@@ -7,13 +7,9 @@
 # [model-name [index ... ]]*
 # You can omit the index to see all of them.
 #
-# The column output space delimetered is
+# The column output is space delimetered so you can 
 #
-# ip model tps
-#
-# So you can do
-#
-# $ free-ollama model1 model2 | sort -k3,3nr | cut -d ' ' -f 1-2 | xargs -d '\n' -I {} redis-cli rpush server-pool "{}"
+# $ free-ollama model1 model2 | sort -rn | cut -d ' ' -f 1-2 | xargs -d '\n' -I {} redis-cli rpush server-pool "{}"
 #
 # And now you have a server pool. You can even "test" it.
 # 
