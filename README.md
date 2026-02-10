@@ -18,7 +18,7 @@ With **free-ollama** you can do:
 - **Model Filtering**: Find what a server *claims* to have 
 - **Performance Sorting**: Sort by TPS so you can choose the *least* slow server.  
 - **Testing**: Optional [`llcat`](https://github.com/day50-dev/llcat) probe to see if the server picks up your calls.  
-- **Zero-Config**: Works until it doesn’t. Caching means you can pretend the internet is fast.g
+- **Zero-Config**: With caching! Works until it doesn’t.
 
 Let’s not ask too many questions.
 
