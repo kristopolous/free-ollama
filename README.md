@@ -6,14 +6,13 @@
 
 ---
 
-Have you ever wasimplescreenrecorder-2026-02-10_02.20.48.mkvnted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models? 
+Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models? 
 
-How about running **135m smollm2** or **270m gemma3** on someone else's server?  
+How about running **135m smollm2** or **270m gemma3** on someone else's 2016 era RTX 1080 Ti?
 
-**Now you can!**
-Let’s not ask too many questions.
+**Well, now you can!**
 
-Here's what we're talking about!
+Do:
 
 - **Server Discovery**: Automatically scrapes a list of public Ollama servers 
 - **Model Filtering**: Find what a server *claims* to have 
@@ -21,6 +20,7 @@ Here's what we're talking about!
 - **Testing**: Optional [`llcat`](https://github.com/day50-dev/llcat) probe to see if the server picks up your calls.  
 - **Zero-Config**: Works until it doesn’t. Caching means you can pretend the internet is fast.g
 
+Let’s not ask too many questions.
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
