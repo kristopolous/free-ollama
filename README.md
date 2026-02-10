@@ -155,23 +155,23 @@ Also you aren't getting free cloud with the `:cloud` models - those credits foll
 
 ## FAQ
 
-    * Q: Was this vibe coded?
-    * A: Only the README. Really.
+ * Q: Was this vibe coded?
+ * A: Only the README. Really.
 
-    ---
+---
 
-    * Q: Was the README vibe coded with one of these servers?
-    * A: **cough cough**
+ * Q: Was the README vibe coded with one of these servers?
+ * A: **cough cough**
 
-    ---
+---
 
-    * Q: Can I install new models on these with `ollama pull`?
-    * A: **cough cough**
+ * Q: Can I install new models on these with `ollama pull`?
+ * A: **cough cough**
 
-    ---
+---
 
-    * Q: That cough sounds pretty bad, you should get some rest.
-    * A: Ok! Thank you very much!
+ * Q: That cough sounds pretty bad, you should get some rest.
+ * A: Agreed! Thank you very much!
 
 ## License
 
