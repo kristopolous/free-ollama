@@ -176,7 +176,7 @@ Based on actual data (yes, really):
 ```
 95  gemma3:1b
 96  deepseek-r1:7b
-102 deepseek-v3.1:671b-cloud 
+102 deepseek-v3.1:671b-cloud   (will not help you)
 103 deepseek-r1:latest
 103 llama3-backup:latest       
 116 llama3.1:8b-instruct-q4_K_M
