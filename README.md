@@ -28,20 +28,22 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 ## Go ahead, you try.
 
 ### 1. See what models are floating out there
+
+Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) tool for super fast access (or git clone this)
 ```bash
-./free-ollama
+$ shurl gh:kristopolous/free-ollama/free-ollama 
 ```
 *Outputs a sorted list of models by how often they appear in the wild. No Spoilers!*
 
 ### 2. Find servers with a specific model
 ```bash
-./free-ollama qwen3:latest
+$ free-ollama qwen3:latest
 ```
 *Lists all servers offering `qwen3:latest`, sorted by TPS. Enjoy.*
 
 ### 3. Pick the “top” performers by index
 ```bash
-./free-ollama qwen3:latest {0..10}
+$ free-ollama qwen3:latest {0..10}
 ```
 *Shows the 11 fastest servers (indices 0–10).*
 
@@ -50,7 +52,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 Here's a stack of machines.
 
 ```bash
-./free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
+$ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 ```
 *Finds the top 10 qwen3:latest and top 5 qwen2 not-so-latest*
 
@@ -71,18 +73,18 @@ Example:
 
 ```bash
 # Get top 10 servers with glm-4.7-flash:q4_K_M, extract IPs only
-./free-ollama glm-4.7-flash:q4_K_M {0..9} | awk '{print $2}' > server-list.txt
+$ free-ollama glm-4.7-flash:q4_K_M {0..9} | awk '{print $2}' > server-list.txt
 # Now you have a list of IPs that may or may not work tomorrow. Cool.
 
 # Build a Redis server pool (requires redis-cli, because why not)
-./free-ollama mistral:7b {0..20} | \
+$ free-ollama mistral:7b {0..20} | \
   sort -k1,1nr | \
   cut -d' ' -f2 | \
   xargs -I {} redis-cli rpush server-pool "{}"
 # You’re welcome, production.
 
 # Sort by TPS descending and pick server+model pairs
-./free-ollama llama2:7b | sort -k1,1nr | cut -d' ' -f2-3
+$ free-ollama llama2:7b | sort -k1,1nr | cut -d' ' -f2-3
 ```
 
 ---
@@ -93,7 +95,7 @@ First install [`llcat`](https://github.com/day50-dev/llcat). It's awesome and al
 
 ```bash
 # Test all servers with a specific model
-./free-ollama test qwen3
+$ free-ollama test qwen3
 ```
 Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filtered out until you manually `--refresh`.
 
@@ -112,19 +114,19 @@ Bad -- http://192.168.1.5:11434 phi3:mini
 ### Custom index selection
 ```bash
 # Non-sequential indices (keeping it low-key)
-./free-ollama mistral:7b 2 5 7 9
+$ free-ollama mistral:7b 2 5 7 9
 
 # Range expansion (Bash brace expansion)
-./free-ollama llama2:13b {5..15..2}   # Every other from 5 to 15
+$ free-ollama llama2:13b {5..15..2}   # Every other from 5 to 15
 ```
 
 ### Combining with parallel tools (why suffer alone?)
 ```bash
 # Using parallel (GNU parallel)
-./free-ollama codellama {0..50} | parallel -j4 ./test-server.sh
+$ free-ollama codellama {0..50} | parallel -j4 ./test-server.sh
 
 # Using xpanes for multi-pane testing (look busy)
-./free-ollama glm-4.7-flash:q4_K_M {0..9} | xpanes -c "./test-and-log.sh {}"
+$ free-ollama glm-4.7-flash:q4_K_M {0..9} | xpanes -c "./test-and-log.sh {}"
 ```
 
 ---
@@ -134,7 +136,7 @@ Bad -- http://192.168.1.5:11434 phi3:mini
 - **Cache location**: `~/.cache/free-ollama.json` (every 24 hours)
 - **Force refresh**: Built in, baby!
 ```bash
-./free-ollama --refresh
+$ free-ollama --refresh
 ```
 
 ## Disclaimer 
