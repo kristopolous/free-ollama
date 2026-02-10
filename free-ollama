@@ -1,5 +1,6 @@
 #!/bin/bash
-# Example usage:
+#
+# Example abusage:
 # free-ollama gemma3:latest {0..10}
 #
 # It's a stack based system with the syntax
@@ -14,10 +15,11 @@
 #
 # $ free-ollama model1 model2 | sort -k3,3nr | cut -d ' ' -f 1-2 | xargs -d '\n' -I {} redis-cli rpush server-pool "{}"
 #
-# And now you have a server pool
+# And now you have a server pool. You can even "test" it.
+# 
+# $ free-ollama test model1
 #
-# Try instrumenting it with llcat. pipx install llcat
-# And then maybe xpanes
+# Try instrumenting it with llcat, then maybe xpanes
 #
 # Don't know what to choose?
 # Run it without arguments, you'll get a frequency distribution.
