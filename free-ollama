@@ -1,4 +1,28 @@
 #!/bin/bash
+# Example usage:
+# free-ollama gemma3:latest {0..10}
+#
+# It's a stack based system with the syntax
+# [model-name [index ... ]]*
+# You can omit the index to see all of them.
+#
+# The column output space delimetered is
+#
+# ip model tps
+#
+# So you can do
+#
+# $ free-ollama model1 model2 | sort -k3,3nr | cut -d ' ' -f 1-2 | xargs -d '\n' -I {} redis-cli rpush server-pool "{}"
+#
+# And now you have a server pool
+#
+# Try instrumenting it with llcat. pipx install llcat
+# And then maybe xpanes
+#
+# Don't know what to choose?
+# Run it without arguments, you'll get a frequency distribution.
+#
+
 db="$HOME/.cache/free-ollama.json"
 
 if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
