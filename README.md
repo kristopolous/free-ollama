@@ -6,10 +6,12 @@
 
 ---
 
-Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models?  
+Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models? 
+
 How about running **135m smollm2** or **270m gemma3** on someone else's server?  
 
-Now you can! Let’s not ask too many questions.
+**Now you can!**
+Let’s not ask too many questions.
 
 Here's what we're talking about!
 
