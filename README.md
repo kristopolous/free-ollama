@@ -115,7 +115,7 @@ Bad -- http://192.168.1.5:11434 phi3:mini
 
 ### Custom index selection
 ```bash
-# Non-sequential indices (because you’re special)
+# Non-sequential indices (keeping it low-key)
 ./free-ollama mistral:7b 2 5 7 9
 
 # Range expansion (Bash brace expansion)
