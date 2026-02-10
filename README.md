@@ -1,9 +1,7 @@
 # free-ollama
 
-> **Discover, filter, and test public Ollama servers**  
-> A command-line utility for finding and benchmarking Ollama-compatible servers based on model availability and performance.
-
-[![Status](https://img.shields.io/badge/status-active-brightgreen.svg)](https://github.com/yourusername/free-ollama)
+**Discover, filter, and test public Ollama servers**  
+A command-line utility for finding and benchmarking Ollama-compatible servers based on model availability and performance.
 
 ## Features
 
@@ -13,19 +11,6 @@
 - **Health Testing**: Optional live testing with `llcat` to verify server responsiveness
 - **Zero-Config**: Works out-of-the-box with sensible caching and defaults
 
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/free-ollama.git
-cd free-ollama
-
-# Make executable
-chmod +x free-ollama
-
-# Optional: Install llcat for testing (requires pip/pipx)
-pipx install llcat
-```
 
 ### Dependencies
 
