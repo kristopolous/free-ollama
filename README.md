@@ -12,7 +12,7 @@ How about running **135m smollm2** or **270m gemma3** on someone else's 2016 era
 
 **Well, now you can!**
 
-Do:
+With **free-ollama** you can do:
 
 - **Server Discovery**: Automatically scrapes a list of public Ollama servers 
 - **Model Filtering**: Find what a server *claims* to have 
@@ -25,7 +25,7 @@ Let’s not ask too many questions.
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 
-## And now, it's your turn!
+## Go ahead, you try.
 
 ### 1. See what models are floating out there
 ```bash
