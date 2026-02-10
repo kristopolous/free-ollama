@@ -6,7 +6,7 @@
 
 ---
 
-Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models? 
+Have you ever wasimplescreenrecorder-2026-02-10_02.20.48.mkvnted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models? 
 
 How about running **135m smollm2** or **270m gemma3** on someone else's server?  
 
@@ -16,12 +16,16 @@ Let’s not ask too many questions.
 Here's what we're talking about!
 
 - **Server Discovery**: Automatically scrapes a list of public Ollama servers 
-- **Model Filtering**: Find that one server that *claims* to have `mario:latest` 
+- **Model Filtering**: Find what a server *claims* to have 
 - **Performance Sorting**: Sort by TPS so you can choose the *least* slow server.  
-- **Health Testing**: Optional [`llcat`](https://github.com/day50-dev/llcat) probe to see if the server is actually alive or just a ghost in the shell.  
-- **Zero-Config**: Works until it doesn’t. Caching means you can pretend the internet is fast.
+- **Testing**: Optional [`llcat`](https://github.com/day50-dev/llcat) probe to see if the server picks up your calls.  
+- **Zero-Config**: Works until it doesn’t. Caching means you can pretend the internet is fast.g
 
----
+
+https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
+
+
+## And now, it's your turn!
 
 ### 1. See what models are floating out there
 ```bash
