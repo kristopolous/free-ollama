@@ -171,14 +171,8 @@ Also you aren't getting free cloud with the `:cloud` models - those credits foll
 ---
 
  * Q: That cough sounds pretty bad, you should get some rest.
- * A: Agreed! Thank you very much!
+ * A: Thank you very much!
 
-## License
-
-MIT License. See [LICENSE](LICENSE) file.  
-*Because even questionable tools deserve a permissive license.*
-
----
 
 ## Example output
 
