@@ -14,11 +14,8 @@ A command-line utility for finding and benchmarking Ollama-compatible servers ba
 
 ### Dependencies
 
-- `bash` (≥ 4.0)
-- `jq` (JSON processor)
-- `curl`
-- `find` (standard GNU utilities)
-- Optional: [`llcat`](https://github.com/day50-dev/llcat/) for server testing
+- `bash` , `jq`, `curl`, `find`
+-  [`llcat`](https://github.com/day50-dev/llcat/) for server testing
 
 ## Quick Start
 
