@@ -39,7 +39,7 @@ process_stack() {
    jq -r 'map(select(.models and (.models | contains(["'$model'"])))) 
        | sort_by(.tps) 
        | .['$(IFS=,; echo "${index[*]}")'] 
-       | "\(.tps | floor)\t\(.server) \(.models 
+       | "\(.tps | floor) \(.server) \(.models 
             | map(select(contains("'$model'"))) 
             | join(" ")) "' "$db"
 
