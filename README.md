@@ -29,7 +29,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ### 1. See what models are floating out there
 
-Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) tool for super fast access (or git clone this)
+Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) tool for super fast access (or git clone like an amateur)
 ```bash
 $ shurl gh:kristopolous/free-ollama/free-ollama 
 ```
