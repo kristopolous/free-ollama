@@ -149,7 +149,7 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 
 **Use responsibly. Or don’t.**
 
-Note: you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. These are all reserved instances or owned infra. You aren't actually incurring metered cost, probably.
+**Note**: you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. These are all reserved instances or owned infra so you aren't actually increasing someone else's bills... probably.
 
 
 ## FAQ
