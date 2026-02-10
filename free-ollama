@@ -1,0 +1,56 @@
+#!/bin/bash
+db="$HOME/.cache/free-ollama.json"
+
+if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
+    echo "Updating cache..." > /dev/stderr
+    curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > $db
+fi
+
+process_stack() {
+   [[ -z "$model" ]] && return
+   jq -r 'map(select(.models and (.models | contains(["'$model'"])))) 
+       | sort_by(.tps) 
+       | .['$(IFS=,; echo "${index[*]}")'] 
+       | "\(.tps | floor)\t\(.server) \(.models 
+            | map(select(contains("'$model'"))) 
+            | join(" ")) "' "$db"
+
+   index=()
+}
+
+tester() {
+    bad="$HOME/.cache/free-ollama-bad-hosts.txt" 
+    touch "$bad"
+    if [[ -n "$dotest" ]]; then
+        tac | grep -vf "$bad" | while read tps host model; do
+            # The < /dev/null is to avoid llcat from slurping up the stdin
+            timing=$( { 
+                time timeout 30s llcat -u $host -m $model "respond with test" </dev/null >~/.cache/free-ollama.test 2>&1; 
+            } 2>&1 | grep real | sed 's/[a-z\ ]//g' )
+            if [[ -s ~/.cache/free-ollama.test ]]; then 
+                printf "%s %-30s %s\n" $timing $host $model
+            else 
+                echo "Bad -- $host $model"
+                echo "$host $model" >> "$bad"
+            fi
+        done
+    else
+        cat
+    fi
+}
+
+if [[ -z "$1" ]]; then
+    jq -r 'map(.models[]) | group_by(.) | map("\(length) \(.[0])") | .[]' "$db" | sort -n
+else
+    declare -a index
+    model=
+    while [ $# -gt 0 ]; do
+        case $1 in
+            test) dotest=1 ;;
+            [0-9]*) index+=( "$1" ) ;;
+            *) process_stack | tester; model=$1 ;;
+        esac
+        shift
+    done
+    process_stack |tester
+fi
