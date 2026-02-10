@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 ```bash
 ./free-ollama
 ```
-*Outputs a sorted list of models by how often they appear in the wild. Spoiler: `smollm2:135m` is shockingly common.*
+*Outputs a sorted list of models by how often they appear in the wild. No Spoilers!*
 
 ### 2. Find servers with a specific model (good luck)
 ```bash
