@@ -6,9 +6,9 @@
 
 ---
 
-Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens for ~900 mostly useless models? 
+Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens for 1,000 useless models? 
 
-How about running **135m smollm2** or **270m gemma3** on someone else's 2016 era RTX 1080 Ti?
+Ever wanted to run **135m smollm2** or **270m gemma3** on someone else's 2016 era RTX 1080 Ti?
 
 **Well, now you can!**
 
