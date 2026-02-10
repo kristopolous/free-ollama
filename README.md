@@ -142,7 +142,7 @@ rm ~/.cache/free-ollama.json
 ./free-ollama  # Will fetch fresh data (maybe)
 ```
 
-## Disclaimer (Do We Need This?)
+## Disclaimer 
 
 Oh I shouldn’t have to say anything here.
 
