@@ -1,8 +1,6 @@
 # Free-ollama  
 *Because paying for cloud GPUs is for chumps with self-respect.*  
 
-## What Is This?
-
 Have you ever wanted an **unreliable**, **ethically-questionable**, and **gloriously free** way to get tokens on ~900 low-end models?  
 How about running **135m smollm2** or **270m gemma3** on someone else's server?  
 
