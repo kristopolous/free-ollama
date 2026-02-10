@@ -6,7 +6,7 @@
 
 ---
 
-Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models? 
+Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens for ~900 mostly useless models? 
 
 How about running **135m smollm2** or **270m gemma3** on someone else's 2016 era RTX 1080 Ti?
 
