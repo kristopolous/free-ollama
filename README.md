@@ -1,22 +1,25 @@
-# Free-ollama  
-*Because paying for cloud GPUs is for chumps with self-respect.*  
+<p align="center">
+<img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
+<br/>
+  <br/><strong>Because paying for cloud GPUs is for chumps with self-respect.</strong>
+</p>
 
-Have you ever wanted an **unreliable**, **ethically-questionable**, and **gloriously free** way to get tokens on ~900 low-end models?  
+---
+
+Have you ever wanted **unreliable**, **ethically-questionable**, **unquestionably free** tokens on ~900 low-end models?  
 How about running **135m smollm2** or **270m gemma3** on someone else's server?  
 
-Now you can. Let’s not ask too many questions.
+Now you can! Let’s not ask too many questions.
 
 Here's what we're talking about!
 
 - **Server Discovery**: Automatically scrapes a list of public Ollama servers 
 - **Model Filtering**: Find that one server that *claims* to have `mario:latest` 
 - **Performance Sorting**: Sort by TPS so you can choose the *least* slow server.  
-- **Health Testing**: Optional `llcat` probe to see if the server is actually alive or just a ghost in the shell.  
+- **Health Testing**: Optional [`llcat`](https://github.com/day50-dev/llcat) probe to see if the server is actually alive or just a ghost in the shell.  
 - **Zero-Config**: Works until it doesn’t. Caching means you can pretend the internet is fast.
 
 ---
-
-## Quick Start
 
 ### 1. See what models are floating out there
 ```bash
@@ -84,6 +87,8 @@ Yes, TPS is transactions per second. You can test it with test.
 
 ## Testing Servers
 
+First install [`llcat`](https://github.com/day50-dev/llcat) because it's awesome (and also used in the testing).
+
 ```bash
 # Test all servers with a specific model
 ./free-ollama test qwen3
@@ -92,11 +97,11 @@ Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filt
 
 **Testing output:**
 ```
-2.34s 34.120.89.11:11434 gemma3:latest
-1.87s 15.164.98.22:11434 llama2:13b codellama:7b
-Bad -- 192.168.1.5:11434 phi3:mini
+2.34s http://34.120.89.11:11434 gemma3:latest
+1.87s http://15.164.98.22:11434 llama2:13b codellama:7b
+Bad -- http://192.168.1.5:11434 phi3:mini
 ```
-*“Bad --” means either the server is dead, the model isn’t there, or the feds are on their way.*
+*“Bad --” means it's not working. Fancy that...*
 
 ---
 
@@ -124,8 +129,7 @@ Bad -- 192.168.1.5:11434 phi3:mini
 
 ## Cache Management
 
-- **Cache location**: `~/.cache/free-ollama.json` 
-- **Auto-refresh**: Every 24 hours (1440 minutes of hope)
+- **Cache location**: `~/.cache/free-ollama.json` (every 24 hours)
 - **Force refresh**: Delete the cache file
 ```bash
 rm ~/.cache/free-ollama.json
@@ -134,8 +138,10 @@ rm ~/.cache/free-ollama.json
 
 ## Disclaimer (Do We Need This?)
 
-Oh I shouldn’t have to say anything here. But lawyers are boring:  
+Oh I shouldn’t have to say anything here.
+
 This tool scrapes public lists. Some servers may not want to be scraped. Some may collapse under your query. Some may log your IP and report you to authorities. So go do it at McDonalds.
+
 **Use responsibly. Or don’t. I’m not your mom.**
 
 Also you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. So these are all reserved instances - you aren't actually incurring cost, probably.
