@@ -93,7 +93,7 @@ Yes, TPS is transactions per second. You can test it with test.
 
 ## Testing Servers
 
-First install [`llcat`](https://github.com/day50-dev/llcat) because it's awesome (and also used in the testing).
+First install [`llcat`](https://github.com/day50-dev/llcat). It's awesome and also used in the testing.
 
 ```bash
 # Test all servers with a specific model
@@ -136,10 +136,9 @@ Bad -- http://192.168.1.5:11434 phi3:mini
 ## Cache Management
 
 - **Cache location**: `~/.cache/free-ollama.json` (every 24 hours)
-- **Force refresh**: Delete the cache file
+- **Force refresh**: Built in, baby!
 ```bash
-rm ~/.cache/free-ollama.json
-./free-ollama  # Will fetch fresh data (maybe)
+./free-ollama --refresh
 ```
 
 ## Disclaimer 
