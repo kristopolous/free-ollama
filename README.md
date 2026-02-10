@@ -8,7 +8,7 @@ A command-line utility for finding and benchmarking Ollama-compatible servers ba
 - **Server Discovery**: Automatically fetches and caches a curated list of public Ollama servers
 - **Model Filtering**: Find servers by model name(s) with stack-based syntax
 - **Performance Sorting**: Sort servers by TPS (transactions per second)
-- **Health Testing**: Optional live testing with `llcat` to verify server responsiveness
+- **Health Testing**: Optional live testing with [`llcat`](https://github.com/day50-dev/llcat/) to verify server responsiveness
 - **Zero-Config**: Works out-of-the-box with sensible caching and defaults
 
 
@@ -18,7 +18,7 @@ A command-line utility for finding and benchmarking Ollama-compatible servers ba
 - `jq` (JSON processor)
 - `curl`
 - `find` (standard GNU utilities)
-- Optional: `llcat` for server testing
+- Optional: [`llcat`](https://github.com/day50-dev/llcat/) for server testing
 
 ## Quick Start
 
