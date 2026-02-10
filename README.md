@@ -67,10 +67,6 @@ Example:
 128 http://15.164.98.22:11434 llama2:13b codellama:7b
 ```
 
-Yes, TPS is transactions per second. You can test it with test.
-
----
-
 ## Pipeline Integration 
 
 ```bash
