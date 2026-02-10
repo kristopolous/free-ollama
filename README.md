@@ -33,7 +33,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 ```
 *Outputs a sorted list of models by how often they appear in the wild. No Spoilers!*
 
-### 2. Find servers with a specific model (good luck)
+### 2. Find servers with a specific model
 ```bash
 ./free-ollama qwen3:latest
 ```
