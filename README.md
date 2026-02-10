@@ -132,7 +132,7 @@ Bad -- 192.168.1.5:11434 phi3:mini
 ./free-ollama codellama {0..50} | parallel -j4 ./test-server.sh
 
 # Using xpanes for multi-pane testing
-./free-ollama llama2:7b {0..9} | xpanes -c "./test-and-log.sh {}"
+./free-ollama glm-4.7-flash:q4_K_M {0..9} | xpanes -c "./test-and-log.sh {}"
 ```
 
 ## Cache Management
@@ -172,28 +172,10 @@ Data includes:
 - Model not actually available despite being listed
 - Check `~/.cache/free-ollama-bad-hosts.txt` for persistent failures
 
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request with:
-   - Clear description of changes
-   - Testing instructions
-   - Updated documentation
-
 ## Disclaimer
 
-This tool connects to **publicly listed** servers. Please:
-- Respect each server's terms of use
-- Avoid excessive requests (add delays if testing many servers)
-- Remove problematic servers from the list if you maintain the upstream source
-- Use responsibly—these are community-run servers with limited resources
+Oh I shouldn't have to say anything here. Hush hush.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE) file.
-
----
-
-**Note**: This tool is for **educational and experimental purposes**. Always verify server legitimacy and compliance before use.
