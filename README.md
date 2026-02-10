@@ -79,16 +79,8 @@ Use the `test` flag to verify server responsiveness with `llcat`:
 ```bash
 # Test all servers with a specific model
 ./free-ollama test qwen3
-
-# Test while selecting specific indices
-./free-ollama test kimi
 ```
-
-### What testing does:
-1. Sends a simple prompt (`"respond with test"`) to each server
-2. Measures response time via `timeout` and `llcat`
-3. Records **bad hosts** in `~/.cache/free-ollama-bad-hosts.txt`
-4. Only prints successful responses with timing
+Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filtered out later
 
 ### Testing output:
 ```
