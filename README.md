@@ -12,7 +12,7 @@ Ever wanted to run **135m smollm2** or **270m gemma3** on someone else's 2016 er
 
 **Well, now you can!**
 
-With **free-ollama** you can do:
+With **free-ollama** you get:
 
 - **Server Discovery**: Automatically scrapes a list of public Ollama servers 
 - **Model Filtering**: Find what a server *claims* to have 
