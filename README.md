@@ -148,9 +148,9 @@ Oh I shouldn’t have to say anything here.
 
 This tool scrapes public lists. Some servers may not want to be scraped. Some may collapse under your query. Some may log your IP and report you to authorities. So go do it at McDonalds.
 
-**Use responsibly. Or don’t. I’m not your mom.**
+**Use responsibly. Or don’t.**
 
-Also you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. So these are all reserved instances - you aren't actually incurring cost, probably.
+Note: you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. These are all reserved instances or owned infra. You aren't actually incurring metered cost, probably.
 
 
 ## FAQ
