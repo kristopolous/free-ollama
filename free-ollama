@@ -25,10 +25,12 @@
 
 db="$HOME/.cache/free-ollama.json"
 
-if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
-    echo "Updating cache..." > /dev/stderr
-    curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > $db
-fi
+cache() {
+    if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
+        echo "Updating cache..." > /dev/stderr
+        curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > $db
+    fi
+}
 
 process_stack() {
    [[ -z "$model" ]] && return
@@ -63,6 +65,7 @@ tester() {
     fi
 }
 
+cache
 if [[ -z "$1" ]]; then
     jq -r 'map(.models[]) | group_by(.) | map("\(length) \(.[0])") | .[]' "$db" | sort -n
 else
@@ -70,6 +73,8 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
+            --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
+            --help) $(command -v batcat || echo cat) "$0" ;;
             test) dotest=1 ;;
             [0-9]*) index+=( "$1" ) ;;
             *) process_stack | tester; model=$1 ;;
