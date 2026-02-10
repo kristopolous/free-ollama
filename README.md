@@ -51,8 +51,8 @@ The default output is **space-delimited** in this format:
 ```
 Example:
 ```
-42 34.120.89.11:11434 gemma3:latest
-128 15.164.98.22:11434 llama2:13b codellama:7b
+42 http://34.120.89.11:11434 gemma3:latest
+128 http://15.164.98.22:11434 llama2:13b codellama:7b
 ```
 
 ### Pipeline Integration
@@ -78,10 +78,10 @@ Use the `test` flag to verify server responsiveness with `llcat`:
 
 ```bash
 # Test all servers with a specific model
-./free-ollama phi3 test
+./free-ollama test qwen3
 
 # Test while selecting specific indices
-./free-ollama llama2:13b {0..3} test
+./free-ollama test kimi
 ```
 
 ### What testing does:
