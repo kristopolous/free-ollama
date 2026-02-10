@@ -156,11 +156,11 @@ Also you aren't getting free cloud with the `:cloud` models - those credits foll
 ## FAQ
 
  * Q: Was this vibe coded?
- * A: Only the README. Really.
+ * A: Only the README
 
 ---
 
- * Q: Was the README vibe coded with one of these servers?
+ * Q: Was that with one of these servers?
  * A: **cough cough**
 
 ---
