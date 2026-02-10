@@ -176,23 +176,23 @@ Based on actual data (yes, really):
 ```
 95  gemma3:1b
 96  deepseek-r1:7b
-102 deepseek-v3.1:671b-cloud   (sure, Jan)
+102 deepseek-v3.1:671b-cloud 
 103 deepseek-r1:latest
-103 llama3-backup:latest       (backup to what?)
+103 llama3-backup:latest       
 116 llama3.1:8b-instruct-q4_K_M
 122 llama3:latest
-129 gpt-oss:120b               (ah, the 120b “open” weights. Totally.)
+129 gpt-oss:120b               
 140 mattw/pygmalion:latest     (roleplay server? I’m shocked.)
 148 mistral:latest
-155 mario:latest               (plumber or mushroom?)
+155 mario:latest              
 164 gemma3:latest
 180 llama3.2:3b-instruct-q5_K_M
-196 lukashabtoch/plutotext-r3-emotional:latest   (emotional model? Cute.)
+196 lukashabtoch/plutotext-r3-emotional:latest 
 209 nomic-embed-text:latest
 223 gemma3:270m               (the tiny one you wanted!)
 238 deepseek-r1:1.5b
 248 llama3.1:8b
-315 llama3.2:latest
+315 llama3.2:latest           (nobody likes llama4)
 1142 smollm2:135m             (the champion of tiny models!)
 ```
 
