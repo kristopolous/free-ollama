@@ -99,7 +99,7 @@ First install [`llcat`](https://github.com/day50-dev/llcat) because it's awesome
 # Test all servers with a specific model
 ./free-ollama test qwen3
 ```
-Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filtered out later (until they magically work again).
+Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filtered out forever.
 
 **Testing output:**
 ```
@@ -115,7 +115,7 @@ Bad -- http://192.168.1.5:11434 phi3:mini
 
 ### Custom index selection
 ```bash
-# Non-sequential indices (because you’re special)
+# Non-sequential indices (keeping it low-key)
 ./free-ollama mistral:7b 2 5 7 9
 
 # Range expansion (Bash brace expansion)
@@ -148,9 +148,9 @@ Oh I shouldn’t have to say anything here.
 
 This tool scrapes public lists. Some servers may not want to be scraped. Some may collapse under your query. Some may log your IP and report you to authorities. So go do it at McDonalds.
 
-**Use responsibly. Or don’t. I’m not your mom.**
+**Use responsibly. Or don’t.**
 
-Also you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. So these are all reserved instances - you aren't actually incurring cost, probably.
+Note: you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. These are all reserved instances or owned infra. You aren't actually incurring metered cost, probably.
 
 
 ## FAQ
