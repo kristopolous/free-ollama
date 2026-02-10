@@ -151,7 +151,7 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 ## FAQ
 
  * Q: Was this vibe coded?
- * A: Only the README
+ * A: Only the README. Then heavily human because [LLMs aren't funny](https://github.com/kristopolous/humor-evals).
 
 ---
 
