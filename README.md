@@ -99,7 +99,7 @@ First install [`llcat`](https://github.com/day50-dev/llcat) because it's awesome
 # Test all servers with a specific model
 ./free-ollama test qwen3
 ```
-Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filtered out later (until they magically work again).
+Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filtered out forever.
 
 **Testing output:**
 ```
