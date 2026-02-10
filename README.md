@@ -43,7 +43,7 @@ Here's what we're talking about!
 
 ### 4. It's actually a stack machine
 
-Almost like I have a CS degree from a few decades ago.
+Here's a stack of machines.
 
 ```bash
 ./free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
