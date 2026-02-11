@@ -120,7 +120,7 @@ $ free-ollama mistral:7b 2 5 7 9
 $ free-ollama llama2:13b {5..15..2}   # Every other from 5 to 15
 ```
 
-### Combining with parallel tools (why suffer alone?)
+### Combining with parallel tools (that's why this exists)
 ```bash
 # Using parallel (GNU parallel)
 $ free-ollama codellama {0..50} | parallel -j4 ./test-server.sh
