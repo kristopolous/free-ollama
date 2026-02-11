@@ -71,6 +71,15 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
+            --proxy) start=11434
+                while true; do
+                    echo "Using $start ..."
+                    socat TCP-LISTEN:$start,fork,reuseaddr TCP:${2#*://}
+                    [[ $? != 1 ]] && break
+                    echo "Woops ... that's in use"
+                    (( start++ ))
+                done
+                ;;
             --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
             test) dotest=1 ;;
