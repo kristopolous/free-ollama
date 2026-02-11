@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ## Go ahead, you try.
 
-### 1. See what models are floating out there
+### 1. Pet some feral llamas
 
 Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) for super fast access (or git clone like an amateur)
 ```bash
@@ -35,19 +35,19 @@ $ shurl gh:kristopolous/free-ollama/free-ollama
 ```
 *Outputs a sorted list of models by how often they appear in the wild. No Spoilers!*
 
-### 2. Find servers with a specific model
+### 2. Find a few with a specific model
 ```bash
 $ free-ollama qwen3:latest
 ```
 *Lists all servers offering `qwen3:latest`, sorted by TPS. Enjoy.*
 
-### 3. Pick the “top” performers by index
+### 3. Pick the fast ones
 ```bash
 $ free-ollama qwen3:latest {0..10}
 ```
 *Shows the 11 fastest servers (indices 0–10).*
 
-### 4. It's actually a stack machine
+### 4. Use a stack machine
 
 Here's a stack of machines.
 
