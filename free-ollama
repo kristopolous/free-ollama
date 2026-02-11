@@ -52,10 +52,18 @@ tester() {
                 time timeout 30s llcat -u $host -m $model "respond with test" </dev/null >~/.cache/free-ollama.test 2>&1; 
             } 2>&1 | grep real | sed 's/[a-z\ ]//g' )
             if [[ -s ~/.cache/free-ollama.test ]]; then 
+
+                if [[ -n "$1" ]]; then
+                    echo "$host"
+                    return
+                fi
+
                 printf "%s %-30s %s\n" $timing $host $model
             else 
-                echo "Bad -- $host $model"
-                echo "$host $model" >> "$bad"
+                if [[ -z "$1" ]]; then
+                    echo "Bad -- $host $model"
+                    echo "$host $model" >> "$bad"
+                fi
             fi
         done
     else
@@ -72,13 +80,24 @@ else
     while [ $# -gt 0 ]; do
         case $1 in
             --proxy) start=11434
+                arg="$2"
+                if [[ ! "$arg" =~ /http/ ]]; then
+                    model="$2"
+                    dotest=1
+                    echo "Testing for a $model that works"
+                    host=$(process_stack | tester 1)
+                else
+                    host="$2"
+                fi
+
                 while true; do
                     echo "Using $start ..."
-                    socat TCP-LISTEN:$start,fork,reuseaddr TCP:${2#*://}
+                    socat TCP-LISTEN:$start,fork,reuseaddr TCP:${host#*://}
                     [[ $? != 1 ]] && break
                     echo "Woops ... that's in use"
                     (( start++ ))
                 done
+                exit
                 ;;
             --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
