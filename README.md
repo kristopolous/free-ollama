@@ -32,6 +32,11 @@ $ shurl gh:kristopolous/free-ollama/free-ollama
 ```
 *Outputs a sorted list of models by how often they appear in the wild. No Spoilers!*
 
+```bash
+$ shurl gh:kristopolous/free-ollama/free-ollama --proxy qwen3:8b
+```
+*Finds the fastest qwen3:8b that works, sets up a proxy with socat.*
+
 ### 2. Find a few with a specific model
 ```bash
 $ free-ollama qwen3:latest
