@@ -84,18 +84,24 @@ else
                 if [[ ! "$arg" =~ /http/ ]]; then
                     model="$2"
                     dotest=1
-                    echo "Trying to find a $model that works"
-                    host=$(process_stack | tester 1)
                 else
                     host="$2"
                 fi
 
                 while true; do
-                    echo "Using 127.0.0.1:$start ..."
-                    socat TCP-LISTEN:$start,fork,reuseaddr TCP:${host#*://}
-                    [[ $? != 1 ]] && break
-                    echo "Woops ... that's in use"
-                    (( start++ ))
+                    if [[ "$dotest" == 1 ]]; then
+                        echo " 👀 to pet a $model"
+                        host=$(process_stack | tester 1)
+                    fi
+                    while true; do
+                        echo " $host -> 127.0.0.1:$start"
+                        socat TCP-LISTEN:$start,fork,reuseaddr TCP:${host#*://} 
+                        [[ $? != 1 ]] && break
+                        echo " \_ Woops :$start is in use"
+                        (( start++ ))
+                    done
+                    echo
+                    read -p "Enter for next, ctrl+c to exit..."
                 done
                 exit
                 ;;
