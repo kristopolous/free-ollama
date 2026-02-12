@@ -13,7 +13,7 @@
 #
 # And now you have a server pool. You can even "test" it.
 # 
-# $ free-ollama test model1
+# $ free-ollama --test model1
 #
 # Try instrumenting it with llcat, then maybe xpanes
 #
@@ -50,27 +50,34 @@ process_stack() {
 }
 
 tester() {
+    pet=-1
+    skip=${1:-0}
     bad="$HOME/.cache/free-ollama-bad-hosts.txt" 
     touch "$bad"
     if [[ -n "$dotest" ]]; then
         tac | grep -vf "$bad" | while read tps host model; do
+            (( pet ++ ))
+            (( pet < skip )) && continue 
+
             # The < /dev/null is to avoid llcat from slurping up the stdin
-            timing=$( { 
-                time timeout 30s llcat -u $host -m $model "respond with test" </dev/null >~/.cache/free-ollama.test 2>&1; 
-            } 2>&1 | grep real | sed 's/[a-z\ ]//g' )
-            if [[ -s ~/.cache/free-ollama.test ]]; then 
+            start_time=$(date +%s.%N)
+            model=${model%% *}
+            timeout 30s llcat -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
+            end_time=$(date +%s.%N)
+            timing=$( echo "$end_time - $start_time" | bc )
+
+            if [[ -s ~/.cache/free-ollama.test ]] && ! grep -i error ~/.cache/free-ollama.test > /dev/null; then 
 
                 if [[ -n "$1" ]]; then
+                    [[ "$info" == 1 ]] && llcat -u $host -m $model --info > /dev/stderr
                     echo "$host"
                     return
                 fi
 
                 printf "%s %-30s %s\n" $timing $host $model
             else 
-                if [[ -z "$1" ]]; then
-                    echo "Bad -- $host $model"
-                    echo "$host $model" >> "$bad"
-                fi
+                echo " 🐡 Not friendly! $model@$host" > /dev/stderr
+                echo "$host $model" >> "$bad"
             fi
         done
     else
@@ -80,6 +87,7 @@ tester() {
 
 proxy() {
     local start=11434
+    local pet=0
     if [[ ! "$1" =~ /http/ ]]; then
         model="$1"
         dotest=1
@@ -90,7 +98,7 @@ proxy() {
     while true; do
         if [[ "$dotest" == 1 ]]; then
             echo " 👀 to pet a $model"
-            host=$(process_stack | tester 1)
+            host=$(process_stack | tester $pet)
         fi
         while true; do
             echo " $host -> 127.0.0.1:$start"
@@ -100,7 +108,8 @@ proxy() {
             (( start++ ))
         done
         echo
-        read -p "Enter for next, ctrl+c to exit..."
+        read -p " Press Enter for more 🦙. Ctrl+C to leave the park..."
+        (( pet++ ))
     done
     exit
 }
@@ -113,10 +122,11 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
+            --info) info=1 ;;
             --proxy) proxy $2 ;;
             --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
-            test) dotest=1 ;;
+            --test) dotest=1 ;;
             [0-9]*) index+=( "$1" ) ;;
             *) process_stack | tester; model=$1 ;;
         esac
