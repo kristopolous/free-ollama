@@ -69,7 +69,11 @@ tester() {
             if [[ -s ~/.cache/free-ollama.test ]] && ! grep -i error ~/.cache/free-ollama.test > /dev/null; then 
 
                 if [[ -n "$1" ]]; then
-                    [[ "$info" == 1 ]] && llcat -u $host -m $model --info > /dev/stderr
+                    if [[ "$info" == 1 ]]; then 
+                        echo " Looking under the hood!" > /dev/stderr
+                        llcat -u $host -m $model --info </dev/null | jq . > /dev/stderr
+                        echo > /dev/stderr
+                    fi
                     echo "$host"
                     return
                 fi
