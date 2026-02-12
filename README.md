@@ -28,12 +28,12 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) for super fast access (or git clone like an amateur)
 ```bash
-$ shurl gh:kristopolous/free-ollama/free-ollama 
+$ shurl gh:kristopolous/free-ollama 
 ```
 *Outputs a sorted list of models by how often they appear in the wild. No Spoilers!*
 
 ```bash
-$ shurl gh:kristopolous/free-ollama/free-ollama --proxy qwen3:8b
+$ shurl gh:kristopolous/free-ollama --proxy qwen3:8b
 ```
 *Finds the fastest qwen3:8b that works, sets up a proxy with socat.*
 
