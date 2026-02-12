@@ -78,6 +78,33 @@ tester() {
     fi
 }
 
+proxy() {
+    local start=11434
+    if [[ ! "$1" =~ /http/ ]]; then
+        model="$1"
+        dotest=1
+    else
+        host="$1"
+    fi
+
+    while true; do
+        if [[ "$dotest" == 1 ]]; then
+            echo " 👀 to pet a $model"
+            host=$(process_stack | tester 1)
+        fi
+        while true; do
+            echo " $host -> 127.0.0.1:$start"
+            socat TCP-LISTEN:$start,fork,reuseaddr TCP:${host#*://} 
+            [[ $? != 1 ]] && break
+            echo " \_ Woops :$start is in use"
+            (( start++ ))
+        done
+        echo
+        read -p "Enter for next, ctrl+c to exit..."
+    done
+    exit
+}
+
 cache
 if [[ -z "$1" ]]; then
     jq -r 'map(.models[]) | group_by(.) | map("\(length) \(.[0])") | .[]' "$db" | sort -n
@@ -86,32 +113,7 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
-            --proxy) start=11434
-                arg="$2"
-                if [[ ! "$arg" =~ /http/ ]]; then
-                    model="$2"
-                    dotest=1
-                else
-                    host="$2"
-                fi
-
-                while true; do
-                    if [[ "$dotest" == 1 ]]; then
-                        echo " 👀 to pet a $model"
-                        host=$(process_stack | tester 1)
-                    fi
-                    while true; do
-                        echo " $host -> 127.0.0.1:$start"
-                        socat TCP-LISTEN:$start,fork,reuseaddr TCP:${host#*://} 
-                        [[ $? != 1 ]] && break
-                        echo " \_ Woops :$start is in use"
-                        (( start++ ))
-                    done
-                    echo
-                    read -p "Enter for next, ctrl+c to exit..."
-                done
-                exit
-                ;;
+            --proxy) proxy $2 ;;
             --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
             test) dotest=1 ;;
