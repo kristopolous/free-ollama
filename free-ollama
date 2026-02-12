@@ -32,7 +32,14 @@ cache() {
 
 process_stack() {
    [[ -z "$model" ]] && return
-   jq -r 'map(select(.models and (.models | contains(["'$model'"])))) 
+   [[ "$model" =~ cloud ]] && nocloud= || nocloud='and (.models | all(contains(":cloud") | not))'
+   jq -r 'map(
+       select( .models 
+               and (.models | contains(["'$model'"]))
+               and (.models | all(contains(":cloud") | not))
+               '"$nocloud"'
+           )
+       ) 
        | sort_by(.tps) 
        | .['$(IFS=,; echo "${index[*]}")'] 
        | "\(.tps | floor) \(.server) \(.models 

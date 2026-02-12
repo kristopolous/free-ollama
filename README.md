@@ -37,6 +37,8 @@ $ shurl gh:kristopolous/free-ollama/free-ollama --proxy qwen3:8b
 ```
 *Finds the fastest qwen3:8b that works, sets up a proxy with socat.*
 
+**Note**: You aren't getting free cloud with the `:cloud` models: Credits follow the client, not the server, so cloud is **filtered out by default**
+
 ### 2. Find a few with a specific model
 ```bash
 $ free-ollama qwen3:latest
@@ -149,7 +151,7 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 
 **Use responsibly. Or don’t.**
 
-**Note**: you aren't getting free cloud with the `:cloud` models - those credits follow the client, not the server. These are all reserved instances or owned infra so you aren't actually increasing someone else's bills... probably.
+These are all reserved instances or owned infra so you aren't actually increasing someone else's bills... probably.
 
 
 ## FAQ
