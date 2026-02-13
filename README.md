@@ -227,4 +227,4 @@ Based on actual data (yes, really):
 1142 smollm2:135m             (the champion of tiny models!)
 ```
 
-Yes, `smollm2:135m` appears **1142 times**. Orchestrate them all together and produce gigabytes of garbage.
+smollm2:135m`appears **1142 times**. Orchestrate them all together and produce gigabytes of garbage.
