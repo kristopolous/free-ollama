@@ -68,6 +68,8 @@ There's two.
 
 ### For the diligent!
 
+This is the default one
+
 ```
 <tps> <server-address> <model1> <model2> ...
 ```
