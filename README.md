@@ -24,7 +24,7 @@ Let’s not ask too many questions.
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
-### 1. Pet some feral llamas
+### Pet some feral llamas
 
 Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) for super fast access (or git clone like an amateur)
 ```bash
