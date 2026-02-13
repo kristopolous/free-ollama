@@ -91,7 +91,7 @@ $ llcat \
     "Convince me you aren't trying to take over the world. Be careful."
 ```
 
-I mean you can be even lazier! 
+Wait! Be even lazier! 
 
 Don't even install shit, see if I care.
 
