@@ -134,7 +134,7 @@ Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filt
 1.87 http://15.164.98.22:11434 llama2:13b codellama:7b
  🐡 Not friendly! llama3.1:8b@http://3.17.61.100:11434
 ```
-The porcupine means that llama doesn't want to be pet.
+The puffer fish means that llama doesn't want to be pet.
 
 ---
 
