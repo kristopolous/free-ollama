@@ -181,7 +181,7 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 
 **Use responsibly. Or don’t.**
 
-These are all reserved instances or owned infra so you aren't actually increasing someone else's bills... probably.
+You aren't actually increasing someone else's bills by using these... probably.
 
 
 ## FAQ
