@@ -22,6 +22,7 @@
 #
 
 db="$HOME/.cache/free-ollama.json"
+_host=
 
 cache() {
     if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
@@ -31,9 +32,14 @@ cache() {
 }
 
 process_stack() {
-   [[ -z "$model" ]] && return
-   [[ "$model" =~ cloud ]] && nocloud= || nocloud='and (.models | all(contains(":cloud") | not))'
-   jq -r 'map(
+    local out=' "\(.tps | floor) \(.server) \(.models 
+            | map(select(contains("'$model'"))) 
+            | join(" ")) "' 
+    [[ -z "$model" ]] && return
+    [[ "$model" =~ cloud ]] && nocloud= || nocloud='and (.models | all(contains(":cloud") | not))'
+    [[ -n "$_host" ]] && out='"\(.server)"'
+
+    jq -r 'map(
        select( .models 
                and (.models | contains(["'$model'"]))
                and (.models | all(contains(":cloud") | not))
@@ -42,9 +48,7 @@ process_stack() {
        ) 
        | sort_by(.tps) 
        | .['$(IFS=,; echo "${index[*]}")'] 
-       | "\(.tps | floor) \(.server) \(.models 
-            | map(select(contains("'$model'"))) 
-            | join(" ")) "' "$db"
+       | '"$out" "$db"
 
    index=()
 }
@@ -126,6 +130,7 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
+            --host) _host=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
             --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
