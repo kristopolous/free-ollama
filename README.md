@@ -39,19 +39,18 @@ $ shurl gh:kristopolous/free-ollama --proxy qwen3:8b
 
 **Note**: You aren't getting free cloud with the `:cloud` models: Credits follow the client, not the server, so cloud is **filtered out by default**
 
-### 2. Find a few with a specific model
-```bash
+Lists all servers offering `qwen3:latest`, sorted by TPS. Enjoy.
+
+```
 $ free-ollama qwen3:latest
 ```
-*Lists all servers offering `qwen3:latest`, sorted by TPS. Enjoy.*
 
-### 3. Pick the fast ones
+Shows the some of the fast llamas 
 ```bash
 $ free-ollama qwen3:latest {0..10}
 ```
-*Shows the 11 fastest servers (indices 0–10).*
 
-### 4. Use a stack machine
+The parser is actually a stack machine (true).
 
 Here's a stack of machines.
 
@@ -80,7 +79,7 @@ Example:
 ```
 
 ### For the lazy
-Use `--host`. If you combine it with an index, you don't need to do any parsing. 
+Use `--host`. Combined with an index, you don't need to do any parsing. Put those pipes away, dear child!
 
 Example:
 
