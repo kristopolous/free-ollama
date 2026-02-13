@@ -80,7 +80,7 @@ Example:
 ```
 
 ### For the lazy
-Go with the `--host` option, you don't need to do any parsing. 
+Use `--host`. If you combine it with an index, you don't need to do any parsing. 
 
 Example:
 
