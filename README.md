@@ -124,7 +124,7 @@ First install [`llcat`](https://github.com/day50-dev/llcat). It's awesome and al
 
 ```bash
 # Test all servers with a specific model
-$ free-ollama test qwen3
+$ free-ollama --test qwen3
 ```
 Bad host/model pairs get stored in `~/.cache/free-ollama-bad-hosts.txt` and filtered out until you manually `--refresh`.
 
