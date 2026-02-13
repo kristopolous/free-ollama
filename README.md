@@ -106,18 +106,14 @@ $ uvx llcat \
 
 ```bash
 # Get top 10 servers with glm-4.7-flash:q4_K_M, extract IPs only
-$ free-ollama glm-4.7-flash:q4_K_M {0..9} | awk '{print $2}' > server-list.txt
+$ free-ollama --host glm-4.7-flash:q4_K_M {0..9} > server-list.txt
 # Now you have a list of IPs that may or may not work tomorrow. Cool.
 
 # Build a Redis server pool (requires redis-cli, because why not)
-$ free-ollama mistral:7b {0..20} | \
-  sort -k1,1nr | \
-  cut -d' ' -f2 | \
+$ free-ollama --host mistral:7b {0..20} | \
   xargs -I {} redis-cli rpush server-pool "{}"
 # You’re welcome, production.
 
-# Sort by TPS descending and pick server+model pairs
-$ free-ollama llama2:7b | sort -k1,1nr | cut -d' ' -f2-3
 ```
 
 ---
