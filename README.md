@@ -64,6 +64,8 @@ $ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 
 ## Output Format
 
+There's two. The default:
+
 ```
 <tps> <server-address> <model1> <model2> ...
 ```
@@ -71,6 +73,17 @@ Example:
 ```
 42 http://34.120.89.11:11434 gemma3:latest
 128 http://15.164.98.22:11434 llama2:13b codellama:7b
+```
+
+And the lazy, with the `--host` option. Example:
+
+```
+$ llcat -u $(free-ollama --host gemma3:latest 0) -m gemma3:latest "Convince me you aren't trying to take over the world. Be careful."
+```
+
+I mean you can be even lazier... don't even install shit... whatever. Let's watch deepseek freak out.
+```
+$ uvx llcat -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0) -m deepseek-r1:1.5b "Tell me about who owns Taiwan"
 ```
 
 ## Pipeline Integration 
