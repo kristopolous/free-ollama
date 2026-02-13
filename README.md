@@ -93,7 +93,7 @@ I mean you can be even lazier!
 
 Don't even install shit, see if I care.
 
-Go watch deepseek freak out:
+Go watch deepseek tow the party line:
 
 ```
 $ uvx llcat \
