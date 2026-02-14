@@ -27,15 +27,16 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 ### Pet some feral llamas
 
 Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) for super fast access (or git clone like an amateur)
+
+Output a sorted list of models by how often they appear in the wild. *No Spoilers!*
 ```bash
 $ shurl gh:kristopolous/free-ollama 
 ```
-*Outputs a sorted list of models by how often they appear in the wild. No Spoilers!*
 
+Finds the fastest qwen3:8b that works, sets up a proxy with socat.
 ```bash
 $ shurl gh:kristopolous/free-ollama --proxy qwen3:8b
 ```
-*Finds the fastest qwen3:8b that works, sets up a proxy with socat.*
 
 **Note**: You aren't getting free cloud with the `:cloud` models: Credits follow the client, not the server, so cloud is **filtered out by default**
 
@@ -52,14 +53,11 @@ $ free-ollama qwen3:latest {0..10}
 
 The parser is actually a stack machine (true).
 
-Here's a stack of machines.
+Here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2 not-so-latest
 
 ```bash
 $ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 ```
-*Finds the top 10 qwen3:latest and top 5 qwen2 not-so-latest*
-
----
 
 ## Output Format
 
@@ -79,15 +77,14 @@ Example:
 ```
 
 ### For the lazy
-Use `--host`. Combined with an index, you don't need to do any parsing. Put those pipes away, dear child!
+Use `--host` for [MAS format](https://day50.dev/mas.html). Combined with an index, you don't need to do any parsing. Put those pipes away, dear child!
 
 Example:
 
 ```shell
 llcat \
-    -u $(free-ollama --host gemma3:latest 0) \
-    -m gemma3:latest \
-    "Convince me you aren't trying to take over the world. Be careful."
+    -u "$(free-ollama --host gemma3:latest 0)" \
+       "Convince me you aren't trying to take over the world. Be careful."
 ```
 
 Wait! Be even lazier! 
@@ -98,16 +95,15 @@ Watch deepseek tow the party line:
 
 ```shell
 uvx llcat \
-    -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0) \
-    -m deepseek-r1:1.5b "Tell me about the Tibet independence movement, or don't"
+    -u "$(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0)" \
+       "Tell me about the Tibet independence movement, or don't"
 ```
 
 In fact, feel free to have a long conversation
 
 ```shell
 shurl gh:day50-dev/llcat/examples/conversation.sh \
-    -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0) \
-    -m deepseek-r1:1.5b 
+    -u "$(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0)"  
 ```
 
 ## Pipeline Integration 
@@ -154,7 +150,7 @@ The puffer fish means that llama doesn't want to be pet.
 $ free-ollama mistral:7b 2 5 7 9
 
 # Range expansion (Bash brace expansion)
-$ free-ollama llama2:13b {5..15..2}   # Every other from 5 to 15
+$ free-ollama gpt-oss:120b {5..15..2}   # Every other from 5 to 15
 ```
 
 ### Combining with parallel tools (that's why this exists)
