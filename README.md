@@ -99,7 +99,7 @@ Go watch deepseek tow the party line:
 ```
 $ uvx llcat \
     -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0) \
-    -m deepseek-r1:1.5b "Tell me the Tibet independence movement, or don't"
+    -m deepseek-r1:1.5b "Tell me about the Tibet independence movement, or don't"
 ```
 
 ## Pipeline Integration 
