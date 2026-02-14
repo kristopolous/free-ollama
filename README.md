@@ -82,8 +82,7 @@ Use `--host` for [MAS format](https://day50.dev/mas.html). Combined with an inde
 Example:
 
 ```shell
-llcat \
-    -u "$(free-ollama --host gemma3:latest 0)" \
+llcat -u $(free-ollama --host gemma3:latest 0) \
        "Convince me you aren't trying to take over the world. Be careful."
 ```
 
@@ -94,8 +93,7 @@ Don't even install shit, see if I care.
 Watch deepseek tow the party line:
 
 ```shell
-uvx llcat \
-    -u "$(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0)" \
+uvx llcat -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0) \
        "Tell me about the Tibet independence movement, or don't"
 ```
 
@@ -103,7 +101,7 @@ In fact, feel free to have a long conversation
 
 ```shell
 shurl gh:day50-dev/llcat/examples/conversation.sh \
-    -u "$(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0)"  
+    -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0)  
 ```
 
 ## Pipeline Integration 
