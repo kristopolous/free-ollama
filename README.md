@@ -224,3 +224,12 @@ Based on actual data (yes, really):
 ```
 
 smollm2:135m appears **1142 times**. Orchestrate them all together and produce gigabytes of garbage.
+
+```
+   \\         
+    l'> Bahhhhh
+    ll       
+    llama~  
+    || ||  
+    '' ''
+```
