@@ -84,7 +84,7 @@ Use `--host`. Combined with an index, you don't need to do any parsing. Put thos
 Example:
 
 ```
-$ llcat \
+llcat \
     -u $(free-ollama --host gemma3:latest 0) \
     -m gemma3:latest \
     "Convince me you aren't trying to take over the world. Be careful."
@@ -94,10 +94,10 @@ Wait! Be even lazier!
 
 Don't even install shit, see if I care.
 
-Go watch deepseek tow the party line:
+Watch deepseek tow the party line:
 
-```
-$ uvx llcat \
+```shell
+uvx llcat \
     -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0) \
     -m deepseek-r1:1.5b "Tell me about the Tibet independence movement, or don't"
 ```
