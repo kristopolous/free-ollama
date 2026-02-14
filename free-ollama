@@ -33,6 +33,7 @@
 
 db="$HOME/.cache/free-ollama.json"
 _host=
+_chat=
 
 cache() {
     if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
@@ -103,6 +104,18 @@ tester() {
     fi
 }
 
+chatty() {
+    if [[ -n "$_chat" ]] ; then
+        read host
+        cat > /dev/null
+        echo "(($host))"
+        shurl gh:day50-dev/llcat/examples/conversation.sh -u $host -m $model
+        exit 0
+    else
+        cat
+    fi
+}
+
 proxy() {
     local start=11434
     local pet=0
@@ -140,6 +153,7 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
+            --chat) _chat=1 ; _host=1 ;;
             --host) _host=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
@@ -151,5 +165,5 @@ else
         esac
         shift
     done
-    process_stack |tester
+    process_stack | tester | chatty
 fi

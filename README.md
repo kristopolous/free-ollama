@@ -102,6 +102,14 @@ uvx llcat \
     -m deepseek-r1:1.5b "Tell me about the Tibet independence movement, or don't"
 ```
 
+In fact, feel free to have a long conversation
+
+```shell
+shurl gh:day50-dev/llcat/examples/conversation.sh \
+    -u $(shurl gh:kristopolous/free-ollama --host deepseek-r1:1.5b 0) \
+    -m deepseek-r1:1.5b 
+```
+
 ## Pipeline Integration 
 
 ```bash
