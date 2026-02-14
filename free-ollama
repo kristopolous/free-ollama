@@ -1,6 +1,16 @@
 #!/bin/bash
 #
+# Pet the feral llama
+#
+#   \\         
+#    l'> Bahhhhh
+#    ll       
+#    llama~  
+#    || ||  
+#    '' ''
+#
 # Example abusage:
+#
 # free-ollama gemma3:latest {0..10}
 #
 # It's a stack based system with the syntax
