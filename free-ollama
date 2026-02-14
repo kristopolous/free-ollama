@@ -33,6 +33,7 @@
 
 db="$HOME/.cache/free-ollama.json"
 _host=
+_mas=
 
 cache() {
     if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
@@ -48,8 +49,14 @@ process_stack() {
     [[ -z "$model" ]] && return
     [[ "$model" =~ cloud ]] && nocloud= || nocloud='and (.models | all(contains(":cloud") | not))'
 
-    ## MAS format https://day50.dev/mas.html
-    [[ -n "$_host" ]] && out='"\(.server)#m='$model'"'
+    if [[ -n "$_host" ]]; then 
+        ## MAS format https://day50.dev/mas.html
+        if [[ -n "$_mas" ]]; then
+            out='"\(.server)#m='$model'"'
+        else
+            out='"\(.server)"'
+        fi
+    fi
 
     jq -r 'map(
        select( .models 
@@ -143,6 +150,7 @@ else
     while [ $# -gt 0 ]; do
         case $1 in
             --host) _host=1 ;;
+            --mas) _mas=1 _host=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
             --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
