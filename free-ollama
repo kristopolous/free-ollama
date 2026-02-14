@@ -103,7 +103,7 @@ tester() {
 
                 printf "%s %-30s %s\n" $timing $host $model
             else 
-                echo " 🐡 Not friendly! $model@$host" > /dev/stderr
+                echo " 🐡 Not friendly! $host#m=$model" > /dev/stderr
                 [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$bad"
             fi
         done
