@@ -71,7 +71,7 @@ tester() {
     bad="$HOME/.cache/free-ollama-bad-hosts.txt" 
     touch "$bad"
     if [[ -n "$dotest" ]]; then
-        tac | grep -vf "$bad" | while read tps host model; do
+        tac | grep -vFf "$bad" | while read tps host model; do
             (( pet ++ ))
             (( pet < skip )) && continue 
 
@@ -97,7 +97,7 @@ tester() {
                 printf "%s %-30s %s\n" $timing $host $model
             else 
                 echo " 🐡 Not friendly! $model@$host" > /dev/stderr
-                echo "$host $model" >> "$bad"
+                [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$bad"
             fi
         done
     else
