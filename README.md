@@ -83,7 +83,7 @@ Use `--host`. Combined with an index, you don't need to do any parsing. Put thos
 
 Example:
 
-```
+```shell
 llcat \
     -u $(free-ollama --host gemma3:latest 0) \
     -m gemma3:latest \
