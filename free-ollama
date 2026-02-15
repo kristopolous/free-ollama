@@ -153,7 +153,7 @@ else
             --mas) _mas=1 _host=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
-            --refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
+            --update|--refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
             --test) dotest=1 ;;
             [0-9]*) index+=( "$1" ) ;;
