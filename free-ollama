@@ -85,7 +85,7 @@ tester() {
             # The < /dev/null is to avoid llcat from slurping up the stdin
             start_time=$(date +%s.%N)
             model=${model%% *}
-            timeout 30s llcat -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
+            timeout 60s llcat -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
             end_time=$(date +%s.%N)
             timing=$( echo "$end_time - $start_time" | bc )
 
