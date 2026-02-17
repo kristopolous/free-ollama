@@ -85,7 +85,7 @@ tester() {
             # The < /dev/null is to avoid llcat from slurping up the stdin
             start_time=$(date +%s.%N)
             model=${model%% *}
-            timeout 60s llcat -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
+            timeout 90s llcat -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
             end_time=$(date +%s.%N)
             timing=$( echo "$end_time - $start_time" | bc )
 
@@ -103,6 +103,7 @@ tester() {
 
                 printf "%s %-30s %s\n" $timing $host $model
             else 
+                jq .data.response.payload.error.message ~/.cache/free-ollama.test >/dev/stderr
                 echo " 🐡 Not friendly! $host#m=$model" > /dev/stderr
                 [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$bad"
             fi
