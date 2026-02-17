@@ -218,9 +218,6 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 
 **Use responsibly. Or don’t.**
 
-You aren't actually increasing someone else's bills by using these... probably.
-
-
 ## FAQ
 
  * Q: Was this vibe coded?
