@@ -62,6 +62,14 @@ For example, here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2
 free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 ```
 
+Let's find out the versions that are running in the wild, using the example script `ollama-do`:
+
+```bash
+free-ollama --host : \
+    | xargs -P 30 -n 1 shurl gh:kristopolous/free-ollama/examples/ollama-do -v \
+    | grep -v client
+```
+
 ## Output Format
 
 There's multiple!
