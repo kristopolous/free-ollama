@@ -40,7 +40,7 @@ shurl gh:kristopolous/free-ollama --proxy qwen3:8b
 
 Let's do some embedding with the power of shurl:
 ```bash
-cat README.md |\
+curl https://archive.org/stream/pdfy-TNlDHryRIk4DXKAU/Steal%20This%20Book_djvu.txt |\
   shurl gh:kristopolous/free-ollama/examples/embed \
   $(free-ollama --mas nomic-embed-text:latest 0)
 ```
