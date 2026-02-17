@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+
+import sys
+import requests
+from urllib.parse import urlparse
+
+def parse_mas(mas_url):
+    if "#m=" not in mas_url:
+        raise ValueError("MAS URL must contain #m=<model>")
+
+    base, fragment = mas_url.split("#", 1)
+
+    if not fragment.startswith("m="):
+        raise ValueError("Fragment must start with m=")
+
+    model = fragment[2:]
+    return base.rstrip("/"), model
+
+def embed_line(base_url, model, text):
+    r = requests.post(
+        f"{base_url}/api/embeddings",
+        json={
+            "model": model,
+            "prompt": text
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()["embedding"]
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: embed <MAS_URL>", file=sys.stderr)
+        sys.exit(1)
+
+    mas_url = sys.argv[1]
+    base_url, model = parse_mas(mas_url)
+
+    for line in sys.stdin:
+        text = line.strip()
+        if not text:
+            continue
+
+        vector = embed_line(base_url, model, text)
+
+        # Output JSONL
+        print({
+            "text": text,
+            "embedding": vector
+        })
+
+if __name__ == "__main__":
+    main()
+
