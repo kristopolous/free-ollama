@@ -126,6 +126,10 @@ proxy() {
         if [[ "$dotest" == 1 ]]; then
             echo " 👀 to pet a $model"
             host=$(process_stack | tester $pet)
+            if [[ -z "$host" ]]; then
+                echo -e " 🌵 There doesn't seem to be any good hosts!\n    Check ~/.cache/free-ollama-bad-hosts.txt"
+                exit 1
+            fi
         fi
         while true; do
             echo " $host -> 127.0.0.1:$start"
