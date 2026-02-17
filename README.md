@@ -30,12 +30,19 @@ Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) for super fast ac
 
 Output a sorted list of models by how often they appear in the wild. *No Spoilers!*
 ```bash
-$ shurl gh:kristopolous/free-ollama 
+shurl gh:kristopolous/free-ollama 
 ```
 
 Let's find the fastest qwen3:8b that works and set up a proxy with socat.
 ```bash
-$ shurl gh:kristopolous/free-ollama --proxy qwen3:8b
+shurl gh:kristopolous/free-ollama --proxy qwen3:8b
+```
+
+Let's do some embedding with the power of shurl:
+```bash
+cat README.md |\
+  shurl gh:kristopolous/free-ollama/examples/embed \
+  $(free-ollama --mas nomic-embed-text:latest 0)
 ```
 
 **Note**: You aren't getting free cloud with the `:cloud` models: Credits follow the client, not the server, so cloud is **filtered out by default**
@@ -44,7 +51,7 @@ Let's move on
 
 Show some of the fast llamas 
 ```bash
-$ free-ollama qwen3:latest {0..10}
+free-ollama qwen3:latest {0..10}
 ```
 
 The parser is actually a stack machine
@@ -52,7 +59,7 @@ The parser is actually a stack machine
 For example, here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2 not-so-latest
 
 ```bash
-$ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
+free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 ```
 
 ## Output Format
@@ -107,10 +114,9 @@ shurl gh:day50-dev/llcat/examples/conversation.sh \
 $ free-ollama --host glm-4.7-flash:q4_K_M {0..9} > server-list.txt
 # Now you have a list of IPs that may or may not work tomorrow. Cool.
 
-# Build a Redis server pool (requires redis-cli, because why not)
+# Build a Redis server pool
 $ free-ollama --host mistral:7b {0..20} | \
   xargs -I {} redis-cli rpush server-pool "{}"
-# You’re welcome, production.
 
 ```
 
