@@ -220,8 +220,13 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 
 ## FAQ
 
+ * Q: Is this legal?
+ * A: Look. Have you ever used a restroom "for customers only" without buying something? I ANAL. 
+
+---
+
  * Q: Was this vibe coded?
- * A: Only the README. Then heavily human because [LLMs aren't funny](https://github.com/kristopolous/humor-evals).
+ * A: Only the README, early versions, because [LLMs aren't funny](https://github.com/kristopolous/humor-evals).
 
 ---
 
