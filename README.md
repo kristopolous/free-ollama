@@ -33,27 +33,23 @@ Output a sorted list of models by how often they appear in the wild. *No Spoiler
 $ shurl gh:kristopolous/free-ollama 
 ```
 
-Finds the fastest qwen3:8b that works, sets up a proxy with socat.
+Let's find the fastest qwen3:8b that works and set up a proxy with socat.
 ```bash
 $ shurl gh:kristopolous/free-ollama --proxy qwen3:8b
 ```
 
 **Note**: You aren't getting free cloud with the `:cloud` models: Credits follow the client, not the server, so cloud is **filtered out by default**
 
-Lists all servers offering `qwen3:latest`, sorted by TPS. Enjoy.
+Let's move on
 
-```
-$ free-ollama qwen3:latest
-```
-
-Shows the some of the fast llamas 
+Show some of the fast llamas 
 ```bash
 $ free-ollama qwen3:latest {0..10}
 ```
 
-The parser is actually a stack machine (true).
+The parser is actually a stack machine
 
-Here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2 not-so-latest
+For example, here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2 not-so-latest
 
 ```bash
 $ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
