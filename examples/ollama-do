@@ -1,3 +1,2 @@
 #!/usr/bin/env bash
-OLLAMA_HOST=$2 ollama ${@:3}
-echo $? $2 >> $1
+OLLAMA_HOST="${@: -1}" ollama "${@:1:$#-1}"
