@@ -26,22 +26,22 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ### Pet some feral llamas
 
-Use the awesome [`shurl`](https://github.com/day50-dev/shurl/) for super fast access (or git clone like an amateur)
+Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
 Output a sorted list of models by how often they appear in the wild. *No Spoilers!*
 ```bash
-shurl gh:kristopolous/free-ollama 
+ursh gh:kristopolous/free-ollama 
 ```
 
 Let's find the fastest qwen3:8b that works and set up a proxy with socat.
 ```bash
-shurl gh:kristopolous/free-ollama --proxy qwen3:8b
+ursh gh:kristopolous/free-ollama --proxy qwen3:8b
 ```
 
-Let's do some embedding with the power of shurl:
+Let's do some embedding with the power of ursh:
 ```bash
 curl https://archive.org/stream/pdfy-TNlDHryRIk4DXKAU/Steal%20This%20Book_djvu.txt |\
-  shurl gh:kristopolous/free-ollama/examples/embed \
+  ursh gh:kristopolous/free-ollama/examples/embed \
   $(free-ollama --mas nomic-embed-text:latest 0)
 ```
 
@@ -66,7 +66,7 @@ Let's find out the versions that are running in the wild, using the example scri
 
 ```bash
 free-ollama --host : \
-    | xargs -P 30 -n 1 shurl gh:kristopolous/free-ollama/examples/ollama-do -v \
+    | xargs -P 30 -n 1 ursh gh:kristopolous/free-ollama/examples/ollama-do -v \
     | grep -v client
 ```
 
@@ -134,15 +134,15 @@ Don't even install shit, see if I care.
 Watch deepseek tow the party line:
 
 ```shell
-uvx llcat -u $(shurl gh:kristopolous/free-ollama --mas deepseek-r1:1.5b 0) \
+uvx llcat -u $(ursh gh:kristopolous/free-ollama --mas deepseek-r1:1.5b 0) \
        "Tell me about the Tibet independence movement, or don't"
 ```
 
 In fact, feel free to have a long conversation
 
 ```shell
-shurl gh:day50-dev/llcat/examples/conversation.sh \
-    -u $(shurl gh:kristopolous/free-ollama --mas deepseek-r1:1.5b 0)  
+ursh gh:day50-dev/llcat/examples/conversation.sh \
+    -u $(ursh gh:kristopolous/free-ollama --mas deepseek-r1:1.5b 0)  
 ```
 
 ## Pipeline Integration 
