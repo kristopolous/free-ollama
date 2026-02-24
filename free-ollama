@@ -149,7 +149,13 @@ proxy() {
         fi
         while true; do
             echo " $host -> 127.0.0.1:$start"
-            socat TCP-LISTEN:$start,fork,reuseaddr TCP:${host#*://} 
+
+            if command -v socat > /dev/null 2>&1; then
+                socat TCP-LISTEN:$start,fork,reuseaddr TCP:${host#*://} 
+            else
+                echo "You need socat for the proxy."
+            fi
+
             [[ $? != 1 ]] && break
             echo " \_ Woops :$start is in use"
             (( start++ ))
