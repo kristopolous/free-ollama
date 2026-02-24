@@ -78,6 +78,20 @@ tester() {
     bad="$HOME/.cache/free-ollama-bad-hosts.txt" 
     touch "$bad"
     if [[ -n "$dotest" ]]; then
+        tester=llcat
+        if ! command -v llcat > /dev/null 2>&1; then
+            if command -v uv > /dev/null 2>&1; then
+                tester="uvx llcat"
+            else
+                echo "You need llcat to test. Pick your poison:"
+                echo
+                echo " * pipx install llcat"
+                echo " * uv tool install llcat"
+                echo " * pip install llcat (probably won't work but you do you)"
+                exit 1
+            fi
+        fi
+
         tac | grep -vFf "$bad" | while read tps host model; do
             (( pet ++ ))
             (( pet < skip )) && continue 
@@ -94,7 +108,7 @@ tester() {
                 if [[ -n "$1" ]]; then
                     if [[ "$info" == 1 ]]; then 
                         echo " Looking under the hood!" > /dev/stderr
-                        llcat -u $host -m $model --info </dev/null | jq . > /dev/stderr
+                        $tester -u $host -m $model --info </dev/null | jq . > /dev/stderr
                         echo > /dev/stderr
                     fi
                     echo "$host"
