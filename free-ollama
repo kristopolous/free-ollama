@@ -101,10 +101,11 @@ tester() {
                     return
                 fi
 
-                printf "%s %-30s %s\n" $timing $host $model
+                printf "%s %s#m=%s\n" ${timing:0:4} $host $model
+               
             else 
                 jq .data.response.payload.error.message ~/.cache/free-ollama.test >/dev/stderr
-                echo " 🐡 Not friendly! $host#m=$model" > /dev/stderr
+                echo "  🐡  Not friendly! $host#m=$model" > /dev/stderr
                 [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$bad"
             fi
         done
@@ -155,7 +156,7 @@ else
     while [ $# -gt 0 ]; do
         case $1 in
             --host) _host=1 ;;
-            --mas) _mas=1 _host=1 ;;
+            --mas)  _mas=1 _host=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
             --update|--refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
