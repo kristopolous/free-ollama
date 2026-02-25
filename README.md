@@ -6,16 +6,14 @@
 
 ---
 
-Would you like **unreliable** **ethically-questionable** **free** tokens for about  1,000 useless models? 
+**Unreliable** **ethically-questionable** **free** tokens for 2 decent models and 1,000 useless ones.
 
-Want to run **135m smollm2** or **270m gemma3** on someone else's 2016 era RTX 1080 Ti?
+Run **135m smollm2** or **270m gemma3** on someone else's 2016 era RTX 1080 Ti.
 
-**Well, now you can!**
+The answer is **free-ollama**.
 
-With **free-ollama** you get:
-
-- **Ollamas in the Wild**: Open Ollama servers are just sitting there on IPv4. 
-- **Model Filtering**: Find what a server *claims* to have 
+- **See ollamas in the wild**: Open Ollama servers are just sitting there on IPv4. 
+- **Filter the cute ones**: Find what a server *claims* to have 
 - **Performance Sorting**: Sort by TPS so you can choose the *least* slow server.  
 - **Testing**: Probe to see if the server picks up your calls.  
 - **Zero-Config**: With caching! Works until it doesn’t.
