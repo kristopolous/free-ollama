@@ -54,6 +54,11 @@ Show some of the fast llamas
 free-ollama qwen3:latest {0..10}
 ```
 
+Show all the 120 billion parameter models
+```bash
+free-ollama 120b
+```
+
 The parser is actually a stack machine
 
 For example, here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2 not-so-latest
