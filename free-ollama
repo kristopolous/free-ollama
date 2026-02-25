@@ -72,6 +72,10 @@ process_stack() {
    index=()
 }
 
+curly() {
+    curl -d '{"model":"'$4h'","messages":[{"role":"user","content":"'$5'\n"}]}' $2 2>&1
+}
+
 tester() {
     pet=-1
     skip=${1:-0}
@@ -82,8 +86,14 @@ tester() {
         if ! command -v llcat > /dev/null 2>&1; then
             if command -v uv > /dev/null 2>&1; then
                 tester="uvx llcat"
+            elif ! command curl > /dev/null 2>&1; then
+                tester=curly
             else
-                echo "You need llcat to test. Pick your poison:"
+                echo "You need llcat to test or curl or uv. "
+                echo
+                echo "First of all, what the fuck is wrong with you, is this how you live?"
+                echo
+                echo "Second, do one of these:"
                 echo
                 echo " * pipx install llcat"
                 echo " * uv tool install llcat"
@@ -99,17 +109,19 @@ tester() {
             # The < /dev/null is to avoid llcat from slurping up the stdin
             start_time=$(date +%s.%N)
             model=${model%% *}
-            timeout 90s llcat -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
+            timeout 90s $tester -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
             end_time=$(date +%s.%N)
             timing=$( echo "$end_time - $start_time" | bc )
 
-            if [[ -s ~/.cache/free-ollama.test ]] && ! grep -i error ~/.cache/free-ollama.test > /dev/null; then 
+            if [[ -s ~/.cache/free-ollama.test ]] && ! grep -iE '(fail|error)' ~/.cache/free-ollama.test > /dev/null; then 
 
                 if [[ -n "$1" ]]; then
                     if [[ "$info" == 1 ]]; then 
                         echo " Looking under the hood!" > /dev/stderr
-                        $tester -u $host -m $model --info </dev/null | jq . > /dev/stderr
-                        echo > /dev/stderr
+                        if [[ $tester != 'curly' ]]; then
+                            $tester -u $host -m $model --info </dev/null | jq . > /dev/stderr
+                            echo > /dev/stderr
+                        fi
                     fi
                     echo "$host"
                     return
