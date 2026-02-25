@@ -36,6 +36,17 @@ _host=
 _mas=
 
 cache() {
+    if ! command -v curl > /dev/null 2>&1; then
+        for i in {5..2}; do
+            printf "\r\033[K🎯%*s🥌🧹" $i ''
+            sleep 0.5;
+        done
+        printf "\r\033[K🎯🥌 🧹" 
+        sleep 0.5;
+        printf "\r\033[K🥌  🧹\n" 
+        echo "This is the closest I can get to curling on this system. Go install curl."
+        exit
+    fi
     if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
         echo "Updating cache..." > /dev/stderr
         curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > $db
