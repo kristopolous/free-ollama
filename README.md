@@ -10,7 +10,7 @@
 
 Run **135m smollm2** or **270m gemma3** on someone else's RTX 2070.
 
-The answer is **free-ollama**.
+Interested? Your path to victory is **free-ollama**!
 
 - **See ollamas in the wild**: Open Ollama servers are just sitting there on IPv4. 
 - **Filter the cute ones**: Find what a server *claims* to have 
