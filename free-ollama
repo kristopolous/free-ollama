@@ -73,7 +73,7 @@ process_stack() {
 }
 
 curly() {
-    curl -d '{"model":"'$4h'","messages":[{"role":"user","content":"'$5'\n"}]}' $2 2>&1
+    curl -d '{"model":"'$4'","messages":[{"role":"user","content":"'$5'\n"}]}' $2 2>&1
 }
 
 tester() {
