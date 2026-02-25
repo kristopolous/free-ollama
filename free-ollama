@@ -205,7 +205,7 @@ else
             --update|--refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
             --test) dotest=1 ;;
-            *[A-Za-z]*) process_stack | tester; model=$1 ;;
+            *[A-Za-z:]*) process_stack | tester; model=$1 ;;
             [0-9]*) index+=( "$1" ) ;;
         esac
         shift
