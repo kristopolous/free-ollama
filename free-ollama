@@ -116,6 +116,10 @@ tester() {
         tac | grep -vFf "$bad" | while read tps host model; do
             (( pet ++ ))
             (( pet < skip )) && continue 
+            if [[ "$(curl -s "$host"/api/ps | jq .models)" != '[]' ]]; then
+                echo " $host is busy"
+                continue
+            fi
 
             # The < /dev/null is to avoid llcat from slurping up the stdin
             start_time=$(date +%s.%N)

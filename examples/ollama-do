@@ -1,2 +1,3 @@
 #!/usr/bin/env bash
-OLLAMA_HOST="${@: -1}" ollama "${@:1:$#-1}"
+export OLLAMA_HOST="${@: -1}" 
+ollama ${@:1:$#-1} #| sed "s|^|$OLLAMA_HOST |g"

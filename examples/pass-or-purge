@@ -3,9 +3,6 @@ export OLLAMA_HOST="$2"
 model="$1"
 if [[ $(ollama ps | wc -l) == 1 ]]; then
     if [[ $(ollama ls | grep "$model" | wc -l) -gt 0 ]]; then
-        echo "<<<"
-        ollama ls | grep "$model"
-        echo ">>>"
         res=$(timeout 120s ollama run "$model" "respond with the word test")
         grep -iE test <(echo $res) && echo "$2 - passed" || ollama rm $1
     else
