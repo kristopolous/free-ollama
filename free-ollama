@@ -47,7 +47,7 @@ cache() {
         echo "This is the closest I can get to curling on this system. Go install curl."
         exit
     fi
-    if [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
+    if [[ -n "$1" ]] || [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
         echo "Updating cache..." > /dev/stderr
         curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > $db
     fi
@@ -116,17 +116,19 @@ tester() {
         tac | grep -vFf "$bad" | while read tps host model; do
             (( pet ++ ))
             (( pet < skip )) && continue 
-            if [[ "$(curl -s "$host"/api/ps | jq .models)" != '[]' ]]; then
-                echo " $host is busy"
-                continue
-            fi
 
             # The < /dev/null is to avoid llcat from slurping up the stdin
             start_time=$(date +%s.%N)
             model=${model%% *}
-            timeout 90s $tester -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
-            end_time=$(date +%s.%N)
-            timing=$( echo "$end_time - $start_time" | bc )
+            running="$(curl -s $host/api/ps | jq -r '.models[].name')"
+            if [[ -n "$running" && "$running" != "$model" ]]; then
+                echo "  🕵️ $running"
+                truncate -s 0 "$HOME/.cache/free-ollama.test"
+            else
+                timeout 90s $tester -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
+                end_time=$(date +%s.%N)
+                timing=$( echo "$end_time - $start_time" | bc )
+            fi
 
             if [[ -s ~/.cache/free-ollama.test ]] && ! grep -iE '(fail|error)' ~/.cache/free-ollama.test > /dev/null; then 
 
@@ -206,7 +208,7 @@ else
             --mas)  _mas=1 _host=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
-            --update|--refresh) rm ~/.cache/free-ollama*.*; cache; echo "Ahh! How refreshing";;
+            --update|--refresh) truncate -s 0 "$HOME/.cache/free-ollama-bad-hosts.txt"; cache 1; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
             --test) dotest=1 ;;
             *[A-Za-z:]*) process_stack | tester; model=$1 ;;
