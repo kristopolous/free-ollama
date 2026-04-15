@@ -47,7 +47,7 @@ cache() {
         echo "This is the closest I can get to curling on this system. Go install curl."
         exit
     fi
-    if [[ -n "$1" ]] || [[ ! -f "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
+    if [[ -n "$1" ]] || [[ ! -s "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
         echo "Updating cache..." > /dev/stderr
         curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > $db
     fi
