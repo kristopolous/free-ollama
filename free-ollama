@@ -129,12 +129,19 @@ tester() {
         fi
 
         tac | grep -vFf "$bad" | while read tps host model; do
+            if [[ -n "$dosmoke" ]]; then
+              echo "$host $($tester -u $host -m | tr '\n' ' ')"
+              echo "  ->" $(curl -s $host/api/ps | jq -r '.models[].name')
+              continue
+            fi
+
             (( pet ++ ))
             (( pet < skip )) && continue 
 
             # The < /dev/null is to avoid llcat from slurping up the stdin
             start_time=$(date +%s.%N)
             model=${model%% *}
+
             running="$(curl -s $host/api/ps | jq -r '.models[].name')"
             if [[ -n "$running" && "$running" != "$model" ]]; then
                 echo "  🕵️ $running"
@@ -225,6 +232,7 @@ else
             --proxy) proxy $2 ;;
             --update|--refresh) truncate -s 0 "$HOME/.cache/free-ollama-bad-hosts.txt"; cache 1; echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
+            --smoke) dosmoke=1 dotest=1 ;;
             --test) dotest=1 ;;
             *[A-Za-z:]*) process_stack | tester; model=$1 ;;
             [0-9]*) index+=( "$1" ) ;;
