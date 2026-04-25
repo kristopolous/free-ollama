@@ -50,6 +50,7 @@ cache() {
     if [[ -n "$1" ]] || [[ ! -s "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
         echo "Updating cache..." > /dev/stderr
         curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > ${db}.tmp
+        curl -Ls 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json' > ${db}-spider.tmp
         {
           echo "server,models";
           curl -Ls 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv'
@@ -61,9 +62,17 @@ for r in n:
   r['models']=[m.strip() for m in r['models'].split(',')]
   if len(r['models']) == 0:
     r['models'] = ['unknown']
+
 with open('${db}.tmp', 'r') as f:
   for row in json.loads(f.read()):
     n.append(row)
+
+with open('${db}-spider.tmp', 'r') as f:
+  for row in json.loads(f.read()):
+    n.append({
+      'tps': 0,
+      'server': row.get('url'), 'models': [ n.get('name') for n in row.get('models') ]})
+
 print(json.dumps(n))" > $db
     fi
 }
