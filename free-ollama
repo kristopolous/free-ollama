@@ -60,24 +60,34 @@ cache() {
           cat "${_db}-happyshua.tmp"
         } | python3 -c "
 import csv, json, sys
-n=list(csv.DictReader(sys.stdin))
-for r in n:
-  r['tps']=0
-  r['models']=[m.strip() for m in r['models'].split(',')]
-  if len(r['models']) == 0:
-    r['models'] = ['unknown']
+n = list(csv.DictReader(sys.stdin))
+host_map = {}
 
 with open('${_db}-vercel.tmp', 'r') as f:
   for row in json.loads(f.read()):
-    n.append(row)
+    host_map[row.get('server')] = row
+
+for r in n:
+  ip = r.get('server')
+  models = [m.strip() for m in r['models'].split(',')]
+  if ip not in host_map:
+    host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+
+  host_map[ip]['models'] += models
 
 with open('${_db}-spider.tmp', 'r') as f:
   for row in json.loads(f.read()):
-    n.append({
-      'tps': 0,
-      'server': row.get('url'), 'models': [ n.get('name') for n in row.get('models') ]})
+    ip = row.get('url')
+    models = [ n.get('name') for n in row.get('models') ]
+    if ip not in host_map:
+      host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
 
-print(json.dumps(n))" > "$_db"
+    host_map[ip]['models'] += models
+
+for k,v in host_map.items():
+  v['models'] = list(set(v['models']))
+
+print(json.dumps(list(host_map.values())))" > "$_db"
     fi
 }
 
@@ -240,13 +250,16 @@ else
     while [ $# -gt 0 ]; do
         case $1 in
             --host) _host=1 ;;
-            --mas)  _mas=1 _host=1 ;;
+            --mas)  _host=1 _mas=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
-            --update|--refresh) truncate -s 0 "$HOME/.cache/free-ollama-bad-hosts.txt"; cache 1; echo "Ahh! How refreshing";;
+            --update|--refresh) 
+              truncate -s 0 "$HOME/.cache/free-ollama-bad-hosts.txt"; 
+              cache 1; 
+              echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
-            --smoke) dosmoke=1 dotest=1 ;;
-            --test) dotest=1 ;;
+            --smoke) dotest=1 dosmoke=1 ;;
+            --test)  dotest=1 ;;
             *[A-Za-z:]*) process_stack | tester; model=$1 ;;
             [0-9]*) index+=( "$1" ) ;;
         esac
