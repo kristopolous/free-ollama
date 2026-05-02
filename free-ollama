@@ -52,11 +52,12 @@ cache() {
     fi
     if [[ -n "$1" ]] || [[ ! -s "$_db" ]] || [[ -n "$(find "$_db" -mmin +1440)" ]]; then
         echo "Updating cache..." > /dev/stderr
-        curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > ${_db}.tmp
-        curl -Ls 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json' > ${_db}-spider.tmp
+        curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > "${_db}-vercel.tmp"
+        curl -Ls 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json' > "${_db}-spider.tmp"
+        curl -Ls 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv' > "${_db}-happyshua.tmp"
         {
           echo "server,models";
-          curl -Ls 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv'
+          cat "${_db}-happyshua.tmp"
         } | python3 -c "
 import csv, json, sys
 n=list(csv.DictReader(sys.stdin))
@@ -66,7 +67,7 @@ for r in n:
   if len(r['models']) == 0:
     r['models'] = ['unknown']
 
-with open('${_db}.tmp', 'r') as f:
+with open('${_db}-vercel.tmp', 'r') as f:
   for row in json.loads(f.read()):
     n.append(row)
 
