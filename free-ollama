@@ -31,7 +31,10 @@
 # Run it without arguments, you'll get a frequency distribution.
 #
 
-db="$HOME/.cache/free-ollama.json"
+_cache="$HOME/.cache/free-ollama"
+[[ -d "$_cache" ]] || mkdir -p "$_cache"
+
+_db="$_cache/free-ollama.json"
 _host=
 _mas=
 
@@ -47,10 +50,10 @@ cache() {
         echo "This is the closest I can get to curling on this system. Go install curl."
         exit
     fi
-    if [[ -n "$1" ]] || [[ ! -s "$db" ]] || [[ -n "$(find "$db" -mmin +1440)" ]]; then
+    if [[ -n "$1" ]] || [[ ! -s "$_db" ]] || [[ -n "$(find "$_db" -mmin +1440)" ]]; then
         echo "Updating cache..." > /dev/stderr
-        curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > ${db}.tmp
-        curl -Ls 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json' > ${db}-spider.tmp
+        curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > ${_db}.tmp
+        curl -Ls 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json' > ${_db}-spider.tmp
         {
           echo "server,models";
           curl -Ls 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv'
@@ -63,17 +66,17 @@ for r in n:
   if len(r['models']) == 0:
     r['models'] = ['unknown']
 
-with open('${db}.tmp', 'r') as f:
+with open('${_db}.tmp', 'r') as f:
   for row in json.loads(f.read()):
     n.append(row)
 
-with open('${db}-spider.tmp', 'r') as f:
+with open('${_db}-spider.tmp', 'r') as f:
   for row in json.loads(f.read()):
     n.append({
       'tps': 0,
       'server': row.get('url'), 'models': [ n.get('name') for n in row.get('models') ]})
 
-print(json.dumps(n))" > $db
+print(json.dumps(n))" > "$_db"
     fi
 }
 
@@ -102,7 +105,7 @@ process_stack() {
        ) 
        | sort_by(.tps) 
        | .['$(IFS=,; echo "${index[*]}")'] 
-       | '"$out" "$db"
+       | '"$out" "$_db"
 
    index=()
 }
@@ -151,9 +154,9 @@ tester() {
             start_time=$(date +%s.%N)
             model=${model%% *}
 
-            running="$(curl -s $host/api/ps | jq -r '.models[].name')"
+            running="$(curl -s $host/api/ps | jq -r '.models[].name' | tr '\n' ' ')"
             if [[ -n "$running" && "$running" != "$model" ]]; then
-                echo "  🕵️ $running"
+                echo "    🕵️  NOT TESTING: $running"
                 truncate -s 0 "$HOME/.cache/free-ollama.test"
             else
                 timeout 90s $tester -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
@@ -229,7 +232,7 @@ proxy() {
 
 cache
 if [[ -z "$1" ]]; then
-    jq -r 'map(.models[]) | group_by(.) | map("\(length) \(.[0])") | .[]' "$db" | sort -n
+    jq -r 'map(.models[]) | group_by(.) | map("\(length) \(.[0])") | .[]' "$_db" | sort -n
 else
     declare -a index
     model=
