@@ -35,8 +35,10 @@ _cache="$HOME/.cache/free-ollama"
 [[ -d "$_cache" ]] || mkdir -p "$_cache"
 
 _db="$_cache/free-ollama.json"
+_bad="$_cache/bad-hosts.txt"
 _host=
 _mas=
+_timeout=90
 
 cache() {
     if ! command -v curl > /dev/null 2>&1; then
@@ -128,8 +130,7 @@ curly() {
 tester() {
     pet=-1
     skip=${1:-0}
-    bad="$_cache/free-ollama-bad-hosts.txt" 
-    touch "$bad"
+    touch "$_bad"
     if [[ -n "$dotest" ]]; then
         tester=llcat
         if ! command -v llcat > /dev/null 2>&1; then
@@ -151,9 +152,9 @@ tester() {
             fi
         fi
 
-        tac | grep -vFf "$bad" | while read tps host model; do
+        tac | grep -vFf "$_bad" | while read tps host model; do
             if [[ -n "$dosmoke" ]]; then
-              echo "$host $($tester -u $host -m | tr '\n' ' ')"
+              echo "$host $($tester --timeout $_timeout -u $host -m | tr '\n' ' ')"
               echo "  ->" $(curl -s $host/api/ps | jq -r '.models[].name')
               continue
             fi
@@ -170,7 +171,7 @@ tester() {
                 echo "    🕵️  NOT TESTING: $running"
                 truncate -s 0 "$_cache/free-ollama.test"
             else
-                timeout 90s $tester -u $host -m $model "respond with the single word 'test'" </dev/null > "$_cache/free-ollama.test" 2>&1
+                timeout "$_timeout"s $tester --timeout "$_timeout" -u $host -m $model "respond with the single word 'test'" </dev/null > "$_cache/free-ollama.test" 2>&1
                 end_time=$(date +%s.%N)
                 timing=$( echo "$end_time - $start_time" | bc )
             fi
@@ -181,7 +182,7 @@ tester() {
                     if [[ "$info" == 1 ]]; then 
                         echo " Looking under the hood!" > /dev/stderr
                         if [[ $tester != 'curly' ]]; then
-                            $tester -u $host -m $model --info </dev/null | jq . > /dev/stderr
+                            $tester --timeout "$_timeout" -u $host -m $model --info </dev/null | jq . > /dev/stderr
                             echo > /dev/stderr
                         fi
                     fi
@@ -194,7 +195,7 @@ tester() {
             else 
                 jq .data.response.payload.error.message "$_cache/free-ollama.test" >/dev/stderr
                 echo "  🐡  Not friendly! $host#m=$model" > /dev/stderr
-                [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$bad"
+                [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$_bad"
             fi
         done
     else
@@ -217,7 +218,7 @@ proxy() {
             echo " 👀 to pet a $model"
             host=$(process_stack | tester $pet)
             if [[ -z "$host" ]]; then
-                echo -e " 🌵 There doesn't seem to be any good hosts!\n    Check $_cache/free-ollama-bad-hosts.txt"
+                echo -e " 🌵 There doesn't seem to be any good hosts!\n    Check $_bad"
                 exit 1
             fi
         fi
@@ -249,12 +250,15 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
+            --timeout)
+              shift
+              _timeout=$1 ;;
             --host) _host=1 ;;
             --mas)  _host=1 _mas=1 ;;
             --info) info=1 ;;
             --proxy) proxy $2 ;;
             --update|--refresh) 
-              truncate -s 0 "$_cache/free-ollama-bad-hosts.txt"; 
+              truncate -s 0 "$_bad"
               cache 1; 
               echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
