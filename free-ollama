@@ -128,7 +128,7 @@ curly() {
 tester() {
     pet=-1
     skip=${1:-0}
-    bad="$HOME/.cache/free-ollama-bad-hosts.txt" 
+    bad="$_cache/free-ollama-bad-hosts.txt" 
     touch "$bad"
     if [[ -n "$dotest" ]]; then
         tester=llcat
@@ -168,14 +168,14 @@ tester() {
             running="$(curl -s $host/api/ps | jq -r '.models[].name' | tr '\n' ' ')"
             if [[ -n "$running" && "$running" != "$model" ]]; then
                 echo "    🕵️  NOT TESTING: $running"
-                truncate -s 0 "$HOME/.cache/free-ollama.test"
+                truncate -s 0 "$_cache/free-ollama.test"
             else
-                timeout 90s $tester -u $host -m $model "respond with the single word 'test'" </dev/null > ~/.cache/free-ollama.test 2>&1
+                timeout 90s $tester -u $host -m $model "respond with the single word 'test'" </dev/null > "$_cache/free-ollama.test" 2>&1
                 end_time=$(date +%s.%N)
                 timing=$( echo "$end_time - $start_time" | bc )
             fi
 
-            if [[ -s ~/.cache/free-ollama.test ]] && ! grep -iE '(fail|error)' ~/.cache/free-ollama.test > /dev/null; then 
+            if [[ -s "$_cache/free-ollama.test" ]] && ! grep -iE '(fail|error)' "$_cache/free-ollama.test" > /dev/null; then 
 
                 if [[ -n "$1" ]]; then
                     if [[ "$info" == 1 ]]; then 
@@ -192,7 +192,7 @@ tester() {
                 printf "%s %s#m=%s\n" ${timing:0:4} $host $model
                
             else 
-                jq .data.response.payload.error.message ~/.cache/free-ollama.test >/dev/stderr
+                jq .data.response.payload.error.message "$_cache/free-ollama.test" >/dev/stderr
                 echo "  🐡  Not friendly! $host#m=$model" > /dev/stderr
                 [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$bad"
             fi
@@ -217,7 +217,7 @@ proxy() {
             echo " 👀 to pet a $model"
             host=$(process_stack | tester $pet)
             if [[ -z "$host" ]]; then
-                echo -e " 🌵 There doesn't seem to be any good hosts!\n    Check ~/.cache/free-ollama-bad-hosts.txt"
+                echo -e " 🌵 There doesn't seem to be any good hosts!\n    Check $_cache/free-ollama-bad-hosts.txt"
                 exit 1
             fi
         fi
@@ -254,7 +254,7 @@ else
             --info) info=1 ;;
             --proxy) proxy $2 ;;
             --update|--refresh) 
-              truncate -s 0 "$HOME/.cache/free-ollama-bad-hosts.txt"; 
+              truncate -s 0 "$_cache/free-ollama-bad-hosts.txt"; 
               cache 1; 
               echo "Ahh! How refreshing";;
             --help) $(command -v batcat || echo cat) "$0" ;;
