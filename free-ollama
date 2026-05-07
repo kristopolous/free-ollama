@@ -166,9 +166,9 @@ tester() {
             start_time=$(date +%s.%N)
             model=${model%% *}
 
-            running="$(curl -s $host/api/ps | jq -r '.models[].name' | tr '\n' ' ')"
+            running="$(curl -s $host/api/ps | jq -r '.models[].name' | tr '\n' ' ' | tr -d ' ')"
             if [[ -n "$running" && "$running" != "$model" ]]; then
-                echo "    🕵️  NOT TESTING: $running"
+                echo "   🕵️ Running: <$running> (wanted <$model>)" > /dev/stderr
                 truncate -s 0 "$_cache/free-ollama.test"
             else
                 timeout "$_timeout"s $tester --timeout "$_timeout" -u $host -m $model "respond with the single word 'test'" </dev/null > "$_cache/free-ollama.test" 2>&1
@@ -194,7 +194,7 @@ tester() {
                
             else 
                 jq .data.response.payload.error.message "$_cache/free-ollama.test" >/dev/stderr
-                echo "  🐡  Not friendly! $host#m=$model" > /dev/stderr
+                echo " 🐡 Not friendly! $host#m=$model" > /dev/stderr
                 [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$_bad"
             fi
         done
