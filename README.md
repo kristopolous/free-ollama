@@ -1,7 +1,7 @@
 <p align="center">
 <img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
 <br/>
-  <br/><strong>Because paying for cloud GPUs is for chumps with self-respect.</strong>
+  <br/><strong>Free Ollama: Paying for cloud GPUs is for chumps with self-respect.</strong>
 </p>
 
 ---
