@@ -250,6 +250,12 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
+            --exec)
+              shift
+              export OLLAMA_HOST="${@: -1}"
+              ollama ${@:1:$#-1} 
+              exit 0
+              ;;
             --timeout)
               shift
               _timeout=$1 ;;
