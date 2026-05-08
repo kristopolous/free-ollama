@@ -67,11 +67,11 @@ For example, here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2
 free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 ```
 
-Let's find out the versions that are running in the wild, using the example script `ollama-do`:
+Let's find out the versions that are running in the wild:
 
 ```bash
 free-ollama --host : \
-    | xargs -P 30 -n 1 ursh gh:kristopolous/free-ollama/examples/ollama-do -v \
+    | xargs -P 30 -n 1 free-ollama --exec -v \
     | grep -v client
 ```
 
@@ -251,28 +251,31 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 
 ## Example output
 
-Based on actual data (yes, really):
+Based on actual data:
 
 ```
 ...
-116 llama3.1:8b-instruct-q4_K_M
-122 llama3:latest
-129 gpt-oss:120b               
-140 mattw/pygmalion:latest     (roleplay server? I’m shocked.)
-148 mistral:latest
-155 mario:latest              
-164 gemma3:latest
-180 llama3.2:3b-instruct-q5_K_M
-196 lukashabtoch/plutotext-r3-emotional:latest 
-209 nomic-embed-text:latest
-223 gemma3:270m               (the tiny one you wanted!)
-238 deepseek-r1:1.5b
-248 llama3.1:8b
-315 llama3.2:latest           (nobody likes llama4)
-1142 smollm2:135m             (the champion of tiny models!)
+116 mattw/pygmalion:latest
+126 mario:latest
+133 bge-m3:latest
+147 gemma3:latest
+151 llama3.2:3b-instruct-q5_K_M
+192 nomic-embed-text:latest
+215 deepseek-r1:1.5b
+227 llama3.1:8b
+247 mistral:latest
+329 llama3.2:latest
+379 llama3.2:3b
+515 openchat:7b
+527 qwen2.5:1.5b
+529 codellama:13b
+604 llama2:latest
+633 deepseek-r1:latest
+694 llama3:latest
+892 smollm2:135m
 ```
 
-smollm2:135m appears **1142 times**. Orchestrate them all together and produce gigabytes of garbage.
+smollm2:135m appears **892 times**. Orchestrate them all together and produce gigabytes of garbage.
 
 ```
 Pet the feral llama
