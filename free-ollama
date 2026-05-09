@@ -54,9 +54,9 @@ cache() {
     fi
     if [[ -n "$1" ]] || [[ ! -s "$_db" ]] || [[ -n "$(find "$_db" -mmin +1440)" ]]; then
         echo "Updating cache..." > /dev/stderr
-        curl -Ls 'https://awesome-ollama-server.vercel.app/data.json' > "${_db}-vercel.tmp"
-        curl -Ls 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json' > "${_db}-spider.tmp"
-        curl -Ls 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv' > "${_db}-happyshua.tmp"
+        curl -L 'https://awesome-ollama-server.vercel.app/data.json' > "${_db}-vercel.tmp"
+        curl -L 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json' > "${_db}-spider.tmp"
+        curl -L 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv' > "${_db}-happyshua.tmp"
         {
           echo "server,models";
           cat "${_db}-happyshua.tmp"
@@ -169,7 +169,7 @@ tester() {
             running="$(curl -s $host/api/ps | jq -r '.models[].name' | tr '\n' ' ' | tr -d ' ')"
             if [[ -n "$running" && "$running" != "$model" ]]; then
                 echo "   🕵️ Running: <$running> (wanted <$model>)" > /dev/stderr
-                truncate -s 0 "$_cache/free-ollama.test"
+                continue
             else
                 timeout "$_timeout"s $tester --timeout "$_timeout" -u $host -m $model "respond with the single word 'test'" </dev/null > "$_cache/free-ollama.test" 2>&1
                 end_time=$(date +%s.%N)
