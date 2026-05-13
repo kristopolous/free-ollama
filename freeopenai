@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+import json, os, subprocess, sys, time, threading, signal
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from queue import Queue, Empty
+
+CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
+CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
+BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
+POOL_SIZE = int(os.environ.get("POOL_SIZE", "3"))
+PORT = int(os.environ.get("PORT", "8080"))
+TIMEOUT = int(os.environ.get("TIMEOUT", "60"))
+
+
+def ensure_cache():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    need = False
+    if not os.path.exists(CACHE_FILE) or os.path.getsize(CACHE_FILE) == 0:
+        need = True
+    elif time.time() - os.path.getmtime(CACHE_FILE) > 86400:
+        need = True
+    if need:
+        script = os.path.join(os.path.dirname(__file__), "free-ollama")
+        if not os.path.exists(script):
+            script = "free-ollama"
+        subprocess.run([script], capture_output=True, timeout=120)
+
+
+def load_servers():
+    ensure_cache()
+    with open(CACHE_FILE) as f:
+        return json.load(f)
+
+
+def load_bad():
+    s = set()
+    if os.path.exists(BAD_FILE):
+        with open(BAD_FILE) as f:
+            for line in f:
+                if line.strip():
+                    s.add(line.strip())
+    return s
+
+
+def add_bad(host, model):
+    with open(BAD_FILE, "a") as f:
+        f.write(f"{host} {model}\n")
+
+
+def find_servers(sub):
+    servers = load_servers()
+    bad = load_bad()
+    matched = []
+    for s in servers:
+        models = s.get("models", [])
+        ms = [m for m in models if sub in m]
+        if not ms:
+            continue
+        if any(":cloud" in m for m in models) and ":cloud" not in sub:
+            continue
+        host = s.get("server", "")
+        if f"{host} {sub}" in bad:
+            continue
+        matched.append((s.get("tps", 0), host, ms))
+    matched.sort(key=lambda x: x[0])
+    return matched
+
+
+def all_models():
+    servers = load_servers()
+    seen = set()
+    out = []
+    for s in servers:
+        for m in s.get("models", []):
+            if ":cloud" in m:
+                continue
+            if m not in seen:
+                seen.add(m)
+                out.append(m)
+    out.sort()
+    return out
+
+
+def to_ollama(body):
+    msg = body.get("messages", [])
+    opts = {}
+    if "temperature" in body:
+        opts["temperature"] = body["temperature"]
+    if "max_tokens" in body:
+        opts["num_predict"] = body["max_tokens"]
+    if "top_p" in body:
+        opts["top_p"] = body["top_p"]
+    return {"model": body.get("model", ""), "messages": msg, "stream": False, "options": opts}
+
+
+def to_openai(resp, model):
+    return {
+        "id": "chatcmpl-%s" % int(time.time()),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": resp.get("message", {}).get("content", ""),
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": resp.get("prompt_eval_count", 0),
+            "completion_tokens": resp.get("eval_count", 0),
+            "total_tokens": resp.get("prompt_eval_count", 0) + resp.get("eval_count", 0),
+        },
+    }
+
+
+def err_obj(msg, code=None):
+    e = {"message": msg}
+    if code:
+        e["code"] = code
+    return {"error": e}
+
+
+def try_host(host, payload, q, done):
+    if done.is_set():
+        return
+    try:
+        proc = subprocess.Popen(
+            ["curl", "-s", "--max-time", str(TIMEOUT),
+             "%s/api/chat" % host,
+             "-H", "Content-Type: application/json",
+             "-d", json.dumps(payload)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        while not done.is_set():
+            try:
+                proc.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+        if done.is_set():
+            proc.kill()
+            proc.wait()
+            return
+        out, _ = proc.communicate()
+        if proc.returncode != 0:
+            if not done.is_set():
+                q.put(("conn", host))
+            return
+        resp = json.loads(out)
+        if "error" in resp:
+            if not done.is_set():
+                q.put(("serv", host, resp["error"]))
+            return
+        if not done.is_set():
+            q.put(("ok", host, resp))
+    except Exception:
+        if not done.is_set():
+            q.put(("conn", host))
+
+
+def fan_out(servers, payload):
+    q = Queue()
+    done = threading.Event()
+    threads = []
+    for _, host, _ in servers:
+        t = threading.Thread(target=try_host, args=(host, payload, q, done))
+        t.start()
+        threads.append(t)
+    result = None
+    while result is None:
+        try:
+            result = q.get(timeout=TIMEOUT + 5)
+        except Empty:
+            break
+    done.set()
+    for t in threads:
+        t.join(timeout=1)
+    if result is None:
+        return None, "all servers failed"
+    tag = result[0]
+    if tag == "ok":
+        return result[1], result[2]
+    if tag == "serv":
+        return None, ("serv", result[1], result[2])
+    return None, ("conn", result[1])
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/v1/models":
+            models = all_models()
+            self.send_json({
+                "object": "list",
+                "data": [{"id": m, "object": "model", "created": int(time.time()), "owned_by": "free-ollama"} for m in models],
+            })
+        else:
+            self.send_json(err_obj("not found"), 404)
+
+    def do_POST(self):
+        if self.path != "/v1/chat/completions":
+            self.send_json(err_obj("not found"), 404)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self.send_json(err_obj("invalid JSON"), 400)
+            return
+        model = body.get("model", "")
+        if not model:
+            self.send_json(err_obj("model is required", "missing_model"), 400)
+            return
+        servers = find_servers(model)
+        if not servers:
+            self.send_json(err_obj("no available servers for '%s'" % model, "model_not_found"), 404)
+            return
+        opayload = to_ollama(body)
+        off = 0
+        while off < len(servers):
+            batch = servers[off:off + POOL_SIZE]
+            host, data = fan_out(batch, opayload)
+            if host is not None:
+                self.send_json(to_openai(data, model))
+                return
+            tag2, h = data[0], data[1]
+            if tag2 == "serv":
+                add_bad(h, model)
+            off += POOL_SIZE
+        self.send_json(err_obj("all servers failed"), 502)
+
+    def send_json(self, data, status=200):
+        body = json.dumps(data)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body.encode())))
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("[%s] %s - %s\n" % (
+            self.log_date_time_string(), self.client_address[0], fmt % args))
+
+
+class PoolServer(ThreadingMixIn, HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def main():
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
+    srv = PoolServer(("", port), Handler)
+    print("freeopenai :%d  POOL_SIZE=%d" % (port, POOL_SIZE), file=sys.stderr)
+    def stop(sig, frm):
+        print("\nbye", file=sys.stderr)
+        srv.shutdown()
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        srv.shutdown()
+
+
+if __name__ == "__main__":
+    main()
