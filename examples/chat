@@ -2,7 +2,7 @@
 # /// script
 # dependencies = ["openai"]
 # ///
-import sys, os, subprocess, signal, atexit, socket, time
+import sys, os, subprocess, signal, atexit, socket, time, argparse
 import readline
 import openai
 
@@ -16,19 +16,20 @@ def free_port():
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: chat <model> [<prompt>]", file=sys.stderr)
-        sys.exit(1)
+    p = argparse.ArgumentParser(description="Chat with a free Ollama model.")
+    p.add_argument("model", help="model name (substring match)")
+    p.add_argument("prompt", nargs="?", help="one-shot prompt")
+    p.add_argument("-p", "--poolsize", type=int, default=3, help="servers to race (default 3)")
+    args = p.parse_args()
+    pool = args.poolsize
 
-    model = sys.argv[1]
-    oneshot = sys.argv[2] if len(sys.argv) > 2 else None
     port = free_port()
     script = os.path.join(os.path.dirname(__file__), "..", "freeopenai")
 
     srv = subprocess.Popen(
         [script, str(port)],
         stdout=subprocess.DEVNULL, stderr=None,
-        env={**os.environ, "TIMEOUT": "30", "POOL_SIZE": "3"},
+        env={**os.environ, "TIMEOUT": "30", "POOL_SIZE": str(pool)},
     )
 
     def cleanup():
@@ -40,6 +41,8 @@ def main():
     time.sleep(1)
 
     client = openai.OpenAI(base_url="http://localhost:%d/v1" % port, api_key="sk-not-needed")
+    model = args.model
+    oneshot = args.prompt
 
     try:
         readline.read_history_file(HISTFILE)

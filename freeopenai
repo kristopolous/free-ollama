@@ -90,7 +90,7 @@ def to_ollama(body):
         opts["num_predict"] = body["max_tokens"]
     if "top_p" in body:
         opts["top_p"] = body["top_p"]
-    return {"model": body.get("model", ""), "messages": msg, "stream": False, "options": opts}
+    return {"model": body.get("model", ""), "messages": msg, "options": opts}
 
 
 def to_openai(resp, model):
@@ -122,13 +122,46 @@ def err_obj(msg, code=None):
     return {"error": e}
 
 
-def try_host(model, host, payload, q, done):
+def sse_chunk(model, content, done=False):
+    return {
+        "id": "chatcmpl-%s" % int(time.time()),
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {} if not content else {"content": content},
+            "finish_reason": "stop" if done else None,
+        }],
+    }
+
+
+def sse_str(obj):
+    return "data: %s\n\n" % json.dumps(obj)
+
+
+def parse_json(data):
+    s = data.decode().strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    try:
+        dec = json.JSONDecoder()
+        obj, _ = dec.raw_decode(s)
+        return obj
+    except Exception:
+        return None
+
+
+def try_host(full_model, host, payload, q, done):
+    tag = "%s %s" % (host, full_model)
     if done.is_set():
         return
     try:
         proc = subprocess.Popen(
             ["curl", "-s", "--max-time", str(TIMEOUT),
-             "%s/api/chat" % host,
+             "%s/api/chat" % base_url(host),
              "-H", "Content-Type: application/json",
              "-d", json.dumps(payload)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -140,56 +173,58 @@ def try_host(model, host, payload, q, done):
             except subprocess.TimeoutExpired:
                 pass
         if done.is_set():
-            sys.stderr.write("  └─ %s  (killed)\n" % host)
+            sys.stderr.write("  └─ %s  (killed)\n" % tag)
             proc.kill()
             proc.wait()
             return
         out, _ = proc.communicate()
         if proc.returncode != 0:
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (connection failed)\n" % host)
+                sys.stderr.write("  ✗ %s  (connection failed)\n" % tag)
                 q.put(("conn", host))
             return
         if not out.strip():
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (empty response)\n" % host)
+                sys.stderr.write("  ✗ %s  (empty response)\n" % tag)
                 q.put(("conn", host))
             return
-        resp = json.loads(out)
+        resp = parse_json(out)
         if not isinstance(resp, dict):
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (unexpected response type: %s)\n" % (host, type(resp).__name__))
+                sys.stderr.write("  ✗ %s  (bad response: %s)\n" % (tag, out.decode().strip()[:120]))
                 q.put(("conn", host))
             return
         if "error" in resp:
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (error: %s)\n" % (host, resp["error"]))
+                sys.stderr.write("  ✗ %s  (error: %s)\n" % (tag, resp["error"]))
                 q.put(("serv", host, resp["error"]))
             return
+        if "choices" in resp and "message" not in resp:
+            choices = resp.get("choices", [])
+            if choices:
+                msg = choices[0].get("message", {})
+                resp = {"message": msg, "done": True}
         if not done.is_set():
-            sys.stderr.write("  ✓ %s\n" % host)
+            sys.stderr.write("  ✓ %s\n" % tag)
             q.put(("ok", host, resp))
     except Exception as e:
         if not done.is_set():
-            sys.stderr.write("  ✗ %s  (exception: %s)\n" % (host, e))
+            sys.stderr.write("  ✗ %s  (exception: %s)\n" % (tag, e))
             q.put(("conn", host))
 
 
 def fan_out(sub, servers, payload):
     q = Queue()
     done = threading.Event()
-    threads = []
-    hosts = []
+    serv_errors = []
     for _, host, ms in servers:
-        hosts.append(host)
         full = ms[0]
         p = dict(payload, model=full)
         t = threading.Thread(target=try_host, args=(full, host, p, q, done))
         t.start()
-        threads.append(t)
-    sys.stderr.write("  trying %s on %s\n" % (sub, ", ".join(hosts)))
-    errors = []
-    remaining = len(threads)
+    pairs = ["%s %s" % (h, m[0]) for (_, h, m) in servers]
+    sys.stderr.write("  trying %s on %s\n" % (sub, ", ".join(pairs)))
+    remaining = len(servers)
     while remaining > 0:
         try:
             result = q.get(timeout=TIMEOUT + 5)
@@ -199,18 +234,11 @@ def fan_out(sub, servers, payload):
         tag = result[0]
         if tag == "ok":
             done.set()
-            for t in threads:
-                t.join(timeout=1)
-            return result[1], result[2]
-        errors.append(result)
+            return result[1], result[2], serv_errors
+        if tag == "serv":
+            serv_errors.append(result[1])
     done.set()
-    for t in threads:
-        t.join(timeout=1)
-    if errors:
-        tag, h = errors[0][0], errors[0][1]
-        extra = errors[0][2] if len(errors[0]) > 2 else ""
-        return None, ("serv" if tag == "serv" else "conn", h, extra)
-    return None, ("conn", "", "all servers failed")
+    return None, None, serv_errors
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -238,27 +266,117 @@ class Handler(BaseHTTPRequestHandler):
         if not model:
             self.send_json(err_obj("model is required", "missing_model"), 400)
             return
+        do_stream = body.get("stream", False)
         servers = find_servers(model)
         if not servers:
             self.send_json(err_obj("no available servers for '%s'" % model, "model_not_found"), 404)
             return
         opayload = to_ollama(body)
+        if do_stream:
+            self._handle_stream(model, servers, opayload)
+            return
         off = 0
         while off < len(servers):
             batch = servers[off:off + POOL_SIZE]
-            host, data = fan_out(model, batch, opayload)
+            host, data, serv_errors = fan_out(model, batch, dict(opayload, stream=False))
+            for h in serv_errors:
+                sys.stderr.write("  └─ added %s to bad hosts\n" % h)
+                add_bad(h, model)
             if host is not None:
                 self.send_json(to_openai(data, model))
                 return
-            tag2, h = data[0], data[1]
-            if tag2 == "serv":
-                sys.stderr.write("  └─ added %s to bad hosts\n" % h)
-                add_bad(h, model)
             off += POOL_SIZE
             if off < len(servers):
                 sys.stderr.write("  retrying with next %d servers\n" % POOL_SIZE)
         sys.stderr.write("  ✗ all servers failed\n")
         self.send_json(err_obj("all servers failed"), 502)
+
+    def _pick_winner(self, procs):
+        q = Queue()
+
+        def check(idx, proc, host, full):
+            for raw in proc.stdout:
+                line = raw.decode().strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "error" in obj:
+                    sys.stderr.write("  ✗ %s  (error: %s)\n" % (host, obj["error"]))
+                    return
+                q.put((idx, host, full, obj))
+                return
+
+        for idx, (proc, host, full) in enumerate(procs):
+            t = threading.Thread(target=check, args=(idx, proc, host, full))
+            t.daemon = True
+            t.start()
+
+        try:
+            idx, host, full, obj = q.get(timeout=TIMEOUT)
+            for j, (p, _, _) in enumerate(procs):
+                if j != idx:
+                    p.kill()
+            sys.stderr.write("  ✓ %s %s\n" % (host, full))
+            return idx, host, full, obj
+        except Empty:
+            for p, _, _ in procs:
+                p.kill()
+            return None, None, None, None
+
+    def _handle_stream(self, model, servers, opayload):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        self.wfile.flush()
+
+        off = 0
+        while off < len(servers):
+            batch = servers[off:off + POOL_SIZE]
+            procs = []
+            for _, host, ms in batch:
+                full = ms[0]
+                p = dict(opayload, model=full, stream=True)
+                proc = subprocess.Popen(
+                    ["curl", "-s", "-N", "--max-time", str(TIMEOUT),
+                     "%s/api/chat" % host,
+                     "-H", "Content-Type: application/json",
+                     "-d", json.dumps(p)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                procs.append((proc, host, full))
+
+            idx, win_host, win_full, first = self._pick_winner(procs)
+            off += POOL_SIZE
+
+            if idx is not None:
+                self.wfile.write(sse_str(sse_chunk(win_full, first.get("message", {}).get("content", ""))).encode())
+
+                for raw in procs[idx][0].stdout:
+                    line = raw.decode().strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    content = obj.get("message", {}).get("content", "")
+                    if content:
+                        self.wfile.write(sse_str(sse_chunk(win_full, content)).encode())
+                    if obj.get("done"):
+                        self.wfile.write(sse_str(sse_chunk(win_full, "", done=True)).encode())
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                        return
+
+                return
+
+            if off < len(servers):
+                sys.stderr.write("  retrying with next %d servers\n" % POOL_SIZE)
+
+        self.wfile.write(sse_str({"error": "all servers failed"}).encode())
+        self.wfile.write(b"data: [DONE]\n\n")
 
     def send_json(self, data, status=200):
         body = json.dumps(data)
