@@ -1,0 +1,96 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["openai"]
+# ///
+import sys, os, subprocess, signal, atexit, socket, time
+import readline
+import openai
+
+HISTFILE = os.path.expanduser("~/.cache/free-ollama/chat_history")
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: chat <model> [<prompt>]", file=sys.stderr)
+        sys.exit(1)
+
+    model = sys.argv[1]
+    oneshot = sys.argv[2] if len(sys.argv) > 2 else None
+    port = free_port()
+    script = os.path.join(os.path.dirname(__file__), "..", "freeopenai")
+
+    srv = subprocess.Popen(
+        [script, str(port)],
+        stdout=subprocess.DEVNULL, stderr=None,
+        env={**os.environ, "TIMEOUT": "30", "POOL_SIZE": "3"},
+    )
+
+    def cleanup():
+        srv.kill()
+        srv.wait()
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+
+    time.sleep(1)
+
+    client = openai.OpenAI(base_url="http://localhost:%d/v1" % port, api_key="sk-not-needed")
+
+    try:
+        readline.read_history_file(HISTFILE)
+    except Exception:
+        pass
+    atexit.register(lambda: [os.makedirs(os.path.dirname(HISTFILE), exist_ok=True), readline.write_history_file(HISTFILE)])
+
+    messages = [{"role": "system", "content": "You are a helpful assistant."}]
+
+    if oneshot:
+        messages.append({"role": "user", "content": oneshot})
+        try:
+            r = client.chat.completions.create(
+                model=model, messages=messages, temperature=0.7
+            )
+            print(r.choices[0].message.content)
+        except openai.APIError as e:
+            print("Error: %s" % e, file=sys.stderr)
+        return
+
+    print("Chat with %s.  Ctrl+C or /quit to exit.\n" % model)
+
+    while True:
+        try:
+            line = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not line:
+            continue
+        if line == "/quit":
+            break
+        if line == "/clear":
+            messages = [{"role": "system", "content": "You are a helpful assistant."}]
+            print("(cleared)\n")
+            continue
+
+        messages.append({"role": "user", "content": line})
+
+        try:
+            r = client.chat.completions.create(
+                model=model, messages=messages, temperature=0.7
+            )
+            reply = r.choices[0].message.content
+            print(reply)
+            print()
+            messages.append({"role": "assistant", "content": reply})
+        except openai.APIError as e:
+            print("Error: %s" % e, file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

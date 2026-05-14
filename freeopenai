@@ -122,7 +122,7 @@ def err_obj(msg, code=None):
     return {"error": e}
 
 
-def try_host(host, payload, q, done):
+def try_host(model, host, payload, q, done):
     if done.is_set():
         return
     try:
@@ -140,51 +140,77 @@ def try_host(host, payload, q, done):
             except subprocess.TimeoutExpired:
                 pass
         if done.is_set():
+            sys.stderr.write("  └─ %s  (killed)\n" % host)
             proc.kill()
             proc.wait()
             return
         out, _ = proc.communicate()
         if proc.returncode != 0:
             if not done.is_set():
+                sys.stderr.write("  ✗ %s  (connection failed)\n" % host)
+                q.put(("conn", host))
+            return
+        if not out.strip():
+            if not done.is_set():
+                sys.stderr.write("  ✗ %s  (empty response)\n" % host)
                 q.put(("conn", host))
             return
         resp = json.loads(out)
+        if not isinstance(resp, dict):
+            if not done.is_set():
+                sys.stderr.write("  ✗ %s  (unexpected response type: %s)\n" % (host, type(resp).__name__))
+                q.put(("conn", host))
+            return
         if "error" in resp:
             if not done.is_set():
+                sys.stderr.write("  ✗ %s  (error: %s)\n" % (host, resp["error"]))
                 q.put(("serv", host, resp["error"]))
             return
         if not done.is_set():
+            sys.stderr.write("  ✓ %s\n" % host)
             q.put(("ok", host, resp))
-    except Exception:
+    except Exception as e:
         if not done.is_set():
+            sys.stderr.write("  ✗ %s  (exception: %s)\n" % (host, e))
             q.put(("conn", host))
 
 
-def fan_out(servers, payload):
+def fan_out(sub, servers, payload):
     q = Queue()
     done = threading.Event()
     threads = []
-    for _, host, _ in servers:
-        t = threading.Thread(target=try_host, args=(host, payload, q, done))
+    hosts = []
+    for _, host, ms in servers:
+        hosts.append(host)
+        full = ms[0]
+        p = dict(payload, model=full)
+        t = threading.Thread(target=try_host, args=(full, host, p, q, done))
         t.start()
         threads.append(t)
-    result = None
-    while result is None:
+    sys.stderr.write("  trying %s on %s\n" % (sub, ", ".join(hosts)))
+    errors = []
+    remaining = len(threads)
+    while remaining > 0:
         try:
             result = q.get(timeout=TIMEOUT + 5)
         except Empty:
             break
+        remaining -= 1
+        tag = result[0]
+        if tag == "ok":
+            done.set()
+            for t in threads:
+                t.join(timeout=1)
+            return result[1], result[2]
+        errors.append(result)
     done.set()
     for t in threads:
         t.join(timeout=1)
-    if result is None:
-        return None, "all servers failed"
-    tag = result[0]
-    if tag == "ok":
-        return result[1], result[2]
-    if tag == "serv":
-        return None, ("serv", result[1], result[2])
-    return None, ("conn", result[1])
+    if errors:
+        tag, h = errors[0][0], errors[0][1]
+        extra = errors[0][2] if len(errors[0]) > 2 else ""
+        return None, ("serv" if tag == "serv" else "conn", h, extra)
+    return None, ("conn", "", "all servers failed")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -220,14 +246,18 @@ class Handler(BaseHTTPRequestHandler):
         off = 0
         while off < len(servers):
             batch = servers[off:off + POOL_SIZE]
-            host, data = fan_out(batch, opayload)
+            host, data = fan_out(model, batch, opayload)
             if host is not None:
                 self.send_json(to_openai(data, model))
                 return
             tag2, h = data[0], data[1]
             if tag2 == "serv":
+                sys.stderr.write("  └─ added %s to bad hosts\n" % h)
                 add_bad(h, model)
             off += POOL_SIZE
+            if off < len(servers):
+                sys.stderr.write("  retrying with next %d servers\n" % POOL_SIZE)
+        sys.stderr.write("  ✗ all servers failed\n")
         self.send_json(err_obj("all servers failed"), 502)
 
     def send_json(self, data, status=200):
