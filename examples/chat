@@ -1,7 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# dependencies = ["openai"]
-# ///
+#!/usr/bin/env python3
 import sys, os, subprocess, signal, atexit, socket, time, argparse
 import readline
 import openai

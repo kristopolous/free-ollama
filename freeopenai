@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
-import json, os, requests, sys, time, threading, signal
+import json, os, requests, logging, sys, time, threading, signal
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(message)s",
+    stream=sys.stderr,
+)
+log = logging.getLogger("freeopenai")
 from socketserver import ThreadingMixIn
 from queue import Queue, Empty
 
@@ -200,38 +207,38 @@ def try_host(full_model, host, payload, q, done):
     t.join(timeout=TIMEOUT + 1)
 
     if done.is_set():
-        sys.stderr.write(f"  └─ {tag}  (killed)\n")
+        log.debug(f"  └─ {tag}  (killed)")
         return
 
     if exc[0]:
-        sys.stderr.write(f"  ✗ {tag}  (exception: {exc[0]})\n")
+        log.debug(f"  ✗ {tag}  (exception: {exc[0]})")
         q.put(("conn", host))
         return
 
     if result[0] is None:
-        sys.stderr.write(f"  ✗ {tag}  (timeout)\n")
+        log.debug(f"  ✗ {tag}  (timeout)")
         q.put(("conn", host))
         return
 
     if result[0].status_code != 200:
-        sys.stderr.write(f"  ✗ {tag}  (status {result[0].status_code})\n")
+        log.debug(f"  ✗ {tag}  (status {result[0].status_code})")
         q.put(("conn", host))
         return
 
     out = result[0].text
     if not out.strip():
-        sys.stderr.write(f"  ✗ {tag}  (empty response)\n")
+        log.debug(f"  ✗ {tag}  (empty response)")
         q.put(("conn", host))
         return
 
     resp = parse_json(out.encode())
     if not isinstance(resp, dict):
-        sys.stderr.write(f"  ✗ {tag}  (bad response: {out[:120]})\n")
+        log.debug(f"  ✗ {tag}  (bad response: {out[:120]})")
         q.put(("conn", host))
         return
 
     if "error" in resp:
-        sys.stderr.write(f"  ✗ {tag}  (error: {resp['error']})\n")
+        log.debug(f"  ✗ {tag}  (error: {resp['error']})")
         q.put(("serv", host, resp["error"]))
         return
 
@@ -241,7 +248,7 @@ def try_host(full_model, host, payload, q, done):
             msg = choices[0].get("message", {})
             resp = {"message": msg, "done": True}
 
-    sys.stderr.write(f"  ✓ {tag}\n")
+    log.debug(f"  ✓ {tag}")
     q.put(("ok", host, resp))
 
 
@@ -249,13 +256,13 @@ def fan_out(sub, servers, payload):
     q = Queue()
     done = threading.Event()
     serv_errors = []
-    for _, host, ms in servers:
+    for _, _, host, ms in servers:
         full = ms[0]
         p = dict(payload, model=full)
         t = threading.Thread(target=try_host, args=(full, host, p, q, done))
         t.start()
-    pairs = [f"{h} {m[0]}" for (_, h, m) in servers]
-    sys.stderr.write(f"  trying {sub} on {', '.join(pairs)}\n")
+    pairs = [f"{h} {m[0]}" for (_, _, h, m) in servers]
+    log.debug(f"  trying {sub} on {', '.join(pairs)}")
     remaining = len(servers)
     while remaining > 0:
         try:
@@ -267,6 +274,7 @@ def fan_out(sub, servers, payload):
         if tag == "ok":
             done.set()
             LAST_SUCCESS[sub] = result[1]
+            add_good(result[1], sub)
             return result[1], result[2], serv_errors
         if tag == "serv":
             serv_errors.append(result[1])
@@ -307,7 +315,7 @@ class Handler(BaseHTTPRequestHandler):
             servers = find_servers(model)
             matched = [s for s in servers if s[2] == last_host]
             if matched:
-                sys.stderr.write(f"  trying last successful: {last_host}\n")
+                log.debug(f"  trying last successful: {last_host}")
                 if do_stream:
                     result = self._try_stream(model, matched, opayload)
                 else:
@@ -330,15 +338,15 @@ class Handler(BaseHTTPRequestHandler):
             batch = servers[off:off + POOL_SIZE]
             host, data, serv_errors = fan_out(model, batch, dict(opayload, stream=False))
             for h in serv_errors:
-                sys.stderr.write(f"  └─ added {h} to bad hosts\n")
+                log.debug(f"  └─ added {h} to bad hosts")
                 add_bad(h, model)
             if host is not None:
                 self.send_json(to_openai(data, model))
                 return
             off += POOL_SIZE
             if off < len(servers):
-                sys.stderr.write(f"  retrying with next {POOL_SIZE} servers\n")
-        sys.stderr.write("  ✗ all servers failed\n")
+                log.debug(f"  retrying with next {POOL_SIZE} servers")
+        log.debug("  ✗ all servers failed")
         self.send_json(err_obj("all servers failed"), 502)
 
     def _try_one(self, host, model, full_model, opayload):
@@ -347,24 +355,25 @@ class Handler(BaseHTTPRequestHandler):
         try:
             resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT)
         except Exception as e:
-            sys.stderr.write(f"  ✗ {tag}  (exception: {e})\n")
+            log.debug(f"  ✗ {tag}  (exception: {e})")
             return None
 
         if resp.status_code != 200:
-            sys.stderr.write(f"  ✗ {tag}  (status {resp.status_code})\n")
+            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
             return None
 
         data = resp.json()
         if "error" in data:
-            sys.stderr.write(f"  ✗ {tag}  (error: {data['error']})\n")
+            log.debug(f"  ✗ {tag}  (error: {data['error']})")
             return None
 
-        sys.stderr.write(f"  ✓ {tag}\n")
+        log.debug(f"  ✓ {tag}")
         LAST_SUCCESS[model] = host
+        add_good(host, model)
         return to_openai(data, model)
 
     def _try_stream(self, model, servers, opayload):
-        _, host, ms = servers[0]
+        _, _, host, ms = servers[0]
         full = ms[0]
         tag = f"{host} {full}"
         payload = dict(opayload, model=full, stream=True)
@@ -372,11 +381,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
         except Exception as e:
-            sys.stderr.write(f"  ✗ {tag}  (exception: {e})\n")
+            log.debug(f"  ✗ {tag}  (exception: {e})")
             return None
 
         if resp.status_code != 200:
-            sys.stderr.write(f"  ✗ {tag}  (status {resp.status_code})\n")
+            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
             return None
 
         first_line = None
@@ -387,21 +396,22 @@ class Handler(BaseHTTPRequestHandler):
             break
 
         if not first_line:
-            sys.stderr.write(f"  ✗ {tag}  (empty response)\n")
+            log.debug(f"  ✗ {tag}  (empty response)")
             return None
 
         try:
             first = json.loads(first_line)
         except json.JSONDecodeError:
-            sys.stderr.write(f"  ✗ {tag}  (bad response)\n")
+            log.debug(f"  ✗ {tag}  (bad response)")
             return None
 
         if "error" in first:
-            sys.stderr.write(f"  ✗ {tag}  (error: {first['error']})\n")
+            log.debug(f"  ✗ {tag}  (error: {first['error']})")
             return None
 
-        sys.stderr.write(f"  ✓ {tag}\n")
+        log.debug(f"  ✓ {tag}")
         LAST_SUCCESS[model] = host
+        add_good(host, model)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -440,7 +450,7 @@ class Handler(BaseHTTPRequestHandler):
                 except json.JSONDecodeError:
                     continue
                 if "error" in obj:
-                    sys.stderr.write(f"  ✗ {host}  (error: {obj['error']})\n")
+                    log.debug(f"  ✗ {host}  (error: {obj['error']})")
                     return
                 q.put((idx, host, full, obj))
                 return
@@ -455,7 +465,7 @@ class Handler(BaseHTTPRequestHandler):
             for j, (p, _, _) in enumerate(procs):
                 if j != idx:
                     p.kill()
-            sys.stderr.write(f"  ✓ {host} {full}\n")
+            log.debug(f"  ✓ {host} {full}")
             return idx, host, full, obj
         except Empty:
             for p, _, _ in procs:
@@ -522,7 +532,7 @@ class Handler(BaseHTTPRequestHandler):
                     except json.JSONDecodeError:
                         continue
                     if "error" in obj:
-                        sys.stderr.write(f"  ✗ {active[resp][0]}  (error: {obj['error']})\n")
+                        log.debug(f"  ✗ {active[resp][0]}  (error: {obj['error']})")
                         result_queue.put(("fail", resp))
                         return
                     result_queue.put(("ok", resp, obj))
@@ -553,6 +563,7 @@ class Handler(BaseHTTPRequestHandler):
                 first = result[2]
                 win_host, win_full = active[winning_resp]
                 LAST_SUCCESS[model] = win_host
+                add_good(win_host, model)
 
                 for resp in active:
                     if resp != winning_resp:
@@ -578,7 +589,7 @@ class Handler(BaseHTTPRequestHandler):
                 failed_resp = result[1]
                 if failed_resp in active:
                     failed_host, failed_full = active[failed_resp]
-                    sys.stderr.write(f"  ✗ {failed_host}  (failed)\n")
+                    log.debug(f"  ✗ {failed_host}  (failed)")
                     failed_resp.close()
                     del active[failed_resp]
 
@@ -602,7 +613,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
 
     def log_message(self, fmt, *args):
-        sys.stderr.write(f"[{self.log_date_time_string()}] {self.client_address[0]} - {fmt % args}\n")
+        log.debug(f"[{self.log_date_time_string()}] {self.client_address[0]} - {fmt % args}")
 
 
 class PoolServer(ThreadingMixIn, HTTPServer):
