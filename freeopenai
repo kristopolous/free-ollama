@@ -459,13 +459,17 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             obj = json.loads(line)
             content = obj.get("message", {}).get("content", "")
-            if content:
-                self.wfile.write(sse_str(sse_chunk(full, content)).encode())
-            if obj.get("done"):
-                self.wfile.write(sse_str(sse_chunk(full, "", done=True)).encode())
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
-                return True
+            try:
+                if content:
+                    self.wfile.write(sse_str(sse_chunk(full, content)).encode())
+                if obj.get("done"):
+                    self.wfile.write(sse_str(sse_chunk(full, "", done=True)).encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                log.debug("Client disconnected during stream")
+                return None
 
         return True
 
@@ -586,8 +590,12 @@ class Handler(BaseHTTPRequestHandler):
                     log.debug(f"Closing connection to {active[resp][0]}")
                     resp.close()
                 log.debug("All servers failed")
-                self.wfile.write(sse_str({"error": "all servers failed"}).encode())
-                self.wfile.write(b"data: [DONE]\n\n")
+                try:
+                    self.wfile.write(sse_str({"error": "all servers failed"}).encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    log.debug("Client disconnected")
+                return
                 return
 
             tag = result[0]
@@ -605,19 +613,29 @@ class Handler(BaseHTTPRequestHandler):
                         resp.close()
 
                 log.debug(f"Using {win_host} for {model}")
-                self.wfile.write(sse_str(sse_chunk(win_full, first.get("message", {}).get("content", ""))).encode())
+                try:
+                    self.wfile.write(sse_str(sse_chunk(win_full, first.get("message", {}).get("content", ""))).encode())
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    log.debug("Client disconnected")
+                    winning_resp.close()
+                    return
 
                 for line in winning_resp.iter_lines():
                     if not line:
                         continue
                     obj = json.loads(line)
                     content = obj.get("message", {}).get("content", "")
-                    if content:
-                        self.wfile.write(sse_str(sse_chunk(win_full, content)).encode())
-                    if obj.get("done"):
-                        self.wfile.write(sse_str(sse_chunk(win_full, "", done=True)).encode())
-                        self.wfile.write(b"data: [DONE]\n\n")
-                        self.wfile.flush()
+                    try:
+                        if content:
+                            self.wfile.write(sse_str(sse_chunk(win_full, content)).encode())
+                        if obj.get("done"):
+                            self.wfile.write(sse_str(sse_chunk(win_full, "", done=True)).encode())
+                            self.wfile.write(b"data: [DONE]\n\n")
+                            self.wfile.flush()
+                            return
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        log.debug("Client disconnected during stream")
+                        winning_resp.close()
                         return
                 return
 
@@ -638,8 +656,11 @@ class Handler(BaseHTTPRequestHandler):
                         t.start()
 
                 if not active:
-                    self.wfile.write(sse_str({"error": "all servers failed"}).encode())
-                    self.wfile.write(b"data: [DONE]\n\n")
+                    try:
+                        self.wfile.write(sse_str({"error": "all servers failed"}).encode())
+                        self.wfile.write(b"data: [DONE]\n\n")
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        log.debug("Client disconnected")
                     return
 
     def send_json(self, data, status=200):
