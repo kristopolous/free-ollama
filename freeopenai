@@ -95,7 +95,7 @@ def to_ollama(body):
 
 def to_openai(resp, model):
     return {
-        "id": "chatcmpl-%s" % int(time.time()),
+        "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
@@ -124,7 +124,7 @@ def err_obj(msg, code=None):
 
 def sse_chunk(model, content, done=False):
     return {
-        "id": "chatcmpl-%s" % int(time.time()),
+        "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
@@ -137,7 +137,7 @@ def sse_chunk(model, content, done=False):
 
 
 def sse_str(obj):
-    return "data: %s\n\n" % json.dumps(obj)
+    return f"data: {json.dumps(obj)}\n\n"
 
 
 def parse_json(data):
@@ -155,13 +155,13 @@ def parse_json(data):
 
 
 def try_host(full_model, host, payload, q, done):
-    tag = "%s %s" % (host, full_model)
+    tag = f"{host} {full_model}"
     if done.is_set():
         return
     try:
         proc = subprocess.Popen(
             ["curl", "-s", "--max-time", str(TIMEOUT),
-             "%s/api/chat" % base_url(host),
+             f"{host}/api/chat",
              "-H", "Content-Type: application/json",
              "-d", json.dumps(payload)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -173,30 +173,30 @@ def try_host(full_model, host, payload, q, done):
             except subprocess.TimeoutExpired:
                 pass
         if done.is_set():
-            sys.stderr.write("  └─ %s  (killed)\n" % tag)
+            sys.stderr.write(f"  └─ {tag}  (killed)\n")
             proc.kill()
             proc.wait()
             return
         out, _ = proc.communicate()
         if proc.returncode != 0:
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (connection failed)\n" % tag)
+                sys.stderr.write(f"  ✗ {tag}  (connection failed)\n")
                 q.put(("conn", host))
             return
         if not out.strip():
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (empty response)\n" % tag)
+                sys.stderr.write(f"  ✗ {tag}  (empty response)\n")
                 q.put(("conn", host))
             return
         resp = parse_json(out)
         if not isinstance(resp, dict):
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (bad response: %s)\n" % (tag, out.decode().strip()[:120]))
+                sys.stderr.write(f"  ✗ {tag}  (bad response: {out.decode().strip()[:120]})\n")
                 q.put(("conn", host))
             return
         if "error" in resp:
             if not done.is_set():
-                sys.stderr.write("  ✗ %s  (error: %s)\n" % (tag, resp["error"]))
+                sys.stderr.write(f"  ✗ {tag}  (error: {resp['error']})\n")
                 q.put(("serv", host, resp["error"]))
             return
         if "choices" in resp and "message" not in resp:
@@ -205,11 +205,11 @@ def try_host(full_model, host, payload, q, done):
                 msg = choices[0].get("message", {})
                 resp = {"message": msg, "done": True}
         if not done.is_set():
-            sys.stderr.write("  ✓ %s\n" % tag)
+            sys.stderr.write(f"  ✓ {tag}\n")
             q.put(("ok", host, resp))
     except Exception as e:
         if not done.is_set():
-            sys.stderr.write("  ✗ %s  (exception: %s)\n" % (tag, e))
+            sys.stderr.write(f"  ✗ {tag}  (exception: {e})\n")
             q.put(("conn", host))
 
 
@@ -222,8 +222,8 @@ def fan_out(sub, servers, payload):
         p = dict(payload, model=full)
         t = threading.Thread(target=try_host, args=(full, host, p, q, done))
         t.start()
-    pairs = ["%s %s" % (h, m[0]) for (_, h, m) in servers]
-    sys.stderr.write("  trying %s on %s\n" % (sub, ", ".join(pairs)))
+    pairs = [f"{h} {m[0]}" for (_, h, m) in servers]
+    sys.stderr.write(f"  trying {sub} on {', '.join(pairs)}\n")
     remaining = len(servers)
     while remaining > 0:
         try:
@@ -269,7 +269,7 @@ class Handler(BaseHTTPRequestHandler):
         do_stream = body.get("stream", False)
         servers = find_servers(model)
         if not servers:
-            self.send_json(err_obj("no available servers for '%s'" % model, "model_not_found"), 404)
+            self.send_json(err_obj(f"no available servers for '{model}'", "model_not_found"), 404)
             return
         opayload = to_ollama(body)
         if do_stream:
@@ -280,14 +280,14 @@ class Handler(BaseHTTPRequestHandler):
             batch = servers[off:off + POOL_SIZE]
             host, data, serv_errors = fan_out(model, batch, dict(opayload, stream=False))
             for h in serv_errors:
-                sys.stderr.write("  └─ added %s to bad hosts\n" % h)
+                sys.stderr.write(f"  └─ added {h} to bad hosts\n")
                 add_bad(h, model)
             if host is not None:
                 self.send_json(to_openai(data, model))
                 return
             off += POOL_SIZE
             if off < len(servers):
-                sys.stderr.write("  retrying with next %d servers\n" % POOL_SIZE)
+                sys.stderr.write(f"  retrying with next {POOL_SIZE} servers\n")
         sys.stderr.write("  ✗ all servers failed\n")
         self.send_json(err_obj("all servers failed"), 502)
 
@@ -304,7 +304,7 @@ class Handler(BaseHTTPRequestHandler):
                 except json.JSONDecodeError:
                     continue
                 if "error" in obj:
-                    sys.stderr.write("  ✗ %s  (error: %s)\n" % (host, obj["error"]))
+                    sys.stderr.write(f"  ✗ {host}  (error: {obj['error']})\n")
                     return
                 q.put((idx, host, full, obj))
                 return
@@ -319,7 +319,7 @@ class Handler(BaseHTTPRequestHandler):
             for j, (p, _, _) in enumerate(procs):
                 if j != idx:
                     p.kill()
-            sys.stderr.write("  ✓ %s %s\n" % (host, full))
+            sys.stderr.write(f"  ✓ {host} {full}\n")
             return idx, host, full, obj
         except Empty:
             for p, _, _ in procs:
@@ -343,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
                 p = dict(opayload, model=full, stream=True)
                 proc = subprocess.Popen(
                     ["curl", "-s", "-N", "--max-time", str(TIMEOUT),
-                     "%s/api/chat" % host,
+                     f"{host}/api/chat",
                      "-H", "Content-Type: application/json",
                      "-d", json.dumps(p)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
