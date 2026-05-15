@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-import json, os, requests, logging, sys, time, threading, signal
+import fnmatch, json, os, requests, logging, sys, time, threading, signal
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, LOGLEVEL, logging.INFO),
     format="%(message)s",
     stream=sys.stderr,
 )
@@ -74,6 +75,12 @@ def add_good(host, model):
             f.write(f"{key}\n")
 
 
+def match_model(model_name, pattern):
+    if any(c in pattern for c in "*?["):
+        return fnmatch.fnmatch(model_name, f"*{pattern}*")
+    return pattern in model_name
+
+
 def find_servers(sub):
     servers = load_servers()
     bad = load_bad()
@@ -81,7 +88,7 @@ def find_servers(sub):
     matched = []
     for s in servers:
         models = s.get("models", [])
-        ms = [m for m in models if sub in m]
+        ms = [m for m in models if match_model(m, sub)]
         if not ms:
             continue
         if any(":cloud" in m for m in models) and ":cloud" not in sub:
@@ -99,17 +106,17 @@ def find_servers(sub):
 
 def all_models():
     servers = load_servers()
-    seen = set()
+    seen = {}
     out = []
     for s in servers:
         for m in s.get("models", []):
             if ":cloud" in m:
                 continue
             if m not in seen:
-                seen.add(m)
-                out.append(m)
-    out.sort()
-    return out
+                seen[m] = {'id': m, 'count': 1}
+            else:
+                seen[m]['count'] += 1
+    return list(seen.values())
 
 
 def to_ollama(body):
@@ -288,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             models = all_models()
             self.send_json({
                 "object": "list",
-                "data": [{"id": m, "object": "model", "created": int(time.time()), "owned_by": "free-ollama"} for m in models],
+                "data": models
             })
         else:
             self.send_json(err_obj("not found"), 404)
@@ -487,7 +494,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def spawn_one(idx):
             try:
-                _, host, ms = next(server_iter)
+                _, _, host, ms = next(server_iter)
             except StopIteration:
                 return None
             full = ms[0]
@@ -551,7 +558,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = result_queue.get(timeout=TIMEOUT)
             except Empty:
                 for resp in active:
+                    log.debug(f"Closing connection to {active[resp][0]}")
                     resp.close()
+                log.debug("All servers failed")
                 self.wfile.write(sse_str({"error": "all servers failed"}).encode())
                 self.wfile.write(b"data: [DONE]\n\n")
                 return
@@ -567,8 +576,10 @@ class Handler(BaseHTTPRequestHandler):
 
                 for resp in active:
                     if resp != winning_resp:
+                        log.debug(f"Closing connection to {active[resp][0]}")
                         resp.close()
 
+                log.debug(f"Using {win_host} for {model}")
                 self.wfile.write(sse_str(sse_chunk(win_full, first.get("message", {}).get("content", ""))).encode())
 
                 for line in winning_resp.iter_lines():
@@ -590,11 +601,13 @@ class Handler(BaseHTTPRequestHandler):
                 if failed_resp in active:
                     failed_host, failed_full = active[failed_resp]
                     log.debug(f"  ✗ {failed_host}  (failed)")
+                    log.debug(f"Closing connection to {failed_host}")
                     failed_resp.close()
                     del active[failed_resp]
 
                     new_resp = spawn_one(len(active))
                     if new_resp:
+                        log.debug(f"Starting new request to {active[new_resp][0]}")
                         t = threading.Thread(target=monitor_resp, args=(new_resp,))
                         t.daemon = True
                         t.start()
@@ -624,8 +637,10 @@ class PoolServer(ThreadingMixIn, HTTPServer):
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = PoolServer(("", port), Handler)
+    log.debug(f"Starting freeopenai on port {port}, POOL_SIZE={POOL_SIZE}")
     print(f"freeopenai :{port}  POOL_SIZE={POOL_SIZE}", file=sys.stderr)
     def stop(sig, frm):
+        log.debug("Shutting down")
         print("\nbye", file=sys.stderr)
         srv.shutdown()
     signal.signal(signal.SIGINT, stop)
