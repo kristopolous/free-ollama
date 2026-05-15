@@ -21,6 +21,10 @@ LAST_SUCCESS = {}
 PORT = int(os.environ.get("PORT", "8080"))
 TIMEOUT = 30
 
+_bad_cache = None
+_good_cache = None
+_servers_cache = None
+
 
 def ensure_cache():
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -30,6 +34,7 @@ def ensure_cache():
     elif time.time() - os.path.getmtime(CACHE_FILE) > 86400:
         need = True
     if need:
+        log.debug("Refreshing server cache...")
         script = os.path.join(os.path.dirname(__file__), "free-ollama")
         if not os.path.exists(script):
             script = "free-ollama"
@@ -37,34 +42,45 @@ def ensure_cache():
 
 
 def load_servers():
+    global _servers_cache
+    log.debug("Loading servers...")
     ensure_cache()
-    with open(CACHE_FILE) as f:
-        return json.load(f)
+    if _servers_cache is None:
+        with open(CACHE_FILE) as f:
+            _servers_cache = json.load(f)
+    return _servers_cache
 
 
 def load_bad():
-    s = set()
-    if os.path.exists(BAD_FILE):
-        with open(BAD_FILE) as f:
-            for line in f:
-                if line.strip():
-                    s.add(line.strip())
-    return s
+    global _bad_cache
+    if _bad_cache is None:
+        _bad_cache = set()
+        if os.path.exists(BAD_FILE):
+            with open(BAD_FILE) as f:
+                for line in f:
+                    if line.strip():
+                        _bad_cache.add(line.strip())
+    return _bad_cache
 
 
 def add_bad(host, model):
+    global _bad_cache
     with open(BAD_FILE, "a") as f:
         f.write(f"{host} {model}\n")
+    if _bad_cache is not None:
+        _bad_cache.add(f"{host} {model}")
 
 
 def load_good():
-    s = set()
-    if os.path.exists(GOOD_FILE):
-        with open(GOOD_FILE) as f:
-            for line in f:
-                if line.strip():
-                    s.add(line.strip())
-    return s
+    global _good_cache
+    if _good_cache is None:
+        _good_cache = set()
+        if os.path.exists(GOOD_FILE):
+            with open(GOOD_FILE) as f:
+                for line in f:
+                    if line.strip():
+                        _good_cache.add(line.strip())
+    return _good_cache
 
 
 def add_good(host, model):
@@ -73,6 +89,8 @@ def add_good(host, model):
     if key not in good:
         with open(GOOD_FILE, "a") as f:
             f.write(f"{key}\n")
+        if _good_cache is not None:
+            _good_cache.add(key)
 
 
 def match_model(model_name, pattern):
@@ -316,11 +334,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         do_stream = body.get("stream", False)
         opayload = to_ollama(body)
+        log.debug(f"Request: model={model}, stream={do_stream}")
 
         last_host = LAST_SUCCESS.get(model)
+        log.debug(f"Last successful for {model}: {last_host}")
         if last_host:
             servers = find_servers(model)
+            log.debug(f"Found {len(servers)} servers for {model}")
             matched = [s for s in servers if s[2] == last_host]
+            log.debug(f"Matched last successful: {len(matched)} servers")
             if matched:
                 log.debug(f"  trying last successful: {last_host}")
                 if do_stream:
@@ -630,6 +652,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         log.debug(f"[{self.log_date_time_string()}] {self.client_address[0]} - {fmt % args}")
+
+    def safe_write(self, data):
+        try:
+            self.wfile.write(data)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            log.debug("Client disconnected")
+            raise
 
 
 class PoolServer(ThreadingMixIn, HTTPServer):
