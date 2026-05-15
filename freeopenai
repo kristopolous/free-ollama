@@ -324,12 +324,13 @@ class Handler(BaseHTTPRequestHandler):
             if matched:
                 log.debug(f"  trying last successful: {last_host}")
                 if do_stream:
-                    result = self._try_stream(model, matched, opayload)
+                    self._try_stream(model, matched, opayload)
+                    return
                 else:
                     result = self._try_one(last_host, model, matched[0][3][0], opayload)
-                if result:
-                    self.send_json(result, 200 if not do_stream else None)
-                    return
+                    if result:
+                        self.send_json(result, 200)
+                        return
 
         servers = find_servers(model)
         if not servers:
@@ -395,8 +396,9 @@ class Handler(BaseHTTPRequestHandler):
             log.debug(f"  ✗ {tag}  (status {resp.status_code})")
             return None
 
+        lines_iter = resp.iter_lines()
         first_line = None
-        for line in resp.iter_lines():
+        for line in lines_iter:
             if not line:
                 continue
             first_line = line
@@ -428,8 +430,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
         self.wfile.write(sse_str(sse_chunk(full, first.get("message", {}).get("content", ""))).encode())
+        self.wfile.flush()
 
-        for line in resp.iter_lines():
+        for line in lines_iter:
             if not line:
                 continue
             obj = json.loads(line)
@@ -648,7 +651,7 @@ def main():
     def stop(sig, frm):
         log.debug("Shutting down")
         print("\nbye", file=sys.stderr)
-        srv.shutdown()
+        raise KeyboardInterrupt
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     try:
