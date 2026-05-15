@@ -1,0 +1,16 @@
+[project]
+name = "freeopenai"
+version = "0.0.1"
+description = "OpenAI-compatible proxy that routes to free Ollama servers"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+freeopenai = "freeopenai:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
