@@ -334,29 +334,83 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.flush()
 
-        off = 0
-        while off < len(servers):
-            batch = servers[off:off + POOL_SIZE]
-            procs = []
-            for _, host, ms in batch:
-                full = ms[0]
-                p = dict(opayload, model=full, stream=True)
-                proc = subprocess.Popen(
-                    ["curl", "-s", "-N", "--max-time", str(TIMEOUT),
-                     f"{host}/api/chat",
-                     "-H", "Content-Type: application/json",
-                     "-d", json.dumps(p)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                )
-                procs.append((proc, host, full))
+        server_iter = iter(servers)
+        active = []
+        pending = []
 
-            idx, win_host, win_full, first = self._pick_winner(procs)
-            off += POOL_SIZE
+        def spawn_next():
+            try:
+                _, host, ms = next(server_iter)
+            except StopIteration:
+                return None
+            full = ms[0]
+            p = dict(opayload, model=full, stream=True)
+            proc = subprocess.Popen(
+                ["curl", "-s", "-N", "--max-time", str(TIMEOUT),
+                 f"{host}/api/chat",
+                 "-H", "Content-Type: application/json",
+                 "-d", json.dumps(p)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            active.append((proc, host, full))
+            return (proc, host, full)
 
-            if idx is not None:
+        for _ in range(POOL_SIZE):
+            if spawn_next() is None:
+                break
+
+        result_queue = Queue()
+        done_event = threading.Event()
+
+        def monitor_proc(idx, proc, host, full):
+            try:
+                for raw in proc.stdout:
+                    if done_event.is_set():
+                        return
+                    line = raw.decode().strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if "error" in obj:
+                        sys.stderr.write(f"  ✗ {host}  (error: {obj['error']})\n")
+                        result_queue.put(("fail", idx, host, full))
+                        return
+                    result_queue.put(("ok", idx, host, full, obj))
+                    return
+                result_queue.put(("fail", idx, host, full))
+            except Exception as e:
+                result_queue.put(("fail", idx, host, full))
+
+        for idx, (proc, host, full) in enumerate(active):
+            t = threading.Thread(target=monitor_proc, args=(idx, proc, host, full))
+            t.daemon = True
+            t.start()
+
+        while True:
+            try:
+                result = result_queue.get(timeout=TIMEOUT)
+            except Empty:
+                for proc, _, _ in active:
+                    proc.kill()
+                self.wfile.write(sse_str({"error": "all servers failed"}).encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                return
+
+            tag = result[0]
+            if tag == "ok":
+                done_event.set()
+                for proc, _, _ in active:
+                    if proc != result[1]:
+                        proc.kill()
+                win_host = result[2]
+                win_full = result[3]
+                first = result[4]
                 self.wfile.write(sse_str(sse_chunk(win_full, first.get("message", {}).get("content", ""))).encode())
 
-                for raw in procs[idx][0].stdout:
+                for raw in first.get("_stdout", []):
                     line = raw.decode().strip()
                     if not line:
                         continue
@@ -372,11 +426,25 @@ class Handler(BaseHTTPRequestHandler):
 
                 return
 
-            if off < len(servers):
-                sys.stderr.write("  retrying with next %d servers\n" % POOL_SIZE)
+            if tag == "fail":
+                failed_idx = result[1]
+                failed_host = result[2]
+                failed_full = result[3]
+                sys.stderr.write(f"  ✗ {failed_host}  (failed)\n")
+                active[failed_idx] = None
+                spawn = spawn_next()
+                if spawn is not None:
+                    new_idx = len([x for x in active if x is not None])
+                    new_proc, new_host, new_full = spawn
+                    t = threading.Thread(target=monitor_proc, args=(new_idx, new_proc, new_host, new_full))
+                    t.daemon = True
+                    t.start()
+                    pending.append((new_idx, new_proc, new_host, new_full))
 
-        self.wfile.write(sse_str({"error": "all servers failed"}).encode())
-        self.wfile.write(b"data: [DONE]\n\n")
+                if all(x is None for x in active):
+                    self.wfile.write(sse_str({"error": "all servers failed"}).encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    return
 
     def send_json(self, data, status=200):
         body = json.dumps(data)
@@ -387,8 +455,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("[%s] %s - %s\n" % (
-            self.log_date_time_string(), self.client_address[0], fmt % args))
+        sys.stderr.write(f"[{self.log_date_time_string()}] {self.client_address[0]} - {fmt % args}\n")
 
 
 class PoolServer(ThreadingMixIn, HTTPServer):
@@ -399,7 +466,7 @@ class PoolServer(ThreadingMixIn, HTTPServer):
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = PoolServer(("", port), Handler)
-    print("freeopenai :%d  POOL_SIZE=%d" % (port, POOL_SIZE), file=sys.stderr)
+    print(f"freeopenai :{port}  POOL_SIZE={POOL_SIZE}", file=sys.stderr)
     def stop(sig, frm):
         print("\nbye", file=sys.stderr)
         srv.shutdown()
