@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, subprocess, sys, time, threading, signal
+import json, os, requests, sys, time, threading, signal
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from queue import Queue, Empty
@@ -158,59 +158,67 @@ def try_host(full_model, host, payload, q, done):
     tag = f"{host} {full_model}"
     if done.is_set():
         return
-    try:
-        proc = subprocess.Popen(
-            ["curl", "-s", "--max-time", str(TIMEOUT),
-             f"{host}/api/chat",
-             "-H", "Content-Type: application/json",
-             "-d", json.dumps(payload)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        while not done.is_set():
-            try:
-                proc.wait(timeout=0.1)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-        if done.is_set():
-            sys.stderr.write(f"  └─ {tag}  (killed)\n")
-            proc.kill()
-            proc.wait()
-            return
-        out, _ = proc.communicate()
-        if proc.returncode != 0:
-            if not done.is_set():
-                sys.stderr.write(f"  ✗ {tag}  (connection failed)\n")
-                q.put(("conn", host))
-            return
-        if not out.strip():
-            if not done.is_set():
-                sys.stderr.write(f"  ✗ {tag}  (empty response)\n")
-                q.put(("conn", host))
-            return
-        resp = parse_json(out)
-        if not isinstance(resp, dict):
-            if not done.is_set():
-                sys.stderr.write(f"  ✗ {tag}  (bad response: {out.decode().strip()[:120]})\n")
-                q.put(("conn", host))
-            return
-        if "error" in resp:
-            if not done.is_set():
-                sys.stderr.write(f"  ✗ {tag}  (error: {resp['error']})\n")
-                q.put(("serv", host, resp["error"]))
-            return
-        if "choices" in resp and "message" not in resp:
-            choices = resp.get("choices", [])
-            if choices:
-                msg = choices[0].get("message", {})
-                resp = {"message": msg, "done": True}
-        if not done.is_set():
-            sys.stderr.write(f"  ✓ {tag}\n")
-            q.put(("ok", host, resp))
-    except Exception as e:
-        if not done.is_set():
-            sys.stderr.write(f"  ✗ {tag}  (exception: {e})\n")
-            q.put(("conn", host))
+    result = [None]
+    exc = [None]
+
+    def make_request():
+        try:
+            result[0] = requests.post(
+                f"{host}/api/chat",
+                json=payload,
+                timeout=TIMEOUT,
+            )
+        except Exception as e:
+            exc[0] = e
+
+    t = threading.Thread(target=make_request)
+    t.start()
+    t.join(timeout=TIMEOUT + 1)
+
+    if done.is_set():
+        sys.stderr.write(f"  └─ {tag}  (killed)\n")
+        return
+
+    if exc[0]:
+        sys.stderr.write(f"  ✗ {tag}  (exception: {exc[0]})\n")
+        q.put(("conn", host))
+        return
+
+    if result[0] is None:
+        sys.stderr.write(f"  ✗ {tag}  (timeout)\n")
+        q.put(("conn", host))
+        return
+
+    if result[0].status_code != 200:
+        sys.stderr.write(f"  ✗ {tag}  (status {result[0].status_code})\n")
+        q.put(("conn", host))
+        return
+
+    out = result[0].text
+    if not out.strip():
+        sys.stderr.write(f"  ✗ {tag}  (empty response)\n")
+        q.put(("conn", host))
+        return
+
+    resp = parse_json(out.encode())
+    if not isinstance(resp, dict):
+        sys.stderr.write(f"  ✗ {tag}  (bad response: {out[:120]})\n")
+        q.put(("conn", host))
+        return
+
+    if "error" in resp:
+        sys.stderr.write(f"  ✗ {tag}  (error: {resp['error']})\n")
+        q.put(("serv", host, resp["error"]))
+        return
+
+    if "choices" in resp and "message" not in resp:
+        choices = resp.get("choices", [])
+        if choices:
+            msg = choices[0].get("message", {})
+            resp = {"message": msg, "done": True}
+
+    sys.stderr.write(f"  ✓ {tag}\n")
+    q.put(("ok", host, resp))
 
 
 def fan_out(sub, servers, payload):
@@ -335,10 +343,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
         server_iter = iter(servers)
-        active = []
-        pending = []
+        active_procs = {}
+        result_queue = Queue()
+        done_event = threading.Event()
 
-        def spawn_next():
+        def spawn_one(server_idx):
             try:
                 _, host, ms = next(server_iter)
             except StopIteration:
@@ -352,17 +361,14 @@ class Handler(BaseHTTPRequestHandler):
                  "-d", json.dumps(p)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
-            active.append((proc, host, full))
-            return (proc, host, full)
+            active_procs[proc] = (host, full)
+            return proc
 
         for _ in range(POOL_SIZE):
-            if spawn_next() is None:
+            if spawn_one(len(active_procs)) is None:
                 break
 
-        result_queue = Queue()
-        done_event = threading.Event()
-
-        def monitor_proc(idx, proc, host, full):
+        def monitor_proc(proc):
             try:
                 for raw in proc.stdout:
                     if done_event.is_set():
@@ -375,17 +381,17 @@ class Handler(BaseHTTPRequestHandler):
                     except json.JSONDecodeError:
                         continue
                     if "error" in obj:
-                        sys.stderr.write(f"  ✗ {host}  (error: {obj['error']})\n")
-                        result_queue.put(("fail", idx, host, full))
+                        sys.stderr.write(f"  ✗ {active_procs[proc][0]}  (error: {obj['error']})\n")
+                        result_queue.put(("fail", proc))
                         return
-                    result_queue.put(("ok", idx, host, full, obj))
+                    result_queue.put(("ok", proc, obj))
                     return
-                result_queue.put(("fail", idx, host, full))
-            except Exception as e:
-                result_queue.put(("fail", idx, host, full))
+                result_queue.put(("fail", proc))
+            except Exception:
+                result_queue.put(("fail", proc))
 
-        for idx, (proc, host, full) in enumerate(active):
-            t = threading.Thread(target=monitor_proc, args=(idx, proc, host, full))
+        for proc in list(active_procs.keys()):
+            t = threading.Thread(target=monitor_proc, args=(proc,))
             t.daemon = True
             t.start()
 
@@ -393,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = result_queue.get(timeout=TIMEOUT)
             except Empty:
-                for proc, _, _ in active:
+                for proc in active_procs:
                     proc.kill()
                 self.wfile.write(sse_str({"error": "all servers failed"}).encode())
                 self.wfile.write(b"data: [DONE]\n\n")
@@ -402,15 +408,17 @@ class Handler(BaseHTTPRequestHandler):
             tag = result[0]
             if tag == "ok":
                 done_event.set()
-                for proc, _, _ in active:
-                    if proc != result[1]:
+                winning_proc = result[1]
+                first = result[2]
+                win_host, win_full = active_procs[winning_proc]
+
+                for proc in active_procs:
+                    if proc != winning_proc:
                         proc.kill()
-                win_host = result[2]
-                win_full = result[3]
-                first = result[4]
+
                 self.wfile.write(sse_str(sse_chunk(win_full, first.get("message", {}).get("content", ""))).encode())
 
-                for raw in first.get("_stdout", []):
+                for raw in winning_proc.stdout:
                     line = raw.decode().strip()
                     if not line:
                         continue
@@ -423,25 +431,22 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
                         return
-
                 return
 
             if tag == "fail":
-                failed_idx = result[1]
-                failed_host = result[2]
-                failed_full = result[3]
-                sys.stderr.write(f"  ✗ {failed_host}  (failed)\n")
-                active[failed_idx] = None
-                spawn = spawn_next()
-                if spawn is not None:
-                    new_idx = len([x for x in active if x is not None])
-                    new_proc, new_host, new_full = spawn
-                    t = threading.Thread(target=monitor_proc, args=(new_idx, new_proc, new_host, new_full))
-                    t.daemon = True
-                    t.start()
-                    pending.append((new_idx, new_proc, new_host, new_full))
+                failed_proc = result[1]
+                if failed_proc in active_procs:
+                    failed_host, failed_full = active_procs[failed_proc]
+                    sys.stderr.write(f"  ✗ {failed_host}  (failed)\n")
+                    del active_procs[failed_proc]
 
-                if all(x is None for x in active):
+                    new_proc = spawn_one(len(active_procs))
+                    if new_proc:
+                        t = threading.Thread(target=monitor_proc, args=(new_proc,))
+                        t.daemon = True
+                        t.start()
+
+                if not active_procs:
                     self.wfile.write(sse_str({"error": "all servers failed"}).encode())
                     self.wfile.write(b"data: [DONE]\n\n")
                     return
