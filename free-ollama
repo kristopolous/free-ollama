@@ -257,6 +257,9 @@ else
               ollama ${@:1:$#-1} 
               exit 0
               ;;
+            --serve)
+              ./dyva || ./dyva --port 0
+              ;;
             --timeout)
               shift
               _timeout=$1 ;;
