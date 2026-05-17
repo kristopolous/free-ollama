@@ -178,7 +178,7 @@ def err_obj(msg, code=None):
     return {"error": e}
 
 
-def sse_chunk(model, content, done=False):
+def sse_chunk(model, content, done=False, finish_reason="stop"):
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
@@ -187,7 +187,7 @@ def sse_chunk(model, content, done=False):
         "choices": [{
             "index": 0,
             "delta": {} if not content else {"content": content},
-            "finish_reason": "stop" if done else None,
+            "finish_reason": finish_reason if done else None,
         }],
     }
 
@@ -404,8 +404,8 @@ class Handler(BaseHTTPRequestHandler):
             if matched:
                 log.debug(f"  trying last successful: {last_host}")
                 if do_stream:
-                    self._try_stream(model, matched, opayload)
-                    return
+                    if self._try_stream(model, matched, opayload):
+                        return
                 else:
                     result = self._try_one(last_host, model, matched[0][3][0], opayload)
                     if result:
@@ -529,14 +529,16 @@ class Handler(BaseHTTPRequestHandler):
                 if content:
                     self.wfile.write(sse_str(sse_chunk(full, content)).encode())
                 if obj.get("done"):
-                    self.wfile.write(sse_str(sse_chunk(full, "", done=True)).encode())
-                    self.wfile.write(b"data: [DONE]\n\n")
+                    fr = obj.get("done_reason", "stop")
+                    self.wfile.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
                     self.wfile.flush()
+                    self.close_connection = True
                     return True
             except (BrokenPipeError, ConnectionResetError, OSError):
                 log.debug("Client disconnected during stream")
                 return None
 
+        self.close_connection = True
         return True
 
     def _pick_winner(self, procs):
@@ -658,10 +660,10 @@ class Handler(BaseHTTPRequestHandler):
                 log.debug("All servers failed")
                 try:
                     self.wfile.write(sse_str({"error": "all servers failed"}).encode())
-                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.write(sse_str(sse_chunk("", "", done=True)).encode())
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     log.debug("Client disconnected")
-                return
+                self.close_connection = True
                 return
 
             tag = result[0]
@@ -695,14 +697,16 @@ class Handler(BaseHTTPRequestHandler):
                         if content:
                             self.wfile.write(sse_str(sse_chunk(win_full, content)).encode())
                         if obj.get("done"):
-                            self.wfile.write(sse_str(sse_chunk(win_full, "", done=True)).encode())
-                            self.wfile.write(b"data: [DONE]\n\n")
+                            fr = obj.get("done_reason", "stop")
+                            self.wfile.write(sse_str(sse_chunk(win_full, "", done=True, finish_reason=fr)).encode())
                             self.wfile.flush()
+                            self.close_connection = True
                             return
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         log.debug("Client disconnected during stream")
                         winning_resp.close()
                         return
+                self.close_connection = True
                 return
 
             if tag == "fail":
@@ -724,9 +728,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not active:
                     try:
                         self.wfile.write(sse_str({"error": "all servers failed"}).encode())
-                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.write(sse_str(sse_chunk("", "", done=True)).encode())
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         log.debug("Client disconnected")
+                    self.close_connection = True
                     return
 
     def send_json(self, data, status=200):
