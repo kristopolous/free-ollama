@@ -24,7 +24,19 @@ Let’s not ask too many questions.
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
+## But Wait, there's More! 
+
+**Dyva** is a managed proxy that you can connect to with any openai compatible client. 
+
+It will cycle through and find working hosts automatically. 
+
+You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable 
+
+You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
+
 ### Pet some feral llamas
+
+There's also a command line for losers without a web browser.
 
 Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
