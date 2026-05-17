@@ -36,7 +36,7 @@ You can go to the port in your web browser and view the current settings or cran
 
 ### Pet some feral llamas
 
-There's also a command line for losers without a web browser.
+There's also a command line for the losers who like typing shit 
 
 Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
