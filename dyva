@@ -626,7 +626,8 @@ class Handler(BaseHTTPRequestHandler):
 
         def monitor_resp(resp):
             try:
-                for line in resp.iter_lines():
+                it = resp.iter_lines()
+                for line in it:
                     if done_event.is_set():
                         return
                     if not line:
@@ -639,7 +640,7 @@ class Handler(BaseHTTPRequestHandler):
                         log.debug(f"  ✗ {active[resp][0]}  (error: {obj['error']})")
                         result_queue.put(("fail", resp))
                         return
-                    result_queue.put(("ok", resp, obj))
+                    result_queue.put(("ok", resp, obj, it))
                     return
                 result_queue.put(("fail", resp))
             except Exception:
@@ -671,6 +672,7 @@ class Handler(BaseHTTPRequestHandler):
                 done_event.set()
                 winning_resp = result[1]
                 first = result[2]
+                it = result[3]
                 win_host, win_full = active[winning_resp]
                 LAST_SUCCESS[model] = win_host
                 add_good(win_host, model)
@@ -688,7 +690,7 @@ class Handler(BaseHTTPRequestHandler):
                     winning_resp.close()
                     return
 
-                for line in winning_resp.iter_lines():
+                for line in it:
                     if not line:
                         continue
                     obj = json.loads(line)
