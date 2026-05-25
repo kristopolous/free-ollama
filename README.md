@@ -24,7 +24,7 @@ Let’s not ask too many questions.
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
-## But Wait, there's More! 
+## Method 1: Liberated Infrastructure
 
 **Dyva** is a managed proxy that you can connect to with any openai compatible client. 
 
@@ -48,7 +48,7 @@ Also let's take a moment and appreciate that magnificent icon, generated with on
 
 <hr>
 
-## Free Ollama in Terminal Space
+## Method 2: Artsinal Ollamas in Terminal Space
 
 **Pet some feral llamas**: There's also a command line for the losers who like typing shit.
 
