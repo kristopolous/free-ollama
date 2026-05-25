@@ -40,11 +40,11 @@ Here's the web interface so you can see the status while you're running it.
 
 Now where's that $50 million seed round...
 
-Also let's take a moment and appreciate that magnificent icon:
+Also let's take a moment and appreciate that magnificent icon, generated with one of these shady ip addresses!
 
-<img width="533" alt="dyva" src="https://github.com/user-attachments/assets/33f0f350-2913-4729-a0a9-1400ff02ef75" />
-
-This was generated with one of those servers. Funny that...
+<center>
+<img width="450" alt="dyva" src="https://github.com/user-attachments/assets/33f0f350-2913-4729-a0a9-1400ff02ef75" />
+</center>
 
 
 ### Pet some feral llamas
