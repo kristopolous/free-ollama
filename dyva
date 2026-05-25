@@ -27,6 +27,7 @@ _servers_cache = None
 
 
 def ensure_cache():
+    """Download the latest server list if cache is missing or >24h old."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     need = False
     if not os.path.exists(CACHE_FILE) or os.path.getsize(CACHE_FILE) == 0:
@@ -42,6 +43,7 @@ def ensure_cache():
 
 
 def load_servers():
+    """Return list of server dicts from the cached JSON file."""
     global _servers_cache
     log.debug("Loading servers...")
     ensure_cache()
@@ -52,6 +54,7 @@ def load_servers():
 
 
 def load_bad():
+    """Return set of 'host model' keys that have failed."""
     global _bad_cache
     if _bad_cache is None:
         _bad_cache = set()
@@ -64,6 +67,7 @@ def load_bad():
 
 
 def add_bad(host, model):
+    """Record that host+model pair failed, both to file and in-memory."""
     global _bad_cache
     with open(BAD_FILE, "a") as f:
         f.write(f"{host} {model}\n")
@@ -72,6 +76,7 @@ def add_bad(host, model):
 
 
 def load_good():
+    """Return set of 'host model' keys that have succeeded."""
     global _good_cache
     if _good_cache is None:
         _good_cache = set()
@@ -84,6 +89,7 @@ def load_good():
 
 
 def add_good(host, model):
+    """Record that host+model pair succeeded, both to file and in-memory."""
     key = f"{host} {model}"
     good = load_good()
     if key not in good:
@@ -94,12 +100,18 @@ def add_good(host, model):
 
 
 def match_model(model_name, pattern):
+    """Return True if model_name contains pattern, supporting fnmatch wildcards."""
     if any(c in pattern for c in "*?["):
         return fnmatch.fnmatch(model_name, f"*{pattern}*")
     return pattern in model_name
 
 
 def find_servers(sub):
+    """Return servers that serve model matching *sub*, sorted by success history then TPS.
+
+    Results are sorted so last-successful comes first, then known-good hosts,
+    then remaining hosts.
+    """
     servers = load_servers()
     bad = load_bad()
     good = load_good()
@@ -123,6 +135,7 @@ def find_servers(sub):
 
 
 def all_models():
+    """Return deduplicated list of all models across all servers."""
     servers = load_servers()
     seen = {}
     out = []
@@ -138,6 +151,7 @@ def all_models():
 
 
 def to_ollama(body):
+    """Translate OpenAI-format request body to Ollama-format request body."""
     msg = body.get("messages", [])
     opts = {}
     if "temperature" in body:
@@ -150,6 +164,7 @@ def to_ollama(body):
 
 
 def to_openai(resp, model):
+    """Translate Ollama non-streaming response to OpenAI-format response dict."""
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
@@ -172,6 +187,7 @@ def to_openai(resp, model):
 
 
 def err_obj(msg, code=None):
+    """Return an OpenAI-style error dict."""
     e = {"message": msg}
     if code:
         e["code"] = code
@@ -179,6 +195,7 @@ def err_obj(msg, code=None):
 
 
 def sse_chunk(model, content, done=False, finish_reason="stop"):
+    """Build an OpenAI SSE chunk dict for a single token delta."""
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
@@ -193,10 +210,12 @@ def sse_chunk(model, content, done=False, finish_reason="stop"):
 
 
 def sse_str(obj):
+    """Serialize *obj* to a single SSE ``data: ...`` line."""
     return f"data: {json.dumps(obj)}\n\n"
 
 
 def parse_json(data):
+    """Try to parse *data* as JSON, falling back to raw_decode for partial payloads."""
     s = data.decode().strip()
     try:
         return json.loads(s)
@@ -211,6 +230,11 @@ def parse_json(data):
 
 
 def try_host(full_model, host, payload, q, done):
+    """Try one host for non-streaming, returning result via *q*.
+
+    Puts one of ``("ok", host, resp)``, ``("conn", host)``, or
+    ``("serv", host, error)``.
+    """
     tag = f"{host} {full_model}"
     if done.is_set():
         return
@@ -278,6 +302,7 @@ def try_host(full_model, host, payload, q, done):
 
 
 def fan_out(sub, servers, payload):
+    """Race the given servers in parallel; return (winning_host, resp, errors)."""
     q = Queue()
     done = threading.Event()
     serv_errors = []
@@ -308,6 +333,8 @@ def fan_out(sub, servers, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
+    """OpenAI-compatible HTTP handler that proxies to free Ollama servers."""
+
     def do_GET(self):
         if self.path == "/v1/models":
             models = all_models()
@@ -377,6 +404,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(err_obj("not found"), 404)
 
     def do_POST(self):
+        """Route ``/v1/chat/completions`` to the appropriate handler."""
         if self.path != "/v1/chat/completions":
             self.send_json(err_obj("not found"), 404)
             return
@@ -438,6 +466,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(err_obj("all servers failed"), 502)
 
     def _try_one(self, host, model, full_model, opayload):
+        """Try one host synchronously (no streaming). Return OpenAI response dict or None."""
         tag = f"{host} {full_model}"
         payload = dict(opayload, model=full_model, stream=False)
         try:
@@ -464,6 +493,11 @@ class Handler(BaseHTTPRequestHandler):
         return to_openai(data, model)
 
     def _try_stream(self, model, servers, opayload):
+        """Try one host for streaming (last-success shortcut). Return True on success.
+
+        Uses a single ``iter_lines()`` generator for both the first and subsequent
+        chunks, so generator-internal buffers are never abandoned.
+        """
         _, _, host, ms = servers[0]
         full = ms[0]
         tag = f"{host} {full}"
@@ -542,6 +576,10 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _pick_winner(self, procs):
+        """Race subprocess-based connections, return winner's first JSON line.
+
+        Not currently used (HTTP-based racing via _handle_stream).
+        """
         q = Queue()
 
         def check(idx, proc, host, full):
@@ -577,6 +615,11 @@ class Handler(BaseHTTPRequestHandler):
             return None, None, None, None
 
     def _handle_stream(self, model, servers, opayload):
+        """Send an SSE response, racing POOL_SIZE servers for the fastest first token.
+
+        The first response wins; the winner's ``iter_lines()`` generator is passed
+        through the result queue so no generator-internal buffer is discarded.
+        """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -590,6 +633,10 @@ class Handler(BaseHTTPRequestHandler):
         done_event = threading.Event()
 
         def spawn_one(idx):
+            """Start a streaming request to the next server in the list.
+
+            Returns the requests.Response on success, or None.
+            """
             try:
                 _, _, host, ms = next(server_iter)
             except StopIteration:
@@ -625,6 +672,12 @@ class Handler(BaseHTTPRequestHandler):
                 break
 
         def monitor_resp(resp):
+            """Read the first JSON line from the response and submit it to the result queue.
+
+            Passes the ``iter_lines()`` iterator along with the parsed first line so
+            the main loop can continue reading from the same generator (preserving any
+            internally-buffered data).
+            """
             try:
                 it = resp.iter_lines()
                 for line in it:
@@ -737,6 +790,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
     def send_json(self, data, status=200):
+        """Send *data* as a JSON HTTP response."""
         body = json.dumps(data)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -748,6 +802,7 @@ class Handler(BaseHTTPRequestHandler):
         log.debug(f"[{self.log_date_time_string()}] {self.client_address[0]} - {fmt % args}")
 
     def safe_write(self, data):
+        """Write *data* to the client, raising on disconnect."""
         try:
             self.wfile.write(data)
             self.wfile.flush()
@@ -757,11 +812,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class PoolServer(ThreadingMixIn, HTTPServer):
+    """Threaded HTTP server that reuses the listening address."""
     allow_reuse_address = True
     daemon_threads = True
 
 
 def main():
+    """Parse args and start the HTTP server."""
     global TIMEOUT, PORT
     parser = argparse.ArgumentParser(description="dumpster-dive - OpenAI-compatible proxy for free Ollama servers")
     parser.add_argument("--port", "-p", type=int, default=PORT, help=f"port to listen on (default: {PORT})")
