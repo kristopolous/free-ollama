@@ -46,10 +46,11 @@ Also let's take a moment and appreciate that magnificent icon, generated with on
 <img width="450" alt="dyva" src="https://github.com/user-attachments/assets/33f0f350-2913-4729-a0a9-1400ff02ef75" />
 </center>
 
+<hr>
 
-### Pet some feral llamas
+## Free Ollama in Terminal Space
 
-There's also a command line for the losers who like typing shit.
+**Pet some feral llamas**: There's also a command line for the losers who like typing shit.
 
 Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
