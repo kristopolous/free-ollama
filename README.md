@@ -40,6 +40,13 @@ Here's the web interface so you can see the status while you're running it.
 
 Now where's that $50 million seed round...
 
+Also let's take a moment and appreciate that magnificent icon:
+
+<img width="533" alt="dyva" src="https://github.com/user-attachments/assets/33f0f350-2913-4729-a0a9-1400ff02ef75" />
+
+This was generated with one of those servers. Funny that...
+
+
 ### Pet some feral llamas
 
 There's also a command line for the losers who like typing shit.
