@@ -239,7 +239,7 @@ Oh I shouldn’t have to say anything here.
 
 This tool scrapes public lists. Some servers may not want to be scraped. Some may collapse under your query. Some may log your IP and report you to authorities. So go do it at McDonalds.
 
-**Use responsibly. Or don’t.**
+**Use responsibly. Or don’t.** Personally I use it for [WhackGPT](https://whackgpt.com/).
 
 ## FAQ
 
