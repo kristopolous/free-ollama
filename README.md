@@ -34,6 +34,12 @@ You can even specify models in partial forms and with globs such as "qwen*27b" o
 
 You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
 
+Here's the web interface so you can see the status while you're running it.
+
+<img width="1293" alt="2026-05-25_04-19" src="https://github.com/user-attachments/assets/887e8d65-dafb-4c37-a4b8-b721ec1bef43" />
+
+Now where's that $50 million seed round...
+
 ### Pet some feral llamas
 
 There's also a command line for the losers who like typing shit 
