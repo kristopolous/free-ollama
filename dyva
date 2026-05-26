@@ -343,6 +343,14 @@ def fan_out(sub, servers, payload):
 class Handler(BaseHTTPRequestHandler):
     """OpenAI-compatible HTTP handler that proxies to free Ollama servers."""
 
+    def do_HEAD(self):
+        """Handle HEAD requests: same as GET but no body."""
+        self.head_request = True
+        try:
+            self.do_GET()
+        finally:
+            self.head_request = False
+
     def do_GET(self):
         if self.path == "/v1/models":
             models = all_models()
@@ -397,7 +405,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if not getattr(self, 'head_request', False):
+                self.wfile.write(body)
             return
         if self.path == "/api/tags":
             models = all_models()
@@ -443,7 +452,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            if not getattr(self, 'head_request', False):
+                self.wfile.write(data)
             return
         self.send_json(err_obj("not found"), 404)
 
@@ -1196,7 +1206,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body.encode())))
         self.end_headers()
-        self.wfile.write(body.encode())
+        if not getattr(self, 'head_request', False):
+            self.wfile.write(body.encode())
 
     def log_message(self, fmt, *args):
         log.debug(f"[{self.log_date_time_string()}] {self.client_address[0]} - {fmt % args}")
