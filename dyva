@@ -399,6 +399,34 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/api/tags":
+            models = all_models()
+            now = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime())
+            dummy_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            self.send_json({
+                "models": [
+                    {
+                        "name": m["id"],
+                        "model": m["id"],
+                        "modified_at": now,
+                        "size": 1,
+                        "digest": dummy_digest,
+                        "details": {
+                            "parent_model": "",
+                            "format": "gguf",
+                            "family": "",
+                            "families": None,
+                            "parameter_size": "",
+                            "quantization_level": "",
+                        },
+                    }
+                    for m in models
+                ],
+            })
+            return
+        if self.path == "/api/version":
+            self.send_json({"version": "0.5.0"})
+            return
         if self.path == "/api/show":
             self.send_json({
                 "modelfile": "# free-ollama proxy",
@@ -420,7 +448,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(err_obj("not found"), 404)
 
     def do_POST(self):
-        """Route ``/v1/chat/completions`` to the appropriate handler."""
+        """Route requests to the appropriate handler."""
         if self.path == "/api/show":
             self.send_json({
                 "modelfile": "# free-ollama proxy",
@@ -429,9 +457,32 @@ class Handler(BaseHTTPRequestHandler):
                 "model_info": {},
             })
             return
+
+        if self.path == "/api/chat":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length))
+            except json.JSONDecodeError:
+                self.send_json(err_obj("invalid JSON"), 400)
+                return
+            model = body.get("model", "")
+            if not model:
+                self.send_json(err_obj("model is required", "missing_model"), 400)
+                return
+            do_stream = body.get("stream", False)
+            opayload = body
+            log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
+            self._proxy_chat(model, opayload, do_stream, openai_format=False)
+            return
+
+        if self.path == "/api/generate":
+            self._proxy_generate()
+            return
+
         if self.path != "/v1/chat/completions":
             self.send_json(err_obj("not found"), 404)
             return
+
         length = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(length))
@@ -444,8 +495,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         do_stream = body.get("stream", False)
         opayload = to_ollama(body)
-        log.debug(f"Request: model={model}, stream={do_stream}")
+        log.debug(f"OpenAI request: model={model}, stream={do_stream}")
+        self._proxy_chat(model, opayload, do_stream, openai_format=True)
 
+    def _proxy_chat(self, model, opayload, do_stream, openai_format):
+        """Find a server and proxy the chat request, returning OpenAI or Ollama format."""
         last_host = LAST_SUCCESS.get(model)
         log.debug(f"Last successful for {model}: {last_host}")
         if last_host:
@@ -456,12 +510,19 @@ class Handler(BaseHTTPRequestHandler):
             if matched:
                 log.debug(f"  trying last successful: {last_host}")
                 if do_stream:
-                    if self._try_stream(model, matched, opayload):
-                        return
+                    if openai_format:
+                        if self._try_stream(model, matched, opayload):
+                            return
+                    else:
+                        if self._try_stream_ollama(model, matched, opayload):
+                            return
                 else:
                     result = self._try_one(last_host, model, matched[0][3][0], opayload)
                     if result:
-                        self.send_json(result, 200)
+                        if openai_format:
+                            self.send_json(to_openai(result, model), 200)
+                        else:
+                            self.send_json(result, 200)
                         return
 
         servers = find_servers(model)
@@ -470,7 +531,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if do_stream:
-            self._handle_stream(model, servers, opayload)
+            if openai_format:
+                self._handle_stream(model, servers, opayload)
+            else:
+                self._handle_stream_ollama(model, servers, opayload)
             return
 
         all_failed = []
@@ -484,7 +548,10 @@ class Handler(BaseHTTPRequestHandler):
                 log.debug(f"  └─ added {h} to bad hosts")
                 add_bad(h, model)
             if host is not None:
-                self.send_json(to_openai(data, model))
+                if openai_format:
+                    self.send_json(to_openai(data, model), 200)
+                else:
+                    self.send_json(data, 200)
                 return
             off += POOL_SIZE
             if off < len(servers):
@@ -492,8 +559,122 @@ class Handler(BaseHTTPRequestHandler):
         log.debug(f"  ✗ all servers failed: {', '.join(all_failed)}")
         self.send_json(err_obj(f"all {len(all_failed)} servers failed"), 502)
 
+    def _proxy_generate(self):
+        """Proxy an Ollama /api/generate request to a backend server."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self.send_json(err_obj("invalid JSON"), 400)
+            return
+        model = body.get("model", "")
+        if not model:
+            self.send_json(err_obj("model is required", "missing_model"), 400)
+            return
+        do_stream = body.get("stream", False)
+        log.debug(f"Ollama generate request: model={model}, stream={do_stream}")
+
+        servers = find_servers(model)
+        if not servers:
+            self.send_json(err_obj(f"no available servers for '{model}'", "model_not_found"), 404)
+            return
+
+        all_failed = []
+        for _, _, host, ms in servers:
+            full = ms[0]
+            tag = f"{host} {full}"
+            payload = dict(body, model=full)
+
+            try:
+                resp = requests.post(f"{host}/api/generate", json=payload,
+                                     timeout=TIMEOUT, stream=do_stream)
+            except Exception as e:
+                log.debug(f"  ✗ {tag}  (exception: {e})")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            if resp.status_code != 200:
+                log.debug(f"  ✗ {tag}  (status {resp.status_code})")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            if not do_stream:
+                data = resp.json()
+                if "error" in data:
+                    log.debug(f"  ✗ {tag}  (error: {data['error']})")
+                    add_bad(host, model)
+                    all_failed.append(host)
+                    continue
+                log.debug(f"  ✓ {tag}")
+                LAST_SUCCESS[model] = host
+                add_good(host, model)
+                self.send_json(data, 200)
+                return
+
+            it = resp.iter_lines()
+            first_line = None
+            for line in it:
+                if not line:
+                    continue
+                first_line = line
+                break
+
+            if not first_line:
+                log.debug(f"  ✗ {tag}  (empty response)")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            try:
+                first = json.loads(first_line)
+            except json.JSONDecodeError:
+                log.debug(f"  ✗ {tag}  (bad response)")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            if "error" in first:
+                log.debug(f"  ✗ {tag}  (error: {first['error']})")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            log.debug(f"  ✓ {tag}")
+            LAST_SUCCESS[model] = host
+            add_good(host, model)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.flush()
+            self.wfile.write(first_line + b"\n")
+            self.wfile.flush()
+
+            for line in it:
+                if not line:
+                    continue
+                try:
+                    self.wfile.write(line + b"\n")
+                    obj = json.loads(line)
+                    if obj.get("done"):
+                        self.wfile.flush()
+                        self.close_connection = True
+                        return
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    log.debug("Client disconnected during stream")
+                    return
+
+            self.close_connection = True
+            return
+
+        log.debug(f"  ✗ all servers failed: {', '.join(all_failed)}")
+        self.send_json(err_obj(f"all servers failed"), 502)
+
     def _try_one(self, host, model, full_model, opayload):
-        """Try one host synchronously (no streaming). Return OpenAI response dict or None."""
+        """Try one host synchronously (no streaming). Return Ollama response dict or None."""
         tag = f"{host} {full_model}"
         payload = dict(opayload, model=full_model, stream=False)
         try:
@@ -517,7 +698,7 @@ class Handler(BaseHTTPRequestHandler):
         log.debug(f"  ✓ {tag}")
         LAST_SUCCESS[model] = host
         add_good(host, model)
-        return to_openai(data, model)
+        return data
 
     def _try_stream(self, model, servers, opayload):
         """Try one host for streaming (last-success shortcut). Return True on success.
@@ -592,6 +773,80 @@ class Handler(BaseHTTPRequestHandler):
                 if obj.get("done"):
                     fr = obj.get("done_reason", "stop")
                     self.wfile.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                log.debug("Client disconnected during stream")
+                return None
+
+        self.close_connection = True
+        return True
+
+    def _try_stream_ollama(self, model, servers, opayload):
+        """Try one host for streaming in Ollama NDJSON format (last-success shortcut)."""
+        _, _, host, ms = servers[0]
+        full = ms[0]
+        tag = f"{host} {full}"
+        payload = dict(opayload, model=full, stream=True)
+
+        try:
+            resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
+        except Exception as e:
+            log.debug(f"  ✗ {tag}  (exception: {e})")
+            add_bad(host, model)
+            return None
+
+        if resp.status_code != 200:
+            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
+            add_bad(host, model)
+            return None
+
+        lines_iter = resp.iter_lines()
+        first_line = None
+        for line in lines_iter:
+            if not line:
+                continue
+            first_line = line
+            break
+
+        if not first_line:
+            log.debug(f"  ✗ {tag}  (empty response)")
+            add_bad(host, model)
+            return None
+
+        try:
+            first = json.loads(first_line)
+        except json.JSONDecodeError:
+            log.debug(f"  ✗ {tag}  (bad response)")
+            add_bad(host, model)
+            return None
+
+        if "error" in first:
+            log.debug(f"  ✗ {tag}  (error: {first['error']})")
+            add_bad(host, model)
+            return None
+
+        log.debug(f"  ✓ {tag}")
+        LAST_SUCCESS[model] = host
+        add_good(host, model)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.flush()
+
+        self.wfile.write(first_line + b"\n")
+        self.wfile.flush()
+
+        for line in lines_iter:
+            if not line:
+                continue
+            try:
+                self.wfile.write(line + b"\n")
+                obj = json.loads(line)
+                if obj.get("done"):
                     self.wfile.flush()
                     self.close_connection = True
                     return True
@@ -850,6 +1105,89 @@ class Handler(BaseHTTPRequestHandler):
                         log.debug("Client disconnected")
                     self.close_connection = True
                     return
+
+    def _handle_stream_ollama(self, model, servers, opayload):
+        """Try servers one at a time and passthrough Ollama NDJSON format."""
+        all_failed = []
+        for _, _, host, ms in servers:
+            full = ms[0]
+            tag = f"{host} {full}"
+            payload = dict(opayload, model=full, stream=True)
+
+            try:
+                resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
+            except Exception as e:
+                log.debug(f"  ✗ {tag}  (exception: {e})")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            if resp.status_code != 200:
+                log.debug(f"  ✗ {tag}  (status {resp.status_code})")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            it = resp.iter_lines()
+            first_line = None
+            for line in it:
+                if not line:
+                    continue
+                first_line = line
+                break
+
+            if not first_line:
+                log.debug(f"  ✗ {tag}  (empty response)")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            try:
+                first = json.loads(first_line)
+            except json.JSONDecodeError:
+                log.debug(f"  ✗ {tag}  (bad response)")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            if "error" in first:
+                log.debug(f"  ✗ {tag}  (error: {first['error']})")
+                add_bad(host, model)
+                all_failed.append(host)
+                continue
+
+            log.debug(f"  ✓ {tag}")
+            LAST_SUCCESS[model] = host
+            add_good(host, model)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.flush()
+
+            self.wfile.write(first_line + b"\n")
+            self.wfile.flush()
+
+            for line in it:
+                if not line:
+                    continue
+                try:
+                    self.wfile.write(line + b"\n")
+                    obj = json.loads(line)
+                    if obj.get("done"):
+                        self.wfile.flush()
+                        self.close_connection = True
+                        return
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    log.debug("Client disconnected during stream")
+                    return
+
+            self.close_connection = True
+            return
+
+        log.debug(f"  ✗ all servers failed: {', '.join(all_failed)}")
+        self.send_json(err_obj(f"all servers failed"), 502)
 
     def send_json(self, data, status=200):
         """Send *data* as a JSON HTTP response."""
