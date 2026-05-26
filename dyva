@@ -18,7 +18,7 @@ BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 POOL_SIZE = int(os.environ.get("POOL_SIZE", "3"))
 LAST_SUCCESS = {}
-PORT = int(os.environ.get("PORT", "8080"))
+PORT = int(os.environ.get("PORT", "11434"))
 TIMEOUT = 30
 
 _bad_cache = None

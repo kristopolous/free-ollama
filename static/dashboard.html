@@ -14,6 +14,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5;
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
 .card{background:#fff;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.1);max-height:70vh;overflow-y:auto}
 .card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#666;margin-bottom:10px}
+.chat-card{max-height:none;display:flex;flex-direction:column}
+.chat-card .chat-form{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.chat-card .chat-form input,.chat-card .chat-form textarea{font-family:ui-monospace,monospace;font-size:.82rem;padding:6px 8px;border:1px solid #ddd;border-radius:4px;outline:none}
+.chat-card .chat-form input:focus,.chat-card .chat-form textarea:focus{border-color:#888}
+.chat-card .chat-form input{flex:1;min-width:120px}
+.chat-card .chat-form textarea{flex:2;min-width:200px;resize:vertical;min-height:36px}
+.chat-card .chat-form button{padding:6px 16px;background:#66a;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:.82rem}
+.chat-card .chat-form button:hover{background:#558}
+.chat-card .chat-form button:disabled{background:#ccc;cursor:default}
+#chatResponse{background:#fafafa;border:1px solid #eee;border-radius:4px;padding:8px;font-family:ui-monospace,monospace;font-size:.82rem;line-height:1.5;min-height:60px;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+.status-line{padding:2px 0;font-size:.78rem}
+.status-searching{color:#888}
+.status-trying{color:#66a}
+.status-connected{color:#282}
+.status-failed{color:#c33}
+.content-line{padding:2px 0;color:#222}
+.done-line{color:#888;font-style:italic}
 input[type=text]{width:100%;padding:6px 8px;margin-bottom:8px;border:1px solid #ddd;border-radius:4px;font-size:.85rem;outline:none}
 input[type=text]:focus{border-color:#888}
 .model-item{padding:6px 0;border-bottom:1px solid #eee;font-size:.85rem;display:flex;justify-content:space-between}
@@ -37,6 +54,15 @@ input[type=text]:focus{border-color:#888}
 </div>
 </div>
 <div class="grid">
+<div class="card chat-card">
+<h2>Chat</h2>
+<div class="chat-form">
+<input type="text" id="chatModel" list="modelList" placeholder="model" value="">
+<textarea id="chatInput" rows="1" placeholder="message"></textarea>
+<button id="chatSend" onclick="sendChat()">Send</button>
+</div>
+<div id="chatResponse"></div>
+</div>
 <div class="card">
 <h2>Models</h2>
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter...">
@@ -67,6 +93,32 @@ __BAD_MORE__
 <div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#66a" href="https://github.com/kristopolous/free-ollama">obviously open source</a></div>
 <script>
 function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
+var firstModel=document.querySelector('#modelList .model-item');if(firstModel){document.getElementById('chatModel').value=firstModel.getAttribute('data-name')}
+document.getElementById('chatInput').addEventListener('keydown',function(e){if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();sendChat()}})
+async function sendChat(){var model=document.getElementById('chatModel').value.trim();if(!model)return;var msg=document.getElementById('chatInput').value.trim();if(!msg)return;var btn=document.getElementById('chatSend');btn.disabled=true;btn.textContent='Cancel';var respDiv=document.getElementById('chatResponse');respDiv.innerHTML='<div class="status-line status-searching">connecting...</div>';var cancelled=false;btn.onclick=function(){cancelled=true;btn.disabled=false;btn.textContent='Send';btn.onclick=sendChat}
+try{var response=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:[{role:'user',content:msg}],stream:true})})
+if(!response.ok){respDiv.innerHTML='<div class="status-line status-failed">error: '+response.status+' '+response.statusText+'</div>';btn.disabled=false;btn.textContent='Send';return}
+var reader=response.body.getReader();var decoder=new TextDecoder();var buf='';var content='';var statusDiv=respDiv.querySelector('.status-line');if(!statusDiv){respDiv.innerHTML='';statusDiv=null}
+while(true){if(cancelled){reader.cancel();break}
+var r=await reader.read();if(r.done)break
+buf+=decoder.decode(r.value,{stream:true})
+var parts=buf.split('\n');buf=parts.pop()
+for(var i=0;i<parts.length;i++){var line=parts[i];var trimmed=line.trim()
+if(line.startsWith('event: ')){var eventType=line.slice(7).trim()
+var dataLine=''
+while(i+1<parts.length&&parts[i+1].startsWith('data: ')){i++;dataLine=parts[i].slice(6)}
+if(eventType=='status'&&dataLine){try{var ev=JSON.parse(dataLine);var cls='status-'+ev.status;var html='<div class="status-line '+cls+'">'+escapeHtml(ev.message)+'</div>';if(statusDiv){respDiv.innerHTML=''+html;statusDiv=respDiv.querySelector('.status-line')}else{respDiv.innerHTML+=html}}
+catch(e){}}
+continue}
+if(trimmed.startsWith('data: ')){var d=trimmed.slice(6)
+if(d=='[DONE]'){respDiv.innerHTML+='<div class="done-line">done</div>';break}
+try{var obj=JSON.parse(d);var c=obj.choices&&obj.choices[0];if(c){var delta=c.delta&&c.delta.content||'';if(delta){content+=delta;respDiv.innerHTML='<div class="content-line">'+escapeHtml(content)+'</div>';respDiv.scrollTop=respDiv.scrollHeight}
+if(c.finish_reason){respDiv.innerHTML+='<div class="done-line">['+c.finish_reason+']</div>'}}}
+catch(e){}}}}
+if(!cancelled){respDiv.innerHTML+='<div class="done-line">done</div>'}
+btn.disabled=false;btn.textContent='Send';btn.onclick=sendChat}
+catch(e){respDiv.innerHTML='<div class="status-line status-failed">error: '+e.message+'</div>';btn.disabled=false;btn.textContent='Send';btn.onclick=sendChat}}
+function escapeHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 </script>
 </body>
 </html>
