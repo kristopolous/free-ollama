@@ -95,24 +95,25 @@ __BAD_MORE__
 function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
 var firstModel=document.querySelector('#modelList .model-item');if(firstModel){document.getElementById('chatModel').value=firstModel.getAttribute('data-name')}
 document.getElementById('chatInput').addEventListener('keydown',function(e){if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();sendChat()}})
-async function sendChat(){var model=document.getElementById('chatModel').value.trim();if(!model)return;var msg=document.getElementById('chatInput').value.trim();if(!msg)return;var btn=document.getElementById('chatSend');btn.disabled=true;btn.textContent='Cancel';var respDiv=document.getElementById('chatResponse');respDiv.innerHTML='<div class="status-line status-searching">connecting...</div>';var cancelled=false;btn.onclick=function(){cancelled=true;btn.disabled=false;btn.textContent='Send';btn.onclick=sendChat}
-try{var response=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:[{role:'user',content:msg}],stream:true})})
+async function sendChat(){var model=document.getElementById('chatModel').value.trim();if(!model)return;var msg=document.getElementById('chatInput').value.trim();if(!msg)return;var btn=document.getElementById('chatSend');btn.disabled=true;btn.textContent='Cancel';var respDiv=document.getElementById('chatResponse');respDiv.innerHTML='';var cancelled=false;btn.onclick=function(){cancelled=true;btn.disabled=false;btn.textContent='Send';btn.onclick=sendChat}
+try{var response=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','X-Dyva-Status':'1'},body:JSON.stringify({model:model,messages:[{role:'user',content:msg}],stream:true})})
 if(!response.ok){respDiv.innerHTML='<div class="status-line status-failed">error: '+response.status+' '+response.statusText+'</div>';btn.disabled=false;btn.textContent='Send';return}
-var reader=response.body.getReader();var decoder=new TextDecoder();var buf='';var content='';var statusDiv=respDiv.querySelector('.status-line');if(!statusDiv){respDiv.innerHTML='';statusDiv=null}
+var reader=response.body.getReader();var decoder=new TextDecoder();var buf='';var content=''
 while(true){if(cancelled){reader.cancel();break}
 var r=await reader.read();if(r.done)break
 buf+=decoder.decode(r.value,{stream:true})
 var parts=buf.split('\n');buf=parts.pop()
 for(var i=0;i<parts.length;i++){var line=parts[i];var trimmed=line.trim()
-if(line.startsWith('event: ')){var eventType=line.slice(7).trim()
-var dataLine=''
+if(line.startsWith('event: ')){var dataLine=''
 while(i+1<parts.length&&parts[i+1].startsWith('data: ')){i++;dataLine=parts[i].slice(6)}
-if(eventType=='status'&&dataLine){try{var ev=JSON.parse(dataLine);var cls='status-'+ev.status;var html='<div class="status-line '+cls+'">'+escapeHtml(ev.message)+'</div>';if(statusDiv){respDiv.innerHTML=''+html;statusDiv=respDiv.querySelector('.status-line')}else{respDiv.innerHTML+=html}}
-catch(e){}}
+if(dataLine){try{var ev=JSON.parse(dataLine);if(ev.message){respDiv.innerHTML+='<div class="status-line status-'+ev.status+'">'+escapeHtml(ev.message)+'</div>'}}catch(e){}}
 continue}
-if(trimmed.startsWith('data: ')){var d=trimmed.slice(6)
+if(!trimmed.startsWith('data: '))continue
+var d=trimmed.slice(6)
 if(d=='[DONE]'){respDiv.innerHTML+='<div class="done-line">done</div>';break}
-try{var obj=JSON.parse(d);var c=obj.choices&&obj.choices[0];if(c){var delta=c.delta&&c.delta.content||'';if(delta){content+=delta;respDiv.innerHTML='<div class="content-line">'+escapeHtml(content)+'</div>';respDiv.scrollTop=respDiv.scrollHeight}
+try{var obj=JSON.parse(d);var c=obj.choices&&obj.choices[0]
+if(obj.error){respDiv.innerHTML='<div class="status-line status-failed">error: '+escapeHtml(obj.error)+'</div>';break}
+if(c){var delta=c.delta&&c.delta.content||'';if(delta){content+=delta;respDiv.innerHTML='<div class="content-line">'+escapeHtml(content)+'</div>';respDiv.scrollTop=respDiv.scrollHeight}
 if(c.finish_reason){respDiv.innerHTML+='<div class="done-line">['+c.finish_reason+']</div>'}}}
 catch(e){}}}}
 if(!cancelled){respDiv.innerHTML+='<div class="done-line">done</div>'}

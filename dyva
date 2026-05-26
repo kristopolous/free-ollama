@@ -482,6 +482,7 @@ class Handler(BaseHTTPRequestHandler):
             do_stream = body.get("stream", False)
             opayload = body
             log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
+            self._send_status = self.headers.get("X-Dyva-Status") == "1"
             self._proxy_chat(model, opayload, do_stream, openai_format=False)
             return
 
@@ -506,6 +507,7 @@ class Handler(BaseHTTPRequestHandler):
         do_stream = body.get("stream", False)
         opayload = to_ollama(body)
         log.debug(f"OpenAI request: model={model}, stream={do_stream}")
+        self._send_status = self.headers.get("X-Dyva-Status") == "1"
         self._proxy_chat(model, opayload, do_stream, openai_format=True)
 
     def _proxy_chat(self, model, opayload, do_stream, openai_format):
@@ -919,14 +921,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.flush()
 
+        send_status = getattr(self, "_send_status", False)
         searched_models = set()
         for _, _, _, ms in servers:
             searched_models.add(ms[0])
         model_str = model or next(iter(searched_models), "unknown")
-        self.wfile.write(
-            sse_status("", model_str, f"searching {len(servers)} servers for {model_str}...", "searching").encode()
-        )
-        self.wfile.flush()
+        if send_status:
+            self.wfile.write(
+                sse_status("", model_str, f"searching {len(servers)} servers for {model_str}...", "searching").encode()
+            )
+            self.wfile.flush()
 
         server_iter = iter(servers)
         active = {}
@@ -964,17 +968,19 @@ class Handler(BaseHTTPRequestHandler):
 
             if err[0]:
                 log.debug(f"  ✗ {host} {full}  (exception: {err[0]})")
-                self.wfile.write(
-                    sse_status(host, full, f"trying {host}... failed ({err[0]})", "failed").encode()
-                )
-                self.wfile.flush()
+                if send_status:
+                    self.wfile.write(
+                        sse_status(host, full, f"trying {host}... failed ({err[0]})", "failed").encode()
+                    )
+                    self.wfile.flush()
                 return None
 
             active[resp[0]] = (host, full)
-            self.wfile.write(
-                sse_status(host, full, f"trying {host}...", "trying").encode()
-            )
-            self.wfile.flush()
+            if send_status:
+                self.wfile.write(
+                    sse_status(host, full, f"trying {host}...", "trying").encode()
+                )
+                self.wfile.flush()
             return resp[0]
 
         for i in range(POOL_SIZE):
@@ -1024,10 +1030,14 @@ class Handler(BaseHTTPRequestHandler):
                     resp.close()
                 log.debug("All servers failed")
                 tried = ", ".join(active.values()) if active else "none"
+                if send_status:
+                    try:
+                        self.wfile.write(
+                            sse_status("", model_str, f"all servers failed (tried: {tried})", "failed").encode()
+                        )
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        log.debug("Client disconnected")
                 try:
-                    self.wfile.write(
-                        sse_status("", model_str, f"all servers failed (tried: {tried})", "failed").encode()
-                    )
                     self.wfile.write(sse_str({"error": f"all servers failed"}).encode())
                     self.wfile.write(sse_str(sse_chunk("", "", done=True)).encode())
                 except (BrokenPipeError, ConnectionResetError, OSError):
@@ -1051,9 +1061,13 @@ class Handler(BaseHTTPRequestHandler):
                         resp.close()
 
                 log.debug(f"Using {win_host} for {model}")
-                self.wfile.write(
-                    sse_status(win_host, win_full, f"connected to {win_host}", "connected").encode()
-                )
+                if send_status:
+                    try:
+                        self.wfile.write(
+                            sse_status(win_host, win_full, f"connected to {win_host}", "connected").encode()
+                        )
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        log.debug("Client disconnected")
                 try:
                     self.wfile.write(sse_str(sse_chunk(win_full, first.get("message", {}).get("content", ""))).encode())
                 except (BrokenPipeError, ConnectionResetError, OSError):
@@ -1088,10 +1102,14 @@ class Handler(BaseHTTPRequestHandler):
                 if failed_resp in active:
                     failed_host, failed_full = active[failed_resp]
                     log.debug(f"  ✗ {failed_host}  (failed: {err_msg})")
-                    self.wfile.write(
-                        sse_status(failed_host, failed_full, f"{failed_host} failed ({err_msg})", "failed").encode()
-                    )
-                    self.wfile.flush()
+                    if send_status:
+                        try:
+                            self.wfile.write(
+                                sse_status(failed_host, failed_full, f"{failed_host} failed ({err_msg})", "failed").encode()
+                            )
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            log.debug("Client disconnected")
                     log.debug(f"Closing connection to {failed_host}")
                     failed_resp.close()
                     del active[failed_resp]
@@ -1104,11 +1122,14 @@ class Handler(BaseHTTPRequestHandler):
                         t.start()
 
                 if not active:
-                    tried = "all servers"
+                    if send_status:
+                        try:
+                            self.wfile.write(
+                                sse_status("", model_str, f"all servers failed", "failed").encode()
+                            )
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            log.debug("Client disconnected")
                     try:
-                        self.wfile.write(
-                            sse_status("", model_str, f"all servers failed", "failed").encode()
-                        )
                         self.wfile.write(sse_str({"error": "all servers failed"}).encode())
                         self.wfile.write(sse_str(sse_chunk("", "", done=True)).encode())
                     except (BrokenPipeError, ConnectionResetError, OSError):
