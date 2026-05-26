@@ -884,11 +884,12 @@ def main():
     global TIMEOUT, PORT
     parser = argparse.ArgumentParser(description="dumpster-dive - OpenAI-compatible proxy for free Ollama servers")
     parser.add_argument("--port", "-p", type=int, default=PORT, help=f"port to listen on (default: {PORT})")
+    parser.add_argument("--host", type=str, default="", help="host address to bind to (default: all interfaces)")
     parser.add_argument("--timeout", "-t", type=int, default=30, help="request timeout in seconds (default: 30)")
     args = parser.parse_args()
     TIMEOUT = args.timeout
 
-    addr = ("", args.port)
+    addr = (args.host, args.port)
     try:
         srv = PoolServer(addr, Handler)
     except OSError as e:
