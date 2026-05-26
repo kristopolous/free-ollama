@@ -24,19 +24,33 @@ Let’s not ask too many questions.
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
-## But Wait, there's More! 
+## Method 1: Liberated Infrastructure
 
 **Dyva** is a managed proxy that you can connect to with any openai compatible client. 
 
 It will cycle through and find working hosts automatically. 
 
-You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable 
+You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable.
 
 You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
 
-### Pet some feral llamas
+Here's the web interface so you can see the status while you're running it.
 
-There's also a command line for the losers who like typing shit 
+<img width="1293" alt="2026-05-25_04-19" src="https://github.com/user-attachments/assets/887e8d65-dafb-4c37-a4b8-b721ec1bef43" />
+
+Now where's that $50 million seed round...
+
+Also let's take a moment and appreciate that magnificent icon, generated with one of these shady ip addresses!
+
+<center>
+<img width="450" alt="dyva" src="https://github.com/user-attachments/assets/33f0f350-2913-4729-a0a9-1400ff02ef75" />
+</center>
+
+<hr>
+
+## Method 2: Artsinal Ollamas in Terminal Space
+
+**Pet some feral llamas**: There's also a command line for the losers who like typing shit.
 
 Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
@@ -233,7 +247,7 @@ Oh I shouldn’t have to say anything here.
 
 This tool scrapes public lists. Some servers may not want to be scraped. Some may collapse under your query. Some may log your IP and report you to authorities. So go do it at McDonalds.
 
-**Use responsibly. Or don’t.**
+**Use responsibly. Or don’t.** Personally I use it for [WhackGPT](https://whackgpt.com/).
 
 ## FAQ
 
