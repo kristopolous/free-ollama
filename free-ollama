@@ -258,21 +258,21 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
-            --exec)     # run a command
+            --exec)     # Run a command
               shift
               export OLLAMA_HOST="${@: -1}"
               ollama ${@:1:$#-1} 
               exit 0
               ;;
-            --serve)    # start the dyva server
+            --serve)    # Start the dyva server
               ./dyva || ./dyva --port 0
               ;;
-            --timeout)  # set a timeout
+            --timeout)  # Set the timeout
               shift
               _timeout=$1 ;;
             --host)     # Report just the host
                 _host=1 ;;
-            --mas)      # Report just the host in mas format
+            --mas)      # Report just the host in MAS format
                 _host=1 _mas=1 ;;
             --info)     # Run info on the model
                 info=1 ;;
