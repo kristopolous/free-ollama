@@ -25,6 +25,32 @@ _bad_cache = None
 _good_cache = None
 _servers_cache = None
 
+_activity_listeners = []
+_activity_lock = threading.Lock()
+
+def broadcast_activity(host, model, status, message):
+    entry = {'host': host, 'model': model, 'status': status, 'message': message, 'time': time.time()}
+    with _activity_lock:
+        dead = []
+        for q in _activity_listeners:
+            try:
+                q.put_nowait(entry)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            _activity_listeners.remove(q)
+
+def listen_activity():
+    q = Queue()
+    with _activity_lock:
+        _activity_listeners.append(q)
+    return q
+
+def unlisten_activity(q):
+    with _activity_lock:
+        if q in _activity_listeners:
+            _activity_listeners.remove(q)
+
 
 def ensure_cache():
     """Download the latest server list if cache is missing or >24h old."""
@@ -241,6 +267,7 @@ def try_host(full_model, host, payload, q, done):
     ``("serv", host, error)``.
     """
     tag = f"{host} {full_model}"
+    broadcast_activity(host, full_model, "trying", f"trying {host}...")
     if done.is_set():
         return
     result = [None]
@@ -266,33 +293,39 @@ def try_host(full_model, host, payload, q, done):
 
     if exc[0]:
         log.debug(f"  ✗ {tag}  (exception: {exc[0]})")
+        broadcast_activity(host, full_model, "failed", f"{host} failed ({exc[0]})")
         q.put(("conn", host))
         return
 
     if result[0] is None:
         log.debug(f"  ✗ {tag}  (timeout)")
+        broadcast_activity(host, full_model, "failed", f"{host} timed out")
         q.put(("conn", host))
         return
 
     if result[0].status_code != 200:
         log.debug(f"  ✗ {tag}  (status {result[0].status_code})")
+        broadcast_activity(host, full_model, "failed", f"{host} returned {result[0].status_code}")
         q.put(("conn", host))
         return
 
     out = result[0].text
     if not out.strip():
         log.debug(f"  ✗ {tag}  (empty response)")
+        broadcast_activity(host, full_model, "failed", f"{host} returned empty response")
         q.put(("conn", host))
         return
 
     resp = parse_json(out.encode())
     if not isinstance(resp, dict):
         log.debug(f"  ✗ {tag}  (bad response: {out[:120]})")
+        broadcast_activity(host, full_model, "failed", f"{host} returned bad response")
         q.put(("conn", host))
         return
 
     if "error" in resp:
         log.debug(f"  ✗ {tag}  (error: {resp['error']})")
+        broadcast_activity(host, full_model, "failed", f"{host} error: {resp['error']}")
         q.put(("serv", host, resp["error"]))
         return
 
@@ -303,6 +336,7 @@ def try_host(full_model, host, payload, q, done):
             resp = {"message": msg, "done": True}
 
     log.debug(f"  ✓ {tag}")
+    broadcast_activity(host, full_model, "connected", f"connected to {host}")
     q.put(("ok", host, resp))
 
 
@@ -312,6 +346,7 @@ def fan_out(sub, servers, payload):
     done = threading.Event()
     conn_errors = []
     serv_errors = []
+    broadcast_activity("", sub, "searching", f"searching {len(servers)} servers for {sub}...")
     for _, _, host, ms in servers:
         full = ms[0]
         p = dict(payload, model=full)
@@ -436,6 +471,28 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/version":
             self.send_json({"version": "0.5.0"})
             return
+        if self.path == "/api/activity":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.flush()
+
+            q = listen_activity()
+            try:
+                while True:
+                    entry = q.get()
+                    try:
+                        self.wfile.write(f"data: {json.dumps(entry)}\n\n".encode())
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+            finally:
+                unlisten_activity(q)
+            return
+
         if self.path == "/api/show":
             self.send_json({
                 "modelfile": "# free-ollama proxy",
@@ -722,17 +779,20 @@ class Handler(BaseHTTPRequestHandler):
         full = ms[0]
         tag = f"{host} {full}"
         payload = dict(opayload, model=full, stream=True)
+        broadcast_activity(host, full, "trying", f"trying {host}...")
 
         try:
             resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
         except Exception as e:
             log.debug(f"  ✗ {tag}  (exception: {e})")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} failed ({e})")
             return None
 
         if resp.status_code != 200:
             log.debug(f"  ✗ {tag}  (status {resp.status_code})")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} returned {resp.status_code}")
             return None
 
         lines_iter = resp.iter_lines()
@@ -746,6 +806,7 @@ class Handler(BaseHTTPRequestHandler):
         if not first_line:
             log.debug(f"  ✗ {tag}  (empty response)")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} empty response")
             return None
 
         try:
@@ -753,16 +814,19 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             log.debug(f"  ✗ {tag}  (bad response)")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} bad response")
             return None
 
         if "error" in first:
             log.debug(f"  ✗ {tag}  (error: {first['error']})")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} error: {first['error']}")
             return None
 
         log.debug(f"  ✓ {tag}")
         LAST_SUCCESS[model] = host
         add_good(host, model)
+        broadcast_activity(host, full, "connected", f"connected to {host}")
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -801,17 +865,20 @@ class Handler(BaseHTTPRequestHandler):
         full = ms[0]
         tag = f"{host} {full}"
         payload = dict(opayload, model=full, stream=True)
+        broadcast_activity(host, full, "trying", f"trying {host}...")
 
         try:
             resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
         except Exception as e:
             log.debug(f"  ✗ {tag}  (exception: {e})")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} failed ({e})")
             return None
 
         if resp.status_code != 200:
             log.debug(f"  ✗ {tag}  (status {resp.status_code})")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} returned {resp.status_code}")
             return None
 
         lines_iter = resp.iter_lines()
@@ -825,6 +892,7 @@ class Handler(BaseHTTPRequestHandler):
         if not first_line:
             log.debug(f"  ✗ {tag}  (empty response)")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} empty response")
             return None
 
         try:
@@ -832,16 +900,19 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             log.debug(f"  ✗ {tag}  (bad response)")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} bad response")
             return None
 
         if "error" in first:
             log.debug(f"  ✗ {tag}  (error: {first['error']})")
             add_bad(host, model)
+            broadcast_activity(host, full, "failed", f"{host} error: {first['error']}")
             return None
 
         log.debug(f"  ✓ {tag}")
         LAST_SUCCESS[model] = host
         add_good(host, model)
+        broadcast_activity(host, full, "connected", f"connected to {host}")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
@@ -926,6 +997,7 @@ class Handler(BaseHTTPRequestHandler):
         for _, _, _, ms in servers:
             searched_models.add(ms[0])
         model_str = model or next(iter(searched_models), "unknown")
+        broadcast_activity("", model_str, "searching", f"searching {len(servers)} servers for {model_str}...")
         if send_status:
             self.wfile.write(
                 sse_status("", model_str, f"searching {len(servers)} servers for {model_str}...", "searching").encode()
@@ -968,6 +1040,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if err[0]:
                 log.debug(f"  ✗ {host} {full}  (exception: {err[0]})")
+                broadcast_activity(host, full, "failed", f"{host} failed ({err[0]})")
                 if send_status:
                     self.wfile.write(
                         sse_status(host, full, f"trying {host}... failed ({err[0]})", "failed").encode()
@@ -976,6 +1049,7 @@ class Handler(BaseHTTPRequestHandler):
                 return None
 
             active[resp[0]] = (host, full)
+            broadcast_activity(host, full, "trying", f"trying {host}...")
             if send_status:
                 self.wfile.write(
                     sse_status(host, full, f"trying {host}...", "trying").encode()
@@ -1054,6 +1128,7 @@ class Handler(BaseHTTPRequestHandler):
                 win_host, win_full = active[winning_resp]
                 LAST_SUCCESS[model] = win_host
                 add_good(win_host, model)
+                broadcast_activity(win_host, win_full, "connected", f"connected to {win_host}")
 
                 for resp in active:
                     if resp != winning_resp:
@@ -1102,6 +1177,7 @@ class Handler(BaseHTTPRequestHandler):
                 if failed_resp in active:
                     failed_host, failed_full = active[failed_resp]
                     log.debug(f"  ✗ {failed_host}  (failed: {err_msg})")
+                    broadcast_activity(failed_host, failed_full, "failed", f"{failed_host} failed ({err_msg})")
                     if send_status:
                         try:
                             self.wfile.write(
@@ -1140,22 +1216,26 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_stream_ollama(self, model, servers, opayload):
         """Try servers one at a time and passthrough Ollama NDJSON format."""
         all_failed = []
+        broadcast_activity("", model, "searching", f"searching {len(servers)} servers for {model}...")
         for _, _, host, ms in servers:
             full = ms[0]
             tag = f"{host} {full}"
             payload = dict(opayload, model=full, stream=True)
+            broadcast_activity(host, full, "trying", f"trying {host}...")
 
             try:
                 resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
             except Exception as e:
                 log.debug(f"  ✗ {tag}  (exception: {e})")
                 add_bad(host, model)
+                broadcast_activity(host, full, "failed", f"{host} failed ({e})")
                 all_failed.append(host)
                 continue
 
             if resp.status_code != 200:
                 log.debug(f"  ✗ {tag}  (status {resp.status_code})")
                 add_bad(host, model)
+                broadcast_activity(host, full, "failed", f"{host} returned {resp.status_code}")
                 all_failed.append(host)
                 continue
 
@@ -1170,6 +1250,7 @@ class Handler(BaseHTTPRequestHandler):
             if not first_line:
                 log.debug(f"  ✗ {tag}  (empty response)")
                 add_bad(host, model)
+                broadcast_activity(host, full, "failed", f"{host} empty response")
                 all_failed.append(host)
                 continue
 
@@ -1178,18 +1259,21 @@ class Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 log.debug(f"  ✗ {tag}  (bad response)")
                 add_bad(host, model)
+                broadcast_activity(host, full, "failed", f"{host} bad response")
                 all_failed.append(host)
                 continue
 
             if "error" in first:
                 log.debug(f"  ✗ {tag}  (error: {first['error']})")
                 add_bad(host, model)
+                broadcast_activity(host, full, "failed", f"{host} error: {first['error']}")
                 all_failed.append(host)
                 continue
 
             log.debug(f"  ✓ {tag}")
             LAST_SUCCESS[model] = host
             add_good(host, model)
+            broadcast_activity(host, full, "connected", f"connected to {host}")
 
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
