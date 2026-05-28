@@ -166,13 +166,13 @@ tester() {
             start_time=$(date +%s.%N)
             model=${model%% *}
 
-            running="$(curl -s $host/api/ps | jq -r '.models[].name' | tr '\n' ' ' | tr -d ' ')"
-            if [[ -n "$running" && "$running" != "$model" ]]; then
-                echo " $host" > /dev/stderr
+            running="$(curl -s $host/api/ps | jq -r '.models[].name' | tr '\n' ' ' )"
+            if [[ -n "$running" && "$running" =~ /$model/ ]]; then
+                echo "  $host" > /dev/stderr
                 echo "    ╰─ Running: <$running> (wanted <$model>)" > /dev/stderr
                 continue
             else
-                timeout "$_timeout"s $tester --timeout "$_timeout" -u $host -m $model "respond with the single word 'test'" </dev/null > "$_cache/free-ollama.test" 2>&1
+                LOGLEVEL=INFO timeout "$_timeout"s $tester --timeout "$_timeout" -u $host -m $model "respond with the single word 'test'" </dev/null > "$_cache/free-ollama.test" 2>&1
                 end_time=$(date +%s.%N)
                 timing=$( echo "$end_time - $start_time" | bc )
             fi
@@ -192,10 +192,17 @@ tester() {
                 fi
 
                 printf "%s %s#m=%s\n" ${timing:0:4} $host $model
-               
+                OLLAMA_HOST=$host ollama ps
+                echo
             else 
                 echo " 🐡 Not friendly! $host#m=$model" > /dev/stderr
-                echo "    ╰─ " $(jq -r .data.response.payload.error.message "$_cache/free-ollama.test")  > /dev/stderr
+
+                {
+                    [[ -s "$_cache/free-ollama.test" ]] && \
+                        echo "    ╰─ " $(jq -r .data.response.payload.error.message "$_cache/free-ollama.test") 
+
+                } > /dev/stderr
+
                 [[ -n "$host" && -n "$model" ]] && echo "$host $model" >> "$_bad"
             fi
         done
@@ -251,31 +258,38 @@ else
     model=
     while [ $# -gt 0 ]; do
         case $1 in
-            --exec)
+            --exec)     # run a command
               shift
               export OLLAMA_HOST="${@: -1}"
               ollama ${@:1:$#-1} 
               exit 0
               ;;
-            --serve)
+            --serve)    # start the dyva server
               ./dyva || ./dyva --port 0
               ;;
-            --timeout)
+            --timeout)  # set a timeout
               shift
               _timeout=$1 ;;
-            --host) _host=1 ;;
-            --mas)  _host=1 _mas=1 ;;
-            --info) info=1 ;;
-            --proxy) proxy $2 ;;
-            --update|--refresh) 
+            --host)     # Report just the host
+                _host=1 ;;
+            --mas)      # Report just the host in mas format
+                _host=1 _mas=1 ;;
+            --info)     # Run info on the model
+                info=1 ;;
+            --proxy)    # Try to proxy matching ones
+                proxy $2 ;;
+            --refresh)  # Refresh the cache
+              cache 1
               truncate -s 0 "$_bad"
-              cache 1; 
-              echo "Ahh! How refreshing";;
-            --help) $(command -v batcat || echo cat) "$0" ;;
-            --smoke) dotest=1 dosmoke=1 ;;
-            --test)  dotest=1 ;;
+              echo "Ahh! How refreshing" ;;
+            --smoke)    # See what's running
+                dotest=1 dosmoke=1 ;;
+            --test)     # Try to load a model maybe? 
+                dotest=1 ;;
+            --*) grep -- "  --" "$0" ;;
             *[A-Za-z:]*) process_stack | tester; model=$1 ;;
             [0-9]*) index+=( "$1" ) ;;
+
         esac
         shift
     done
