@@ -168,11 +168,15 @@ def find_servers(sub):
     return matched
 
 
+_sort_toggle=False
 def all_models():
     """Return deduplicated list of all models across all servers."""
+    global _sort_toggle
     servers = load_servers()
     seen = {}
     out = []
+    _sort_toggle = not _sort_toggle
+
     for s in servers:
         for m in s.get("models", []):
             if ":cloud" in m or len(m) == 0:
@@ -181,7 +185,14 @@ def all_models():
                 seen[m] = {'id': m, 'count': 1}
             else:
                 seen[m]['count'] += 1
-    return list(sorted(seen.values(), key=lambda x: x.get('count')))
+
+    # ollama ls doesn't really have sort so we just toggle the order
+    if _sort_toggle:
+        sorty = sorted(seen.values(), key=lambda x: x.get('count'))
+    else:
+        sorty = sorted(seen.values(), key=lambda x: x.get('id').lower())
+
+    return list(sorty)
 
 
 def to_ollama(body):
@@ -402,6 +413,14 @@ class Handler(BaseHTTPRequestHandler):
                 "data": models
             })
             return
+
+        if getattr(self, 'head_request', False):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", 0)
+            self.end_headers()
+            return
+
         if self.path in ("/", "/dashboard"):
             bad = load_bad()
             good = load_good()
@@ -448,9 +467,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            if not getattr(self, 'head_request', False):
-                self.wfile.write(body)
+            self.wfile.write(body)
             return
+
         if self.path == "/api/tags":
             graffiti = [
                 ":::::::-.  ",
@@ -613,8 +632,6 @@ class Handler(BaseHTTPRequestHandler):
                 "          ",
                 "          "]
 
-
-
             models = all_models()
             now = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.localtime(time.time() - (7 * 24 * 60 * 60)))
             self.send_json({
@@ -638,9 +655,11 @@ class Handler(BaseHTTPRequestHandler):
                 ],
             })
             return
+
         if self.path == "/api/version":
             self.send_json({"version": "0.5.0"})
             return
+
         if self.path == "/api/activity":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -677,6 +696,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model_info": {},
             })
             return
+
         static_path = os.path.join(os.path.dirname(__file__), "static", self.path.lstrip("/"))
         if os.path.exists(static_path) and os.path.isfile(static_path):
             data = open(static_path, "rb").read()
