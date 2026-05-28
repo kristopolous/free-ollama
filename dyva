@@ -52,20 +52,28 @@ def unlisten_activity(q):
             _activity_listeners.remove(q)
 
 
+def refresh_cache():
+    """Force a refresh of the server cache."""
+    global _servers_cache, _bad_cache, _good_cache
+    _servers_cache = None
+    _bad_cache = None
+    _good_cache = None
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    log.debug("Refreshing server cache...")
+    script = os.path.join(os.path.dirname(__file__), "free-ollama")
+    if not os.path.exists(script):
+        script = "free-ollama"
+    subprocess.run([script], capture_output=True, timeout=120)
+
 def ensure_cache():
     """Download the latest server list if cache is missing or >24h old."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
     need = False
     if not os.path.exists(CACHE_FILE) or os.path.getsize(CACHE_FILE) == 0:
         need = True
     elif time.time() - os.path.getmtime(CACHE_FILE) > 86400:
         need = True
     if need:
-        log.debug("Refreshing server cache...")
-        script = os.path.join(os.path.dirname(__file__), "free-ollama")
-        if not os.path.exists(script):
-            script = "free-ollama"
-        subprocess.run([script], capture_output=True, timeout=120)
+        refresh_cache()
 
 
 def load_servers():
@@ -444,17 +452,99 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             return
         if self.path == "/api/tags":
+            graffiti = [
+                ":::::::-.  ",
+                " ;;,   `';,",
+                " `[[     [[",
+                "  $$,    $$",
+                "  888_,o8P'",
+                "  MMMMP'`  ",
+                " ...    :::",
+                " ;;     ;;;",
+                "[['     [[[",
+                "$$      $$$",
+                "88    .d888",
+                " 'YmmMMMM''",
+                ".        : ",
+                ";;,.    ;;;",
+                "[[[[, ,[[[[",
+                "$$$$$$$$'$$",
+                "888 Y88' 88",
+                "MMM  M'  'M",
+                "::::::::::.",
+                " `;;;```.;;",
+                "  `]]nnn]]'",
+                "   $$$''   ",
+                "   888o    ",
+                "   YMMMb   ",
+                " .::::::. ",
+                ";;;`    ` ",
+                "'[==/[[[[,",
+                "  '''    $",
+                " 88b    dP",
+                "  'YMmMY' ",
+                ":::::::::::",
+                ";;;;;;;;'''",
+                "     [[    ",
+                "     $$    ",
+                "     88,   ",
+                "     MMM   ",
+                ".,::::::  ",
+                ";;;;''''  ",
+                " [[cccc   ",
+                " $$''''   ",
+                " 888oo,__ ",
+                " ''''YUMMM",
+                ":::::::..  ",
+                ";;;;``;;;; ",
+                " [[[,/[[[' ",
+                " $$$$$$c   ",
+                " 888b '88bo",
+                " MMMM   'W'",
+                "           ",
+                "           ",
+                ":::::::-.  ",
+                " ;;,   `';,",
+                " `[[     [[",
+                "  $$,    $$",
+                "  888_,o8P'",
+                "  MMMMP'`  ",
+                ".-:.     ::",
+                " ';;.   ;;;",
+                "   '[[,[[['",
+                "     c$$'  ",
+                "   ,8P'`   ",
+                "  mM'      ",
+                ":::      .:",
+                "';;,   ,;;;",
+                " \\[[  .[[/ ",
+                "  Y$c.$$'  ",
+                "   Y88P    ",
+                "    MP     ",
+                "  :::.     ",
+                "  ;;`;;    ",
+                " ,[[ '[[,  ",
+                "c$$$cc$$$c ",
+                " 888   888,",
+                " YMM   ''` ",
+                "           ",
+                "           ",
+                "  -~===~-  ",
+                "           ",
+                "           "]
+
+
+
             models = all_models()
-            now = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime())
-            dummy_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            now = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.localtime(time.time() - (7 * 24 * 60 * 60)))
             self.send_json({
                 "models": [
                     {
-                        "name": m["id"],
-                        "model": m["id"],
+                        "name": models[m]["id"],
+                        "model": models[m]["id"],
                         "modified_at": now,
-                        "size": 1,
-                        "digest": dummy_digest,
+                        "size": models[m]['count'],
+                        "digest": f"{graffiti[m % len(graffiti)]}       000000000000000000000000000000000000000000000000000000",
                         "details": {
                             "parent_model": "",
                             "format": "gguf",
@@ -464,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
                             "quantization_level": "",
                         },
                     }
-                    for m in models
+                    for m in range(len(models))
                 ],
             })
             return
@@ -491,6 +581,12 @@ class Handler(BaseHTTPRequestHandler):
                         break
             finally:
                 unlisten_activity(q)
+            return
+
+        if self.path == "/refresh":
+            broadcast_activity("", "", "searching", "refreshing server cache...")
+            refresh_cache()
+            self.send_json({"status": "ok", "message": "cache refreshed"})
             return
 
         if self.path == "/api/show":
