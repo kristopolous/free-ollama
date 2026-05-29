@@ -6,34 +6,36 @@
 <title>Dumpster Dive</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5;color:#222;padding:20px}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px}
 .header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
 .header img{flex-shrink:0}
 .header-text h1{font-size:1.5rem;margin-bottom:2px}
-.header-text .sub{color:#666;font-size:.85rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-.card{background:#fff;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.1);max-height:70vh;overflow-y:auto}
-.card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#666;margin-bottom:10px}
+.header-text .sub{color:#999;font-size:.85rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:12px}
+.card{background:#1e1e1e;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.4);max-height:70vh;overflow-y:auto}
+.card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
 
 .status-line{padding:2px 0;font-size:.78rem}
 .status-searching{color:#888}
-.status-trying{color:#66a}
-.status-connected{color:#282}
+.status-trying{color:#77a}
+.status-connected{color:#4a4}
 .status-failed{color:#c33}
-.content-line{padding:2px 0;color:#222}
-.done-line{color:#888;font-style:italic}
-input[type=text]{width:100%;padding:6px 8px;margin-bottom:8px;border:1px solid #ddd;border-radius:4px;font-size:.85rem;outline:none}
+.content-line{padding:2px 0;color:#ccc}
+.done-line{color:#666;font-style:italic}
+input[type=text]{width:100%;padding:6px 8px;margin-bottom:8px;border:1px solid #444;border-radius:4px;font-size:.85rem;outline:none;background:#2a2a2a;color:#eee}
 input[type=text]:focus{border-color:#888}
-.model-item{padding:6px 0;border-bottom:1px solid #eee;font-size:.85rem;display:flex;justify-content:space-between}
+.model-item{padding:6px 0;border-bottom:1px solid #333;font-size:.85rem;display:flex;justify-content:space-between}
 .model-item:last-child{border:none}
 .model-name{font-family:ui-monospace,monospace;font-size:.82rem}
 .model-count{color:#888}
-.host-name{font-family:ui-monospace,monospace;font-size:.82rem;color:#555;overflow-wrap:break-word;flex:1}
-.host-model{font-family:ui-monospace,monospace;font-size:.82rem;color:#999}
+#modelList .model-item{cursor:pointer;transition:background .1s}
+#modelList .model-item:hover{background:#2a2a3a}
+.host-name{font-family:ui-monospace,monospace;font-size:.82rem;color:#bbb;overflow-wrap:break-word;flex:1}
+.host-model{font-family:ui-monospace,monospace;font-size:.82rem;color:#777}
 .badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.75rem;margin-left:6px}
-.bad{background:#fee;color:#c33}
-.good{background:#efe;color:#282}
-.more{font-size:.8rem;color:#999;margin-top:6px}
+.bad{background:#3a1a1a;color:#e55}
+.good{background:#1a3a1a;color:#4a4}
+.more{font-size:.8rem;color:#666;margin-top:6px}
 </style>
 </head>
 <body>
@@ -41,12 +43,12 @@ input[type=text]:focus{border-color:#888}
 <img src="/dyva.avif" alt="" width="48" height="48">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub">port __PORT__ &middot; POOL_SIZE __POOL_SIZE__ &middot; TIMEOUT __TIMEOUT__s &middot; __SERVER_COUNT__ servers &middot; __MODEL_COUNT__ models</p>
+<p class="sub">port __PORT__ &middot; POOL_SIZE __POOL_SIZE__ &middot; TIMEOUT __TIMEOUT__s &middot; __SERVER_COUNT__ servers &middot; __MODEL_COUNT__ models &middot; cache __CACHE_UPDATED__ <a href="/refresh-cache" id="refreshCache" style="font-size:.75rem;font-weight:normal;color:#66a;cursor:pointer;text-decoration:none">[ update cache ]</a></p>
 </div>
 </div>
 <div class="grid">
 
-<div class="card" style="max-height:none">
+<div class="card">
 <h2>Activity</h2>
 <div id="activityList"></div>
 </div>
@@ -76,8 +78,13 @@ __BAD_ROWS__
 </div>
 __BAD_MORE__
 </div>
+<div class="card" id="hostCard" style="display:none">
+<h2 id="hostCardTitle">Hosts</h2>
+<div id="hostList"></div>
 </div>
-<div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#66a" href="https://github.com/kristopolous/free-ollama">obviously open source</a></div>
+</div>
+<div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#77a" href="https://github.com/kristopolous/free-ollama">obviously open source</a></div>
+<script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
 <script>
 var evtSource=new EventSource('/api/activity');
 evtSource.onmessage=function(e){try{var d=JSON.parse(e.data);if(!d.message)return;var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;p.textContent=d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
@@ -85,6 +92,10 @@ evtSource.onmessage=function(e){try{var d=JSON.parse(e.data);if(!d.message)retur
 <script>
 function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
 document.getElementById('clearBad').addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/clear-bad');x.onload=function(){location.reload()};x.send()})
+document.getElementById('refreshCache').addEventListener('click',function(e){e.preventDefault();var x=new XMLHttpRequest();x.open('GET','/refresh-cache');x.onload=function(){location.reload()};x.send()})
+
+var modelHosts=JSON.parse(document.getElementById('modelHostsData').textContent);
+document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('#modelList .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';var name=this.getAttribute('data-name');var hosts=modelHosts[name]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=name+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';d.textContent=h;list.appendChild(d)})})})
 </script>
 </body>
 </html>

@@ -428,6 +428,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if self.path == "/refresh-cache":
+            refresh_cache()
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
 
         if getattr(self, 'head_request', False):
             self.send_response(200)
@@ -446,9 +452,9 @@ class Handler(BaseHTTPRequestHandler):
                 html = f.read()
             model_rows = "".join(
                 f'<div class="model-item" data-name="{m["id"]}"><span class="model-name">{m["id"]}</span><span class="model-count">{m["count"]}</span></div>'
-                for m in models[:200]
+                for m in models
             )
-            model_more = f'<div class="more">... and {len(models) - 200} more</div>' if len(models) > 200 else ""
+            model_more = ""
             last_rows = "".join(
                 f'<div class="model-item"><span class="host-name">{host}</span><span class="host-model">{model}</span></div>'
                 for model, host in list(LAST_SUCCESS.items())[:20]
@@ -463,11 +469,14 @@ class Handler(BaseHTTPRequestHandler):
                 for h in sorted(bad)[:30]
             )
             bad_more = f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else ""
+            cache_mtime = os.path.getmtime(CACHE_FILE) if os.path.exists(CACHE_FILE) else 0
+            cache_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cache_mtime)) if cache_mtime else "never"
             html = html.replace("__PORT__", str(PORT))
             html = html.replace("__POOL_SIZE__", str(POOL_SIZE))
             html = html.replace("__TIMEOUT__", str(TIMEOUT))
             html = html.replace("__SERVER_COUNT__", str(len(servers)))
             html = html.replace("__MODEL_COUNT__", str(len(models)))
+            html = html.replace("__CACHE_UPDATED__", cache_time)
             html = html.replace("__MODEL_ROWS__", model_rows)
             html = html.replace("__MODEL_MORE__", model_more)
             html = html.replace("__LAST_ROWS__", last_rows)
@@ -477,6 +486,16 @@ class Handler(BaseHTTPRequestHandler):
             html = html.replace("__BAD_COUNT__", str(len(bad)))
             html = html.replace("__BAD_ROWS__", bad_rows)
             html = html.replace("__BAD_MORE__", bad_more)
+            model_hosts = {}
+            for s in servers:
+                host = s.get("server", "")
+                for m in s.get("models", []):
+                    if ":cloud" in m or len(m) == 0:
+                        continue
+                    model_hosts.setdefault(m, []).append(host)
+            for m in model_hosts:
+                model_hosts[m].sort()
+            html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
             body = html.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
