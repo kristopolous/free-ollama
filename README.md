@@ -26,6 +26,14 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ## Method 1: Liberated Infrastructure
 
+Try the demo server:
+
+```shell
+$ OLLAMA_HOST=http://9ol.es:11434 ollama ls
+```
+
+Try a model out, go ahead!
+
 **Dyva** is a managed proxy that you can connect to with any openai compatible client. 
 
 It will cycle through and find working hosts automatically. 
@@ -34,7 +42,7 @@ You can even specify models in partial forms and with globs such as "qwen*27b" o
 
 You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
 
-Here's the web interface so you can see the status while you're running it.
+Here's the web interface so you can see the status while you're running it. [I'm running it right now](http://9ol.es:11434/)
 
 <img width="1293" alt="2026-05-25_04-19" src="https://github.com/user-attachments/assets/887e8d65-dafb-4c37-a4b8-b721ec1bef43" />
 
