@@ -1,6 +1,6 @@
 [project]
-name = "freeopenai"
-version = "0.0.1"
+name = "dyva"
+version = "0.1.0"
 description = "OpenAI-compatible proxy that routes to free Ollama servers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-freeopenai = "freeopenai:main"
+dyva = "dyva:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

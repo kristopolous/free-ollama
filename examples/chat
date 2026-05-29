@@ -21,7 +21,7 @@ def main():
     pool = args.poolsize
 
     port = free_port()
-    script = os.path.join(os.path.dirname(__file__), "..", "freeopenai")
+    script = os.path.join(os.path.dirname(__file__), "..", "dyva")
 
     srv = subprocess.Popen(
         [script, str(port)],
