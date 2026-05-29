@@ -32,7 +32,7 @@ Try the demo server:
 $ OLLAMA_HOST=http://9ol.es:11434 ollama ls
 ```
 
-Interested? Continue reading!
+Try a model out, go ahead!
 
 **Dyva** is a managed proxy that you can connect to with any openai compatible client. 
 
