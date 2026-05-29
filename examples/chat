@@ -21,10 +21,8 @@ def main():
     pool = args.poolsize
 
     port = free_port()
-    script = os.path.join(os.path.dirname(__file__), "..", "dyva")
-
     srv = subprocess.Popen(
-        [script, str(port)],
+        [sys.executable, "-m", "dyva", str(port)],
         stdout=subprocess.DEVNULL, stderr=None,
         env={**os.environ, "TIMEOUT": "30", "POOL_SIZE": str(pool)},
     )
