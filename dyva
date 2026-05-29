@@ -108,6 +108,13 @@ def add_bad(host, model):
     if _bad_cache is not None:
         _bad_cache.add(f"{host} {model}")
 
+def clear_bad():
+    """Clear all bad hosts."""
+    global _bad_cache
+    _bad_cache = None
+    if os.path.exists(BAD_FILE):
+        os.remove(BAD_FILE)
+
 
 def load_good():
     """Return set of 'host model' keys that have succeeded."""
@@ -402,6 +409,13 @@ class Handler(BaseHTTPRequestHandler):
                 "data": models
             })
             return
+        if self.path == "/clear-bad":
+            clear_bad()
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
         if self.path in ("/", "/dashboard"):
             bad = load_bad()
             good = load_good()
@@ -819,6 +833,73 @@ class Handler(BaseHTTPRequestHandler):
         do_stream = body.get("stream", False)
         log.debug(f"Ollama generate request: model={model}, stream={do_stream}")
 
+        last_host = LAST_SUCCESS.get(model)
+        if last_host:
+            servers = find_servers(model)
+            matched = [s for s in servers if s[2] == last_host]
+            if matched:
+                log.debug(f"  trying last successful: {last_host}")
+                host = last_host
+                full = matched[0][3][0]
+                tag = f"{host} {full}"
+                payload = dict(body, model=full)
+                try:
+                    resp = requests.post(f"{host}/api/generate", json=payload,
+                                         timeout=TIMEOUT, stream=do_stream)
+                except Exception as e:
+                    log.debug(f"  ✗ {tag}  (exception: {e})")
+                    add_bad(host, model)
+                else:
+                    if resp.status_code == 200:
+                        if not do_stream:
+                            data = resp.json()
+                            if "error" not in data:
+                                log.debug(f"  ✓ {tag}")
+                                LAST_SUCCESS[model] = host
+                                add_good(host, model)
+                                self.send_json(data, 200)
+                                return
+                        else:
+                            it = resp.iter_lines()
+                            first_line = None
+                            for line in it:
+                                if not line:
+                                    continue
+                                first_line = line
+                                break
+                            if first_line:
+                                try:
+                                    first = json.loads(first_line)
+                                except json.JSONDecodeError:
+                                    first = None
+                                if first and "error" not in first:
+                                    log.debug(f"  ✓ {tag}")
+                                    LAST_SUCCESS[model] = host
+                                    add_good(host, model)
+                                    self.send_response(200)
+                                    self.send_header("Content-Type", "application/x-ndjson")
+                                    self.send_header("Cache-Control", "no-cache")
+                                    self.end_headers()
+                                    self.wfile.flush()
+                                    self.wfile.write(first_line + b"\n")
+                                    self.wfile.flush()
+                                    for line in it:
+                                        if not line:
+                                            continue
+                                        try:
+                                            self.wfile.write(line + b"\n")
+                                            obj = json.loads(line)
+                                            if obj.get("done"):
+                                                self.wfile.flush()
+                                                self.close_connection = True
+                                                return
+                                        except (BrokenPipeError, ConnectionResetError, OSError):
+                                            log.debug("Client disconnected during stream")
+                                            return
+                                    self.close_connection = True
+                                    return
+                    add_bad(host, model)
+
         servers = find_servers(model)
         if not servers:
             self.send_json(err_obj(f"no available servers for '{model}'", "model_not_found"), 404)
@@ -1217,6 +1298,7 @@ class Handler(BaseHTTPRequestHandler):
             if err[0]:
                 log.debug(f"  ✗ {host} {full}  (exception: {err[0]})")
                 broadcast_activity(host, full, "failed", f"{host} failed ({err[0]})")
+                add_bad(host, model)
                 if send_status:
                     self.wfile.write(
                         sse_status(host, full, f"trying {host}... failed ({err[0]})", "failed").encode()
@@ -1277,6 +1359,7 @@ class Handler(BaseHTTPRequestHandler):
                 for resp in active:
                     host, _ = active[resp]
                     log.debug(f"Closing connection to {host}")
+                    add_bad(host, model)
                     resp.close()
                 log.debug("All servers failed")
                 tried = ", ".join(active.values()) if active else "none"
@@ -1354,6 +1437,7 @@ class Handler(BaseHTTPRequestHandler):
                     failed_host, failed_full = active[failed_resp]
                     log.debug(f"  ✗ {failed_host}  (failed: {err_msg})")
                     broadcast_activity(failed_host, failed_full, "failed", f"{failed_host} failed ({err_msg})")
+                    add_bad(failed_host, model)
                     if send_status:
                         try:
                             self.wfile.write(
