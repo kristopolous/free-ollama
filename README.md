@@ -40,6 +40,14 @@ It will cycle through and find working hosts automatically.
 
 You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable.
 
+Run it yourself:
+
+```shell
+$ uvx dyva
+```
+
+Yeah, 4 letters. I got that. In 2026.
+
 You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
 
 Here's the web interface so you can see the status while you're running it. [I'm running it right now](http://9ol.es:11434/)
