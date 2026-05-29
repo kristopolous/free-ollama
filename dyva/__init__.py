@@ -16,13 +16,12 @@ CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
+LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 POOL_SIZE = int(os.environ.get("POOL_SIZE", "3"))
-LAST_SUCCESS = {}  # model -> (host_url, full_model_name)
+_last_cache = None
 
-# The LAST_SUCCESS cache stores (host, full_model_name) so the second request
-# for the same model can try that host DIRECTLY without calling find_servers()
-# (which triggers a slow cache refresh and full server list filter/sort).
-# Only if the stored host fails do we fall through to the full search.
+# LAST_SUCCESS is managed through accessors (get_last/set_last) and persisted
+# to LAST_FILE as {model: {host, full, ctime, count}}.
 
 PORT = int(os.environ.get("PORT", "11434"))
 TIMEOUT = 30
@@ -146,6 +145,44 @@ def add_good(host, model):
             _good_cache.add(key)
 
 
+def load_last():
+    """Load LAST_SUCCESS cache from disk into _last_cache."""
+    global _last_cache
+    if os.path.exists(LAST_FILE):
+        with open(LAST_FILE) as f:
+            _last_cache = json.load(f)
+    else:
+        _last_cache = {}
+
+def save_last():
+    """Persist _last_cache to disk."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(LAST_FILE, "w") as f:
+        json.dump(_last_cache, f)
+
+def get_last(model):
+    """Return (host, full) for model's last-successful server, or None."""
+    if _last_cache is None:
+        load_last()
+    entry = _last_cache.get(model)
+    if entry:
+        return (entry["host"], entry["full"])
+    return None
+
+def set_last(model, host, full):
+    """Record last-successful server for model, persisting both ctime and count."""
+    if _last_cache is None:
+        load_last()
+    now = time.time()
+    existing = _last_cache.get(model)
+    if existing and existing.get("host") == host:
+        existing["ctime"] = now
+        existing["count"] = existing.get("count", 0) + 1
+    else:
+        _last_cache[model] = {"host": host, "full": full, "ctime": now, "count": 1}
+    save_last()
+
+
 def match_model(model_name, pattern):
     """Return True if model_name contains pattern, supporting fnmatch wildcards."""
     if any(c in pattern for c in "*?["):
@@ -175,7 +212,7 @@ def find_servers(sub):
         if key in bad:
             continue
         is_good = key in good
-        _last = LAST_SUCCESS.get(sub)
+        _last = get_last(sub)
         is_last = _last is not None and host == _last[0]
         matched.append((s.get("tps", 0), -2 if is_last else (-1 if is_good else 0), host, ms))
     matched.sort(key=lambda x: (x[1], x[0]))
@@ -392,42 +429,10 @@ def _try_all(servers, model, opayload):
         if "error" in data:
             add_bad(host, model)
             continue
-        LAST_SUCCESS[model] = (host, full)
+        set_last(model, host, full)
         add_good(host, model)
         return host, data
     return None, None
-    """Race the given servers in parallel; return (winning_host, resp, errors)."""
-    q = Queue()
-    done = threading.Event()
-    conn_errors = []
-    serv_errors = []
-    broadcast_activity("", sub, "searching", f"searching {len(servers)} servers for {sub}...")
-    for _, _, host, ms in servers:
-        full = ms[0]
-        p = dict(payload, model=full)
-        t = threading.Thread(target=try_host, args=(full, host, p, q, done))
-        t.start()
-    pairs = [f"{h} {m[0]}" for (_, _, h, m) in servers]
-    log.debug(f"  trying {sub} on {', '.join(pairs)}")
-    remaining = len(servers)
-    while remaining > 0:
-        try:
-            result = q.get(timeout=TIMEOUT + 5)
-        except Empty:
-            break
-        remaining -= 1
-        tag = result[0]
-        if tag == "ok":
-            done.set()
-            LAST_SUCCESS[sub] = result[1]
-            add_good(result[1], sub)
-            return result[1], result[2], conn_errors + serv_errors
-        if tag == "conn":
-            conn_errors.append(result[1])
-        if tag == "serv":
-            serv_errors.append(result[1])
-    done.set()
-    return None, None, conn_errors + serv_errors
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -475,6 +480,7 @@ class Handler(BaseHTTPRequestHandler):
             bad = load_bad()
             good = load_good()
             servers = load_servers()
+            load_last()
             models = sorted(all_models(), key=lambda x: -x["count"])
             tpl_dir = os.path.join(os.path.dirname(__file__), "static")
             with open(os.path.join(tpl_dir, "dashboard.html")) as f:
@@ -485,9 +491,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             model_more = ""
             last_rows = "".join(
-                f'<div class="model-item"><span class="host-name">{host}</span><span class="host-model">{model}</span></div>'
-                for model, (host, _full) in list(LAST_SUCCESS.items())[:20]
-            ) if LAST_SUCCESS else '<div style="color:#999;font-size:.85rem">None</div>'
+                f'<div class="model-item"><span class="host-name">{entry["host"]}</span><span class="host-model">{model}</span></div>'
+                for model, entry in list(_last_cache.items())[:20]
+            ) if _last_cache else '<div style="color:#999;font-size:.85rem">None</div>'
             good_rows = "".join(
                 f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
                 for h in sorted(good)[:30]
@@ -826,12 +832,12 @@ class Handler(BaseHTTPRequestHandler):
         Proxy a chat request to an Ollama backend.
 
         Strategy:
-          1. If LAST_SUCCESS[model] is set, try that (host, full_model) DIRECTLY
+          1. If get_last(model) returns a hit, try that (host, full_model) DIRECTLY
              — skip find_servers() to avoid a slow cache refresh.
           2. If that fails (or no cache), fall through to find_servers() and try
              sequentially until one works.
         """
-        last = LAST_SUCCESS.get(model)
+        last = get_last(model)
         if last:
             last_host, last_full = last
             log.debug(f"Reusing {last_host} for {model}")
@@ -890,7 +896,7 @@ class Handler(BaseHTTPRequestHandler):
         do_stream = body.get("stream", False)
         log.debug(f"Ollama generate request: model={model}, stream={do_stream}")
 
-        last = LAST_SUCCESS.get(model)
+        last = get_last(model)
         if last:
             last_host, last_full = last
             tag = f"{last_host} {last_full}"
@@ -907,7 +913,7 @@ class Handler(BaseHTTPRequestHandler):
                         data = resp.json()
                         if "error" not in data:
                             log.debug(f"  ✓ {tag}")
-                            LAST_SUCCESS[model] = (last_host, last_full)
+                            set_last(model, last_host, last_full)
                             add_good(last_host, model)
                             self.send_json(data, 200)
                             return
@@ -926,7 +932,7 @@ class Handler(BaseHTTPRequestHandler):
                                 first = None
                             if first and "error" not in first:
                                 log.debug(f"  ✓ {tag}")
-                                LAST_SUCCESS[model] = (last_host, last_full)
+                                set_last(model, last_host, last_full)
                                 add_good(last_host, model)
                                 self.send_response(200)
                                 self.send_header("Content-Type", "application/x-ndjson")
@@ -987,7 +993,7 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 tried = len(all_failed) + 1
                 log.debug(f"  ✓ {tag}")
-                LAST_SUCCESS[model] = (host, full)
+                set_last(model, host, full)
                 add_good(host, model)
                 broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
                 self.send_json(data, 200)
@@ -1023,7 +1029,7 @@ class Handler(BaseHTTPRequestHandler):
 
             tried = len(all_failed) + 1
             log.debug(f"  ✓ {tag}")
-            LAST_SUCCESS[model] = (host, full)
+            set_last(model, host, full)
             add_good(host, model)
             broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
 
@@ -1078,7 +1084,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
         log.debug(f"  ✓ {tag}")
-        LAST_SUCCESS[model] = (host, full_model)
+        set_last(model, host, full_model)
         add_good(host, model)
         return data
 
@@ -1137,7 +1143,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
         log.debug(f"  ✓ {tag}")
-        LAST_SUCCESS[model] = (host, full)
+        set_last(model, host, full)
         add_good(host, model)
         broadcast_activity(host, full, "connected", f"connected to {host}")
 
@@ -1223,7 +1229,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
         log.debug(f"  ✓ {tag}")
-        LAST_SUCCESS[model] = (host, full)
+        set_last(model, host, full)
         add_good(host, model)
         broadcast_activity(host, full, "connected", f"connected to {host}")
 
@@ -1325,7 +1331,7 @@ class Handler(BaseHTTPRequestHandler):
 
             tried = len(all_failed) + 1
             log.debug(f"  ✓ {tag}")
-            LAST_SUCCESS[model] = (host, full)
+            set_last(model, host, full)
             add_good(host, model)
             broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
             self._sse_status(send_status, host, full, f"served {model}: {tried}/{len(servers)} servers", "connected")
@@ -1434,7 +1440,7 @@ class Handler(BaseHTTPRequestHandler):
 
             tried = len(all_failed) + 1
             log.debug(f"  ✓ {tag}")
-            LAST_SUCCESS[model] = (host, full)
+            set_last(model, host, full)
             add_good(host, model)
             broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
 

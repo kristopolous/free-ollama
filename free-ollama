@@ -139,7 +139,7 @@ tester() {
             elif ! command curl > /dev/null 2>&1; then
                 tester=curly
             else
-                echo "You need llcat or uv or curl to test."
+                echo "You need llcat, uv or curl to test."
                 echo
                 echo "First of all, what the fuck is wrong with you? Is this how you live?"
                 echo
