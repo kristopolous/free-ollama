@@ -131,6 +131,21 @@ $
 ```
 Kinda old. Alright.
 
+```shell
+
+$ ./free-ollama --help
+    --exec)     # Run a command
+    --serve)    # Start the dyva server
+    --timeout)  # Set the timeout
+    --host)     # Report just the host
+    --mas)      # Report just the host in MAS format
+    --info)     # Run info on the model
+    --proxy)    # Try to proxy matching ones
+    --refresh)  # Refresh the cache
+    --smoke)    # See what's running
+    --test)     # Try to load a model maybe?
+```
+
 ## Output Format
 
 There's multiple!
