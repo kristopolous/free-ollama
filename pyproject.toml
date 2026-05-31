@@ -11,6 +11,9 @@ dependencies = [
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.package-data]
+dyva = ["static/*"]
+
 [project.scripts]
 dyva = "dyva:main"
 
