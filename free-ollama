@@ -109,16 +109,21 @@ process_stack() {
         fi
     fi
 
-    jq -r 'map(
-       select( .models 
-               and (.models | contains(["'$model'"]))
-               and (.models | all(contains(":cloud") | not))
-               '"$nocloud"'
-           )
-       ) 
-       | sort_by(.tps) 
-       | .['$(IFS=,; echo "${index[*]}")'] 
-       | '"$out" "$_db"
+    {
+      jq -r 'map(
+         select( .models 
+                 and (.models | contains(["'$model'"]))
+                 and (.models | all(contains(":cloud") | not))
+                 '"$nocloud"'
+             )
+         ) 
+         | sort_by(.tps) 
+         | .['$(IFS=,; echo "${index[*]}")'] 
+         | '"$out" "$_db"
+    } | {
+      [[ -n "$_host" ]] && sed 's/\/v1//g' || cat
+    }
+
 
    index=()
 }
