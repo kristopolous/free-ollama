@@ -9,7 +9,7 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 log = logging.getLogger("dumpster-dive")
-from socketserver import ThreadingMixIn
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue, Empty
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
@@ -17,7 +17,7 @@ CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
-POOL_SIZE = int(os.environ.get("POOL_SIZE", "3"))
+WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "3"))
 _last_cache = None
 
 # LAST_SUCCESS is managed through accessors (get_last/set_last) and persisted
@@ -190,12 +190,21 @@ def match_model(model_name, pattern):
     return pattern in model_name
 
 
-def find_servers(sub):
-    """Return servers that serve model matching *sub*, sorted by success history then TPS.
+def probe_host(host):
+    """Quick check: is the server idle and reachable via /api/ps? Returns True/False."""
+    try:
+        r = requests.get(f"{host}/api/ps", timeout=TIMEOUT)
+        if r.status_code != 200:
+            return False
+        data = r.json()
+        models = data.get("models", [])
+        return len(models) == 0
+    except Exception:
+        return False
 
-    Results are sorted so last-successful comes first, then known-good hosts,
-    then remaining hosts.
-    """
+
+def find_servers(sub):
+    """Return servers that serve model matching *sub*, sorted last-success then known-good then unknown."""
     servers = load_servers()
     bad = load_bad()
     good = load_good()
@@ -214,8 +223,8 @@ def find_servers(sub):
         is_good = key in good
         _last = get_last(sub)
         is_last = _last is not None and host == _last[0]
-        matched.append((s.get("tps", 0), -2 if is_last else (-1 if is_good else 0), host, ms))
-    matched.sort(key=lambda x: (x[1], x[0]))
+        matched.append((-2 if is_last else (-1 if is_good else 0), host, ms))
+    matched.sort(key=lambda x: x[0])
     return matched
 
 
@@ -310,129 +319,95 @@ def sse_str(obj):
     return f"data: {json.dumps(obj)}\n\n"
 
 
-def sse_status(host, model, message, status):
-    """Serialize a status event to SSE ``event: status`` + ``data: ...``."""
-    return f"event: status\ndata: {json.dumps({'host': host, 'model': model, 'message': message, 'status': status})}\n\n"
+def _race_servers(model, servers, payload, do_stream, endpoint="/api/chat"):
+    """Race WORKER_COUNT servers in parallel. Returns winner or None.
 
+    For non-streaming: returns (\"ok\", host, full, response_json).
+    For streaming:     returns (\"ok_stream\", host, full, first_line_bytes, first_dict, lines_iter).
+    """
+    done = threading.Event()
+    result_queue = Queue()
+    server_iter = iter(servers)
+    iter_lock = threading.Lock()
 
-def parse_json(data):
-    """Try to parse *data* as JSON, falling back to raw_decode for partial payloads."""
-    s = data.decode().strip()
+    def worker():
+        while not done.is_set():
+            with iter_lock:
+                try:
+                    _, host, ms = next(server_iter)
+                except StopIteration:
+                    return
+            full = ms[0]
+
+            if not probe_host(host):
+                add_bad(host, model)
+                continue
+
+            tag = f"{host} {full}"
+            p = dict(payload, model=full, stream=do_stream)
+            try:
+                resp = requests.post(f"{host}{endpoint}", json=p, timeout=TIMEOUT, stream=do_stream)
+            except Exception:
+                add_bad(host, model)
+                continue
+
+            if resp.status_code != 200:
+                add_bad(host, model)
+                continue
+
+            if not do_stream:
+                data = resp.json()
+                if "error" in data:
+                    add_bad(host, model)
+                    continue
+                log.debug(f"  ✓ {tag}")
+                set_last(model, host, full)
+                add_good(host, model)
+                broadcast_activity(host, full, "connected", f"connected to {host}")
+                result_queue.put(("ok", host, full, data))
+                return
+
+            # Streaming: read first chunk to validate
+            it = resp.iter_lines()
+            first_line = None
+            for line in it:
+                if not line:
+                    continue
+                first_line = line
+                break
+
+            if not first_line:
+                add_bad(host, model)
+                continue
+
+            try:
+                first = json.loads(first_line)
+            except json.JSONDecodeError:
+                add_bad(host, model)
+                continue
+
+            if "error" in first:
+                add_bad(host, model)
+                continue
+
+            log.debug(f"  ✓ {tag}")
+            set_last(model, host, full)
+            add_good(host, model)
+            broadcast_activity(host, full, "connected", f"connected to {host}")
+            result_queue.put(("ok_stream", host, full, first_line, first, it))
+            return
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(WORKER_COUNT)]
+    for t in threads:
+        t.start()
+
     try:
-        return json.loads(s)
-    except json.JSONDecodeError:
-        pass
-    try:
-        dec = json.JSONDecoder()
-        obj, _ = dec.raw_decode(s)
-        return obj
-    except Exception:
+        result = result_queue.get(timeout=TIMEOUT + 5)
+    except Empty:
         return None
 
-
-def try_host(full_model, host, payload, q, done):
-    """Try one host for non-streaming, returning result via *q*.
-
-    Puts one of ``("ok", host, resp)``, ``("conn", host)``, or
-    ``("serv", host, error)``.
-    """
-    tag = f"{host} {full_model}"
-    broadcast_activity(host, full_model, "trying", f"trying {host}...")
-    if done.is_set():
-        return
-    result = [None]
-    exc = [None]
-
-    def make_request():
-        try:
-            result[0] = requests.post(
-                f"{host}/api/chat",
-                json=payload,
-                timeout=TIMEOUT,
-            )
-        except Exception as e:
-            exc[0] = e
-
-    t = threading.Thread(target=make_request)
-    t.start()
-    t.join(timeout=TIMEOUT + 1)
-
-    if done.is_set():
-        log.debug(f"  └─ {tag}  (killed)")
-        return
-
-    if exc[0]:
-        log.debug(f"  ✗ {tag}  (exception: {exc[0]})")
-        broadcast_activity(host, full_model, "failed", f"{host} failed ({exc[0]})")
-        q.put(("conn", host))
-        return
-
-    if result[0] is None:
-        log.debug(f"  ✗ {tag}  (timeout)")
-        broadcast_activity(host, full_model, "failed", f"{host} timed out")
-        q.put(("conn", host))
-        return
-
-    if result[0].status_code != 200:
-        log.debug(f"  ✗ {tag}  (status {result[0].status_code})")
-        broadcast_activity(host, full_model, "failed", f"{host} returned {result[0].status_code}")
-        q.put(("conn", host))
-        return
-
-    out = result[0].text
-    if not out.strip():
-        log.debug(f"  ✗ {tag}  (empty response)")
-        broadcast_activity(host, full_model, "failed", f"{host} returned empty response")
-        q.put(("conn", host))
-        return
-
-    resp = parse_json(out.encode())
-    if not isinstance(resp, dict):
-        log.debug(f"  ✗ {tag}  (bad response: {out[:120]})")
-        broadcast_activity(host, full_model, "failed", f"{host} returned bad response")
-        q.put(("conn", host))
-        return
-
-    if "error" in resp:
-        log.debug(f"  ✗ {tag}  (error: {resp['error']})")
-        broadcast_activity(host, full_model, "failed", f"{host} error: {resp['error']}")
-        q.put(("serv", host, resp["error"]))
-        return
-
-    if "choices" in resp and "message" not in resp:
-        choices = resp.get("choices", [])
-        if choices:
-            msg = choices[0].get("message", {})
-            resp = {"message": msg, "done": True}
-
-    log.debug(f"  ✓ {tag}")
-    broadcast_activity(host, full_model, "connected", f"connected to {host}")
-    q.put(("ok", host, full_model, resp))
-
-
-# NOTE: fan_out removed — sequential per-server try replaces it for simplicity.
-# Re-introduce parallel racing (POOL_SIZE) here if latency becomes an issue later.
-def _try_all(servers, model, opayload):
-    """Try servers sequentially until one succeeds. Return (host, data) or (None, None)."""
-    for _, _, host, ms in servers:
-        full = ms[0]
-        payload = dict(opayload, model=full, stream=False)
-        try:
-            r = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT)
-        except Exception:
-            add_bad(host, model)
-            continue
-        if r.status_code != 200:
-            add_bad(host, model)
-            continue
-        data = r.json()
-        if "error" in data:
-            add_bad(host, model)
-            continue
-        set_last(model, host, full)
-        add_good(host, model)
-        return host, data
-    return None, None
+    done.set()
+    return result
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -507,7 +482,7 @@ class Handler(BaseHTTPRequestHandler):
             cache_mtime = os.path.getmtime(CACHE_FILE) if os.path.exists(CACHE_FILE) else 0
             cache_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cache_mtime)) if cache_mtime else "never"
             html = html.replace("__PORT__", str(PORT))
-            html = html.replace("__POOL_SIZE__", str(POOL_SIZE))
+            html = html.replace("__WORKER_COUNT__", str(WORKER_COUNT))
             html = html.replace("__TIMEOUT__", str(TIMEOUT))
             html = html.replace("__SERVER_COUNT__", str(len(servers)))
             html = html.replace("__MODEL_COUNT__", str(len(models)))
@@ -799,7 +774,6 @@ class Handler(BaseHTTPRequestHandler):
             do_stream = body.get("stream", False)
             opayload = body
             log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
-            self._send_status = self.headers.get("X-Dyva-Status") == "1"
             self._proxy_chat(model, opayload, do_stream, openai_format=False)
             return
 
@@ -824,40 +798,28 @@ class Handler(BaseHTTPRequestHandler):
         do_stream = body.get("stream", False)
         opayload = to_ollama(body)
         log.debug(f"OpenAI request: model={model}, stream={do_stream}")
-        self._send_status = self.headers.get("X-Dyva-Status") == "1"
         self._proxy_chat(model, opayload, do_stream, openai_format=True)
 
     def _proxy_chat(self, model, opayload, do_stream, openai_format):
-        """
-        Proxy a chat request to an Ollama backend.
-
-        Strategy:
-          1. If get_last(model) returns a hit, try that (host, full_model) DIRECTLY
-             — skip find_servers() to avoid a slow cache refresh.
-          2. If that fails (or no cache), fall through to find_servers() and try
-             sequentially until one works.
-        """
         last = get_last(model)
         if last:
             last_host, last_full = last
-            log.debug(f"Reusing {last_host} for {model}")
-            if do_stream:
-                # Build a minimal server entry for the stream helpers
-                entry = (0, -2, last_host, [last_full])
-                if openai_format:
-                    if self._try_stream(model, [entry], opayload):
+            if probe_host(last_host):
+                log.debug(f"Reusing {last_host} for {model}")
+                if do_stream:
+                    result = self._try_host(last_host, last_full, model, opayload, do_stream=True)
+                    if result:
+                        _, first_line, first, it = result
+                        self._forward_stream(first_line, it, last_host, last_full, model, openai_format)
                         return
                 else:
-                    if self._try_stream_ollama(model, [entry], opayload):
+                    result = self._try_one(last_host, model, last_full, opayload)
+                    if result:
+                        if openai_format:
+                            self.send_json(to_openai(result, model), 200)
+                        else:
+                            self.send_json(result, 200)
                         return
-            else:
-                result = self._try_one(last_host, model, last_full, opayload)
-                if result:
-                    if openai_format:
-                        self.send_json(to_openai(result, model), 200)
-                    else:
-                        self.send_json(result, 200)
-                    return
 
         servers = find_servers(model)
         if not servers:
@@ -865,14 +827,25 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if do_stream:
+            result = _race_servers(model, servers, opayload, do_stream=True)
+            if result:
+                _, host, full, first_line, first, it = result
+                self._forward_stream(first_line, it, host, full, model, openai_format)
+                return
             if openai_format:
-                self._handle_stream(model, servers, opayload)
+                try:
+                    self.wfile.write(sse_str({"error": "all servers failed"}).encode())
+                    self.wfile.write(sse_str(sse_chunk("", "", done=True)).encode())
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
             else:
-                self._handle_stream_ollama(model, servers, opayload)
+                self.send_json(err_obj("all servers failed"), 502)
+            self.close_connection = True
             return
 
-        host, data = _try_all(servers, model, dict(opayload, stream=False))
-        if host:
+        result = _race_servers(model, servers, dict(opayload, stream=False), do_stream=False)
+        if result:
+            _, host, full, data = result
             if openai_format:
                 self.send_json(to_openai(data, model), 200)
             else:
@@ -880,6 +853,47 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self.send_json(err_obj("all servers failed"), 502)
+
+    def _forward_stream(self, first_line, it, host, full, model, openai_format):
+        content_type = "text/event-stream" if openai_format else "application/x-ndjson"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        self.wfile.flush()
+
+        if openai_format:
+            first = json.loads(first_line)
+            content = first.get("message", {}).get("content", "")
+            self.wfile.write(sse_str(sse_chunk(full, content)).encode())
+        else:
+            self.wfile.write(first_line + b"\n")
+        self.wfile.flush()
+
+        for line in it:
+            if not line:
+                continue
+            try:
+                if openai_format:
+                    obj = json.loads(line)
+                    content = obj.get("message", {}).get("content", "")
+                    if content:
+                        self.wfile.write(sse_str(sse_chunk(full, content)).encode())
+                    if obj.get("done"):
+                        fr = obj.get("done_reason", "stop")
+                        self.wfile.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
+                        self.wfile.flush()
+                else:
+                    self.wfile.write(line + b"\n")
+                    obj = json.loads(line)
+                    if obj.get("done"):
+                        self.wfile.flush()
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                log.debug("Client disconnected during stream")
+                return
+        self.close_connection = True
 
     def _proxy_generate(self):
         """Proxy an Ollama /api/generate request to a backend server."""
@@ -895,171 +909,106 @@ class Handler(BaseHTTPRequestHandler):
             return
         do_stream = body.get("stream", False)
         log.debug(f"Ollama generate request: model={model}, stream={do_stream}")
+        endpoint = "/api/generate"
 
         last = get_last(model)
         if last:
             last_host, last_full = last
-            tag = f"{last_host} {last_full}"
-            payload = dict(body, model=last_full)
-            try:
-                resp = requests.post(f"{last_host}/api/generate", json=payload,
-                                     timeout=TIMEOUT, stream=do_stream)
-            except Exception as e:
-                log.debug(f"  ✗ {tag}  (exception: {e})")
-                add_bad(last_host, model)
-            else:
-                if resp.status_code == 200:
-                    if not do_stream:
-                        data = resp.json()
-                        if "error" not in data:
-                            log.debug(f"  ✓ {tag}")
-                            set_last(model, last_host, last_full)
-                            add_good(last_host, model)
-                            self.send_json(data, 200)
-                            return
+            if probe_host(last_host):
+                log.debug(f"Reusing {last_host} for {model}")
+                if do_stream:
+                    result = self._try_host(last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
+                    if result:
+                        _, first_line, first, it = result
+                        self._forward_stream(first_line, it, last_host, last_full, model, openai_format=False)
+                        return
+                else:
+                    p = dict(body, model=last_full, stream=False)
+                    try:
+                        resp = requests.post(f"{last_host}{endpoint}", json=p, timeout=TIMEOUT)
+                    except Exception as e:
+                        log.debug(f"  ✗ {last_host} {last_full}  (exception: {e})")
+                        add_bad(last_host, model)
                     else:
-                        it = resp.iter_lines()
-                        first_line = None
-                        for line in it:
-                            if not line:
-                                continue
-                            first_line = line
-                            break
-                        if first_line:
-                            try:
-                                first = json.loads(first_line)
-                            except json.JSONDecodeError:
-                                first = None
-                            if first and "error" not in first:
-                                log.debug(f"  ✓ {tag}")
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if "error" not in data:
                                 set_last(model, last_host, last_full)
                                 add_good(last_host, model)
-                                self.send_response(200)
-                                self.send_header("Content-Type", "application/x-ndjson")
-                                self.send_header("Cache-Control", "no-cache")
-                                self.end_headers()
-                                self.wfile.flush()
-                                self.wfile.write(first_line + b"\n")
-                                self.wfile.flush()
-                                for line in it:
-                                    if not line:
-                                        continue
-                                    try:
-                                        self.wfile.write(line + b"\n")
-                                        obj = json.loads(line)
-                                        if obj.get("done"):
-                                            self.wfile.flush()
-                                            self.close_connection = True
-                                            return
-                                    except (BrokenPipeError, ConnectionResetError, OSError):
-                                        log.debug("Client disconnected during stream")
-                                        return
-                                self.close_connection = True
+                                self.send_json(data, 200)
                                 return
-                add_bad(last_host, model)
+                        add_bad(last_host, model)
 
         servers = find_servers(model)
         if not servers:
             self.send_json(err_obj(f"no available servers for '{model}'", "model_not_found"), 404)
             return
 
-        all_failed = []
-        for _, _, host, ms in servers:
-            full = ms[0]
-            tag = f"{host} {full}"
-            payload = dict(body, model=full)
-
-            try:
-                resp = requests.post(f"{host}/api/generate", json=payload,
-                                     timeout=TIMEOUT, stream=do_stream)
-            except Exception as e:
-                log.debug(f"  ✗ {tag}  (exception: {e})")
-                add_bad(host, model)
-                all_failed.append(host)
-                continue
-
-            if resp.status_code != 200:
-                log.debug(f"  ✗ {tag}  (status {resp.status_code})")
-                add_bad(host, model)
-                all_failed.append(host)
-                continue
-
-            if not do_stream:
-                data = resp.json()
-                if "error" in data:
-                    log.debug(f"  ✗ {tag}  (error: {data['error']})")
-                    add_bad(host, model)
-                    all_failed.append(host)
-                    continue
-                tried = len(all_failed) + 1
-                log.debug(f"  ✓ {tag}")
-                set_last(model, host, full)
-                add_good(host, model)
-                broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
-                self.send_json(data, 200)
+        if do_stream:
+            result = _race_servers(model, servers, body, do_stream=True, endpoint=endpoint)
+            if result:
+                _, host, full, first_line, first, it = result
+                self._forward_stream(first_line, it, host, full, model, openai_format=False)
                 return
-
-            it = resp.iter_lines()
-            first_line = None
-            for line in it:
-                if not line:
-                    continue
-                first_line = line
-                break
-
-            if not first_line:
-                log.debug(f"  ✗ {tag}  (empty response)")
-                add_bad(host, model)
-                all_failed.append(host)
-                continue
-
-            try:
-                first = json.loads(first_line)
-            except json.JSONDecodeError:
-                log.debug(f"  ✗ {tag}  (bad response)")
-                add_bad(host, model)
-                all_failed.append(host)
-                continue
-
-            if "error" in first:
-                log.debug(f"  ✗ {tag}  (error: {first['error']})")
-                add_bad(host, model)
-                all_failed.append(host)
-                continue
-
-            tried = len(all_failed) + 1
-            log.debug(f"  ✓ {tag}")
-            set_last(model, host, full)
-            add_good(host, model)
-            broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.flush()
-            self.wfile.write(first_line + b"\n")
-            self.wfile.flush()
-
-            for line in it:
-                if not line:
-                    continue
-                try:
-                    self.wfile.write(line + b"\n")
-                    obj = json.loads(line)
-                    if obj.get("done"):
-                        self.wfile.flush()
-                        self.close_connection = True
-                        return
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    log.debug("Client disconnected during stream")
-                    return
-
-            self.close_connection = True
+            self.send_json(err_obj("all servers failed"), 502)
             return
 
-        log.debug(f"  ✗ all servers failed: {', '.join(all_failed)}")
-        self.send_json(err_obj(f"all servers failed"), 502)
+        result = _race_servers(model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint)
+        if result:
+            _, host, full, data = result
+            self.send_json(data, 200)
+            return
+
+        self.send_json(err_obj("all servers failed"), 502)
+
+    def _try_host(self, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
+        """Try one host with probe + inference. Returns (host, first_line, first, it) or None."""
+        if not probe_host(host):
+            add_bad(host, model)
+            return None
+        tag = f"{host} {full_model}"
+        p = dict(payload, model=full_model, stream=do_stream)
+        try:
+            resp = requests.post(f"{host}{endpoint}", json=p, timeout=TIMEOUT, stream=do_stream)
+        except Exception as e:
+            log.debug(f"  ✗ {tag}  (exception: {e})")
+            add_bad(host, model)
+            broadcast_activity(host, full_model, "failed", f"{host} failed ({e})")
+            return None
+        if resp.status_code != 200:
+            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
+            add_bad(host, model)
+            broadcast_activity(host, full_model, "failed", f"{host} returned {resp.status_code}")
+            return None
+        it = resp.iter_lines()
+        first_line = None
+        for line in it:
+            if not line:
+                continue
+            first_line = line
+            break
+        if not first_line:
+            log.debug(f"  ✗ {tag}  (empty response)")
+            add_bad(host, model)
+            broadcast_activity(host, full_model, "failed", f"{host} empty response")
+            return None
+        try:
+            first = json.loads(first_line)
+        except json.JSONDecodeError:
+            log.debug(f"  ✗ {tag}  (bad response)")
+            add_bad(host, model)
+            broadcast_activity(host, full_model, "failed", f"{host} bad response")
+            return None
+        if "error" in first:
+            log.debug(f"  ✗ {tag}  (error: {first['error']})")
+            add_bad(host, model)
+            broadcast_activity(host, full_model, "failed", f"{host} error: {first['error']}")
+            return None
+        log.debug(f"  ✓ {tag}")
+        set_last(model, host, full_model)
+        add_good(host, model)
+        broadcast_activity(host, full_model, "connected", f"connected to {host}")
+        return host, first_line, first, it
 
     def _try_one(self, host, model, full_model, opayload):
         """Try one host synchronously (no streaming). Return Ollama response dict or None."""
@@ -1088,391 +1037,6 @@ class Handler(BaseHTTPRequestHandler):
         add_good(host, model)
         return data
 
-    def _try_stream(self, model, servers, opayload):
-        """Try one host for streaming (last-success shortcut). Return True on success.
-
-        Uses a single ``iter_lines()`` generator for both the first and subsequent
-        chunks, so generator-internal buffers are never abandoned.
-        """
-        _, _, host, ms = servers[0]
-        full = ms[0]
-        tag = f"{host} {full}"
-        payload = dict(opayload, model=full, stream=True)
-        broadcast_activity(host, full, "trying", f"trying {host}...")
-
-        try:
-            resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
-        except Exception as e:
-            log.debug(f"  ✗ {tag}  (exception: {e})")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} failed ({e})")
-            return None
-
-        if resp.status_code != 200:
-            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} returned {resp.status_code}")
-            return None
-
-        lines_iter = resp.iter_lines()
-        first_line = None
-        for line in lines_iter:
-            if not line:
-                continue
-            first_line = line
-            break
-
-        if not first_line:
-            log.debug(f"  ✗ {tag}  (empty response)")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} empty response")
-            return None
-
-        try:
-            first = json.loads(first_line)
-        except json.JSONDecodeError:
-            log.debug(f"  ✗ {tag}  (bad response)")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} bad response")
-            return None
-
-        if "error" in first:
-            log.debug(f"  ✗ {tag}  (error: {first['error']})")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} error: {first['error']}")
-            return None
-
-        log.debug(f"  ✓ {tag}")
-        set_last(model, host, full)
-        add_good(host, model)
-        broadcast_activity(host, full, "connected", f"connected to {host}")
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        self.wfile.flush()
-
-        self.wfile.write(sse_str(sse_chunk(full, first.get("message", {}).get("content", ""))).encode())
-        self.wfile.flush()
-
-        for line in lines_iter:
-            if not line:
-                continue
-            obj = json.loads(line)
-            content = obj.get("message", {}).get("content", "")
-            try:
-                if content:
-                    self.wfile.write(sse_str(sse_chunk(full, content)).encode())
-                if obj.get("done"):
-                    fr = obj.get("done_reason", "stop")
-                    self.wfile.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
-                    self.wfile.flush()
-                    self.close_connection = True
-                    return True
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                log.debug("Client disconnected during stream")
-                return None
-
-        self.close_connection = True
-        return True
-
-    def _try_stream_ollama(self, model, servers, opayload):
-        """Try one host for streaming in Ollama NDJSON format (last-success shortcut)."""
-        _, _, host, ms = servers[0]
-        full = ms[0]
-        tag = f"{host} {full}"
-        payload = dict(opayload, model=full, stream=True)
-        broadcast_activity(host, full, "trying", f"trying {host}...")
-
-        try:
-            resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
-        except Exception as e:
-            log.debug(f"  ✗ {tag}  (exception: {e})")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} failed ({e})")
-            return None
-
-        if resp.status_code != 200:
-            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} returned {resp.status_code}")
-            return None
-
-        lines_iter = resp.iter_lines()
-        first_line = None
-        for line in lines_iter:
-            if not line:
-                continue
-            first_line = line
-            break
-
-        if not first_line:
-            log.debug(f"  ✗ {tag}  (empty response)")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} empty response")
-            return None
-
-        try:
-            first = json.loads(first_line)
-        except json.JSONDecodeError:
-            log.debug(f"  ✗ {tag}  (bad response)")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} bad response")
-            return None
-
-        if "error" in first:
-            log.debug(f"  ✗ {tag}  (error: {first['error']})")
-            add_bad(host, model)
-            broadcast_activity(host, full, "failed", f"{host} error: {first['error']}")
-            return None
-
-        log.debug(f"  ✓ {tag}")
-        set_last(model, host, full)
-        add_good(host, model)
-        broadcast_activity(host, full, "connected", f"connected to {host}")
-
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        self.wfile.flush()
-
-        self.wfile.write(first_line + b"\n")
-        self.wfile.flush()
-
-        for line in lines_iter:
-            if not line:
-                continue
-            try:
-                self.wfile.write(line + b"\n")
-                obj = json.loads(line)
-                if obj.get("done"):
-                    self.wfile.flush()
-                    self.close_connection = True
-                    return True
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                log.debug("Client disconnected during stream")
-                return None
-
-        self.close_connection = True
-        return True
-
-    def _handle_stream(self, model, servers, opayload):
-        """Try servers sequentially for SSE streaming (OpenAI format)."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        self.wfile.flush()
-
-        send_status = getattr(self, "_send_status", False)
-        model_str = model or next(iter({ms[0] for _, _, _, ms in servers}), "unknown")
-        broadcast_activity("", model_str, "searching", f"searching {len(servers)} servers for {model_str}...")
-        self._sse_status(send_status, "", model_str, f"searching {len(servers)} servers for {model_str}...", "searching")
-
-        all_failed = []
-        for _, _, host, ms in servers:
-            full = ms[0]
-            tag = f"{host} {full}"
-            broadcast_activity(host, full, "trying", f"trying {host}...")
-            self._sse_status(send_status, host, full, f"trying {host}...", "trying")
-
-            try:
-                resp = requests.post(f"{host}/api/chat", json=dict(opayload, model=full, stream=True), timeout=TIMEOUT, stream=True)
-            except Exception as e:
-                log.debug(f"  ✗ {tag}  (exception: {e})")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} failed ({e})")
-                self._sse_status(send_status, host, full, f"{host} failed ({e})", "failed")
-                all_failed.append(host)
-                continue
-
-            if resp.status_code != 200:
-                log.debug(f"  ✗ {tag}  (status {resp.status_code})")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} returned {resp.status_code}")
-                self._sse_status(send_status, host, full, f"{host} returned {resp.status_code}", "failed")
-                all_failed.append(host)
-                continue
-
-            it = resp.iter_lines()
-            first_line = None
-            for line in it:
-                if not line:
-                    continue
-                first_line = line
-                break
-
-            if not first_line:
-                log.debug(f"  ✗ {tag}  (empty response)")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} empty response")
-                all_failed.append(host)
-                continue
-
-            try:
-                first = json.loads(first_line)
-            except json.JSONDecodeError:
-                log.debug(f"  ✗ {tag}  (bad response)")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} bad response")
-                all_failed.append(host)
-                continue
-
-            if "error" in first:
-                log.debug(f"  ✗ {tag}  (error: {first['error']})")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} error: {first['error']}")
-                all_failed.append(host)
-                continue
-
-            tried = len(all_failed) + 1
-            log.debug(f"  ✓ {tag}")
-            set_last(model, host, full)
-            add_good(host, model)
-            broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
-            self._sse_status(send_status, host, full, f"served {model}: {tried}/{len(servers)} servers", "connected")
-
-            try:
-                self.wfile.write(sse_str(sse_chunk(full, first.get("message", {}).get("content", ""))).encode())
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                log.debug("Client disconnected")
-                return
-
-            for line in it:
-                if not line:
-                    continue
-                obj = json.loads(line)
-                content = obj.get("message", {}).get("content", "")
-                try:
-                    if content:
-                        self.wfile.write(sse_str(sse_chunk(full, content)).encode())
-                    if obj.get("done"):
-                        fr = obj.get("done_reason", "stop")
-                        self.wfile.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
-                        self.wfile.flush()
-                        self.close_connection = True
-                        return
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    log.debug("Client disconnected during stream")
-                    return
-
-            self.close_connection = True
-            return
-
-        log.debug(f"  ✗ all servers failed: {', '.join(all_failed)}")
-        self._sse_status(send_status, "", model_str, "all servers failed", "failed")
-        try:
-            self.wfile.write(sse_str({"error": "all servers failed"}).encode())
-            self.wfile.write(sse_str(sse_chunk("", "", done=True)).encode())
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            log.debug("Client disconnected")
-        self.close_connection = True
-
-    def _sse_status(self, enabled, host, model, message, status):
-        if not enabled:
-            return
-        try:
-            self.wfile.write(sse_status(host, model, message, status).encode())
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            log.debug("Client disconnected")
-
-    def _handle_stream_ollama(self, model, servers, opayload):
-        """Try servers one at a time and passthrough Ollama NDJSON format."""
-        all_failed = []
-        broadcast_activity("", model, "searching", f"searching {len(servers)} servers for {model}...")
-        for _, _, host, ms in servers:
-            full = ms[0]
-            tag = f"{host} {full}"
-            payload = dict(opayload, model=full, stream=True)
-            broadcast_activity(host, full, "trying", f"trying {host}...")
-
-            try:
-                resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT, stream=True)
-            except Exception as e:
-                log.debug(f"  ✗ {tag}  (exception: {e})")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} failed ({e})")
-                all_failed.append(host)
-                continue
-
-            if resp.status_code != 200:
-                log.debug(f"  ✗ {tag}  (status {resp.status_code})")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} returned {resp.status_code}")
-                all_failed.append(host)
-                continue
-
-            it = resp.iter_lines()
-            first_line = None
-            for line in it:
-                if not line:
-                    continue
-                first_line = line
-                break
-
-            if not first_line:
-                log.debug(f"  ✗ {tag}  (empty response)")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} empty response")
-                all_failed.append(host)
-                continue
-
-            try:
-                first = json.loads(first_line)
-            except json.JSONDecodeError:
-                log.debug(f"  ✗ {tag}  (bad response)")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} bad response")
-                all_failed.append(host)
-                continue
-
-            if "error" in first:
-                log.debug(f"  ✗ {tag}  (error: {first['error']})")
-                add_bad(host, model)
-                broadcast_activity(host, full, "failed", f"{host} error: {first['error']}")
-                all_failed.append(host)
-                continue
-
-            tried = len(all_failed) + 1
-            log.debug(f"  ✓ {tag}")
-            set_last(model, host, full)
-            add_good(host, model)
-            broadcast_activity(host, full, "connected", f"served {model}: {tried}/{len(servers)} servers")
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.flush()
-
-            self.wfile.write(first_line + b"\n")
-            self.wfile.flush()
-
-            for line in it:
-                if not line:
-                    continue
-                try:
-                    self.wfile.write(line + b"\n")
-                    obj = json.loads(line)
-                    if obj.get("done"):
-                        self.wfile.flush()
-                        self.close_connection = True
-                        return
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    log.debug("Client disconnected during stream")
-                    return
-
-            self.close_connection = True
-            return
-
-        log.debug(f"  ✗ all servers failed: {', '.join(all_failed)}")
-        self.send_json(err_obj(f"all servers failed"), 502)
-
     def send_json(self, data, status=200):
         """Send *data* as a JSON HTTP response."""
         body = json.dumps(data)
@@ -1496,10 +1060,23 @@ class Handler(BaseHTTPRequestHandler):
             raise
 
 
-class PoolServer(ThreadingMixIn, HTTPServer):
-    """Threaded HTTP server that reuses the listening address."""
+class PoolServer(HTTPServer):
     allow_reuse_address = True
-    daemon_threads = True
+
+    def __init__(self, addr, handler):
+        super().__init__(addr, handler)
+        self.executor = ThreadPoolExecutor(max_workers=WORKER_COUNT)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def process_request(self, request, client_address):
+        self.executor.submit(self.process_request_thread, request, client_address)
 
 
 def main():
@@ -1521,8 +1098,8 @@ def main():
             print(f"Address already in use: {addr[0] or '0.0.0.0'}:{addr[1]}", file=sys.stderr)
         raise
     PORT = srv.server_address[1]
-    log.debug(f"Starting dumpster-dive on port {PORT}, POOL_SIZE={POOL_SIZE}, TIMEOUT={TIMEOUT}")
-    print(f"dumpster-dive :{PORT}  POOL_SIZE={POOL_SIZE}  TIMEOUT={TIMEOUT}", file=sys.stderr)
+    log.debug(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
+    print(f"dumpster-dive :{PORT}  WORKER_COUNT={WORKER_COUNT}  TIMEOUT={TIMEOUT}", file=sys.stderr)
     def stop(sig, frm):
         log.debug("Shutting down")
         print("\nbye", file=sys.stderr)

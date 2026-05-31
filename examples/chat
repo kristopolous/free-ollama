@@ -24,7 +24,7 @@ def main():
     srv = subprocess.Popen(
         [sys.executable, "-m", "dyva", str(port)],
         stdout=subprocess.DEVNULL, stderr=None,
-        env={**os.environ, "TIMEOUT": "30", "POOL_SIZE": str(pool)},
+        env={**os.environ, "TIMEOUT": "30", "WORKER_COUNT": str(pool)},
     )
 
     def cleanup():
