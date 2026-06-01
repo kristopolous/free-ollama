@@ -928,6 +928,8 @@ async def handle_api_activity(request):
                 entry = await asyncio.wait_for(q.get(), timeout=1)
             except asyncio.TimeoutError:
                 continue
+            except asyncio.CancelledError:
+                break
             try:
                 await response.write(f"data: {json.dumps(entry)}\n\n".encode())
             except (BrokenPipeError, ConnectionResetError, OSError):
