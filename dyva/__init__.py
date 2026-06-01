@@ -335,9 +335,6 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
             full = ms[0]
 
-            if not await probe_host(session, host):
-                continue
-
             start = time.time()
             tag = f"{host} {full}"
             p = dict(payload, model=full, stream=do_stream)
