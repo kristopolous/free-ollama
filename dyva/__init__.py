@@ -1116,7 +1116,6 @@ def main():
     log.info(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
     def stop(sig, frm):
         log.debug("Shutting down")
-        print("\nbye", file=sys.stderr)
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, stop)
