@@ -1098,12 +1098,12 @@ def banner():
     except Exception as e:
         VERSION="(git)"
     print(f"""
- \\\\                                          //
-  l'>     8888b.  Yb  dP Yb    dP    db     <-l
-  ll       8I  Yb  YbdP   Yb  dP    dPYb     ll
-  llama~   8I  dY   8P     YbdP    dP__Yb    llama~
-  || ||   8888Y"   dP       YP    dP"'''Yb   || ||
-  '' ''               {VERSION}                  '' ''
+ \\\\                                        //
+  l'>     8888b.  Yb  dP Yb    dP   db    <-l
+  ll       8I  Yb  YbdP   Yb  dP   dPYb    ll
+  llama~   8I  dY   8P     YbdP   dP  Yb   llama~
+  || ||   8888Y"   dP       YP   dP    Yb  || ||
+  '' ''               {VERSION}                '' ''
 """)
 
 def main():
