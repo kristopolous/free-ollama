@@ -955,11 +955,55 @@ async def handle_refresh(request):
     return web.json_response({"status": "ok", "message": "cache refreshed"})
 
 
+async def handle_api_ps(request):
+    models_list = []
+    if _last_cache:
+        for model, entry in _last_cache.items():
+            expires_at = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z",
+                                       time.gmtime(entry.get("ctime", time.time()) + 300))
+            models_list.append({
+                "name": model,
+                "model": model,
+                "size": 0,
+                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": "",
+                    "families": None,
+                    "parameter_size": "",
+                    "quantization_level": "",
+                },
+                "expires_at": expires_at,
+                "size_vram": 0,
+            })
+    return web.json_response({"models": models_list})
+
+
 async def handle_api_show(request):
+    model = ""
+    ct = request.content_type or ""
+    if ct == "application/json" or ct == "application/x-ndjson":
+        try:
+            body = await request.json()
+            model = body.get("model", "")
+        except (json.JSONDecodeError, Exception):
+            pass
+    if not model:
+        model = request.query.get("model", "")
+    details = {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "",
+        "families": None,
+        "parameter_size": "",
+        "quantization_level": "",
+    }
     return web.json_response({
-        "modelfile": "# free-ollama proxy",
-        "details": {"parent_model": "", "format": "gguf", "family": "", "families": None,
-                    "parameter_size": "", "quantization_level": ""},
+        "modelfile": f"# free-ollama proxy — model: {model}",
+        "parameters": "",
+        "template": "",
+        "details": details,
         "model_info": {},
     })
 
@@ -1029,6 +1073,7 @@ def make_app():
     app.router.add_get("/clear-bad", handle_clear_bad)
     app.router.add_get("/refresh-cache", handle_refresh_cache)
     app.router.add_get("/api/tags", handle_api_tags)
+    app.router.add_get("/api/ps", handle_api_ps)
     app.router.add_get("/api/version", handle_api_version)
     app.router.add_get("/api/activity", handle_api_activity)
     app.router.add_get("/refresh", handle_refresh)
