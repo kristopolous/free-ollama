@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+import importlib.metadata
 
 import aiohttp
 from aiohttp import web
@@ -1058,6 +1059,18 @@ def main():
     TIMEOUT = args.timeout
 
     PORT = args.port
+    try:
+        VERSION=importlib.metadata.version('dyva')
+    except:
+        VERSION="(git)"
+    print(f"""
+ \\                                          //
+  l'>     8888b.  Yb  dP Yb    dP    db     <-l
+  ll       8I  Yb  YbdP   Yb  dP    dPYb     ll
+  llama~   8I  dY   8P     YbdP    dP__Yb    llama~
+  || ||   8888Y"   dP       YP    dP"'''Yb   || ||
+  '' ''               {VERSION}                  '' ''
+""")
     log.info(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
 
     app = make_app()
