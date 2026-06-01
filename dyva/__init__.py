@@ -391,7 +391,12 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 done.set()
                 return
 
-            first_line = await resp.content.readline()
+            try:
+                first_line = await resp.content.readline()
+            except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+                await resp.release()
+                resp = None
+                continue
             if not first_line or not first_line.strip():
                 dur = time.time() - start
                 await resp.release()
@@ -537,8 +542,16 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
             f"failure: {host} for {model} - status {resp.status}", duration=dur)
         return None
 
-    it = resp.content
-    first_line = await it.readline()
+    try:
+        it = resp.content
+        first_line = await it.readline()
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        dur = time.time() - start
+        await resp.release()
+        await broadcast_activity(host, model, "failed",
+            f"failure: {host} for {model} - {type(e).__name__}", duration=dur)
+        return None
+
     if not first_line or not first_line.strip():
         dur = time.time() - start
         log.debug(f"  \u2717 {tag}  (empty response)")
@@ -606,7 +619,7 @@ async def _forward_stream(request, response, resp, first_line, host, full, model
                     obj = json.loads(line)
                     if obj.get("done"):
                         pass
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
                 log.debug("Client disconnected during stream")
                 return
     finally:
