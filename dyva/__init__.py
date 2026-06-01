@@ -64,10 +64,18 @@ def refresh_cache():
     _good_cache = None
     os.makedirs(CACHE_DIR, exist_ok=True)
     log.debug("Refreshing server cache...")
-    script = os.path.join(os.path.dirname(__file__), "free-ollama")
+    pkg_dir = os.path.dirname(__file__)
+    script = os.path.join(os.path.dirname(pkg_dir), "free-ollama")
+    if not os.path.exists(script):
+        script = os.path.join(pkg_dir, "free-ollama")
     if not os.path.exists(script):
         script = "free-ollama"
-    subprocess.run([script], capture_output=True, timeout=120)
+    try:
+        subprocess.run([script], capture_output=True, timeout=120)
+    except FileNotFoundError:
+        log.warning("free-ollama script not found — cache refresh skipped")
+    except subprocess.TimeoutExpired:
+        log.warning("free-ollama script timed out")
 
 def ensure_cache():
     """Download the latest server list if cache is missing or >24h old."""
@@ -86,9 +94,11 @@ def load_servers():
     log.debug("Loading servers...")
     ensure_cache()
     if _servers_cache is None:
+        if not os.path.exists(CACHE_FILE):
+            return []
         with open(CACHE_FILE) as f:
             _servers_cache = json.load(f)
-    return _servers_cache
+    return _servers_cache or []
 
 
 def load_bad():
@@ -1062,7 +1072,10 @@ class PoolServer(HTTPServer):
 
     def __init__(self, addr, handler):
         super().__init__(addr, handler)
-        self.executor = ThreadPoolExecutor(max_workers=WORKER_COUNT)
+        self.executor = ThreadPoolExecutor(
+            max_workers=WORKER_COUNT,
+            thread_name_prefix="dyva-worker",
+        )
 
     def process_request_thread(self, request, client_address):
         try:
@@ -1074,6 +1087,10 @@ class PoolServer(HTTPServer):
 
     def process_request(self, request, client_address):
         self.executor.submit(self.process_request_thread, request, client_address)
+
+    def server_close(self):
+        self.executor.shutdown(wait=False)
+        super().server_close()
 
 
 def main():
