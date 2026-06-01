@@ -36,7 +36,9 @@ _good_cache = None
 _servers_cache = None
 
 _activity_queues = []
+_activity_history = []
 _activity_lock = asyncio.Lock()
+_ACTIVITY_HISTORY_MAX = 500
 
 
 async def broadcast_activity(host, model, status, message, duration=None):
@@ -44,6 +46,9 @@ async def broadcast_activity(host, model, status, message, duration=None):
     if duration is not None:
         entry['duration'] = round(duration, 2)
     async with _activity_lock:
+        _activity_history.append(entry)
+        if len(_activity_history) > _ACTIVITY_HISTORY_MAX:
+            _activity_history[:100] = []
         dead = []
         for q in _activity_queues:
             try:
@@ -907,6 +912,13 @@ async def handle_api_activity(request):
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Access-Control-Allow-Origin"] = "*"
     await response.prepare(request)
+
+    async with _activity_lock:
+        for entry in _activity_history:
+            try:
+                await response.write(f"data: {json.dumps(entry)}\n\n".encode())
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return response
 
     q = asyncio.Queue()
     await _add_activity_listener(q)
