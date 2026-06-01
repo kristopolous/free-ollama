@@ -199,13 +199,12 @@ async def probe_host(session, host):
         await resp.release()
         return False
     try:
-        data = await resp.json()
+        await resp.json()
     except Exception:
         await resp.release()
         return False
     await resp.release()
-    models = data.get("models", [])
-    return len(models) == 0
+    return True
 
 
 def find_servers(sub):
@@ -330,7 +329,6 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             full = ms[0]
 
             if not await probe_host(session, host):
-                add_bad(host, model)
                 continue
 
             tag = f"{host} {full}"
@@ -341,7 +339,6 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     timeout=TIMEOUT,
                 )
             except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
-                add_bad(host, model)
                 continue
 
             if resp.status != 200:
@@ -352,8 +349,12 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
             if not do_stream:
                 try:
-                    data = await asyncio.wait_for(resp.json(), timeout=TIMEOUT)
-                except Exception:
+                    data = await resp.json()
+                except asyncio.TimeoutError:
+                    await resp.release()
+                    resp = None
+                    continue
+                except json.JSONDecodeError:
                     await resp.release()
                     resp = None
                     add_bad(host, model)
@@ -408,15 +409,20 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
     tasks = [asyncio.create_task(worker()) for _ in range(WORKER_COUNT)]
 
-    try:
-        result = await asyncio.wait_for(result_queue.get(), timeout=TIMEOUT + 5)
-    except asyncio.TimeoutError:
-        result = None
-    finally:
-        done.set()
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    while True:
+        try:
+            result = result_queue.get_nowait()
+            break
+        except asyncio.QueueEmpty:
+            if all(t.done() for t in tasks):
+                result = None
+                break
+        await asyncio.sleep(0.1)
+
+    done.set()
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     return result
 
@@ -429,9 +435,7 @@ async def _try_one(session, host, model, full_model, opayload):
             session.post(f"{host}/api/chat", json=payload),
             timeout=TIMEOUT,
         )
-    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-        log.debug(f"  \u2717 {tag}  (exception: {e})")
-        add_bad(host, model)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
         return None
 
     if resp.status != 200:
@@ -442,7 +446,10 @@ async def _try_one(session, host, model, full_model, opayload):
 
     try:
         data = await resp.json()
-    except Exception:
+    except asyncio.TimeoutError:
+        await resp.release()
+        return None
+    except json.JSONDecodeError:
         await resp.release()
         add_bad(host, model)
         return None
@@ -460,9 +467,6 @@ async def _try_one(session, host, model, full_model, opayload):
 
 
 async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
-    if not await probe_host(session, host):
-        add_bad(host, model)
-        return None
     tag = f"{host} {full_model}"
     p = dict(payload, model=full_model, stream=do_stream)
     try:
@@ -470,10 +474,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
             session.post(f"{host}{endpoint}", json=p),
             timeout=TIMEOUT,
         )
-    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-        log.debug(f"  \u2717 {tag}  (exception: {e})")
-        add_bad(host, model)
-        await broadcast_activity(host, full_model, "failed", f"{host} failed ({e})")
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
         return None
 
     if resp.status != 200:
@@ -555,21 +556,20 @@ async def _proxy_chat(request, session, model, opayload, do_stream, openai_forma
     last = get_last(model)
     if last:
         last_host, last_full = last
-        if await probe_host(session, last_host):
-            log.debug(f"Reusing {last_host} for {model}")
-            if do_stream:
-                result = await _try_host(session, last_host, last_full, model, opayload, do_stream=True)
-                if result:
-                    resp, first_line, first = result
-                    await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format)
-                    return
-            else:
-                data = await _try_one(session, last_host, model, last_full, opayload)
-                if data:
-                    if openai_format:
-                        return web.json_response(to_openai(data, model))
-                    else:
-                        return web.json_response(data)
+        log.debug(f"Reusing {last_host} for {model}")
+        if do_stream:
+            result = await _try_host(session, last_host, last_full, model, opayload, do_stream=True)
+            if result:
+                resp, first_line, first = result
+                await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format)
+                return
+        else:
+            data = await _try_one(session, last_host, model, last_full, opayload)
+            if data:
+                if openai_format:
+                    return web.json_response(to_openai(data, model))
+                else:
+                    return web.json_response(data)
 
     servers = find_servers(model)
     if not servers:
@@ -614,37 +614,36 @@ async def _proxy_generate(request, session):
     last = get_last(model)
     if last:
         last_host, last_full = last
-        if await probe_host(session, last_host):
-            log.debug(f"Reusing {last_host} for {model}")
-            if do_stream:
-                result = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
-                if result:
-                    resp, first_line, first = result
-                    await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format=False)
-                    return
+        log.debug(f"Reusing {last_host} for {model}")
+        if do_stream:
+            result = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
+            if result:
+                resp, first_line, first = result
+                await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format=False)
+                return
+        else:
+            p = dict(body, model=last_full, stream=False)
+            try:
+                r = await asyncio.wait_for(
+                    session.post(f"{last_host}{endpoint}", json=p),
+                    timeout=TIMEOUT,
+                )
+            except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+                pass
             else:
-                p = dict(body, model=last_full, stream=False)
-                try:
-                    r = await asyncio.wait_for(
-                        session.post(f"{last_host}{endpoint}", json=p),
-                        timeout=TIMEOUT,
-                    )
-                except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
-                    add_bad(last_host, model)
+                if r.status == 200:
+                    try:
+                        data = await r.json()
+                    except Exception:
+                        data = None
+                    await r.release()
+                    if data and "error" not in data:
+                        set_last(model, last_host, last_full)
+                        add_good(last_host, model)
+                        return web.json_response(data)
                 else:
-                    if r.status == 200:
-                        try:
-                            data = await r.json()
-                        except Exception:
-                            data = None
-                        await r.release()
-                        if data and "error" not in data:
-                            set_last(model, last_host, last_full)
-                            add_good(last_host, model)
-                            return web.json_response(data)
-                    else:
-                        await r.release()
-                    add_bad(last_host, model)
+                    await r.release()
+                add_bad(last_host, model)
 
     servers = find_servers(model)
     if not servers:
@@ -853,15 +852,7 @@ async def handle_api_show(request):
     })
 
 
-async def handle_static(request):
-    wanted = request.match_info.get("path", "")
-    static_path = os.path.join(os.path.dirname(__file__), "static", wanted)
-    if os.path.exists(static_path) and os.path.isfile(static_path):
-        with open(static_path, "rb") as f:
-            data = f.read()
-        ct = "image/png" if static_path.endswith(".png") else "application/octet-stream"
-        return web.Response(body=data, content_type=ct)
-    return web.json_response(err_obj("not found"), status=404)
+
 
 
 async def handle_ollama_chat(request):
@@ -926,12 +917,13 @@ def make_app():
     app.router.add_get("/api/activity", handle_api_activity)
     app.router.add_get("/refresh", handle_refresh)
     app.router.add_get("/api/show", handle_api_show)
-    app.router.add_get("/static/{path:.*}", handle_static)
-
     app.router.add_post("/api/show", handle_api_show)
     app.router.add_post("/api/chat", handle_ollama_chat)
     app.router.add_post("/api/generate", handle_ollama_generate)
     app.router.add_post("/v1/chat/completions", handle_openai_chat)
+
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    app.router.add_static("/", static_dir, show_index=False)
 
     return app
 
