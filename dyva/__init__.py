@@ -941,7 +941,7 @@ async def handle_api_activity(request):
                 entry = await asyncio.wait_for(q.get(), timeout=1)
             except asyncio.TimeoutError:
                 continue
-            except asyncio.CancelledError:
+            if entry is None:
                 break
             try:
                 await response.write(f"data: {json.dumps(entry)}\n\n".encode())
@@ -1017,6 +1017,10 @@ def make_app():
         app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)
 
     async def on_shutdown(app):
+        async with _activity_lock:
+            for q in _activity_queues:
+                await q.put(None)
+            _activity_queues.clear()
         await app["session"].close()
 
     app.on_startup.append(on_startup)
@@ -1065,8 +1069,9 @@ def main():
     asyncio.set_event_loop(loop)
     try:
         web.run_app(app, host=args.host or "0.0.0.0", port=PORT, print=lambda *a: None)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
+    log.info("Server exiting by keyboard interrupt")
 
 
 if __name__ == "__main__":
