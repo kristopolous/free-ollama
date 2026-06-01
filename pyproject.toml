@@ -13,6 +13,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["dyva"]
+exclude = ["dyva.static"]
 
 [tool.setuptools.package-data]
 dyva = ["static/*"]
