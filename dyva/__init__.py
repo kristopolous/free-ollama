@@ -56,7 +56,6 @@ def unlisten_activity(q):
         if q in _activity_listeners:
             _activity_listeners.remove(q)
 
-
 def refresh_cache():
     """Force a refresh of the server cache."""
     global _servers_cache, _bad_cache, _good_cache
@@ -112,13 +111,6 @@ def add_bad(host, model):
         f.write(f"{host} {model}\n")
     if _bad_cache is not None:
         _bad_cache.add(f"{host} {model}")
-
-def clear_bad():
-    """Clear all bad hosts."""
-    global _bad_cache
-    _bad_cache = None
-    if os.path.exists(BAD_FILE):
-        os.remove(BAD_FILE)
 
 
 def load_good():
@@ -360,6 +352,7 @@ def _race_servers(model, servers, payload, do_stream, endpoint="/api/chat"):
                 if "error" in data:
                     add_bad(host, model)
                     continue
+                
                 log.debug(f"  ✓ {tag}")
                 set_last(model, host, full)
                 add_good(host, model)
@@ -431,7 +424,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/clear-bad":
-            clear_bad()
+            """Clear all bad hosts."""
+            global _bad_cache
+            _bad_cache = None
+            if os.path.exists(BAD_FILE):
+                os.remove(BAD_FILE)
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
@@ -1082,6 +1079,7 @@ class PoolServer(HTTPServer):
 def main():
     """Parse args and start the HTTP server."""
     global TIMEOUT, PORT
+
     parser = argparse.ArgumentParser(description="dumpster-dive - OpenAI-compatible proxy for free Ollama servers")
     parser.add_argument("--port", "-p", type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("--host", type=str, default="", help="host address to bind to (default: all interfaces)")
@@ -1095,17 +1093,18 @@ def main():
     except OSError as e:
         if e.errno == errno.EADDRINUSE:
             log.error(f"Address already in use: {addr[0] or '0.0.0.0'}:{addr[1]}")
-            print(f"Address already in use: {addr[0] or '0.0.0.0'}:{addr[1]}", file=sys.stderr)
         raise
+
     PORT = srv.server_address[1]
-    log.debug(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
-    print(f"dumpster-dive :{PORT}  WORKER_COUNT={WORKER_COUNT}  TIMEOUT={TIMEOUT}", file=sys.stderr)
+    log.info(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
     def stop(sig, frm):
         log.debug("Shutting down")
         print("\nbye", file=sys.stderr)
         raise KeyboardInterrupt
+
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
