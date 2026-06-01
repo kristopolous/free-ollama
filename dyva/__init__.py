@@ -335,6 +335,12 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
             full = ms[0]
 
+            await broadcast_activity(host, model, "trying",
+                f"trying: {host} for {model}")
+
+            if not await probe_host(session, host):
+                continue
+
             start = time.time()
             tag = f"{host} {full}"
             p = dict(payload, model=full, stream=do_stream)
@@ -466,6 +472,8 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
 
 async def _try_one(session, host, model, full_model, opayload):
+    await broadcast_activity(host, model, "trying",
+        f"trying: {host} for {model}")
     tag = f"{host} {full_model}"
     start = time.time()
     payload = dict(opayload, model=full_model, stream=False)
@@ -521,6 +529,8 @@ async def _try_one(session, host, model, full_model, opayload):
 
 
 async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
+    await broadcast_activity(host, model, "trying",
+        f"trying: {host} for {model}")
     tag = f"{host} {full_model}"
     start = time.time()
     p = dict(payload, model=full_model, stream=do_stream)
@@ -701,6 +711,8 @@ async def _proxy_generate(request, session):
                 await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, model, openai_format=False)
                 return stream_resp
         else:
+            await broadcast_activity(last_host, model, "trying",
+                f"trying: {last_host} for {model}")
             start = time.time()
             p = dict(body, model=last_full, stream=False)
             try:
