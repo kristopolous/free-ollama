@@ -823,6 +823,8 @@ async def handle_dashboard(request):
     for m in model_hosts:
         model_hosts[m].sort()
     html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
+    html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
+    html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
