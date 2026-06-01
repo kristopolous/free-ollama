@@ -1126,6 +1126,7 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         srv.shutdown()
+        srv.server_close()
 
 
 if __name__ == "__main__":
