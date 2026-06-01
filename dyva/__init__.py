@@ -239,12 +239,9 @@ def find_servers(sub):
     return matched
 
 
-_sort_toggle = False
 def all_models():
-    global _sort_toggle
     servers = load_servers()
     seen = {}
-    _sort_toggle = not _sort_toggle
     for s in servers:
         for m in s.get("models", []):
             if ":cloud" in m or len(m) == 0:
@@ -253,7 +250,7 @@ def all_models():
                 seen[m] = {'id': m, 'count': 1}
             else:
                 seen[m]['count'] += 1
-    if _sort_toggle:
+    if int(time.time() % 2) == 0:
         sorty = sorted(seen.values(), key=lambda x: x.get('count'))
     else:
         sorty = sorted(seen.values(), key=lambda x: x.get('id').lower())
