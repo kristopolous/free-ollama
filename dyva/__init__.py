@@ -1092,8 +1092,8 @@ def main():
         pass
 
     except Exception as e:
-        print(f"\nUnable to Start\n---------------\n{e}\n\n")
         parser.print_help()
+        print(f"\n  ----- ERROR -----\n [ Unable to Start ]\n  ==-------------==\n\n{e}\n\n")
 
 
 if __name__ == "__main__":
