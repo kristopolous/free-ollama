@@ -332,8 +332,9 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
             full = ms[0]
 
+            wid = asyncio.current_task().get_name()
             await broadcast_activity(host, model, "trying",
-                f"trying: {host} for {model}")
+                f"[{wid}] trying: {host} for {model}")
 
             if not await probe_host(session, host):
                 continue
@@ -349,7 +350,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
                 dur = time.time() - start
                 await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - {type(e).__name__}", duration=dur)
+                    f"[{wid}] failure: {host} for {model} - {type(e).__name__}", duration=dur)
                 continue
 
             if resp.status != 200:
@@ -358,7 +359,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 resp = None
                 add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - status {resp.status}", duration=dur)
+                    f"[{wid}] failure: {host} for {model} - status {resp.status}", duration=dur)
                 continue
 
             if not do_stream:
@@ -369,7 +370,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     await resp.release()
                     resp = None
                     await broadcast_activity(host, model, "failed",
-                        f"failure: {host} for {model} - timeout", duration=dur)
+                        f"[{wid}] failure: {host} for {model} - timeout", duration=dur)
                     continue
                 except json.JSONDecodeError:
                     dur = time.time() - start
@@ -377,21 +378,21 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     resp = None
                     add_bad(host, model)
                     await broadcast_activity(host, model, "failed",
-                        f"failure: {host} for {model} - bad response", duration=dur)
+                        f"[{wid}] failure: {host} for {model} - bad response", duration=dur)
                     continue
                 await resp.release()
                 if "error" in data:
                     dur = time.time() - start
                     add_bad(host, model)
                     await broadcast_activity(host, model, "failed",
-                        f"failure: {host} for {model} - error: {data['error']}", duration=dur)
+                        f"[{wid}] failure: {host} for {model} - error: {data['error']}", duration=dur)
                     continue
                 dur = time.time() - start
                 log.debug(f"  \u2713 {tag}")
                 set_last(model, host, full)
                 add_good(host, model)
                 await broadcast_activity(host, model, "connected",
-                    f"success: {host} for {model}", duration=dur)
+                    f"[{wid}] success: {host} for {model}", duration=dur)
                 await result_queue.put(("ok", host, full, data))
                 done.set()
                 return
@@ -408,7 +409,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 resp = None
                 add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - empty response", duration=dur)
+                    f"[{wid}] failure: {host} for {model} - empty response", duration=dur)
                 continue
 
             try:
@@ -419,7 +420,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 resp = None
                 add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - bad response", duration=dur)
+                    f"[{wid}] failure: {host} for {model} - bad response", duration=dur)
                 continue
 
             if "error" in first:
@@ -428,7 +429,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 resp = None
                 add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - error: {first['error']}", duration=dur)
+                    f"[{wid}] failure: {host} for {model} - error: {first['error']}", duration=dur)
                 continue
 
             if done.is_set():
@@ -440,7 +441,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             set_last(model, host, full)
             add_good(host, model)
             await broadcast_activity(host, model, "connected",
-                f"success: {host} for {model}", duration=dur)
+                f"[{wid}] success: {host} for {model}", duration=dur)
             await result_queue.put(("ok_stream", host, full, resp, first_line, first))
             done.set()
             return
@@ -469,8 +470,9 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
 
 async def _try_one(session, host, model, full_model, opayload):
+    wid = asyncio.current_task().get_name()
     await broadcast_activity(host, model, "trying",
-        f"trying: {host} for {model}")
+        f"[{wid}] trying: {host} for {model}")
     tag = f"{host} {full_model}"
     start = time.time()
     payload = dict(opayload, model=full_model, stream=False)
@@ -482,7 +484,7 @@ async def _try_one(session, host, model, full_model, opayload):
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
         dur = time.time() - start
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - {type(e).__name__}", duration=dur)
+            f"[{wid}] failure: {host} for {model} - {type(e).__name__}", duration=dur)
         return None
 
     if resp.status != 200:
@@ -491,7 +493,7 @@ async def _try_one(session, host, model, full_model, opayload):
         log.debug(f"  \u2717 {tag}  (status {resp.status})")
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - status {resp.status}", duration=dur)
+            f"[{wid}] failure: {host} for {model} - status {resp.status}", duration=dur)
         return None
 
     try:
@@ -504,7 +506,7 @@ async def _try_one(session, host, model, full_model, opayload):
         dur = time.time() - start
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - bad response", duration=dur)
+            f"[{wid}] failure: {host} for {model} - bad response", duration=dur)
         return None
     await resp.release()
 
@@ -513,7 +515,7 @@ async def _try_one(session, host, model, full_model, opayload):
         log.debug(f"  \u2717 {tag}  (error: {data['error']})")
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - error: {data['error']}", duration=dur)
+            f"[{wid}] failure: {host} for {model} - error: {data['error']}", duration=dur)
         return None
 
     dur = time.time() - start
@@ -521,13 +523,14 @@ async def _try_one(session, host, model, full_model, opayload):
     set_last(model, host, full_model)
     add_good(host, model)
     await broadcast_activity(host, model, "connected",
-        f"success: {host} for {model}", duration=dur)
+        f"[{wid}] success: {host} for {model}", duration=dur)
     return data
 
 
 async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
+    wid = asyncio.current_task().get_name()
     await broadcast_activity(host, model, "trying",
-        f"trying: {host} for {model}")
+        f"[{wid}] trying: {host} for {model}")
     tag = f"{host} {full_model}"
     start = time.time()
     p = dict(payload, model=full_model, stream=do_stream)
@@ -539,7 +542,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
         dur = time.time() - start
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - {type(e).__name__}", duration=dur)
+            f"[{wid}] failure: {host} for {model} - {type(e).__name__}", duration=dur)
         return None
 
     if resp.status != 200:
@@ -548,7 +551,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         await resp.release()
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - status {resp.status}", duration=dur)
+            f"[{wid}] failure: {host} for {model} - status {resp.status}", duration=dur)
         return None
 
     try:
@@ -558,7 +561,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         dur = time.time() - start
         await resp.release()
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - {type(e).__name__}", duration=dur)
+            f"[{wid}] failure: {host} for {model} - {type(e).__name__}", duration=dur)
         return None
 
     if not first_line or not first_line.strip():
@@ -567,7 +570,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         await resp.release()
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - empty response", duration=dur)
+            f"[{wid}] failure: {host} for {model} - empty response", duration=dur)
         return None
     try:
         first = json.loads(first_line)
@@ -577,7 +580,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         await resp.release()
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - bad response", duration=dur)
+            f"[{wid}] failure: {host} for {model} - bad response", duration=dur)
         return None
     if "error" in first:
         dur = time.time() - start
@@ -585,14 +588,14 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         await resp.release()
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - error: {first['error']}", duration=dur)
+            f"[{wid}] failure: {host} for {model} - error: {first['error']}", duration=dur)
         return None
     dur = time.time() - start
     log.debug(f"  \u2713 {tag}")
     set_last(model, host, full_model)
     add_good(host, model)
     await broadcast_activity(host, model, "connected",
-        f"success: {host} for {model}", duration=dur)
+        f"[{wid}] success: {host} for {model}", duration=dur)
     return resp, first_line, first
 
 
@@ -708,8 +711,9 @@ async def _proxy_generate(request, session):
                 await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, model, openai_format=False)
                 return stream_resp
         else:
+            wid = asyncio.current_task().get_name()
             await broadcast_activity(last_host, model, "trying",
-                f"trying: {last_host} for {model}")
+                f"[{wid}] trying: {last_host} for {model}")
             start = time.time()
             p = dict(body, model=last_full, stream=False)
             try:
@@ -720,7 +724,7 @@ async def _proxy_generate(request, session):
             except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
                 dur = time.time() - start
                 await broadcast_activity(last_host, model, "failed",
-                    f"failure: {last_host} for {model} - {type(e).__name__}", duration=dur)
+                    f"[{wid}] failure: {last_host} for {model} - {type(e).__name__}", duration=dur)
                 pass
             else:
                 if r.status == 200:
@@ -734,18 +738,18 @@ async def _proxy_generate(request, session):
                         set_last(model, last_host, last_full)
                         add_good(last_host, model)
                         await broadcast_activity(last_host, model, "connected",
-                            f"success: {last_host} for {model}", duration=dur)
+                            f"[{wid}] success: {last_host} for {model}", duration=dur)
                         return web.json_response(data)
                     dur = time.time() - start
                     add_bad(last_host, model)
                     await broadcast_activity(last_host, model, "failed",
-                        f"failure: {last_host} for {model} - bad response", duration=dur)
+                        f"[{wid}] failure: {last_host} for {model} - bad response", duration=dur)
                 else:
                     dur = time.time() - start
                     await r.release()
                     add_bad(last_host, model)
                     await broadcast_activity(last_host, model, "failed",
-                        f"failure: {last_host} for {model} - status {r.status}", duration=dur)
+                        f"[{wid}] failure: {last_host} for {model} - status {r.status}", duration=dur)
 
     servers = find_servers(model)
     if not servers:
