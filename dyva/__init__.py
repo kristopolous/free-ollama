@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
-import argparse, errno, fnmatch, json, os, requests, logging, sys, time, threading, signal, subprocess
+import argparse
+import errno
+import fnmatch
+import json
+import logging
+import os
+import requests
+import signal
+import subprocess
+import sys
+import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from queue import Queue, Empty
+from socketserver import ThreadingMixIn
 
 LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
 logging.basicConfig(
@@ -9,8 +22,6 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 log = logging.getLogger("dumpster-dive")
-from concurrent.futures import ThreadPoolExecutor
-from queue import Queue, Empty
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
@@ -236,7 +247,6 @@ def all_models():
     global _sort_toggle
     servers = load_servers()
     seen = {}
-    out = []
     _sort_toggle = not _sort_toggle
 
     for s in servers:
@@ -1067,15 +1077,17 @@ class Handler(BaseHTTPRequestHandler):
             raise
 
 
-class PoolServer(HTTPServer):
+class PoolServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
 
     def __init__(self, addr, handler):
         super().__init__(addr, handler)
-        self.executor = ThreadPoolExecutor(
-            max_workers=WORKER_COUNT,
-            thread_name_prefix="dyva-worker",
-        )
+        self.semaphore = threading.Semaphore(WORKER_COUNT)
+
+    def process_request(self, request, client_address):
+        self.semaphore.acquire()
+        super().process_request(request, client_address)
 
     def process_request_thread(self, request, client_address):
         try:
@@ -1084,13 +1096,7 @@ class PoolServer(HTTPServer):
             self.handle_error(request, client_address)
         finally:
             self.shutdown_request(request)
-
-    def process_request(self, request, client_address):
-        self.executor.submit(self.process_request_thread, request, client_address)
-
-    def server_close(self):
-        self.executor.shutdown(wait=False)
-        super().server_close()
+            self.semaphore.release()
 
 
 def main():
