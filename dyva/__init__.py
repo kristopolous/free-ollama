@@ -1049,7 +1049,7 @@ def banner():
     except:
         VERSION="(git)"
     print(f"""
- \\                                          //
+ \\\\                                          //
   l'>     8888b.  Yb  dP Yb    dP    db     <-l
   ll       8I  Yb  YbdP   Yb  dP    dPYb     ll
   llama~   8I  dY   8P     YbdP    dP__Yb    llama~
@@ -1072,7 +1072,7 @@ def main():
     if args.version:
         sys.exit(0)
 
-    WOKFER_COUNT = args.worker_count
+    WORKER_COUNT = args.workers
     TIMEOUT = args.timeout
     PORT = args.port
     log.info(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
