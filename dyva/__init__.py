@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 import argparse
-import errno
+import asyncio
 import fnmatch
 import json
 import logging
 import os
-import requests
-import signal
 import subprocess
 import sys
-import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from queue import Queue, Empty
-from socketserver import ThreadingMixIn
+
+import aiohttp
+from aiohttp import web
 
 LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
 logging.basicConfig(
@@ -31,9 +28,6 @@ LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "3"))
 _last_cache = None
 
-# LAST_SUCCESS is managed through accessors (get_last/set_last) and persisted
-# to LAST_FILE as {model: {host, full, ctime, count}}.
-
 PORT = int(os.environ.get("PORT", "11434"))
 TIMEOUT = 30
 
@@ -41,34 +35,35 @@ _bad_cache = None
 _good_cache = None
 _servers_cache = None
 
-_activity_listeners = []
-_activity_lock = threading.Lock()
+_activity_queues = []
+_activity_lock = asyncio.Lock()
 
-def broadcast_activity(host, model, status, message):
+
+async def broadcast_activity(host, model, status, message):
     entry = {'host': host, 'model': model, 'status': status, 'message': message, 'time': time.time()}
-    with _activity_lock:
+    async with _activity_lock:
         dead = []
-        for q in _activity_listeners:
+        for q in _activity_queues:
             try:
-                q.put_nowait(entry)
+                await q.put(entry)
             except Exception:
                 dead.append(q)
         for q in dead:
-            _activity_listeners.remove(q)
+            _activity_queues.remove(q)
 
-def listen_activity():
-    q = Queue()
-    with _activity_lock:
-        _activity_listeners.append(q)
-    return q
 
-def unlisten_activity(q):
-    with _activity_lock:
-        if q in _activity_listeners:
-            _activity_listeners.remove(q)
+async def _add_activity_listener(q):
+    async with _activity_lock:
+        _activity_queues.append(q)
+
+
+async def _remove_activity_listener(q):
+    async with _activity_lock:
+        if q in _activity_queues:
+            _activity_queues.remove(q)
+
 
 def refresh_cache():
-    """Force a refresh of the server cache."""
     global _servers_cache, _bad_cache, _good_cache
     _servers_cache = None
     _bad_cache = None
@@ -88,8 +83,8 @@ def refresh_cache():
     except subprocess.TimeoutExpired:
         log.warning("free-ollama script timed out")
 
+
 def ensure_cache():
-    """Download the latest server list if cache is missing or >24h old."""
     need = False
     if not os.path.exists(CACHE_FILE) or os.path.getsize(CACHE_FILE) == 0:
         need = True
@@ -100,9 +95,7 @@ def ensure_cache():
 
 
 def load_servers():
-    """Return list of server dicts from the cached JSON file."""
     global _servers_cache
-    log.debug("Loading servers...")
     ensure_cache()
     if _servers_cache is None:
         if not os.path.exists(CACHE_FILE):
@@ -113,7 +106,6 @@ def load_servers():
 
 
 def load_bad():
-    """Return set of 'host model' keys that have failed."""
     global _bad_cache
     if _bad_cache is None:
         _bad_cache = set()
@@ -126,7 +118,6 @@ def load_bad():
 
 
 def add_bad(host, model):
-    """Record that host+model pair failed, both to file and in-memory."""
     global _bad_cache
     with open(BAD_FILE, "a") as f:
         f.write(f"{host} {model}\n")
@@ -135,7 +126,6 @@ def add_bad(host, model):
 
 
 def load_good():
-    """Return set of 'host model' keys that have succeeded."""
     global _good_cache
     if _good_cache is None:
         _good_cache = set()
@@ -148,7 +138,6 @@ def load_good():
 
 
 def add_good(host, model):
-    """Record that host+model pair succeeded, both to file and in-memory."""
     key = f"{host} {model}"
     good = load_good()
     if key not in good:
@@ -159,7 +148,6 @@ def add_good(host, model):
 
 
 def load_last():
-    """Load LAST_SUCCESS cache from disk into _last_cache."""
     global _last_cache
     if os.path.exists(LAST_FILE):
         with open(LAST_FILE) as f:
@@ -167,14 +155,14 @@ def load_last():
     else:
         _last_cache = {}
 
+
 def save_last():
-    """Persist _last_cache to disk."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(LAST_FILE, "w") as f:
         json.dump(_last_cache, f)
 
+
 def get_last(model):
-    """Return (host, full) for model's last-successful server, or None."""
     if _last_cache is None:
         load_last()
     entry = _last_cache.get(model)
@@ -182,8 +170,8 @@ def get_last(model):
         return (entry["host"], entry["full"])
     return None
 
+
 def set_last(model, host, full):
-    """Record last-successful server for model, persisting both ctime and count."""
     if _last_cache is None:
         load_last()
     now = time.time()
@@ -197,27 +185,30 @@ def set_last(model, host, full):
 
 
 def match_model(model_name, pattern):
-    """Return True if model_name contains pattern, supporting fnmatch wildcards."""
     if any(c in pattern for c in "*?["):
         return fnmatch.fnmatch(model_name, f"*{pattern}*")
     return pattern in model_name
 
 
-def probe_host(host):
-    """Quick check: is the server idle and reachable via /api/ps? Returns True/False."""
+async def probe_host(session, host):
     try:
-        r = requests.get(f"{host}/api/ps", timeout=TIMEOUT)
-        if r.status_code != 200:
-            return False
-        data = r.json()
-        models = data.get("models", [])
-        return len(models) == 0
-    except Exception:
+        resp = await asyncio.wait_for(session.get(f"{host}/api/ps"), timeout=TIMEOUT)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
         return False
+    if resp.status != 200:
+        await resp.release()
+        return False
+    try:
+        data = await resp.json()
+    except Exception:
+        await resp.release()
+        return False
+    await resp.release()
+    models = data.get("models", [])
+    return len(models) == 0
 
 
 def find_servers(sub):
-    """Return servers that serve model matching *sub*, sorted last-success then known-good then unknown."""
     servers = load_servers()
     bad = load_bad()
     good = load_good()
@@ -241,14 +232,12 @@ def find_servers(sub):
     return matched
 
 
-_sort_toggle=False
+_sort_toggle = False
 def all_models():
-    """Return deduplicated list of all models across all servers."""
     global _sort_toggle
     servers = load_servers()
     seen = {}
     _sort_toggle = not _sort_toggle
-
     for s in servers:
         for m in s.get("models", []):
             if ":cloud" in m or len(m) == 0:
@@ -257,18 +246,14 @@ def all_models():
                 seen[m] = {'id': m, 'count': 1}
             else:
                 seen[m]['count'] += 1
-
-    # ollama ls doesn't really have sort so we just toggle the order
     if _sort_toggle:
         sorty = sorted(seen.values(), key=lambda x: x.get('count'))
     else:
         sorty = sorted(seen.values(), key=lambda x: x.get('id').lower())
-
     return list(sorty)
 
 
 def to_ollama(body):
-    """Translate OpenAI-format request body to Ollama-format request body."""
     msg = body.get("messages", [])
     opts = {}
     if "temperature" in body:
@@ -281,7 +266,6 @@ def to_ollama(body):
 
 
 def to_openai(resp, model):
-    """Translate Ollama non-streaming response to OpenAI-format response dict."""
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
@@ -304,7 +288,6 @@ def to_openai(resp, model):
 
 
 def err_obj(msg, code=None):
-    """Return an OpenAI-style error dict."""
     e = {"message": msg}
     if code:
         e["code"] = code
@@ -312,7 +295,6 @@ def err_obj(msg, code=None):
 
 
 def sse_chunk(model, content, done=False, finish_reason="stop"):
-    """Build an OpenAI SSE chunk dict for a single token delta."""
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
@@ -327,780 +309,634 @@ def sse_chunk(model, content, done=False, finish_reason="stop"):
 
 
 def sse_str(obj):
-    """Serialize *obj* to a single SSE ``data: ...`` line."""
     return f"data: {json.dumps(obj)}\n\n"
 
 
-def _race_servers(model, servers, payload, do_stream, endpoint="/api/chat"):
-    """Race WORKER_COUNT servers in parallel. Returns winner or None.
-
-    For non-streaming: returns (\"ok\", host, full, response_json).
-    For streaming:     returns (\"ok_stream\", host, full, first_line_bytes, first_dict, lines_iter).
-    """
-    done = threading.Event()
-    result_queue = Queue()
+async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat"):
+    done = asyncio.Event()
+    result_queue = asyncio.Queue()
     server_iter = iter(servers)
-    iter_lock = threading.Lock()
+    iter_lock = asyncio.Lock()
 
-    def worker():
+    async def worker():
+        resp = None
         while not done.is_set():
-            with iter_lock:
+            async with iter_lock:
                 try:
                     _, host, ms = next(server_iter)
                 except StopIteration:
                     return
+
             full = ms[0]
 
-            if not probe_host(host):
+            if not await probe_host(session, host):
                 add_bad(host, model)
                 continue
 
             tag = f"{host} {full}"
             p = dict(payload, model=full, stream=do_stream)
             try:
-                resp = requests.post(f"{host}{endpoint}", json=p, timeout=TIMEOUT, stream=do_stream)
-            except Exception:
+                resp = await asyncio.wait_for(
+                    session.post(f"{host}{endpoint}", json=p),
+                    timeout=TIMEOUT,
+                )
+            except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
                 add_bad(host, model)
                 continue
 
-            if resp.status_code != 200:
+            if resp.status != 200:
+                await resp.release()
+                resp = None
                 add_bad(host, model)
                 continue
 
             if not do_stream:
-                data = resp.json()
+                try:
+                    data = await asyncio.wait_for(resp.json(), timeout=TIMEOUT)
+                except Exception:
+                    await resp.release()
+                    resp = None
+                    add_bad(host, model)
+                    continue
+                await resp.release()
                 if "error" in data:
                     add_bad(host, model)
                     continue
-                
-                log.debug(f"  ✓ {tag}")
+                log.debug(f"  \u2713 {tag}")
                 set_last(model, host, full)
                 add_good(host, model)
-                broadcast_activity(host, full, "connected", f"connected to {host}")
-                result_queue.put(("ok", host, full, data))
+                await broadcast_activity(host, full, "connected", f"connected to {host}")
+                await result_queue.put(("ok", host, full, data))
+                done.set()
                 return
 
-            # Streaming: read first chunk to validate
-            it = resp.iter_lines()
-            first_line = None
-            for line in it:
-                if not line:
-                    continue
-                first_line = line
-                break
-
-            if not first_line:
+            first_line = await resp.content.readline()
+            if not first_line or not first_line.strip():
+                await resp.release()
+                resp = None
                 add_bad(host, model)
                 continue
 
             try:
                 first = json.loads(first_line)
             except json.JSONDecodeError:
+                await resp.release()
+                resp = None
                 add_bad(host, model)
                 continue
 
             if "error" in first:
+                await resp.release()
+                resp = None
                 add_bad(host, model)
                 continue
 
-            log.debug(f"  ✓ {tag}")
+            if done.is_set():
+                await resp.release()
+                return
+
+            log.debug(f"  \u2713 {tag}")
             set_last(model, host, full)
             add_good(host, model)
-            broadcast_activity(host, full, "connected", f"connected to {host}")
-            result_queue.put(("ok_stream", host, full, first_line, first, it))
+            await broadcast_activity(host, full, "connected", f"connected to {host}")
+            await result_queue.put(("ok_stream", host, full, resp, first_line, first))
+            done.set()
             return
 
-    threads = [threading.Thread(target=worker, daemon=True) for _ in range(WORKER_COUNT)]
-    for t in threads:
-        t.start()
+        if resp is not None:
+            await resp.release()
+
+    tasks = [asyncio.create_task(worker()) for _ in range(WORKER_COUNT)]
 
     try:
-        result = result_queue.get(timeout=TIMEOUT + 5)
-    except Empty:
-        return None
+        result = await asyncio.wait_for(result_queue.get(), timeout=TIMEOUT + 5)
+    except asyncio.TimeoutError:
+        result = None
+    finally:
+        done.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    done.set()
     return result
 
 
-class Handler(BaseHTTPRequestHandler):
-    """OpenAI-compatible HTTP handler that proxies to free Ollama servers."""
+async def _try_one(session, host, model, full_model, opayload):
+    tag = f"{host} {full_model}"
+    payload = dict(opayload, model=full_model, stream=False)
+    try:
+        resp = await asyncio.wait_for(
+            session.post(f"{host}/api/chat", json=payload),
+            timeout=TIMEOUT,
+        )
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        log.debug(f"  \u2717 {tag}  (exception: {e})")
+        add_bad(host, model)
+        return None
 
-    def do_HEAD(self):
-        """Handle HEAD requests: same as GET but no body."""
-        self.head_request = True
-        try:
-            self.do_GET()
-        finally:
-            self.head_request = False
+    if resp.status != 200:
+        await resp.release()
+        log.debug(f"  \u2717 {tag}  (status {resp.status})")
+        add_bad(host, model)
+        return None
 
-    def do_GET(self):
-        if self.path == "/v1/models":
-            models = all_models()
-            self.send_json({
-                "object": "list",
-                "data": models
-            })
-            return
+    try:
+        data = await resp.json()
+    except Exception:
+        await resp.release()
+        add_bad(host, model)
+        return None
+    await resp.release()
 
-        if self.path == "/clear-bad":
-            """Clear all bad hosts."""
-            global _bad_cache
-            _bad_cache = None
-            if os.path.exists(BAD_FILE):
-                os.remove(BAD_FILE)
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
-            return
+    if "error" in data:
+        log.debug(f"  \u2717 {tag}  (error: {data['error']})")
+        add_bad(host, model)
+        return None
 
-        if self.path == "/refresh-cache":
-            refresh_cache()
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
-            return
+    log.debug(f"  \u2713 {tag}")
+    set_last(model, host, full_model)
+    add_good(host, model)
+    return data
 
-        if getattr(self, 'head_request', False):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", 0)
-            self.end_headers()
-            return
 
-        if self.path in ("/", "/dashboard"):
-            bad = load_bad()
-            good = load_good()
-            servers = load_servers()
-            load_last()
-            models = sorted(all_models(), key=lambda x: -x["count"])
-            tpl_dir = os.path.join(os.path.dirname(__file__), "static")
-            with open(os.path.join(tpl_dir, "dashboard.html")) as f:
-                html = f.read()
-            model_rows = "".join(
-                f'<div class="model-item" data-name="{m["id"]}"><span class="model-name">{m["id"]}</span><span class="model-count">{m["count"]}</span></div>'
-                for m in models
-            )
-            model_more = ""
-            last_rows = "".join(
-                f'<div class="model-item"><span class="host-name">{entry["host"]}</span><span class="host-model">{model}</span></div>'
-                for model, entry in list(_last_cache.items())[:20]
-            ) if _last_cache else '<div style="color:#999;font-size:.85rem">None</div>'
-            good_rows = "".join(
-                f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
-                for h in sorted(good)[:30]
-            )
-            good_more = f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else ""
-            bad_rows = "".join(
-                f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
-                for h in sorted(bad)[:30]
-            )
-            bad_more = f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else ""
-            cache_mtime = os.path.getmtime(CACHE_FILE) if os.path.exists(CACHE_FILE) else 0
-            cache_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cache_mtime)) if cache_mtime else "never"
-            html = html.replace("__PORT__", str(PORT))
-            html = html.replace("__WORKER_COUNT__", str(WORKER_COUNT))
-            html = html.replace("__TIMEOUT__", str(TIMEOUT))
-            html = html.replace("__SERVER_COUNT__", str(len(servers)))
-            html = html.replace("__MODEL_COUNT__", str(len(models)))
-            html = html.replace("__CACHE_UPDATED__", cache_time)
-            html = html.replace("__MODEL_ROWS__", model_rows)
-            html = html.replace("__MODEL_MORE__", model_more)
-            html = html.replace("__LAST_ROWS__", last_rows)
-            html = html.replace("__GOOD_COUNT__", str(len(good)))
-            html = html.replace("__GOOD_ROWS__", good_rows)
-            html = html.replace("__GOOD_MORE__", good_more)
-            html = html.replace("__BAD_COUNT__", str(len(bad)))
-            html = html.replace("__BAD_ROWS__", bad_rows)
-            html = html.replace("__BAD_MORE__", bad_more)
-            model_hosts = {}
-            for s in servers:
-                host = s.get("server", "")
-                for m in s.get("models", []):
-                    if ":cloud" in m or len(m) == 0:
-                        continue
-                    model_hosts.setdefault(m, []).append(host)
-            for m in model_hosts:
-                model_hosts[m].sort()
-            html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
-            body = html.encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
+async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
+    if not await probe_host(session, host):
+        add_bad(host, model)
+        return None
+    tag = f"{host} {full_model}"
+    p = dict(payload, model=full_model, stream=do_stream)
+    try:
+        resp = await asyncio.wait_for(
+            session.post(f"{host}{endpoint}", json=p),
+            timeout=TIMEOUT,
+        )
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        log.debug(f"  \u2717 {tag}  (exception: {e})")
+        add_bad(host, model)
+        await broadcast_activity(host, full_model, "failed", f"{host} failed ({e})")
+        return None
 
-        if self.path == "/api/tags":
-            graffiti = [
-                ":::::::-.  ",
-                " ;;,   `';,",
-                " `[[     [[",
-                "  $$,    $$",
-                "  888_,o8P'",
-                "  MMMMP'`  ",
-                " ...    :::",
-                " ;;     ;;;",
-                "[['     [[[",
-                "$$      $$$",
-                "88    .d888",
-                ".'YmmMMMM''",
-                ";;,.    ;;;",
-                "[[[[, ,[[[[",
-                "$$$$$$$$'$$",
-                "888 Y88' 88",
-                "MMM  M'  'M",
-                "::::::::::.",
-                " `;;;```.;;",
-                "  `]]nnn]]'",
-                "   $$$''   ",
-                "   888o    ",
-                "   YMMMb   ",
-                " .::::::. ",
-                ";;;`    ` ",
-                "'[==/[[[[,",
-                "  '''    $",
-                " 88b    dP",
-                "  'YMmMY' ",
-                ":::::::::::",
-                ";;;;;;;;'''",
-                "     [[    ",
-                "     $$    ",
-                "     88,   ",
-                "     MMM   ",
-                ".,::::::  ",
-                ";;;;''''  ",
-                " [[cccc   ",
-                " $$''''   ",
-                " 888oo,__ ",
-                " ''''YUMMM",
-                ":::::::..  ",
-                ";;;;``;;;; ",
-                " [[[,/[[[' ",
-                " $$$$$$c   ",
-                " 888b '88bo",
-                " MMMM   'W'",
-                "           ",
-                "           ",
-                ":::::::-.  ",
-                " ;;,   `';,",
-                " `[[     [[",
-                "  $$,    $$",
-                "  888_,o8P'",
-                "  MMMMP'`  ",
-                ".-:.     ::",
-                " ';;.   ;;;",
-                "   '[[,[[['",
-                "     c$$'  ",
-                "   ,8P'`   ",
-                "  mM'      ",
-                ":::      .:",
-                "';;,   ,;;;",
-                " \\[[  .[[/ ",
-                "  Y$c.$$'  ",
-                "   Y88P    ",
-                "    MP     ",
-                "  :::.     ",
-                "  ;;`;;    ",
-                " ,[[ '[[,  ",
-                "c$$$cc$$$c ",
-                " 888   888,",
-                " YMM   ''` ",
-                "           ",
-                "           ",
-                "  -~===~-  ",
-                "           ",
-                "           ",
-                "  _______ ",
-                " |   _   |",
-                " |.  1___|",
-                " |.  __)  ",
-                " |:  |    ",
-                " |::.|    ",
-                " `---'    ",
-                "  _______ ",
-                " |   _   \\",
-                " |.  l   /",
-                " |.  _   1",
-                " |:  |   |",
-                " |::.|:. |",
-                " `--- ---'",
-                "  _______ ",
-                " |   _   |",
-                " |.  1___|",
-                " |.  __)_ ",
-                " |:  1   |",
-                " |::.. . |",
-                " `-------'",
-                "  _______ ",
-                " |   _   |",
-                " |.  1___|",
-                " |.  __)_ ",
-                " |:  1   |",
-                " |::.. . |",
-                " `-------'",
-                "          ",
-                "          ",
-                "  _______ ",
-                " |   _   |",
-                " |.  |   |",
-                " |:  1   |",
-                " |::.. . |",
-                " `-------'",
-                "  ___     ",
-                " |   |    ",
-                " |.  |    ",
-                " |.  |___ ",
-                " |:  1   |",
-                " |::.. . |",
-                " `-------'",
-                "  ___     ",
-                " |   |    ",
-                " |.  |    ",
-                " |.  |___ ",
-                " |:  1   |",
-                " |::.. . |",
-                " `-------'",
-                "  _______ ",
-                " |   _   |",
-                " |.  1   |",
-                " |.  _   |",
-                " |:  |   |",
-                " |::.|:. |",
-                " `--- ---'",
-                "  ___ ___ ",
-                " |   Y   |",
-                " |.      |",
-                " |. \\_/  |",
-                " |:  |   |",
-                " |::.|:. |",
-                " `--- ---'",
-                "  _______ ",
-                " |   _   |",
-                " |.  1   |",
-                " |.  _   |",
-                " |:  |   |",
-                " |::.|:. |",
-                " `--- ---'",
-                "          ",
-                "          ",
-                "  : :: :  ",
-                "          ",
-                "          "]
+    if resp.status != 200:
+        log.debug(f"  \u2717 {tag}  (status {resp.status})")
+        await resp.release()
+        add_bad(host, model)
+        await broadcast_activity(host, full_model, "failed", f"{host} returned {resp.status}")
+        return None
 
-            models = all_models()
-            now = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.localtime(time.time() - (7 * 24 * 60 * 60)))
-            self.send_json({
-                "models": [
-                    {
-                        "name": models[m]["id"],
-                        "model": models[m]["id"],
-                        "modified_at": now,
-                        "size": models[m]['count'],
-                        "digest": f"{graffiti[m % len(graffiti)]}       000000000000000000000000000000000000000000000000000000",
-                        "details": {
-                            "parent_model": "",
-                            "format": "gguf",
-                            "family": "",
-                            "families": None,
-                            "parameter_size": "",
-                            "quantization_level": "",
-                        },
-                    }
-                    for m in range(len(models))
-                ],
-            })
-            return
+    it = resp.content
+    first_line = await it.readline()
+    if not first_line or not first_line.strip():
+        log.debug(f"  \u2717 {tag}  (empty response)")
+        await resp.release()
+        add_bad(host, model)
+        await broadcast_activity(host, full_model, "failed", f"{host} empty response")
+        return None
+    try:
+        first = json.loads(first_line)
+    except json.JSONDecodeError:
+        log.debug(f"  \u2717 {tag}  (bad response)")
+        await resp.release()
+        add_bad(host, model)
+        await broadcast_activity(host, full_model, "failed", f"{host} bad response")
+        return None
+    if "error" in first:
+        log.debug(f"  \u2717 {tag}  (error: {first['error']})")
+        await resp.release()
+        add_bad(host, model)
+        await broadcast_activity(host, full_model, "failed", f"{host} error: {first['error']}")
+        return None
+    log.debug(f"  \u2713 {tag}")
+    set_last(model, host, full_model)
+    add_good(host, model)
+    await broadcast_activity(host, full_model, "connected", f"connected to {host}")
+    return resp, first_line, first
 
-        if self.path == "/api/version":
-            self.send_json({"version": "0.5.0"})
-            return
 
-        if self.path == "/api/activity":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.flush()
+async def _forward_stream(request, response, resp, first_line, host, full, model, openai_format):
+    content_type = "text/event-stream" if openai_format else "application/x-ndjson"
+    response.headers["Content-Type"] = content_type
+    response.headers["Cache-Control"] = "no-cache"
+    await response.prepare(request)
 
-            q = listen_activity()
-            try:
-                while True:
-                    entry = q.get()
-                    try:
-                        self.wfile.write(f"data: {json.dumps(entry)}\n\n".encode())
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError, OSError):
-                        break
-            finally:
-                unlisten_activity(q)
-            return
-
-        if self.path == "/refresh":
-            broadcast_activity("", "", "searching", "refreshing server cache...")
-            refresh_cache()
-            self.send_json({"status": "ok", "message": "cache refreshed"})
-            return
-
-        if self.path == "/api/show":
-            self.send_json({
-                "modelfile": "# free-ollama proxy",
-                "details": {"parent_model": "", "format": "gguf", "family": "", "families": None,
-                            "parameter_size": "", "quantization_level": ""},
-                "model_info": {},
-            })
-            return
-
-        static_path = os.path.join(os.path.dirname(__file__), "static", self.path.lstrip("/"))
-        if os.path.exists(static_path) and os.path.isfile(static_path):
-            data = open(static_path, "rb").read()
-            ct = "image/png" if static_path.endswith(".png") else "application/octet-stream"
-            self.send_response(200)
-            self.send_header("Content-Type", ct)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            if not getattr(self, 'head_request', False):
-                self.wfile.write(data)
-            return
-        self.send_json(err_obj("not found"), 404)
-
-    def do_POST(self):
-        """Route requests to the appropriate handler."""
-        if self.path == "/api/show":
-            self.send_json({
-                "modelfile": "# free-ollama proxy",
-                "details": {"parent_model": "", "format": "gguf", "family": "", "families": None,
-                            "parameter_size": "", "quantization_level": ""},
-                "model_info": {},
-            })
-            return
-
-        if self.path == "/api/chat":
-            length = int(self.headers.get("Content-Length", 0))
-            try:
-                body = json.loads(self.rfile.read(length))
-            except json.JSONDecodeError:
-                self.send_json(err_obj("invalid JSON"), 400)
-                return
-            model = body.get("model", "")
-            if not model:
-                self.send_json(err_obj("model is required", "missing_model"), 400)
-                return
-            do_stream = body.get("stream", False)
-            opayload = body
-            log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
-            self._proxy_chat(model, opayload, do_stream, openai_format=False)
-            return
-
-        if self.path == "/api/generate":
-            self._proxy_generate()
-            return
-
-        if self.path != "/v1/chat/completions":
-            self.send_json(err_obj("not found"), 404)
-            return
-
-        length = int(self.headers.get("Content-Length", 0))
-        try:
-            body = json.loads(self.rfile.read(length))
-        except json.JSONDecodeError:
-            self.send_json(err_obj("invalid JSON"), 400)
-            return
-        model = body.get("model", "")
-        if not model:
-            self.send_json(err_obj("model is required", "missing_model"), 400)
-            return
-        do_stream = body.get("stream", False)
-        opayload = to_ollama(body)
-        log.debug(f"OpenAI request: model={model}, stream={do_stream}")
-        self._proxy_chat(model, opayload, do_stream, openai_format=True)
-
-    def _proxy_chat(self, model, opayload, do_stream, openai_format):
-        last = get_last(model)
-        if last:
-            last_host, last_full = last
-            if probe_host(last_host):
-                log.debug(f"Reusing {last_host} for {model}")
-                if do_stream:
-                    result = self._try_host(last_host, last_full, model, opayload, do_stream=True)
-                    if result:
-                        _, first_line, first, it = result
-                        self._forward_stream(first_line, it, last_host, last_full, model, openai_format)
-                        return
-                else:
-                    result = self._try_one(last_host, model, last_full, opayload)
-                    if result:
-                        if openai_format:
-                            self.send_json(to_openai(result, model), 200)
-                        else:
-                            self.send_json(result, 200)
-                        return
-
-        servers = find_servers(model)
-        if not servers:
-            self.send_json(err_obj(f"no available servers for '{model}'", "model_not_found"), 404)
-            return
-
-        if do_stream:
-            result = _race_servers(model, servers, opayload, do_stream=True)
-            if result:
-                _, host, full, first_line, first, it = result
-                self._forward_stream(first_line, it, host, full, model, openai_format)
-                return
-            if openai_format:
-                try:
-                    self.wfile.write(sse_str({"error": "all servers failed"}).encode())
-                    self.wfile.write(sse_str(sse_chunk("", "", done=True)).encode())
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    pass
-            else:
-                self.send_json(err_obj("all servers failed"), 502)
-            self.close_connection = True
-            return
-
-        result = _race_servers(model, servers, dict(opayload, stream=False), do_stream=False)
-        if result:
-            _, host, full, data = result
-            if openai_format:
-                self.send_json(to_openai(data, model), 200)
-            else:
-                self.send_json(data, 200)
-            return
-
-        self.send_json(err_obj("all servers failed"), 502)
-
-    def _forward_stream(self, first_line, it, host, full, model, openai_format):
-        content_type = "text/event-stream" if openai_format else "application/x-ndjson"
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        self.wfile.flush()
-
+    try:
         if openai_format:
             first = json.loads(first_line)
             content = first.get("message", {}).get("content", "")
-            self.wfile.write(sse_str(sse_chunk(full, content)).encode())
+            await response.write(sse_str(sse_chunk(full, content)).encode())
         else:
-            self.wfile.write(first_line + b"\n")
-        self.wfile.flush()
+            await response.write(first_line + b"\n")
 
-        for line in it:
-            if not line:
+        async for line in resp.content:
+            if not line or line == b"\n":
                 continue
+            line = line.rstrip(b"\n\r")
             try:
                 if openai_format:
                     obj = json.loads(line)
                     content = obj.get("message", {}).get("content", "")
                     if content:
-                        self.wfile.write(sse_str(sse_chunk(full, content)).encode())
+                        await response.write(sse_str(sse_chunk(full, content)).encode())
                     if obj.get("done"):
                         fr = obj.get("done_reason", "stop")
-                        self.wfile.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
-                        self.wfile.flush()
+                        await response.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
                 else:
-                    self.wfile.write(line + b"\n")
+                    await response.write(line + b"\n")
                     obj = json.loads(line)
                     if obj.get("done"):
-                        self.wfile.flush()
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass
+            except (BrokenPipeError, ConnectionResetError):
                 log.debug("Client disconnected during stream")
                 return
-        self.close_connection = True
+    finally:
+        await resp.release()
 
-    def _proxy_generate(self):
-        """Proxy an Ollama /api/generate request to a backend server."""
-        length = int(self.headers.get("Content-Length", 0))
-        try:
-            body = json.loads(self.rfile.read(length))
-        except json.JSONDecodeError:
-            self.send_json(err_obj("invalid JSON"), 400)
+
+async def _proxy_chat(request, session, model, opayload, do_stream, openai_format):
+    last = get_last(model)
+    if last:
+        last_host, last_full = last
+        if await probe_host(session, last_host):
+            log.debug(f"Reusing {last_host} for {model}")
+            if do_stream:
+                result = await _try_host(session, last_host, last_full, model, opayload, do_stream=True)
+                if result:
+                    resp, first_line, first = result
+                    await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format)
+                    return
+            else:
+                data = await _try_one(session, last_host, model, last_full, opayload)
+                if data:
+                    if openai_format:
+                        return web.json_response(to_openai(data, model))
+                    else:
+                        return web.json_response(data)
+
+    servers = find_servers(model)
+    if not servers:
+        return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
+
+    if do_stream:
+        result = await _race_servers(session, model, servers, opayload, do_stream=True)
+        if result:
+            _, host, full, resp, first_line, first = result
+            await _forward_stream(request, web.StreamResponse(), resp, first_line, host, full, model, openai_format)
             return
+        if openai_format:
+            return web.Response(
+                text=sse_str({"error": "all servers failed"}) + sse_str(sse_chunk("", "", done=True)),
+                content_type="text/event-stream",
+            )
+        return web.json_response(err_obj("all servers failed"), status=502)
+
+    result = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False)
+    if result:
+        _, host, full, data = result
+        if openai_format:
+            return web.json_response(to_openai(data, model))
+        return web.json_response(data)
+
+    return web.json_response(err_obj("all servers failed"), status=502)
+
+
+async def _proxy_generate(request, session):
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response(err_obj("invalid JSON"), status=400)
+
+    model = body.get("model", "")
+    if not model:
+        return web.json_response(err_obj("model is required", "missing_model"), status=400)
+    do_stream = body.get("stream", False)
+    log.debug(f"Ollama generate request: model={model}, stream={do_stream}")
+    endpoint = "/api/generate"
+
+    last = get_last(model)
+    if last:
+        last_host, last_full = last
+        if await probe_host(session, last_host):
+            log.debug(f"Reusing {last_host} for {model}")
+            if do_stream:
+                result = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
+                if result:
+                    resp, first_line, first = result
+                    await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format=False)
+                    return
+            else:
+                p = dict(body, model=last_full, stream=False)
+                try:
+                    r = await asyncio.wait_for(
+                        session.post(f"{last_host}{endpoint}", json=p),
+                        timeout=TIMEOUT,
+                    )
+                except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+                    add_bad(last_host, model)
+                else:
+                    if r.status == 200:
+                        try:
+                            data = await r.json()
+                        except Exception:
+                            data = None
+                        await r.release()
+                        if data and "error" not in data:
+                            set_last(model, last_host, last_full)
+                            add_good(last_host, model)
+                            return web.json_response(data)
+                    else:
+                        await r.release()
+                    add_bad(last_host, model)
+
+    servers = find_servers(model)
+    if not servers:
+        return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
+
+    if do_stream:
+        result = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint)
+        if result:
+            _, host, full, resp, first_line, first = result
+            await _forward_stream(request, web.StreamResponse(), resp, first_line, host, full, model, openai_format=False)
+            return
+        return web.json_response(err_obj("all servers failed"), status=502)
+
+    result = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint)
+    if result:
+        _, host, full, data = result
+        return web.json_response(data)
+
+    return web.json_response(err_obj("all servers failed"), status=502)
+
+
+async def handle_dashboard(request):
+    bad = load_bad()
+    good = load_good()
+    servers = load_servers()
+    load_last()
+    models = sorted(all_models(), key=lambda x: -x["count"])
+    tpl_dir = os.path.join(os.path.dirname(__file__), "static")
+    with open(os.path.join(tpl_dir, "dashboard.html")) as f:
+        html = f.read()
+    model_rows = "".join(
+        f'<div class="model-item" data-name="{m["id"]}"><span class="model-name">{m["id"]}</span><span class="model-count">{m["count"]}</span></div>'
+        for m in models
+    )
+    model_more = ""
+    last_rows = "".join(
+        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><span class="host-model">{model}</span></div>'
+        for model, entry in list(_last_cache.items())[:20]
+    ) if _last_cache else '<div style="color:#999;font-size:.85rem">None</div>'
+    good_rows = "".join(
+        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
+        for h in sorted(good)[:30]
+    )
+    good_more = f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else ""
+    bad_rows = "".join(
+        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
+        for h in sorted(bad)[:30]
+    )
+    bad_more = f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else ""
+    cache_mtime = os.path.getmtime(CACHE_FILE) if os.path.exists(CACHE_FILE) else 0
+    cache_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cache_mtime)) if cache_mtime else "never"
+    html = html.replace("__PORT__", str(PORT))
+    html = html.replace("__WORKER_COUNT__", str(WORKER_COUNT))
+    html = html.replace("__TIMEOUT__", str(TIMEOUT))
+    html = html.replace("__SERVER_COUNT__", str(len(servers)))
+    html = html.replace("__MODEL_COUNT__", str(len(models)))
+    html = html.replace("__CACHE_UPDATED__", cache_time)
+    html = html.replace("__MODEL_ROWS__", model_rows)
+    html = html.replace("__MODEL_MORE__", model_more)
+    html = html.replace("__LAST_ROWS__", last_rows)
+    html = html.replace("__GOOD_COUNT__", str(len(good)))
+    html = html.replace("__GOOD_ROWS__", good_rows)
+    html = html.replace("__GOOD_MORE__", good_more)
+    html = html.replace("__BAD_COUNT__", str(len(bad)))
+    html = html.replace("__BAD_ROWS__", bad_rows)
+    html = html.replace("__BAD_MORE__", bad_more)
+    model_hosts = {}
+    for s in servers:
+        host = s.get("server", "")
+        for m in s.get("models", []):
+            if ":cloud" in m or len(m) == 0:
+                continue
+            model_hosts.setdefault(m, []).append(host)
+    for m in model_hosts:
+        model_hosts[m].sort()
+    html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
+    return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def handle_v1_models(request):
+    models = all_models()
+    return web.json_response({
+        "object": "list",
+        "data": models,
+    })
+
+
+async def handle_clear_bad(request):
+    global _bad_cache
+    _bad_cache = None
+    if os.path.exists(BAD_FILE):
+        os.remove(BAD_FILE)
+    raise web.HTTPFound("/")
+
+
+async def handle_refresh_cache(request):
+    refresh_cache()
+    raise web.HTTPFound("/")
+
+
+async def handle_api_tags(request):
+    graffiti = [
+        ":::::::-.  ",  " ;;,   `';,",  " `[[     [[",  "  $$,    $$",
+        "  888_,o8P'",  "  MMMMP'`  ",  " ...    :::",  " ;;     ;;;",
+        "[['     [[[",  "$$      $$$",  "88    .d888",  ".'YmmMMMM''",
+        ";;,.    ;;;",  "[[[[, ,[[[[",  "$$$$$$$$'$$",  "888 Y88' 88",
+        "MMM  M'  'M",  "::::::::::.",  " `;;;```.;;",  "  `]]nnn]]'",
+        "   $$$''   ",  "   888o    ",  "   YMMMb   ",  " .::::::. ",
+        ";;;`    ` ",  "'[==/[[[[,",  "  '''    $",  " 88b    dP",
+        "  'YMmMY' ",  ":::::::::::",  ";;;;;;;;'''",  "     [[    ",
+        "     $$    ",  "     88,   ",  "     MMM   ",  ".,::::::  ",
+        ";;;;''''  ",  " [[cccc   ",  " $$''''   ",  " 888oo,__ ",
+        " ''''YUMMM",  ":::::::..  ",  ";;;;``;;;; ",  " [[[,/[[[' ",
+        " $$$$$$c   ",  " 888b '88bo",  " MMMM   'W'",  "           ",
+        "           ",  ":::::::-.  ",  " ;;,   `';,",  " `[[     [[",
+        "  $$,    $$",  "  888_,o8P'",  "  MMMMP'`  ",  ".-:.     ::",
+        " ';;.   ;;;",  "   '[[,[[['",  "     c$$'  ",  "   ,8P'`   ",
+        "  mM'      ",  ":::      .:",  "';;,   ,;;;",  " \\[[  .[[/ ",
+        "  Y$c.$$'  ",  "   Y88P    ",  "    MP     ",  "  :::.     ",
+        "  ;;`;;    ",  " ,[[ '[[,  ",  "c$$$cc$$$c ",  " 888   888,",
+        " YMM   ''` ",  "           ",  "           ",  "  -~===~-  ",
+        "           ",  "           ",  "  _______ ",  " |   _   |",
+        " |.  1___|",  " |.  __)  ",  " |:  |    ",  " |::.|    ",
+        " `---'    ",  "  _______ ",  " |   _   \\", " |.  l   /",
+        " |.  _   1",  " |:  |   |",  " |::.|:. |",  " `--- ---'",
+        "  _______ ",  " |   _   |",  " |.  1___|",  " |.  __)_ ",
+        " |:  1   |",  " |::.. . |",  " `-------'",  "  _______ ",
+        " |   _   |",  " |.  1___|",  " |.  __)_ ",  " |:  1   |",
+        " |::.. . |",  " `-------'",  "          ",  "          ",
+        "  _______ ",  " |   _   |",  " |.  |   |",  " |:  1   |",
+        " |::.. . |",  " `-------'",  "  ___     ",  " |   |    ",
+        " |.  |    ",  " |.  |___ ",  " |:  1   |",  " |::.. . |",
+        " `-------'",  "  ___     ",  " |   |    ",  " |.  |    ",
+        " |.  |___ ",  " |:  1   |",  " |::.. . |",  " `-------'",
+        "  _______ ",  " |   _   |",  " |.  1   |",  " |.  _   |",
+        " |:  |   |",  " |::.|:. |",  " `--- ---'",  "  ___ ___ ",
+        " |   Y   |",  " |.      |",  " |. \\_/  |",  " |:  |   |",
+        " |::.|:. |",  " `--- ---'",  "  _______ ",  " |   _   |",
+        " |.  1   |",  " |.  _   |",  " |:  |   |",  " |::.|:. |",
+        " `--- ---'",  "          ",  "          ",  "  : :: :  ",
+        "          ",  "          "]
+    models = all_models()
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.localtime(time.time() - (7 * 24 * 60 * 60)))
+    return web.json_response({
+        "models": [
+            {
+                "name": models[m]["id"],
+                "model": models[m]["id"],
+                "modified_at": now,
+                "size": models[m]['count'],
+                "digest": f"{graffiti[m % len(graffiti)]}       000000000000000000000000000000000000000000000000000000",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": "",
+                    "families": None,
+                    "parameter_size": "",
+                    "quantization_level": "",
+                },
+            }
+            for m in range(len(models))
+        ],
+    })
+
+
+async def handle_api_version(request):
+    return web.json_response({"version": "0.5.0"})
+
+
+async def handle_api_activity(request):
+    response = web.StreamResponse()
+    response.headers["Content-Type"] = "text/event-stream"
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    await response.prepare(request)
+
+    q = asyncio.Queue()
+    await _add_activity_listener(q)
+    try:
+        while True:
+            try:
+                entry = await asyncio.wait_for(q.get(), timeout=1)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                await response.write(f"data: {json.dumps(entry)}\n\n".encode())
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                break
+    finally:
+        await _remove_activity_listener(q)
+    return response
+
+
+async def handle_refresh(request):
+    await broadcast_activity("", "", "searching", "refreshing server cache...")
+    refresh_cache()
+    return web.json_response({"status": "ok", "message": "cache refreshed"})
+
+
+async def handle_api_show(request):
+    return web.json_response({
+        "modelfile": "# free-ollama proxy",
+        "details": {"parent_model": "", "format": "gguf", "family": "", "families": None,
+                    "parameter_size": "", "quantization_level": ""},
+        "model_info": {},
+    })
+
+
+async def handle_static(request):
+    wanted = request.match_info.get("path", "")
+    static_path = os.path.join(os.path.dirname(__file__), "static", wanted)
+    if os.path.exists(static_path) and os.path.isfile(static_path):
+        with open(static_path, "rb") as f:
+            data = f.read()
+        ct = "image/png" if static_path.endswith(".png") else "application/octet-stream"
+        return web.Response(body=data, content_type=ct)
+    return web.json_response(err_obj("not found"), status=404)
+
+
+async def handle_ollama_chat(request):
+    async with request.app["semaphore"]:
+        session = request.app["session"]
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response(err_obj("invalid JSON"), status=400)
         model = body.get("model", "")
         if not model:
-            self.send_json(err_obj("model is required", "missing_model"), 400)
-            return
+            return web.json_response(err_obj("model is required", "missing_model"), status=400)
         do_stream = body.get("stream", False)
-        log.debug(f"Ollama generate request: model={model}, stream={do_stream}")
-        endpoint = "/api/generate"
+        opayload = body
+        log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
+        return await _proxy_chat(request, session, model, opayload, do_stream, openai_format=False)
 
-        last = get_last(model)
-        if last:
-            last_host, last_full = last
-            if probe_host(last_host):
-                log.debug(f"Reusing {last_host} for {model}")
-                if do_stream:
-                    result = self._try_host(last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
-                    if result:
-                        _, first_line, first, it = result
-                        self._forward_stream(first_line, it, last_host, last_full, model, openai_format=False)
-                        return
-                else:
-                    p = dict(body, model=last_full, stream=False)
-                    try:
-                        resp = requests.post(f"{last_host}{endpoint}", json=p, timeout=TIMEOUT)
-                    except Exception as e:
-                        log.debug(f"  ✗ {last_host} {last_full}  (exception: {e})")
-                        add_bad(last_host, model)
-                    else:
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            if "error" not in data:
-                                set_last(model, last_host, last_full)
-                                add_good(last_host, model)
-                                self.send_json(data, 200)
-                                return
-                        add_bad(last_host, model)
 
-        servers = find_servers(model)
-        if not servers:
-            self.send_json(err_obj(f"no available servers for '{model}'", "model_not_found"), 404)
-            return
-
-        if do_stream:
-            result = _race_servers(model, servers, body, do_stream=True, endpoint=endpoint)
-            if result:
-                _, host, full, first_line, first, it = result
-                self._forward_stream(first_line, it, host, full, model, openai_format=False)
-                return
-            self.send_json(err_obj("all servers failed"), 502)
-            return
-
-        result = _race_servers(model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint)
-        if result:
-            _, host, full, data = result
-            self.send_json(data, 200)
-            return
-
-        self.send_json(err_obj("all servers failed"), 502)
-
-    def _try_host(self, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
-        """Try one host with probe + inference. Returns (host, first_line, first, it) or None."""
-        if not probe_host(host):
-            add_bad(host, model)
-            return None
-        tag = f"{host} {full_model}"
-        p = dict(payload, model=full_model, stream=do_stream)
+async def handle_openai_chat(request):
+    async with request.app["semaphore"]:
+        session = request.app["session"]
         try:
-            resp = requests.post(f"{host}{endpoint}", json=p, timeout=TIMEOUT, stream=do_stream)
-        except Exception as e:
-            log.debug(f"  ✗ {tag}  (exception: {e})")
-            add_bad(host, model)
-            broadcast_activity(host, full_model, "failed", f"{host} failed ({e})")
-            return None
-        if resp.status_code != 200:
-            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
-            add_bad(host, model)
-            broadcast_activity(host, full_model, "failed", f"{host} returned {resp.status_code}")
-            return None
-        it = resp.iter_lines()
-        first_line = None
-        for line in it:
-            if not line:
-                continue
-            first_line = line
-            break
-        if not first_line:
-            log.debug(f"  ✗ {tag}  (empty response)")
-            add_bad(host, model)
-            broadcast_activity(host, full_model, "failed", f"{host} empty response")
-            return None
-        try:
-            first = json.loads(first_line)
+            body = await request.json()
         except json.JSONDecodeError:
-            log.debug(f"  ✗ {tag}  (bad response)")
-            add_bad(host, model)
-            broadcast_activity(host, full_model, "failed", f"{host} bad response")
-            return None
-        if "error" in first:
-            log.debug(f"  ✗ {tag}  (error: {first['error']})")
-            add_bad(host, model)
-            broadcast_activity(host, full_model, "failed", f"{host} error: {first['error']}")
-            return None
-        log.debug(f"  ✓ {tag}")
-        set_last(model, host, full_model)
-        add_good(host, model)
-        broadcast_activity(host, full_model, "connected", f"connected to {host}")
-        return host, first_line, first, it
-
-    def _try_one(self, host, model, full_model, opayload):
-        """Try one host synchronously (no streaming). Return Ollama response dict or None."""
-        tag = f"{host} {full_model}"
-        payload = dict(opayload, model=full_model, stream=False)
-        try:
-            resp = requests.post(f"{host}/api/chat", json=payload, timeout=TIMEOUT)
-        except Exception as e:
-            log.debug(f"  ✗ {tag}  (exception: {e})")
-            add_bad(host, model)
-            return None
-
-        if resp.status_code != 200:
-            log.debug(f"  ✗ {tag}  (status {resp.status_code})")
-            add_bad(host, model)
-            return None
-
-        data = resp.json()
-        if "error" in data:
-            log.debug(f"  ✗ {tag}  (error: {data['error']})")
-            add_bad(host, model)
-            return None
-
-        log.debug(f"  ✓ {tag}")
-        set_last(model, host, full_model)
-        add_good(host, model)
-        return data
-
-    def send_json(self, data, status=200):
-        """Send *data* as a JSON HTTP response."""
-        body = json.dumps(data)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body.encode())))
-        self.end_headers()
-        if not getattr(self, 'head_request', False):
-            self.wfile.write(body.encode())
-
-    def log_message(self, fmt, *args):
-        log.debug(f"[{self.log_date_time_string()}] {self.client_address[0]} - {fmt % args}")
-
-    def safe_write(self, data):
-        """Write *data* to the client, raising on disconnect."""
-        try:
-            self.wfile.write(data)
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            log.debug("Client disconnected")
-            raise
+            return web.json_response(err_obj("invalid JSON"), status=400)
+        model = body.get("model", "")
+        if not model:
+            return web.json_response(err_obj("model is required", "missing_model"), status=400)
+        do_stream = body.get("stream", False)
+        opayload = to_ollama(body)
+        log.debug(f"OpenAI request: model={model}, stream={do_stream}")
+        return await _proxy_chat(request, session, model, opayload, do_stream, openai_format=True)
 
 
-class PoolServer(ThreadingMixIn, HTTPServer):
-    allow_reuse_address = True
-    daemon_threads = True
+async def handle_ollama_generate(request):
+    async with request.app["semaphore"]:
+        return await _proxy_generate(request, request.app["session"])
 
-    def __init__(self, addr, handler):
-        super().__init__(addr, handler)
-        self.semaphore = threading.Semaphore(WORKER_COUNT)
 
-    def process_request(self, request, client_address):
-        self.semaphore.acquire()
-        super().process_request(request, client_address)
+def make_app():
+    app = web.Application()
 
-    def process_request_thread(self, request, client_address):
-        try:
-            self.finish_request(request, client_address)
-        except Exception:
-            self.handle_error(request, client_address)
-        finally:
-            self.shutdown_request(request)
-            self.semaphore.release()
+    async def on_startup(app):
+        app["session"] = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None),
+        )
+        app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)
+
+    async def on_shutdown(app):
+        await app["session"].close()
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    app.router.add_get("/", handle_dashboard)
+    app.router.add_get("/dashboard", handle_dashboard)
+    app.router.add_get("/v1/models", handle_v1_models)
+    app.router.add_get("/clear-bad", handle_clear_bad)
+    app.router.add_get("/refresh-cache", handle_refresh_cache)
+    app.router.add_get("/api/tags", handle_api_tags)
+    app.router.add_get("/api/version", handle_api_version)
+    app.router.add_get("/api/activity", handle_api_activity)
+    app.router.add_get("/refresh", handle_refresh)
+    app.router.add_get("/api/show", handle_api_show)
+    app.router.add_get("/static/{path:.*}", handle_static)
+
+    app.router.add_post("/api/show", handle_api_show)
+    app.router.add_post("/api/chat", handle_ollama_chat)
+    app.router.add_post("/api/generate", handle_ollama_generate)
+    app.router.add_post("/v1/chat/completions", handle_openai_chat)
+
+    return app
 
 
 def main():
-    """Parse args and start the HTTP server."""
     global TIMEOUT, PORT
 
     parser = argparse.ArgumentParser(description="dumpster-dive - OpenAI-compatible proxy for free Ollama servers")
@@ -1110,28 +946,20 @@ def main():
     args = parser.parse_args()
     TIMEOUT = args.timeout
 
-    addr = (args.host, args.port)
-    try:
-        srv = PoolServer(addr, Handler)
-    except OSError as e:
-        if e.errno == errno.EADDRINUSE:
-            log.error(f"Address already in use: {addr[0] or '0.0.0.0'}:{addr[1]}")
-        raise
-
-    PORT = srv.server_address[1]
+    PORT = args.port
     log.info(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
-    def stop(sig, frm):
+
+    app = make_app()
+
+    def stop():
         log.debug("Shutting down")
-        raise KeyboardInterrupt
 
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGTERM, stop)
-
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        srv.serve_forever()
+        web.run_app(app, host=args.host or "0.0.0.0", port=PORT, print=lambda *a: None)
     except KeyboardInterrupt:
-        srv.shutdown()
-        srv.server_close()
+        pass
 
 
 if __name__ == "__main__":
