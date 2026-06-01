@@ -640,8 +640,9 @@ async def _proxy_chat(request, session, model, opayload, do_stream, openai_forma
             result = await _try_host(session, last_host, last_full, model, opayload, do_stream=True)
             if result:
                 resp, first_line, first = result
-                await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format)
-                return
+                stream_resp = web.StreamResponse()
+                await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, model, openai_format)
+                return stream_resp
         else:
             data = await _try_one(session, last_host, model, last_full, opayload)
             if data:
@@ -658,8 +659,9 @@ async def _proxy_chat(request, session, model, opayload, do_stream, openai_forma
         result = await _race_servers(session, model, servers, opayload, do_stream=True)
         if result:
             _, host, full, resp, first_line, first = result
-            await _forward_stream(request, web.StreamResponse(), resp, first_line, host, full, model, openai_format)
-            return
+            stream_resp = web.StreamResponse()
+            await _forward_stream(request, stream_resp, resp, first_line, host, full, model, openai_format)
+            return stream_resp
         if openai_format:
             return web.Response(
                 text=sse_str({"error": "all servers failed"}) + sse_str(sse_chunk("", "", done=True)),
@@ -698,8 +700,9 @@ async def _proxy_generate(request, session):
             result = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
             if result:
                 resp, first_line, first = result
-                await _forward_stream(request, web.StreamResponse(), resp, first_line, last_host, last_full, model, openai_format=False)
-                return
+                stream_resp = web.StreamResponse()
+                await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, model, openai_format=False)
+                return stream_resp
         else:
             start = time.time()
             p = dict(body, model=last_full, stream=False)
@@ -746,8 +749,9 @@ async def _proxy_generate(request, session):
         result = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint)
         if result:
             _, host, full, resp, first_line, first = result
-            await _forward_stream(request, web.StreamResponse(), resp, first_line, host, full, model, openai_format=False)
-            return
+            stream_resp = web.StreamResponse()
+            await _forward_stream(request, stream_resp, resp, first_line, host, full, model, openai_format=False)
+            return stream_resp
         return web.json_response(err_obj("all servers failed"), status=502)
 
     result = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint)
