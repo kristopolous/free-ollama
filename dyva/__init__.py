@@ -19,7 +19,7 @@ logging.basicConfig(
     format="%(message)s",
     stream=sys.stderr,
 )
-log = logging.getLogger("dumpster-dive")
+log = logging.getLogger("dumpster-dyva")
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
@@ -1075,7 +1075,7 @@ def main():
     WORKER_COUNT = args.workers
     TIMEOUT = args.timeout
     PORT = args.port
-    log.info(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
+    log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
 
     app = make_app()
 
@@ -1086,9 +1086,14 @@ def main():
     asyncio.set_event_loop(loop)
     try:
         web.run_app(app, host=args.host or "0.0.0.0", port=PORT, print=lambda *a: None)
+
     except (KeyboardInterrupt, SystemExit):
+        log.info("Server exiting by keyboard interrupt")
         pass
-    log.info("Server exiting by keyboard interrupt")
+
+    except Exception as e:
+        print(f"\nUnable to Start\n---------------\n{e}\n\n")
+        parser.print_help()
 
 
 if __name__ == "__main__":
