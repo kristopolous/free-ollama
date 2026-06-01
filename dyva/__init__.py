@@ -26,10 +26,9 @@ CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
-WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "3"))
 _last_cache = None
 
-PORT = int(os.environ.get("PORT", "11434"))
+PORT = 11434
 TIMEOUT = 30
 
 _bad_cache = None
@@ -1044,18 +1043,7 @@ def make_app():
 
     return app
 
-
-def main():
-    global TIMEOUT, PORT
-
-    parser = argparse.ArgumentParser(description="dumpster-dive - OpenAI-compatible proxy for free Ollama servers")
-    parser.add_argument("--port", "-p", type=int, default=PORT, help=f"port to listen on (default: {PORT})")
-    parser.add_argument("--host", type=str, default="", help="host address to bind to (default: all interfaces)")
-    parser.add_argument("--timeout", "-t", type=int, default=30, help="request timeout in seconds (default: 30)")
-    args = parser.parse_args()
-    TIMEOUT = args.timeout
-
-    PORT = args.port
+def banner():
     try:
         VERSION=importlib.metadata.version('dyva')
     except:
@@ -1068,6 +1056,25 @@ def main():
   || ||   8888Y"   dP       YP    dP"'''Yb   || ||
   '' ''               {VERSION}                  '' ''
 """)
+
+def main():
+    global TIMEOUT, PORT, WORKER_COUNT
+
+    parser = argparse.ArgumentParser(description="dumpster-dyva - Like the :cloud models, but you don't pay.")
+    parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
+    parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
+    parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
+    parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
+    parser.add_argument("-v", "--version",  action="store_true", help="show version information")
+    args = parser.parse_args()
+
+    banner()
+    if args.version:
+        sys.exit(0)
+
+    WOKFER_COUNT = args.worker_count
+    TIMEOUT = args.timeout
+    PORT = args.port
     log.info(f"Starting dumpster-dive on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
 
     app = make_app()
