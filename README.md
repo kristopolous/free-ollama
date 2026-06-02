@@ -34,7 +34,7 @@ $ OLLAMA_HOST=http://9ol.es:11434 ollama ls
 
 Try a model out, go ahead!
 
-**Dyva** is a managed proxy that you can connect to with any openai compatible client. 
+**Dyva** is a managed proxy that you can connect to with any OpenAI or Ollama compatible client. 
 
 It will cycle through and find working hosts automatically. 
 
