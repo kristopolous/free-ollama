@@ -6,7 +6,7 @@
 
 ---
 
-**Unreliable** **ethically-questionable** **free** tokens for 2 decent models and 1,000 useless ones.
+**Unreliable** **ethically-questionable** **free** tokens for 2 decent models and 700 useless ones.
 
 Run **135m smollm2** or **270m gemma3** on someone else's RTX 2070.
 
