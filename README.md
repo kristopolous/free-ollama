@@ -64,7 +64,7 @@ Also let's take a moment and appreciate that magnificent icon, generated with on
 
 <hr>
 
-## Method 2: Artsinal Ollamas in Terminal Space
+## Method 2: Artisanal Ollamas in Terminal Space
 
 **Pet some feral llamas**: There's also a command line for the losers who like typing shit.
 
