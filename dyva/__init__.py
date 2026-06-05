@@ -838,6 +838,9 @@ async def handle_dashboard(request):
 
 
 async def handle_v1_models(request):
+    resp = _check_local(request)
+    if resp:
+        return resp
     models = all_models()
     return web.json_response({
         "object": "list",
