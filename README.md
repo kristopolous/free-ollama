@@ -1,12 +1,12 @@
 <p align="center">
 <img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
 <br/>
-  <br/><strong>Free Ollama: Paying for cloud GPUs is for chumps with self-respect.</strong>
+  <br/><strong>Paying for cloud GPUs is for chumps with self-respect.</strong>
 </p>
 
 ---
 
-**Unreliable** **ethically-questionable** **free** tokens for 2 decent models and 1,000 useless ones.
+**Unreliable** **ethically-questionable** **free** tokens for 2 decent models and 700 useless ones.
 
 Run **135m smollm2** or **270m gemma3** on someone else's RTX 2070.
 
@@ -34,7 +34,7 @@ $ OLLAMA_HOST=http://9ol.es:11434 ollama ls
 
 Try a model out, go ahead!
 
-**Dyva** is a managed proxy that you can connect to with any openai compatible client. 
+**Dyva** is a managed proxy that you can connect to with any OpenAI or Ollama compatible client. 
 
 It will cycle through and find working hosts automatically. 
 
@@ -50,7 +50,7 @@ Yeah, 4 letters. I got that. In 2026.
 
 You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
 
-Here's the web interface so you can see the status while you're running it. [I'm running it right now](https://9ol.es/11434/)
+Here's the web interface so you can see the status while you're running it. ~[I'm running it right now](https://9ol.es/11434/)~ (actually I pulled it ... someone was crawling it which means these proxy servers would pollute the source lists)
 
 <img width="1293" alt="2026-05-25_04-19" src="https://github.com/user-attachments/assets/887e8d65-dafb-4c37-a4b8-b721ec1bef43" />
 
@@ -64,7 +64,7 @@ Also let's take a moment and appreciate that magnificent icon, generated with on
 
 <hr>
 
-## Method 2: Artsinal Ollamas in Terminal Space
+## Method 2: Artisanal Ollamas in Terminal Space
 
 **Pet some feral llamas**: There's also a command line for the losers who like typing shit.
 
