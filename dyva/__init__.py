@@ -1035,7 +1035,7 @@ def _check_local(request):
     remote = request.remote
     if remote in ("127.0.0.1", "::1", "localhost"):
         return None
-    return web.json_response({"error": GITHUB_URL}, status=403)
+    return web.json_response({"error": f"{GITHUB_URL} — Or execute 'uvx dyva' to run your own"}, status=403)
 
 
 async def handle_ollama_chat(request):
