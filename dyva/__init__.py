@@ -27,6 +27,7 @@ BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 _last_cache = None
+_LOCAL = False
 
 PORT = 11434
 TIMEOUT = 30
@@ -36,6 +37,8 @@ _good_cache = None
 _servers_cache = None
 
 _activity_queues = []
+
+GITHUB_URL = "https://github.com/kristopolous/free-ollama"
 _activity_history = []
 _activity_lock = asyncio.Lock()
 _ACTIVITY_HISTORY_MAX = 500
@@ -1023,7 +1026,19 @@ async def handle_api_show(request):
 
 
 
+def _check_local(request):
+    if not _LOCAL:
+        return None
+    remote = request.remote
+    if remote in ("127.0.0.1", "::1", "localhost"):
+        return None
+    return web.json_response({"error": GITHUB_URL}, status=403)
+
+
 async def handle_ollama_chat(request):
+    resp = _check_local(request)
+    if resp:
+        return resp
     async with request.app["semaphore"]:
         session = request.app["session"]
         try:
@@ -1040,6 +1055,9 @@ async def handle_ollama_chat(request):
 
 
 async def handle_openai_chat(request):
+    resp = _check_local(request)
+    if resp:
+        return resp
     async with request.app["semaphore"]:
         session = request.app["session"]
         try:
@@ -1056,6 +1074,9 @@ async def handle_openai_chat(request):
 
 
 async def handle_ollama_generate(request):
+    resp = _check_local(request)
+    if resp:
+        return resp
     async with request.app["semaphore"]:
         return await _proxy_generate(request, request.app["session"])
 
@@ -1115,13 +1136,14 @@ def banner():
 """)
 
 def main():
-    global TIMEOUT, PORT, WORKER_COUNT
+    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL
 
-    parser = argparse.ArgumentParser(description="dumpster-dyva - Like the :cloud models, but you don't pay.")
+    parser = argparse.ArgumentParser(description="dumpster-dyva - Like the Ollama :cloud models, but you don't pay.")
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
+    parser.add_argument("--local",    action="store_true", help="restrict inference endpoints to localhost only")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
 
@@ -1132,7 +1154,8 @@ def main():
     WORKER_COUNT = args.workers
     TIMEOUT = args.timeout
     PORT = args.port
-    log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}")
+    _LOCAL = args.local
+    log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, LOCAL={_LOCAL}")
 
     app = make_app()
 

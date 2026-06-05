@@ -1,6 +1,6 @@
 [project]
 name = "dyva"
-version = "0.2.3"
+version = "0.2.4"
 description = "OpenAI-compatible proxy that routes to free Ollama servers"
 readme = "README.md"
 requires-python = ">=3.10"
