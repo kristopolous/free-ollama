@@ -66,7 +66,7 @@ Also let's take a moment and appreciate that magnificent icon, generated with on
 
 ## Method 2: Artisanal Ollamas in Terminal Space
 
-**Pet some feral llamas**: There's also a command line for the losers who like typing shit.
+**Pet some feral llamas**: There's also a command line for losers like me who like typing shit.
 
 Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
