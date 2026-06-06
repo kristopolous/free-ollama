@@ -212,6 +212,8 @@ $ free-ollama --host mistral:7b {0..20} | \
 
 ```
 
+For instance here I document how [LLMs have no sense of humor](https://github.com/kristopolous/humor-evals).
+
 ---
 
 ## Testing Servers
@@ -275,7 +277,7 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 ## FAQ
 
  * Q: Is this legal?
- * A: Look. Have you ever used a restroom "for customers only" without buying something? I ANAL. 
+ * A: Look. Have you ever used a restroom "for customers only" without buying something? 
 
 ---
 

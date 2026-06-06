@@ -1004,11 +1004,15 @@ async def handle_api_show(request):
     if ct == "application/json" or ct == "application/x-ndjson":
         try:
             body = await request.json()
-            model = body.get("model", "")
+            model = body.get("name", body.get("model", ""))
         except (json.JSONDecodeError, Exception):
             pass
+
     if not model:
         model = request.query.get("model", "")
+
+    hosts = [h[1].rstrip("/v1") for h in find_servers(model)]
+    system_val = " ".join(hosts) if hosts else "No hosts available for this model."
     details = {
         "parent_model": "",
         "format": "gguf",
@@ -1021,10 +1025,15 @@ async def handle_api_show(request):
         "modelfile": f"# free-ollama proxy — model: {model}",
         "parameters": "",
         "template": "",
+        "system": system_val,
         "details": details,
         "model_info": {},
     })
 
+
+async def handle_api_pull(request):
+    refresh_cache()
+    return web.json_response({"status": "success"})
 
 
 
@@ -1113,8 +1122,9 @@ def make_app():
     app.router.add_get("/api/version", handle_api_version)
     app.router.add_get("/api/activity", handle_api_activity)
     app.router.add_get("/refresh", handle_refresh)
-    app.router.add_get("/api/show", handle_api_show)
+    # app.router.add_get("/api/show", handle_api_show)
     app.router.add_post("/api/show", handle_api_show)
+    app.router.add_post("/api/pull", handle_api_pull)
     app.router.add_post("/api/chat", handle_ollama_chat)
     app.router.add_post("/api/generate", handle_ollama_generate)
     app.router.add_post("/v1/chat/completions", handle_openai_chat)
