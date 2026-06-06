@@ -26,14 +26,6 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ## Method 1: Liberated Infrastructure
 
-Try the demo server:
-
-```shell
-$ OLLAMA_HOST=http://9ol.es:11434 ollama ls
-```
-
-Try a model out, go ahead!
-
 **Dyva** is a managed proxy that you can connect to with any OpenAI or Ollama compatible client. 
 
 It will cycle through and find working hosts automatically. 
@@ -66,7 +58,7 @@ Also let's take a moment and appreciate that magnificent icon, generated with on
 
 ## Method 2: Artisanal Ollamas in Terminal Space
 
-**Pet some feral llamas**: There's also a command line for losers like me who like typing shit.
+ There's also a command line for the losers who like typing shit.
 
 Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
