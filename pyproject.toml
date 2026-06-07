@@ -10,13 +10,14 @@ dependencies = [
 
 [tool.setuptools]
 include-package-data = true
-packages = ["dyva", "dyva.static"]
+packages = ["dyva", "dyva.static", "graflex"]
 
 [tool.setuptools.package-data]
 dyva = ["static/*"]
 
 [project.scripts]
 dyva = "dyva:main"
+graflex = "graflex:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
