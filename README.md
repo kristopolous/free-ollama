@@ -105,6 +105,8 @@ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 
 Coming soon ... coming soon ... 
 
+## Usage
+
 ```shell
 
 $ ./free-ollama --help
