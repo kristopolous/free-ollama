@@ -101,43 +101,9 @@ For example, here's a stack of machines: the top 10 qwen3:latest and top 5 qwen2
 free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 ```
 
-Let's find out the versions that are running in the wild:
+## What's graflex do?
 
-```bash
-free-ollama --host : \
-    | xargs -P 30 -n 1 free-ollama --exec -v \
-    | grep -v client
-```
-
-And if you want ...
-
-```bash
-    | cut -d ' ' -f 4 | freq
-...
-0.10.1                 ███████▏ 21
-0.11.8                 ███████▏ 21
-0.11.10                ███████▏ 21
-0.5.7-0-ga420a45-dirty ███████▏ 21
-0.7.1                  ███████▌ 22
-0.11.7                 ███████▉ 23
-0.11.6                 ████████▉ 26
-0.5.10                 ████████▉ 26
-0.6.6                  █████████▏ 27
-0.9.2                  █████████▉ 29
-0.5.12                 █████████▉ 29
-0.7.0                  ███████████▉ 35
-0.9.5                  ███████████▉ 35
-0.5.11                 █████████████▉ 41
-0.6.2                  ██████████████▎ 42
-0.6.8                  ██████████████▎ 42
-0.6.5                  █████████████████▎ 51
-0.9.0                  ████████████████████████▋ 73
-0.11.4                 █████████████████████████▋ 76
-0.9.6                  ████████████████████████████▍ 84
-0.5.7                  ██████████████████████████████▏ 89
-$
-```
-Kinda old. Alright.
+Coming soon ... coming soon ... 
 
 ```shell
 
