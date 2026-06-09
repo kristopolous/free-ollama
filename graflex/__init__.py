@@ -25,7 +25,6 @@ PORTS = [8188, 7860]
 TIMEOUT = 10
 SUBNET = 24
 
-FOFA_EMAIL = os.getenv("FOFA_EMAIL", "")
 FOFA_KEY = os.getenv("FOFA_KEY", "")
 FOFA_API = "https://fofa.info/api/v1/search/all"
 
@@ -105,48 +104,57 @@ async def _check_host(session, host, port):
         return None
 
 
-def fetch(dry=False):
-    if not FOFA_EMAIL or not FOFA_KEY:
-        log.error("FOFA_EMAIL and FOFA_KEY must be set in .env")
+def fetch(dry=False, limit=2):
+    if not FOFA_KEY:
+        log.error("FOFA_KEY must be set in .env")
         return
 
     import base64
-    import urllib.request
     import urllib.parse
+    import requests
+    import curlify
 
-    queries = {
-        "comfyui": ('title="ComfyUI"', 8188),
-        "a1111": ('icon_hash="2075038152" && body="Stable Diffusion"', 7860),
-    }
+    queries = [
+        ('title="ComfyUI"', "comfyui", 8188),
+        ('icon_hash="2075038152" && body="Stable Diffusion"', "a1111", 7860),
+    ]
+    combined_query = " || ".join(f"({q})" for q, _, _ in queries)
 
     hosts = []
-    for service, (query, default_port) in queries.items():
-        params = urllib.parse.urlencode({
-            "email": FOFA_EMAIL,
-            "key": FOFA_KEY,
-            "qbase64": base64.b64encode(query.encode()).decode(),
-            "fields": "ip,port,host",
-            "size": 10000,
-        })
-        url = f"{FOFA_API}?{params}"
+    params = {
+        "key": FOFA_KEY,
+        "qbase64": base64.b64encode(combined_query.encode()).decode(),
+        "size": limit,
+    }
+    req = requests.Request("GET", FOFA_API, params=params)
+    prepared = req.prepare()
+    if dry:
+        log.info(curlify.to_curl(prepared))
+    else:
         try:
-            resp = urllib.request.urlopen(url, timeout=30)
-            data = json.loads(resp.read())
+            with requests.Session() as s:
+                resp = s.send(prepared, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
             if data.get("error"):
                 log.error(f"FOFA error: {data.get('error')}")
-                continue
-            for row in data.get("results", []):
-                ip_addr, port_num, hostname = row[0], row[1], row[2]
-                hosts.append({
-                    "service": service,
-                    "host": f"{ip_addr}:{port_num}",
-                })
+            else:
+                for row in data.get("results", []):
+                    ip_addr, port_num, hostname = row[0], row[1], row[2]
+                    port_num = int(port_num)
+                    for q, service, default_port in queries:
+                        if port_num == default_port:
+                            break
+                    else:
+                        service = "unknown"
+                    hosts.append({
+                        "service": service,
+                        "host": f"{ip_addr}:{port_num}",
+                    })
         except Exception as e:
-            log.error(f"FOFA request failed for {service}: {e}")
+            log.error(f"FOFA request failed: {e}")
 
     if dry:
-        for h in hosts:
-            log.info(f"  {h['service']:>8}  {h['host']}")
         log.info(f"fetch: {len(hosts)} hosts found (dry run)")
         return
 
@@ -272,8 +280,7 @@ VALID_SEQUENCES = [
 def main():
     load_dotenv()
 
-    global FOFA_EMAIL, FOFA_KEY
-    FOFA_EMAIL = os.getenv("FOFA_EMAIL", "")
+    global FOFA_KEY
     FOFA_KEY = os.getenv("FOFA_KEY", "")
 
     logging.basicConfig(
@@ -282,9 +289,10 @@ def main():
         stream=sys.stderr,
     )
 
-    parser = argparse.ArgumentParser(description="Discover public image-generation servers")
-    parser.add_argument("command", nargs="?", help="check | scan-check | fetch-scan-check")
+    parser = argparse.ArgumentParser(description="Discover public image-generation servers via FOFA")
+    parser.add_argument("command", nargs="?", help="check | fetch-check")
     parser.add_argument("--dry", action="store_true", help="report what fetch would do without saving")
+    parser.add_argument("--limit", type=int, default=2, help="max results per query (default: 2)")
     args = parser.parse_args()
 
     if not args.command:
@@ -302,6 +310,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            STEPS[step](dry=args.dry)
+            STEPS[step](dry=args.dry, limit=args.limit)
         else:
             STEPS[step]()
