@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 import logging
@@ -5,6 +6,8 @@ import os
 import subprocess
 import sys
 import time
+
+from dotenv import load_dotenv
 
 try:
     import aiohttp
@@ -31,24 +34,6 @@ SERVICES = {
     7860: "a1111",
     9090: "invokeai",
 }
-
-
-def _load_env():
-    for d in [os.getcwd()] + [os.path.dirname(p) for p in __import__("__main__").__file__]:
-        pass
-    cwd = os.getcwd()
-    for parent in [cwd] + [os.path.dirname(cwd)]:
-        env_path = os.path.join(parent, ".env")
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, val = line.partition("=")
-                    key = key.strip()
-                    val = val.strip().strip("\"'")
-                    os.environ.setdefault(key, val)
 
 
 def _load_json(path):
@@ -121,7 +106,7 @@ async def _check_host(session, host, port):
         return None
 
 
-def fetch():
+def fetch(dry=False):
     if not FOFA_EMAIL or not FOFA_KEY:
         log.error("FOFA_EMAIL and FOFA_KEY must be set in .env")
         return
@@ -156,6 +141,12 @@ def fetch():
                 })
         except Exception as e:
             log.error(f"FOFA request failed for port {port}: {e}")
+
+    if dry:
+        for h in hosts:
+            log.info(f"  {h['service']:>8}  {h['host']}")
+        log.info(f"fetch: {len(hosts)} hosts found (dry run)")
+        return
 
     existing = _load_json(HOSTS_FILE)
     seen = {f"{h['service']}@{h['host']}" for h in existing}
@@ -274,13 +265,11 @@ VALID_SEQUENCES = [
     ("check",),
     ("scan", "check"),
     ("fetch", "scan", "check"),
-    ("fetch",),
-    ("scan",),
 ]
 
 
 def main():
-    _load_env()
+    load_dotenv()
 
     global FOFA_EMAIL, FOFA_KEY
     FOFA_EMAIL = os.getenv("FOFA_EMAIL", "")
@@ -292,28 +281,26 @@ def main():
         stream=sys.stderr,
     )
 
-    if len(sys.argv) < 2:
-        print("usage: graflex <command>", file=sys.stderr)
-        print("commands: fetch, scan, check, scan-check, fetch-scan-check, fetch-scan, fetch-check", file=sys.stderr)
+    parser = argparse.ArgumentParser(description="Discover public image-generation servers")
+    parser.add_argument("command", nargs="?", help="check | scan-check | fetch-scan-check")
+    parser.add_argument("--dry", action="store_true", help="report what fetch would do without saving")
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
         sys.exit(1)
 
-    raw = sys.argv[1]
+    raw = args.command
     parts = raw.split("-")
 
-    if len(parts) == 1:
-        if parts[0] in STEPS:
-            STEPS[parts[0]]()
-            return
-        print(f"unknown command: {raw}", file=sys.stderr)
-        sys.exit(1)
-
     if tuple(parts) not in VALID_SEQUENCES:
-        valid = " ".join("-".join(s) for s in VALID_SEQUENCES)
-        print(f"invalid sequence: {raw}", file=sys.stderr)
-        print(f"valid: {valid}", file=sys.stderr)
+        valid = " | ".join("-".join(s) for s in VALID_SEQUENCES)
+        print(f"usage: graflex {{{valid}}}", file=sys.stderr)
         sys.exit(1)
 
     for step in parts:
-        if step in STEPS:
-            log.info(f"--- {step} ---")
+        log.info(f"--- {step} ---")
+        if step == "fetch":
+            STEPS[step](dry=args.dry)
+        else:
             STEPS[step]()
