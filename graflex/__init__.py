@@ -21,7 +21,7 @@ HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
 DOORKNOCK_FILE = os.path.join(CACHE_DIR, "image-gen-hosts-doorknock.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 
-PORTS = [8188, 7860, 9090]
+PORTS = [8188, 7860]
 TIMEOUT = 10
 SUBNET = 24
 
@@ -32,7 +32,6 @@ FOFA_API = "https://fofa.info/api/v1/search/all"
 SERVICES = {
     8188: "comfyui",
     7860: "a1111",
-    9090: "invokeai",
 }
 
 
@@ -114,11 +113,14 @@ def fetch(dry=False):
     import base64
     import urllib.request
     import urllib.parse
-    import ipaddress
+
+    queries = {
+        "comfyui": ('title="ComfyUI"', 8188),
+        "a1111": ('icon_hash="2075038152" && body="Stable Diffusion"', 7860),
+    }
 
     hosts = []
-    for port in PORTS:
-        query = f'port="{port}"'
+    for service, (query, default_port) in queries.items():
         params = urllib.parse.urlencode({
             "email": FOFA_EMAIL,
             "key": FOFA_KEY,
@@ -136,11 +138,11 @@ def fetch(dry=False):
             for row in data.get("results", []):
                 ip_addr, port_num, hostname = row[0], row[1], row[2]
                 hosts.append({
-                    "service": SERVICES.get(int(port_num), "unknown"),
+                    "service": service,
                     "host": f"{ip_addr}:{port_num}",
                 })
         except Exception as e:
-            log.error(f"FOFA request failed for port {port}: {e}")
+            log.error(f"FOFA request failed for {service}: {e}")
 
     if dry:
         for h in hosts:
@@ -217,9 +219,9 @@ async def _check_all():
         log.error("check requires aiohttp — install with: pip install aiohttp")
         return
 
-    hosts = _load_json(DOORKNOCK_FILE)
+    hosts = _load_json(DOORKNOCK_FILE) or _load_json(HOSTS_FILE)
     if not hosts:
-        log.warning("check: no hosts — run scan first")
+        log.warning("check: no hosts — run fetch first")
         return
 
     connector = aiohttp.TCPConnector(limit=50)
@@ -260,11 +262,10 @@ def check():
     asyncio.run(_check_all())
 
 
-STEPS = {"fetch": fetch, "scan": scan, "check": check}
+STEPS = {"fetch": fetch, "check": check}
 VALID_SEQUENCES = [
     ("check",),
-    ("scan", "check"),
-    ("fetch", "scan", "check"),
+    ("fetch", "check"),
 ]
 
 
