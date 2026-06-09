@@ -26,6 +26,7 @@ CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
+GRAFLEX_WORKING = os.path.join(CACHE_DIR, "image-gen-working.json")
 _last_cache = None
 _LOCAL = False
 
@@ -834,6 +835,20 @@ async def handle_dashboard(request):
     html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
     html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
     html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
+
+    image_gen = []
+    if os.path.exists(GRAFLEX_WORKING):
+        with open(GRAFLEX_WORKING) as f:
+            image_gen = json.load(f)
+    image_gen.sort(key=lambda h: (h.get("gpu") or "", h.get("host", "")))
+    image_gen_rows = "".join(
+        f'<div class="model-item"><span class="host-name">{h.get("host", "")}</span><span class="host-model">{h.get("gpu", "")}</span></div>'
+        for h in image_gen[:30]
+    )
+    image_gen_more = f'<div class="more">... and {len(image_gen) - 30} more</div>' if len(image_gen) > 30 else ""
+    html = html.replace("__IMAGE_GEN_ROWS__", image_gen_rows)
+    html = html.replace("__IMAGE_GEN_MORE__", image_gen_more)
+    html = html.replace("__IMAGE_GEN_COUNT__", str(len(image_gen)))
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 

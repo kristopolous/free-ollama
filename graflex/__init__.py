@@ -159,13 +159,13 @@ def _fetch_web(dry, limit, queries, combined_query):
     url = f"{FOFA_WEB}?qbase64={qbase64}"
 
     if not FOFA_WEB_HEADER:
-        log.error("FOFA_WEB_HEADER must be set in .env for web strategy (paste the Cookie header from your browser)")
+        log.error("FOFA_WEB_HEADER must be set in .env for web method (paste the Cookie header from your browser)")
         return None
 
     cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_WEB_HEADER)
 
     if dry:
-        log.info(f"# Web strategy: GET {url}")
+        log.info(f"# Web method: GET {url}")
         log.info(f"# Cookie: {cookie_header[:80]}...")
         return []
 
@@ -241,7 +241,7 @@ def _parse_fofa_html(html_path, queries):
     return hosts
 
 
-def fetch(dry=False, limit=2, services=None, strategy="api"):
+def fetch(dry=False, limit=2, services=None, method="api"):
     import base64
     import urllib.parse
     import requests
@@ -255,9 +255,9 @@ def fetch(dry=False, limit=2, services=None, strategy="api"):
         queries = [q for q in queries if q[1] in services]
     combined_query = " || ".join(f"({q})" for q, _, _ in queries)
 
-    if strategy == "web":
+    if method == "web":
         if not FOFA_WEB_HEADER:
-            log.error("FOFA_WEB_HEADER must be set in .env for web strategy")
+            log.error("FOFA_WEB_HEADER must be set in .env for web method")
             return
         hosts = _fetch_web(dry, limit, queries, combined_query)
         if hosts is None:
@@ -375,6 +375,7 @@ async def _check_all():
                     existing[i] = h
                     break
 
+    existing.sort(key=lambda h: (h.get("gpu") or "", h.get("host", "")))
     _save_json(WORKING_FILE, existing)
     log.info(f"check: {len(working)} working, {len(existing)} total in working registry")
 
@@ -404,18 +405,14 @@ def main():
     )
 
     parser = argparse.ArgumentParser(description="Discover public image-generation servers via FOFA")
-    parser.add_argument("command", nargs="?", help="check | fetch-check")
+    parser.add_argument("-a", "--action", choices=["check", "fetch-check"], default="check", help="action to perform (default: check)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-s", "--service", nargs="+", default=["all"], choices=["all", "comfyui", "a1111"], help="services to search (default: all)")
-    parser.add_argument("--strategy", choices=["api", "web"], default="api", help="fetch strategy (default: api)")
+    parser.add_argument("-m", "--method", choices=["api", "web"], default="api", help="fetch method (default: api)")
     args = parser.parse_args()
 
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    raw = args.command
+    raw = args.action
     parts = raw.split("-")
 
     if tuple(parts) not in VALID_SEQUENCES:
@@ -426,6 +423,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            STEPS[step](dry=args.dry, limit=args.limit, services=args.service, strategy=args.strategy)
+            STEPS[step](dry=args.dry, limit=args.limit, services=args.service, method=args.method)
         else:
             STEPS[step]()
