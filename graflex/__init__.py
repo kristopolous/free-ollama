@@ -26,7 +26,9 @@ TIMEOUT = 10
 SUBNET = 24
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
+FOFA_WEB_HEADER = os.getenv("FOFA_WEB_HEADER", "")
 FOFA_API = "https://fofa.info/api/v1/search/all"
+FOFA_WEB = "https://en.fofa.info/result"
 
 SERVICES = {
     8188: "comfyui",
@@ -104,11 +106,142 @@ async def _check_host(session, host, port):
         return None
 
 
-def fetch(dry=False, limit=2, services=None):
-    if not FOFA_KEY:
-        log.error("FOFA_KEY must be set in .env")
-        return
+def _fetch_api(dry, limit, queries, combined_query):
+    import base64
+    import requests
+    import curlify
 
+    params = {
+        "key": FOFA_KEY,
+        "qbase64": base64.b64encode(combined_query.encode()).decode(),
+        "size": limit,
+    }
+    req = requests.Request("GET", FOFA_API, params=params)
+    prepared = req.prepare()
+    if dry:
+        log.info(curlify.to_curl(prepared))
+        return []
+
+    try:
+        with requests.Session() as s:
+            resp = s.send(prepared, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("error"):
+            log.error(f"FOFA error: {data.get('error')}")
+            return []
+    except Exception as e:
+        log.error(f"FOFA API request failed: {e}")
+        return []
+
+    hosts = []
+    for row in data.get("results", []):
+        ip_addr, port_num, hostname = row[0], row[1], row[2]
+        port_num = int(port_num)
+        for q, service, default_port in queries:
+            if port_num == default_port:
+                break
+        else:
+            service = "unknown"
+        hosts.append({
+            "service": service,
+            "host": f"{ip_addr}:{port_num}",
+        })
+    return hosts
+
+
+def _fetch_web(dry, limit, queries, combined_query):
+    import base64
+    import re
+    import requests
+
+    qbase64 = base64.b64encode(combined_query.encode()).decode()
+    url = f"{FOFA_WEB}?qbase64={qbase64}"
+
+    if not FOFA_WEB_HEADER:
+        log.error("FOFA_WEB_HEADER must be set in .env for web strategy (paste the Cookie header from your browser)")
+        return None
+
+    cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_WEB_HEADER)
+
+    if dry:
+        log.info(f"# Web strategy: GET {url}")
+        log.info(f"# Cookie: {cookie_header[:80]}...")
+        return []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cookie": cookie_header,
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        log.error(f"FOFA web request failed: {e}")
+        return None
+
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    out_path = os.path.join(CACHE_DIR, f"fofa-results-{ts}.html")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(out_path, "w") as f:
+        f.write(resp.text)
+    log.info(f"saved to {out_path}")
+
+    return _parse_fofa_html(out_path, queries)
+
+
+def _parse_fofa_html(html_path, queries):
+    import re
+    from urllib.parse import urlparse
+
+    with open(html_path) as f:
+        content = f.read()
+
+    values = re.findall(r'data-clipboard-text="([^"]+)"', content)
+    if not values:
+        log.warning(f"no data-clipboard-text found in {html_path}")
+        return []
+
+    seen = set()
+    hosts = []
+    for v in values:
+        v = v.strip()
+        if not v or v in seen:
+            continue
+        seen.add(v)
+
+        if v.startswith("http://") or v.startswith("https://"):
+            parsed = urlparse(v)
+            host = parsed.hostname
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        elif ":" in v:
+            parts = v.split(":")
+            host = parts[0]
+            port = int(parts[1])
+        else:
+            host = v
+            port = 80
+
+        for q, service, default_port in queries:
+            if port == default_port:
+                break
+        else:
+            service = "unknown"
+
+        hosts.append({
+            "service": service,
+            "host": f"{host}:{port}",
+        })
+
+    log.info(f"parsed {len(hosts)} hosts from {html_path}")
+    return hosts
+
+
+def fetch(dry=False, limit=2, services=None, strategy="api"):
     import base64
     import urllib.parse
     import requests
@@ -122,42 +255,20 @@ def fetch(dry=False, limit=2, services=None):
         queries = [q for q in queries if q[1] in services]
     combined_query = " || ".join(f"({q})" for q, _, _ in queries)
 
-    hosts = []
-    params = {
-        "key": FOFA_KEY,
-        "qbase64": base64.b64encode(combined_query.encode()).decode(),
-        "size": limit,
-    }
-    req = requests.Request("GET", FOFA_API, params=params)
-    prepared = req.prepare()
-    if dry:
-        log.info(curlify.to_curl(prepared))
+    if strategy == "web":
+        if not FOFA_WEB_HEADER:
+            log.error("FOFA_WEB_HEADER must be set in .env for web strategy")
+            return
+        hosts = _fetch_web(dry, limit, queries, combined_query)
+        if hosts is None:
+            return
     else:
-        try:
-            with requests.Session() as s:
-                resp = s.send(prepared, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("error"):
-                log.error(f"FOFA error: {data.get('error')}")
-            else:
-                for row in data.get("results", []):
-                    ip_addr, port_num, hostname = row[0], row[1], row[2]
-                    port_num = int(port_num)
-                    for q, service, default_port in queries:
-                        if port_num == default_port:
-                            break
-                    else:
-                        service = "unknown"
-                    hosts.append({
-                        "service": service,
-                        "host": f"{ip_addr}:{port_num}",
-                    })
-        except Exception as e:
-            log.error(f"FOFA request failed: {e}")
+        if not FOFA_KEY:
+            log.error("FOFA_KEY must be set in .env")
+            return
+        hosts = _fetch_api(dry, limit, queries, combined_query)
 
     if dry:
-        log.info(f"fetch: {len(hosts)} hosts found (dry run)")
         return
 
     existing = _load_json(HOSTS_FILE)
@@ -282,8 +393,9 @@ VALID_SEQUENCES = [
 def main():
     load_dotenv()
 
-    global FOFA_KEY
+    global FOFA_KEY, FOFA_WEB_HEADER
     FOFA_KEY = os.getenv("FOFA_KEY", "")
+    FOFA_WEB_HEADER = os.getenv("FOFA_WEB_HEADER", "")
 
     logging.basicConfig(
         level=getattr(logging, os.getenv("LOGLEVEL", "INFO").upper(), logging.INFO),
@@ -296,6 +408,7 @@ def main():
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-s", "--service", nargs="+", default=["all"], choices=["all", "comfyui", "a1111"], help="services to search (default: all)")
+    parser.add_argument("--strategy", choices=["api", "web"], default="api", help="fetch strategy (default: api)")
     args = parser.parse_args()
 
     if not args.command:
@@ -313,6 +426,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            STEPS[step](dry=args.dry, limit=args.limit, services=args.service)
+            STEPS[step](dry=args.dry, limit=args.limit, services=args.service, strategy=args.strategy)
         else:
             STEPS[step]()
