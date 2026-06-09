@@ -104,7 +104,7 @@ async def _check_host(session, host, port):
         return None
 
 
-def fetch(dry=False, limit=2):
+def fetch(dry=False, limit=2, services=None):
     if not FOFA_KEY:
         log.error("FOFA_KEY must be set in .env")
         return
@@ -118,6 +118,8 @@ def fetch(dry=False, limit=2):
         ('title="ComfyUI"', "comfyui", 8188),
         ('icon_hash="2075038152" && body="Stable Diffusion"', "a1111", 7860),
     ]
+    if services and "all" not in services:
+        queries = [q for q in queries if q[1] in services]
     combined_query = " || ".join(f"({q})" for q, _, _ in queries)
 
     hosts = []
@@ -291,8 +293,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="Discover public image-generation servers via FOFA")
     parser.add_argument("command", nargs="?", help="check | fetch-check")
-    parser.add_argument("--dry", action="store_true", help="report what fetch would do without saving")
-    parser.add_argument("--limit", type=int, default=2, help="max results per query (default: 2)")
+    parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
+    parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
+    parser.add_argument("-s", "--service", nargs="+", default=["all"], choices=["all", "comfyui", "a1111"], help="services to search (default: all)")
     args = parser.parse_args()
 
     if not args.command:
@@ -310,6 +313,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            STEPS[step](dry=args.dry, limit=args.limit)
+            STEPS[step](dry=args.dry, limit=args.limit, services=args.service)
         else:
             STEPS[step]()
