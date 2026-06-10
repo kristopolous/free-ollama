@@ -251,12 +251,7 @@ This tool scrapes public lists. Some servers may not want to be scraped. Some ma
 
 ---
 
- * Q: Was this vibe coded?
- * A: Only the README, early versions, because [LLMs aren't funny](https://github.com/kristopolous/humor-evals).
-
----
-
- * Q: Was that with one of these servers?
+ * Q: Do you use these servers, like for production use?
  * A: **cough cough**
 
 ---
