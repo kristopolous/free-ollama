@@ -49,57 +49,31 @@ def _save_json(path, data):
         json.dump(data, f, indent=2)
 
 
-async def _check_host(session, host, port):
-    service = SERVICES.get(port, "unknown")
+async def _check_host(session, host, port, service=None):
+    if service is None:
+        service = SERVICES.get(port, "unknown")
     url = f"http://{host}:{port}"
     try:
-        if port == 8188:
-            resp = await asyncio.wait_for(
-                session.get(f"{url}/system_stats"), timeout=TIMEOUT
-            )
-            if resp.status != 200:
-                await resp.release()
-                return None
-            data = await resp.json()
+        resp = await asyncio.wait_for(
+            session.get(f"{url}/sdapi/v1/memory"), timeout=TIMEOUT
+        )
+        if resp.status != 200:
             await resp.release()
-            return {
-                "service": service,
-                "host": f"{host}:{port}",
-                "gpu": data.get("device", {}).get("name", ""),
-                "vram_total": data.get("device", {}).get("vram_total", 0),
-                "vram_free": data.get("device", {}).get("vram_free", 0),
-                "last_checked": time.time(),
-            }
-        elif port == 7860:
-            resp = await asyncio.wait_for(
-                session.get(f"{url}/sdapi/v1/memory"), timeout=TIMEOUT
-            )
-            if resp.status != 200:
-                await resp.release()
-                return None
-            data = await resp.json()
-            await resp.release()
-            return {
-                "service": service,
-                "host": f"{host}:{port}",
-                "gpu": data.get("gpu", {}).get("name", ""),
-                "vram_total": data.get("gpu", {}).get("cuda", {}).get("total", 0),
-                "vram_free": data.get("gpu", {}).get("cuda", {}).get("free", 0),
-                "last_checked": time.time(),
-            }
-        else:
-            resp = await asyncio.wait_for(
-                session.get(url), timeout=TIMEOUT
-            )
-            if resp.status != 200:
-                await resp.release()
-                return None
-            await resp.release()
-            return {
-                "service": service,
-                "host": f"{host}:{port}",
-                "last_checked": time.time(),
-            }
+            return None
+        data = await resp.json()
+        await resp.release()
+        cuda = data.get("gpu", {}).get("cuda", {})
+        ram = data.get("ram", {})
+        return {
+            "service": service,
+            "host": f"{host}:{port}",
+            "gpu": data.get("gpu", {}).get("name", ""),
+            "vram_total": cuda.get("total", 0),
+            "vram_free": cuda.get("free", 0),
+            "ram_total": ram.get("total", 0),
+            "ram_free": ram.get("free", 0),
+            "last_checked": time.time(),
+        }
     except (asyncio.TimeoutError, OSError, json.JSONDecodeError):
         return None
     except Exception:
@@ -134,15 +108,20 @@ def _fetch_api(dry, limit, queries, combined_query):
         log.error(f"FOFA API request failed: {e}")
         return []
 
+    if len(queries) == 1:
+        known_service = queries[0][1]
     hosts = []
     for row in data.get("results", []):
         ip_addr, port_num, hostname = row[0], row[1], row[2]
         port_num = int(port_num)
-        for q, service, default_port in queries:
-            if port_num == default_port:
-                break
+        if len(queries) == 1:
+            service = known_service
         else:
-            service = "unknown"
+            for q, service, default_port in queries:
+                if port_num == default_port:
+                    break
+            else:
+                service = "unknown"
         hosts.append({
             "service": service,
             "host": f"{ip_addr}:{port_num}",
@@ -206,6 +185,9 @@ def _parse_fofa_html(html_path, queries):
         log.warning(f"no data-clipboard-text found in {html_path}")
         return []
 
+    if len(queries) == 1:
+        known_service = queries[0][1]
+
     seen = set()
     hosts = []
     for v in values:
@@ -226,11 +208,14 @@ def _parse_fofa_html(html_path, queries):
             host = v
             port = 80
 
-        for q, service, default_port in queries:
-            if port == default_port:
-                break
+        if len(queries) == 1:
+            service = known_service
         else:
-            service = "unknown"
+            for q, service, default_port in queries:
+                if port == default_port:
+                    break
+            else:
+                service = "unknown"
 
         hosts.append({
             "service": service,
@@ -336,9 +321,6 @@ def scan():
 
 
 async def _check_all():
-    if aiohttp is None:
-        log.error("check requires aiohttp — install with: pip install aiohttp")
-        return
 
     hosts = _load_json(DOORKNOCK_FILE) or _load_json(HOSTS_FILE)
     if not hosts:
@@ -352,7 +334,8 @@ async def _check_all():
             host_port = entry["host"].split(":")
             h = host_port[0]
             p = int(host_port[1]) if len(host_port) > 1 else 8188
-            tasks.append(_check_host(session, h, p))
+            s = entry.get("service")
+            tasks.append(_check_host(session, h, p, s))
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     working = []
