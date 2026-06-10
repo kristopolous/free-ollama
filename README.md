@@ -230,7 +230,7 @@ $ free-ollama glm-4.7-flash:q4_K_M {0..9} | xpanes -c "./test-and-log.sh {}"
 
 ## Cache Management
 
-- **Cache location**: `~/.cache/free-ollama.json` (every 24 hours)
+- **Cache location**: `~/.cache/free-ollama/` (every 24 hours)
 - **Force refresh**: Built in, baby!
 ```bash
 $ free-ollama --refresh
