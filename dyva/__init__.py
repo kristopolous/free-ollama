@@ -1202,7 +1202,7 @@ def main():
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
-    parser.add_argument("--local",    action="store_true", help="restrict inference endpoints to localhost only")
+    parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
 
