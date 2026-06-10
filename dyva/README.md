@@ -1,6 +1,6 @@
 # dyva
 
-OpenAI-compatible proxy that routes inference to free Ollama servers, with a built-in txt2img proxy for discovered A1111 hosts.
+OpenAI-compatible, ollama-compatible, and a1111-compatible proxy that routes inference to free Ollama servers, and A1111 hosts.
 
 ## Quickstart
 
