@@ -798,7 +798,7 @@ async def handle_dashboard(request):
     ) if _last_cache else '<div style="color:#999;font-size:.85rem">None</div>'
     good_rows = "".join(
         f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
-        for h in sorted(good)[:30]
+        for h in sorted(good, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
     )
     good_more = f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else ""
     bad_rows = "".join(
@@ -1108,6 +1108,36 @@ async def handle_ollama_generate(request):
         return await _proxy_generate(request, request.app["session"])
 
 
+async def handle_txt2img(request):
+    resp = _check_local(request)
+    if resp:
+        return resp
+    session = request.app["session"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    hosts = []
+    if os.path.exists(GRAFLEX_WORKING):
+        with open(GRAFLEX_WORKING) as f:
+            hosts = json.load(f)
+    hosts = [h for h in hosts if h.get("service") == "a1111"]
+    if not hosts:
+        return web.json_response({"error": "no available image-gen hosts"}, status=503)
+
+    host = hosts[0]["host"]
+    url = f"http://{host}/sdapi/v1/txt2img"
+    try:
+        async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as resp:
+            if resp.status != 200:
+                return web.json_response({"error": f"upstream error: {resp.status}"}, status=resp.status)
+            data = await resp.json()
+            return web.json_response(data)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        return web.json_response({"error": f"host unreachable: {e}"}, status=502)
+
+
 def make_app():
     app = web.Application()
 
@@ -1143,6 +1173,7 @@ def make_app():
     app.router.add_post("/api/chat", handle_ollama_chat)
     app.router.add_post("/api/generate", handle_ollama_generate)
     app.router.add_post("/v1/chat/completions", handle_openai_chat)
+    app.router.add_post("/sdapi/v1/txt2img", handle_txt2img)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)
