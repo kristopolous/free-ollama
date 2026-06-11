@@ -2,12 +2,14 @@
 import argparse
 import asyncio
 import fnmatch
+import csv
 import json
 import logging
 import os
 import subprocess
 import sys
 import time
+import requests
 import importlib.metadata
 
 import aiohttp
@@ -81,20 +83,50 @@ def refresh_cache():
     _servers_cache = None
     _bad_cache = None
     _good_cache = None
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     log.debug("Refreshing server cache...")
-    pkg_dir = os.path.dirname(__file__)
-    script = os.path.join(os.path.dirname(pkg_dir), "free-ollama")
-    if not os.path.exists(script):
-        script = os.path.join(pkg_dir, "free-ollama")
-    if not os.path.exists(script):
-        script = "free-ollama"
-    try:
-        subprocess.run([script], capture_output=True, timeout=120)
-    except FileNotFoundError:
-        log.warning("free-ollama script not found — cache refresh skipped")
-    except subprocess.TimeoutExpired:
-        log.warning("free-ollama script timed out")
+    _db = f'{CACHE_DIR}/free-ollama.json'
+
+    for url, loc in [
+       ( 'https://awesome-ollama-server.vercel.app/data.json', f"{_db}-vercel.tmp" ),
+       ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp"),
+       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp")
+    ]:
+        response = requests.get(url)
+        with open(loc, "w") as f:
+            f.write(response.text)
+
+    host_map = {}
+
+    with open(f'{_db}-vercel.tmp', 'r') as f:
+      for row in json.loads(f.read()):
+        host_map[row.get('server')] = row
+
+    with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
+      for r in csv.reader(csvfile):
+        ip = r[0]
+        models = [m.strip() for m in r[1].split(',')]
+        if ip not in host_map:
+          host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+  
+        host_map[ip]['models'] += models
+
+    with open(f'{_db}-spider.tmp', 'r') as f:
+      for row in json.loads(f.read()):
+        ip = row.get('url')
+        models = [ n.get('name') for n in row.get('models') ]
+        if ip not in host_map:
+          host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+
+        host_map[ip]['models'] += models
+
+    for k,v in host_map.items():
+      v['models'] = list(set(v['models']))
+
+    with open(_db, 'w') as f:
+      json.dump(list(host_map.values()), f)
+
 
 
 def ensure_cache():
@@ -1201,12 +1233,18 @@ def main():
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
+    parser.add_argument("-r", "--refresh",  action="store_true", help="refresh cache")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
     parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
 
     banner()
+    if args.refresh:
+        refresh_cache()
+        print("Refreshed cache")
+        sys.exit(0)
+
     if args.version:
         sys.exit(0)
 
