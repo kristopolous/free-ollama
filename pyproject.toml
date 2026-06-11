@@ -14,7 +14,6 @@ dependencies = [
 [tool.setuptools]
 include-package-data = true
 packages = ["dyva", "dyva.static", "graflex"]
-scripts = ["free-ollama"]
 
 [tool.setuptools.package-data]
 dyva = ["static/*"]
