@@ -55,23 +55,19 @@ async def _check_host(session, host, port, service=None):
     url = f"http://{host}:{port}"
     try:
         resp = await asyncio.wait_for(
-            session.get(f"{url}/sdapi/v1/memory"), timeout=TIMEOUT
+            session.get(f"{url}/sdapi/v1/sd-models"), timeout=TIMEOUT
         )
         if resp.status != 200:
             await resp.release()
             return None
         data = await resp.json()
         await resp.release()
-        cuda = data.get("gpu", {}).get("cuda", {})
-        ram = data.get("ram", {})
+        models = [m.get("title", "") for m in data if isinstance(m, dict)]
         return {
             "service": service,
             "host": f"{host}:{port}",
-            "gpu": data.get("gpu", {}).get("name", ""),
-            "vram_total": cuda.get("total", 0),
-            "vram_free": cuda.get("free", 0),
-            "ram_total": ram.get("total", 0),
-            "ram_free": ram.get("free", 0),
+            "models": models,
+            "model_count": len(models),
             "last_checked": time.time(),
         }
     except (asyncio.TimeoutError, OSError, json.JSONDecodeError):

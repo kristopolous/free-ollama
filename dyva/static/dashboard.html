@@ -39,6 +39,10 @@ input[type=text]:focus{border-color:#888}
 .bad{background:#3a1a1a;color:#e55}
 .good{background:#1a3a1a;color:#4a4}
 .more{font-size:.8rem;color:#666;margin-top:6px}
+.card h2{cursor:pointer;user-select:none}
+.card h2::before{content:"▼";display:inline-block;font-size:.65rem;margin-right:6px;transition:transform .15s;color:#666}
+.card.collapsed h2::before{transform:rotate(-90deg)}
+.card.collapsed>div,.card.collapsed>.more,.card.collapsed>input{display:none}
 </style>
 </head>
 <body>
@@ -111,6 +115,17 @@ document.getElementById('refreshCache').addEventListener('click',function(e){e.p
   var x=new XMLHttpRequest();
   x.open('GET','refresh-cache');
   x.onload=function(){location.reload()};x.send()})
+
+document.querySelectorAll('.card').forEach(function(card){
+  var h2=card.querySelector('h2');
+  if(!h2)return;
+  var key='dyva_collapsed_'+h2.textContent.replace(/[^a-z0-9]+/gi,'_').toLowerCase();
+  if(localStorage.getItem(key)==='1')card.classList.add('collapsed');
+  h2.addEventListener('click',function(){
+    card.classList.toggle('collapsed');
+    localStorage.setItem(key,card.classList.contains('collapsed')?'1':'0')
+  })
+})
 
 var modelHosts=JSON.parse(document.getElementById('modelHostsData').textContent);
 var goodHosts=new Set(JSON.parse(document.getElementById('goodHostsData').textContent||'[]'));

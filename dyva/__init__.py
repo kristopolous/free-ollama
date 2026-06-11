@@ -840,9 +840,9 @@ async def handle_dashboard(request):
     if os.path.exists(GRAFLEX_WORKING):
         with open(GRAFLEX_WORKING) as f:
             image_gen = json.load(f)
-    image_gen.sort(key=lambda h: (h.get("gpu") or "", h.get("host", "")))
+    image_gen.sort(key=lambda h: (h.get("model_count", 0) or 0, h.get("host", "")))
     image_gen_rows = "".join(
-        f'<div class="model-item"><span class="host-name">{h.get("host", "")}</span><span class="host-model">{h.get("gpu", "")}</span></div>'
+        f'<div class="model-item"><span class="host-name">{h.get("host", "")}</span><span class="host-model">{h.get("model_count", 0)} models</span></div>'
         for h in image_gen[:30]
     )
     image_gen_more = f'<div class="more">... and {len(image_gen) - 30} more</div>' if len(image_gen) > 30 else ""
