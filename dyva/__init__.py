@@ -34,6 +34,7 @@ _LOCAL = False
 
 PORT = 11434
 TIMEOUT = 30
+VERSION = "0"
 
 _bad_cache = None
 _good_cache = None
@@ -287,7 +288,7 @@ def all_models():
                 seen[m] = {'id': m, 'count': 1}
             else:
                 seen[m]['count'] += 1
-    if int(time.time() % 2) == 0:
+    if True: #int(time.time() % 2) == 0:
         sorty = sorted(seen.values(), key=lambda x: x.get('count'))
     else:
         sorty = sorted(seen.values(), key=lambda x: x.get('id').lower())
@@ -958,7 +959,7 @@ async def handle_api_tags(request):
                 "model": models[m]["id"],
                 "modified_at": now,
                 "size": models[m]['count'],
-                "digest": f"{graffiti[m % len(graffiti)]}       000000000000000000000000000000000000000000000000000000",
+                "digest": f"{graffiti[m % len(graffiti)]}       {m:05}a{VERSION}000000000000000000000000000000000000000000",
                 "details": {
                     "parent_model": "",
                     "format": "gguf",
@@ -1075,6 +1076,7 @@ async def handle_api_show(request):
         "system": system_val,
         "details": details,
         "model_info": {},
+        "capabilities": ["completion", "vision", "audio", "tools", "thinking"]
     })
 
 
@@ -1213,6 +1215,7 @@ def make_app():
     return app
 
 def banner():
+    global VERSION
     try:
         VERSION=importlib.metadata.version('dyva')
     except Exception as e:
