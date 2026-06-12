@@ -51,7 +51,7 @@ def _save_json(path, data):
 
 async def _check_host(session, host, port, service=None):
     if service is None:
-        service = SERVICES.get(port, "unknown")
+        service = "a1111"
     url = f"http://{host}:{port}"
     try:
         resp = await asyncio.wait_for(
@@ -117,7 +117,7 @@ def _fetch_api(dry, limit, queries, combined_query):
                 if port_num == default_port:
                     break
             else:
-                service = "unknown"
+                service = "a1111"
         hosts.append({
             "service": service,
             "host": f"{ip_addr}:{port_num}",

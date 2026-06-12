@@ -91,12 +91,12 @@ def refresh_cache():
 
     for url, loc in [
        ( 'https://awesome-ollama-server.vercel.app/data.json', f"{_db}-vercel.tmp" ),
-       ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp"),
-       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp")
+       ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
+       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" )
     ]:
-        response = requests.get(url)
-        with open(loc, "w") as f:
-            f.write(response.text)
+      response = requests.get(url)
+      with open(loc, "w") as f:
+        f.write(response.text)
 
     host_map = {}
 
@@ -123,11 +123,12 @@ def refresh_cache():
         host_map[ip]['models'] += models
 
     for k,v in host_map.items():
+      if 'service' not in v:
+        v['service'] = 'ollama'
       v['models'] = list(set(v['models']))
 
     with open(_db, 'w') as f:
       json.dump(list(host_map.values()), f)
-
 
 
 def ensure_cache():
