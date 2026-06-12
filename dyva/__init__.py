@@ -113,6 +113,12 @@ def refresh_cache():
   
         host_map[ip]['models'] += models
 
+    with open(f'{CACHE_DIR}/image-gen-working.json', 'r') as f:
+      for row in json.loads(f.read()):
+        if 'host' in row:
+          row['server'] = row['host']
+        host_map[row.get('server')] = row
+
     with open(f'{_db}-spider.tmp', 'r') as f:
       for row in json.loads(f.read()):
         ip = row.get('url')

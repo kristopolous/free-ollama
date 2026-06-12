@@ -211,7 +211,7 @@ def _parse_fofa_html(html_path, queries):
                 if port == default_port:
                     break
             else:
-                service = "unknown"
+                service = "a1111"
 
         hosts.append({
             "service": service,
@@ -300,7 +300,7 @@ def scan():
         for port in PORTS:
             if f"{port}/open" in line:
                 discovered.append({
-                    "service": SERVICES.get(port, "unknown"),
+                    "service": SERVICES.get(port, "a1111"),
                     "host": f"{ip}:{port}",
                 })
 
@@ -383,13 +383,17 @@ def main():
         stream=sys.stderr,
     )
 
-    parser = argparse.ArgumentParser(description="Discover public image-generation servers via FOFA")
-    parser.add_argument("-a", "--action", choices=["check", "fetch-check"], default="check", help="action to perform (default: check)")
+    parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
+    parser.add_argument("-a", "--action", choices=["check", "fetch-check"], help="action to perform")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-s", "--service", nargs="+", default=["all"], choices=["all", "comfyui", "a1111"], help="services to search (default: all)")
     parser.add_argument("-m", "--method", choices=["api", "web"], default="api", help="fetch method (default: api)")
     args = parser.parse_args()
+
+    if args.action is None:
+        parser.print_help()
+        sys.exit(1)
 
     raw = args.action
     parts = raw.split("-")
