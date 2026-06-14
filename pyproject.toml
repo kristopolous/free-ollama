@@ -22,6 +22,7 @@ dyva = ["static/*"]
 [project.scripts]
 dyva = "dyva:main"
 graflex = "graflex:main"
+txt2img = "txt2img:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
