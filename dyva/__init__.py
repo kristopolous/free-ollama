@@ -1675,7 +1675,165 @@ async def handle_txt2img(request):
         if data:
             return web.json_response(data)
 
+    # Phase 3: try comfyui hosts
+    comfy_candidates = [s for s in servers if s.get("service") == "comfyui"]
+    if model_filter:
+        comfy_candidates = [
+            s for s in comfy_candidates
+            if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
+                   for m in s.get("models", []))
+        ]
+    comfy_hosts = [s.get("server") for s in comfy_candidates if f"{s.get('server')} {IMG_KEY}" not in load_bad()]
+    if comfy_hosts:
+        async def _race_comfy(host_list):
+            done = asyncio.Event()
+            result_queue = asyncio.Queue()
+            host_iter = iter(host_list)
+            iter_lock = asyncio.Lock()
+
+            async def worker():
+                while not done.is_set():
+                    async with iter_lock:
+                        try:
+                            host = next(host_iter)
+                        except StopIteration:
+                            return
+                    data = await _txt2img_comfyui(session, host, body)
+                    if data:
+                        set_last(IMG_KEY, host, "")
+                        add_good(host, IMG_KEY)
+                        await result_queue.put(data)
+                        done.set()
+                        return
+
+            tasks = [asyncio.create_task(worker()) for _ in range(min(3, len(host_list)))]
+            try:
+                while True:
+                    try:
+                        return result_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        if all(t.done() for t in tasks):
+                            return None
+                    await asyncio.sleep(0.1)
+            finally:
+                done.set()
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        data = await _race_comfy(comfy_hosts)
+        if data:
+            return web.json_response(data)
+
     return web.json_response({"error": "all image-gen hosts failed"}, status=502)
+
+
+async def _txt2img_comfyui(session, host, body):
+    import uuid as uuid_mod
+
+    try:
+        checkpoints_resp = await session.get(
+            f"http://{host}/models/checkpoints",
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        if checkpoints_resp.status != 200:
+            await checkpoints_resp.release()
+            return None
+        checkpoints = await checkpoints_resp.json()
+        await checkpoints_resp.release()
+        if not isinstance(checkpoints, list) or not checkpoints:
+            return None
+        ckpt = checkpoints[0]
+    except Exception:
+        return None
+
+    prompt_text = body.get("prompt", "")
+    negative_prompt = body.get("negative_prompt", "")
+    width = body.get("width", 512)
+    height = body.get("height", 512)
+    steps = body.get("steps", 20)
+    cfg = body.get("cfg_scale", 7)
+    seed = body.get("seed", -1)
+    if seed == -1:
+        import random
+        seed = random.randint(0, 2**31 - 1)
+    sampler = body.get("sampler_name", "euler")
+
+    workflow = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "2": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": height, "width": width}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": prompt_text}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": negative_prompt}},
+        "5": {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "positive": ["3", 0], "negative": ["4", 0],
+            "latent_image": ["2", 0], "seed": seed, "steps": steps,
+            "cfg": cfg, "sampler_name": sampler, "scheduler": "normal", "denoise": 1,
+        }},
+        "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": "dyva_output", "images": ["6", 0]}},
+    }
+
+    client_id = str(uuid_mod.uuid4())
+    try:
+        prompt_resp = await session.post(
+            f"http://{host}/prompt",
+            json={"prompt": workflow, "client_id": client_id},
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        if prompt_resp.status != 200:
+            await prompt_resp.release()
+            return None
+        prompt_data = await prompt_resp.json()
+        await prompt_resp.release()
+        prompt_id = prompt_data.get("prompt_id")
+        if not prompt_id:
+            return None
+    except Exception:
+        return None
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        await asyncio.sleep(2)
+        try:
+            hist_resp = await session.get(
+                f"http://{host}/history/{prompt_id}",
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if hist_resp.status != 200:
+                await hist_resp.release()
+                continue
+            hist = await hist_resp.json()
+            await hist_resp.release()
+        except Exception:
+            continue
+        entry = hist.get(prompt_id)
+        if not entry:
+            continue
+        if entry.get("status", {}).get("completed"):
+            outputs = entry.get("outputs", {})
+            for node_id, out in outputs.items():
+                images = out.get("images", [])
+                for img in images:
+                    try:
+                        view_resp = await session.get(
+                            f"http://{host}/view",
+                            params={"filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        )
+                        if view_resp.status == 200:
+                            raw = await view_resp.read()
+                            await view_resp.release()
+                            import base64
+                            b64 = base64.b64encode(raw).decode()
+                            return {"images": [b64], "parameters": "{}", "info": json.dumps({"prompt": body})}
+                        await view_resp.release()
+                    except Exception:
+                        pass
+            break
+        if entry.get("status", {}).get("status_str") == "error":
+            break
+
+    return None
 
 
 def make_app():

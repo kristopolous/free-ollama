@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--height", type=int, default=512, help="image height (default: 512)")
     parser.add_argument("--steps", type=int, default=30, help="sampling steps (default: 30)")
     parser.add_argument("-m", "--model", nargs="?", const="__list__", default=None, help="SD model name (use without value to list available models)")
-    parser.add_argument("--prompt", help="text prompt (default: read from stdin)")
+    parser.add_argument("prompt", nargs="?", help="text prompt (default: read from stdin)")
     parser.add_argument("-o", "--output", help="output file (default: stdout as base64)")
     args = parser.parse_args()
 

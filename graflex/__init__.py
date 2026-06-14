@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import sys
 import time
 
@@ -18,22 +17,27 @@ log = logging.getLogger("graflex")
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
-DOORKNOCK_FILE = os.path.join(CACHE_DIR, "image-gen-hosts-doorknock.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
 
-PORTS = [8188, 7860]
 TIMEOUT = 60
-SUBNET = 24
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
 FOFA_WEB_HEADER = os.getenv("FOFA_WEB_HEADER", "")
 FOFA_API = "https://fofa.info/api/v1/search/all"
 FOFA_WEB = "https://en.fofa.info/result"
 
-SERVICES = {
-    8188: "comfyui",
-    7860: "a1111",
+SERVICE_CONFIG = {
+    "a1111": {
+        "port": 7860,
+        "fofa_query": 'icon_hash="2075038152" && body="Stable Diffusion"',
+        "check_path": "/sdapi/v1/sd-models",
+    },
+    "comfyui": {
+        "port": 8188,
+        "fofa_query": 'title="ComfyUI"',
+        "check_path": "/models/checkpoints",
+    },
 }
 
 
@@ -50,20 +54,24 @@ def _save_json(path, data):
         json.dump(data, f, indent=2)
 
 
-async def _check_host(session, host, port, service=None):
-    if service is None:
-        service = "a1111"
-    url = f"http://{host}:{port}"
+async def _check_host(session, host, port, service):
+    cfg = SERVICE_CONFIG[service]
+    url = f"http://{host}:{port}{cfg['check_path']}"
     try:
         resp = await asyncio.wait_for(
-            session.get(f"{url}/sdapi/v1/sd-models"), timeout=TIMEOUT
+            session.get(url), timeout=TIMEOUT
         )
         if resp.status != 200:
             await resp.release()
             return {"error": f"HTTP {resp.status}"}
-        data = await resp.json()
-        await resp.release()
-        models = [m.get("title", "") for m in data if isinstance(m, dict)]
+        if service == "a1111":
+            data = await resp.json()
+            await resp.release()
+            models = [m.get("title", "") for m in data if isinstance(m, dict)]
+        else:
+            data = await resp.json()
+            await resp.release()
+            models = data if isinstance(data, list) else []
         return {
             "service": service,
             "host": f"{host}:{port}",
@@ -81,16 +89,15 @@ async def _check_host(session, host, port, service=None):
         return {"error": str(e)}
 
 
-def _fetch_api(dry, limit, queries, combined_query):
+def _fetch_api(dry, limit, service):
     import base64
     import requests
     import curlify
 
-    params = {
-        "key": FOFA_KEY,
-        "qbase64": base64.b64encode(combined_query.encode()).decode(),
-        "size": limit,
-    }
+    cfg = SERVICE_CONFIG[service]
+    query = cfg["fofa_query"]
+    qb64 = base64.b64encode(query.encode()).decode()
+    params = {"key": FOFA_KEY, "qbase64": qb64, "size": limit}
     req = requests.Request("GET", FOFA_API, params=params)
     prepared = req.prepare()
     if dry:
@@ -109,20 +116,9 @@ def _fetch_api(dry, limit, queries, combined_query):
         log.error(f"FOFA API request failed: {e}")
         return []
 
-    if len(queries) == 1:
-        known_service = queries[0][1]
     hosts = []
     for row in data.get("results", []):
-        ip_addr, port_num, hostname = row[0], row[1], row[2]
-        port_num = int(port_num)
-        if len(queries) == 1:
-            service = known_service
-        else:
-            for q, service, default_port in queries:
-                if port_num == default_port:
-                    break
-            else:
-                service = "a1111"
+        ip_addr, port_num = row[0], row[1]
         hosts.append({
             "service": service,
             "host": f"{ip_addr}:{port_num}",
@@ -130,16 +126,16 @@ def _fetch_api(dry, limit, queries, combined_query):
     return hosts
 
 
-def _fetch_web(dry, limit, queries, combined_query, country=None, port=None, server=None, run_ts=None):
+def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None):
     import base64
     import re
     import requests
 
-    qbase64 = base64.b64encode(combined_query.encode()).decode()
-    url = f"{FOFA_WEB}?qbase64={qbase64}"
+    qb64 = base64.b64encode(combined.encode()).decode()
+    url = f"{FOFA_WEB}?qbase64={qb64}"
 
     if not FOFA_WEB_HEADER:
-        log.error("FOFA_WEB_HEADER must be set in .env for web method (paste the Cookie header from your browser)")
+        log.error("FOFA_WEB_HEADER must be set in .env for web method")
         return None
 
     cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_WEB_HEADER)
@@ -193,17 +189,17 @@ def _fetch_web(dry, limit, queries, combined_query, country=None, port=None, ser
     with open(out_path, "w") as f:
         f.write(resp.text)
 
-    hosts = _parse_fofa_html(out_path, queries)
+    hosts = _parse_fofa_html(out_path, service)
     if not hosts:
         size = len(resp.text)
-        log.warning(f"no results  ({resp.status_code}, {size}b, {out_path})")
+        log.warning(f"no results  (code={resp.status_code}, {size}b, {out_path})")
     else:
         log.info(f"saved to {out_path}")
 
     return hosts
 
 
-def _parse_fofa_html(html_path, queries):
+def _parse_fofa_html(html_path, service):
     import re
     from urllib.parse import urlparse
 
@@ -214,9 +210,6 @@ def _parse_fofa_html(html_path, queries):
     if not values:
         log.warning("no results")
         return []
-
-    if len(queries) == 1:
-        known_service = queries[0][1]
 
     seen = set()
     hosts = []
@@ -238,15 +231,6 @@ def _parse_fofa_html(html_path, queries):
             host = v
             port = 80
 
-        if len(queries) == 1:
-            service = known_service
-        else:
-            for q, service, default_port in queries:
-                if port == default_port:
-                    break
-            else:
-                service = "a1111"
-
         hosts.append({
             "service": service,
             "host": f"{host}:{port}",
@@ -256,25 +240,13 @@ def _parse_fofa_html(html_path, queries):
     return hosts
 
 
-def fetch(dry=False, limit=2, services=None, method="api", notricks=False):
-    import base64
-    import urllib.parse
-    import requests
-    import curlify
-
-    queries = [
-        ('title="ComfyUI"', "comfyui", 8188),
-        ('icon_hash="2075038152" && body="Stable Diffusion"', "a1111", 7860),
-    ]
-    if services and "all" not in services:
-        queries = [q for q in queries if q[1] in services]
-
-    if method == "web" and not notricks:
+def fetch(dry=False, limit=2, service="a1111", method="api"):
+    if method == "web":
         from datetime import datetime
         run_ts = datetime.now().strftime("%Y%m%d%H%M%S")
 
         countries = [None] + ["CN", "US", "CA", "JP", "KR"]
-        ports = [None] + ["10000", "7860", "443", "80"]
+        ports = [None, str(SERVICE_CONFIG[service]["port"])]
         servers = [None] + ["uvicorn", "nginx"]
 
         pool = _load_json(HOSTS_FILE)
@@ -282,23 +254,19 @@ def fetch(dry=False, limit=2, services=None, method="api", notricks=False):
         combos = [(c, p, s) for c in countries for p in ports for s in servers]
 
         for i, (country, port, server) in enumerate(combos):
-            modified = []
-            for q, service, default_port in queries:
-                parts = [q]
-                if port:
-                    parts.append(f'port="{port}"')
-                if country:
-                    parts.append(f'country="{country}"')
-                if server:
-                    parts.append(f'server="{server}"')
-                modified.append(" && ".join(parts))
-
-            combined = " || ".join(f"({q})" for q in modified)
-
+            cfg = SERVICE_CONFIG[service]
+            qparts = [cfg["fofa_query"]]
+            if port:
+                qparts.append(f'port="{port}"')
+            if country:
+                qparts.append(f'country="{country}"')
+            if server:
+                qparts.append(f'server="{server}"')
+            combined = " && ".join(qparts)
             if not dry:
-                log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}")
+                log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}  query={combined}")
 
-            hosts = _fetch_web(dry, limit, queries, combined, country, port, server, run_ts)
+            hosts = _fetch_web(dry, limit, service, combined, country, port, server, run_ts)
             if hosts is None:
                 continue
 
@@ -317,20 +285,10 @@ def fetch(dry=False, limit=2, services=None, method="api", notricks=False):
 
         hosts = pool
     else:
-        combined_query = " || ".join(f"({q})" for q, _, _ in queries)
-
-        if method == "web":
-            if not FOFA_WEB_HEADER:
-                log.error("FOFA_WEB_HEADER must be set in .env for web method")
-                return
-            hosts = _fetch_web(dry, limit, queries, combined_query)
-            if hosts is None:
-                return
-        else:
-            if not FOFA_KEY:
-                log.error("FOFA_KEY must be set in .env")
-                return
-            hosts = _fetch_api(dry, limit, queries, combined_query)
+        if not FOFA_KEY:
+            log.error("FOFA_KEY must be set in .env")
+            return
+        hosts = _fetch_api(dry, limit, service)
 
     if dry:
         return
@@ -347,63 +305,12 @@ def fetch(dry=False, limit=2, services=None, method="api", notricks=False):
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
 
 
-def scan():
-    import ipaddress
+async def _check_all(service):
 
-    seeds = _load_json(HOSTS_FILE)
-    if not seeds:
-        log.warning("scan: no seed hosts — run fetch first")
-        return
-
-    nets = set()
-    for entry in seeds:
-        host = entry["host"].split(":")[0]
-        try:
-            ip = ipaddress.IPv4Address(host)
-        except ipaddress.AddressValueError:
-            continue
-        nets.add(str(ipaddress.IPv4Network(f"{ip}/{SUBNET}", strict=False)))
-
-    log.info(f"scan: expanding {len(seeds)} seeds to {len(nets)} /{SUBNET} networks")
-
-    ports_str = ",".join(str(p) for p in PORTS)
-    result = subprocess.run(
-        ["nmap", "-p", ports_str, "--open", "-T4", "-oG", "-"] + list(nets),
-        capture_output=True, text=True, timeout=600,
-    )
-
-    discovered = []
-    for line in result.stdout.splitlines():
-        if not line.startswith("Host:"):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        ip = parts[0].replace("Host:", "").strip()
-        for port in PORTS:
-            if f"{port}/open" in line:
-                discovered.append({
-                    "service": SERVICES.get(port, "a1111"),
-                    "host": f"{ip}:{port}",
-                })
-
-    existing = _load_json(DOORKNOCK_FILE)
-    seen = {f"{h['service']}@{h['host']}" for h in existing}
-    for h in discovered:
-        key = f"{h['service']}@{h['host']}"
-        if key not in seen:
-            existing.append(h)
-            seen.add(key)
-
-    _save_json(DOORKNOCK_FILE, existing)
-    log.info(f"scan: {len(discovered)} discovered, {len(existing)} total in doorknock file")
-
-
-async def _check_all():
-
-    hosts = _load_json(DOORKNOCK_FILE) or _load_json(HOSTS_FILE)
+    hosts = _load_json(HOSTS_FILE)
+    hosts = [h for h in hosts if h.get("service") == service]
     if not hosts:
-        log.warning("check: no hosts — run fetch first")
+        log.warning(f"check: no {service} hosts — run fetch first")
         return
 
     connector = aiohttp.TCPConnector(limit=50)
@@ -412,9 +319,8 @@ async def _check_all():
         for entry in hosts:
             host_port = entry["host"].split(":")
             h = host_port[0]
-            p = int(host_port[1]) if len(host_port) > 1 else 8188
-            s = entry.get("service")
-            tasks.append(_check_host(session, h, p, s))
+            p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+            tasks.append(_check_host(session, h, p, service))
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     now = time.time()
@@ -426,7 +332,7 @@ async def _check_all():
         else:
             reason = r.get("error", str(r)) if isinstance(r, dict) else str(r)
             notworking.append({
-                "service": entry.get("service", "a1111"),
+                "service": service,
                 "host": entry["host"],
                 "reason": reason,
                 "last_checked": now,
@@ -452,15 +358,8 @@ async def _check_all():
     log.info(f"check: {len(hosts)} checked, {len(working)} working, {len(notworking)} notworking")
 
 
-def check():
-    asyncio.run(_check_all())
-
-
-STEPS = {"fetch": fetch, "check": check}
-VALID_SEQUENCES = [
-    ("check",),
-    ("fetch", "check"),
-]
+def check(service):
+    asyncio.run(_check_all(service))
 
 
 def main():
@@ -477,29 +376,18 @@ def main():
     )
 
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
-    parser.add_argument("-a", "--action", choices=["check", "fetch-check"], help="action to perform")
+    parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG), required=True, help="service to search for")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "fetch-check"], required=True, help="action to perform")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
-    parser.add_argument("-s", "--service", nargs="+", default=["all"], choices=["all", "comfyui", "a1111"], help="services to search (default: all)")
     parser.add_argument("-m", "--method", choices=["api", "web"], default="web", help="fetch method (default: web)")
-    parser.add_argument("--notricks", action="store_true", help="disable country/port query variations")
     args = parser.parse_args()
 
-    if args.action is None:
-        parser.print_help()
-        sys.exit(1)
-
-    raw = args.action
-    parts = raw.split("-")
-
-    if tuple(parts) not in VALID_SEQUENCES:
-        valid = " | ".join("-".join(s) for s in VALID_SEQUENCES)
-        print(f"usage: graflex {{{valid}}}", file=sys.stderr)
-        sys.exit(1)
+    parts = args.action.split("-")
 
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            STEPS[step](dry=args.dry, limit=args.limit, services=args.service, method=args.method, notricks=args.notricks)
-        else:
-            STEPS[step]()
+            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method)
+        elif step == "check":
+            check(service=args.service)
