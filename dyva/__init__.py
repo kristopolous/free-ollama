@@ -403,11 +403,12 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
             if resp.status != 200:
                 dur = time.time() - start
+                code = resp.status
                 await resp.release()
                 resp = None
                 add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
+                    f"failure: {host} for {model} - status {code}", duration=dur, wid=wid)
                 continue
 
             if not do_stream:
@@ -1453,33 +1454,12 @@ async def handle_ollama_generate(request):
         application/json:
           schema:
             type: object
-            required: [model, prompt]
-            properties:
-              model:
-                type: string
-                description: Model name
-              prompt:
-                type: string
-                description: Input prompt
-              stream:
-                type: boolean
-                default: false
-              options:
-                type: object
+            properties: {}
     responses:
       '200':
-        description: Generation response (NDJSON stream or JSON)
-        content:
-          application/x-ndjson:
-            schema:
-              type: string
-          application/json:
-            schema:
-              type: object
+        description: Generation response
       '400':
         description: Invalid request
-      '404':
-        description: Model not found
       '502':
         description: All servers failed
     """
