@@ -1490,6 +1490,44 @@ async def handle_ollama_generate(request):
         return await _proxy_generate(request, request.app["session"])
 
 
+async def handle_sd_models(request):
+    """
+    List available SD models across all A1111 hosts
+    ---
+    tags: [Image]
+    summary: List Stable Diffusion models available on discovered A1111 hosts
+    responses:
+      '200':
+        description: List of SD models
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                models:
+                  type: array
+                  items:
+                    type: string
+    """
+    servers = load_servers()
+    seen = {}
+    for s in servers:
+        if s.get("service") != "a1111":
+            continue
+        for m in s.get("models", []):
+            title = m.split(" [")[0] if " [" in m else m
+            if title not in seen:
+                seen[title] = {"id": title, "hosts": [], "count": 0}
+            seen[title]["count"] += 1
+            h = s.get("server", "")
+            if h not in seen[title]["hosts"]:
+                seen[title]["hosts"].append(h)
+    return web.json_response({
+        "object": "list",
+        "data": sorted(seen.values(), key=lambda x: -x["count"]),
+    })
+
+
 async def handle_txt2img(request):
     """
     Text-to-image generation (A1111 format)
@@ -1503,6 +1541,9 @@ async def handle_txt2img(request):
           schema:
             type: object
             properties:
+              model:
+                type: string
+                description: SD model name to match against (optional)
               prompt:
                 type: string
                 description: Text prompt
@@ -1564,6 +1605,8 @@ async def handle_txt2img(request):
 
     IMG_KEY = "__a1111__"
 
+    model_filter = body.pop("model", None)
+
     last = get_last(IMG_KEY)
     if last:
         last_host, _ = last
@@ -1581,7 +1624,14 @@ async def handle_txt2img(request):
             pass
 
     servers = load_servers()
-    hosts = [s.get("server") for s in servers if s.get("service") == "a1111"]
+    candidates = [s for s in servers if s.get("service") == "a1111"]
+    if model_filter:
+        candidates = [
+            s for s in candidates
+            if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
+                   for m in s.get("models", []))
+        ]
+    hosts = [s.get("server") for s in candidates]
     if not hosts:
         return web.json_response({"error": "no available image-gen hosts"}, status=503)
 
@@ -1688,6 +1738,7 @@ def make_app():
     swagger.add_post("/api/chat", handle_ollama_chat)
     swagger.add_post("/api/generate", handle_ollama_generate)
     swagger.add_post("/v1/chat/completions", handle_openai_chat)
+    swagger.add_get("/sdapi/v1/sd-models", handle_sd_models)
     swagger.add_post("/sdapi/v1/txt2img", handle_txt2img)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")

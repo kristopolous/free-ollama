@@ -20,9 +20,10 @@ CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
 DOORKNOCK_FILE = os.path.join(CACHE_DIR, "image-gen-hosts-doorknock.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
+NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
 
 PORTS = [8188, 7860]
-TIMEOUT = 10
+TIMEOUT = 60
 SUBNET = 24
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
@@ -59,7 +60,7 @@ async def _check_host(session, host, port, service=None):
         )
         if resp.status != 200:
             await resp.release()
-            return None
+            return {"error": f"HTTP {resp.status}"}
         data = await resp.json()
         await resp.release()
         models = [m.get("title", "") for m in data if isinstance(m, dict)]
@@ -70,10 +71,14 @@ async def _check_host(session, host, port, service=None):
             "model_count": len(models),
             "last_checked": time.time(),
         }
-    except (asyncio.TimeoutError, OSError, json.JSONDecodeError):
-        return None
-    except Exception:
-        return None
+    except asyncio.TimeoutError:
+        return {"error": "timeout"}
+    except OSError as e:
+        return {"error": str(e)}
+    except json.JSONDecodeError:
+        return {"error": "bad JSON"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _fetch_api(dry, limit, queries, combined_query):
@@ -125,7 +130,7 @@ def _fetch_api(dry, limit, queries, combined_query):
     return hosts
 
 
-def _fetch_web(dry, limit, queries, combined_query):
+def _fetch_web(dry, limit, queries, combined_query, country=None, port=None, server=None, run_ts=None):
     import base64
     import re
     import requests
@@ -151,22 +156,51 @@ def _fetch_web(dry, limit, queries, combined_query):
         "Cookie": cookie_header,
     }
 
-    try:
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        log.error(f"FOFA web request failed: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            body = resp.text.lower()
+            if "rate limit" in body or "too many requests" in body:
+                raise RuntimeError("rate limited")
+            break
+        except RuntimeError:
+            if attempt < 2:
+                log.warning("rate limited, retrying in 12s")
+                time.sleep(12)
+            else:
+                log.warning("rate limited")
+                return None
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else "?"
+            if code in (429, 403) and attempt < 2:
+                log.warning(f"rate limited ({code}), retrying in 12s")
+                time.sleep(12)
+            else:
+                if code in (429, 403):
+                    log.warning(f"rate limited  ({code})")
+                else:
+                    log.error(f"FOFA web request failed: {e}")
+                return None
+        except Exception as e:
+            log.error(f"FOFA web request failed: {e}")
+            return None
 
-    from datetime import datetime
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    out_path = os.path.join(CACHE_DIR, f"fofa-results-{ts}.html")
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    tmp_dir = "/tmp/graflex"
+    os.makedirs(tmp_dir, exist_ok=True)
+    label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}"
+    out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
     with open(out_path, "w") as f:
         f.write(resp.text)
-    log.info(f"saved to {out_path}")
 
-    return _parse_fofa_html(out_path, queries)
+    hosts = _parse_fofa_html(out_path, queries)
+    if not hosts:
+        size = len(resp.text)
+        log.warning(f"no results  ({resp.status_code}, {size}b, {out_path})")
+    else:
+        log.info(f"saved to {out_path}")
+
+    return hosts
 
 
 def _parse_fofa_html(html_path, queries):
@@ -178,7 +212,7 @@ def _parse_fofa_html(html_path, queries):
 
     values = re.findall(r'data-clipboard-text="([^"]+)"', content)
     if not values:
-        log.warning(f"no data-clipboard-text found in {html_path}")
+        log.warning("no results")
         return []
 
     if len(queries) == 1:
@@ -222,7 +256,7 @@ def _parse_fofa_html(html_path, queries):
     return hosts
 
 
-def fetch(dry=False, limit=2, services=None, method="api"):
+def fetch(dry=False, limit=2, services=None, method="api", notricks=False):
     import base64
     import urllib.parse
     import requests
@@ -234,20 +268,69 @@ def fetch(dry=False, limit=2, services=None, method="api"):
     ]
     if services and "all" not in services:
         queries = [q for q in queries if q[1] in services]
-    combined_query = " || ".join(f"({q})" for q, _, _ in queries)
 
-    if method == "web":
-        if not FOFA_WEB_HEADER:
-            log.error("FOFA_WEB_HEADER must be set in .env for web method")
-            return
-        hosts = _fetch_web(dry, limit, queries, combined_query)
-        if hosts is None:
-            return
+    if method == "web" and not notricks:
+        from datetime import datetime
+        run_ts = datetime.now().strftime("%Y%m%d%H%M%S")
+
+        countries = [None] + ["CN", "US", "CA", "JP", "KR"]
+        ports = [None] + ["10000", "7860", "443", "80"]
+        servers = [None] + ["uvicorn", "nginx"]
+
+        pool = _load_json(HOSTS_FILE)
+        seen = {f"{h['service']}@{h['host']}" for h in pool}
+        combos = [(c, p, s) for c in countries for p in ports for s in servers]
+
+        for i, (country, port, server) in enumerate(combos):
+            modified = []
+            for q, service, default_port in queries:
+                parts = [q]
+                if port:
+                    parts.append(f'port="{port}"')
+                if country:
+                    parts.append(f'country="{country}"')
+                if server:
+                    parts.append(f'server="{server}"')
+                modified.append(" && ".join(parts))
+
+            combined = " || ".join(f"({q})" for q in modified)
+
+            if not dry:
+                log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}")
+
+            hosts = _fetch_web(dry, limit, queries, combined, country, port, server, run_ts)
+            if hosts is None:
+                continue
+
+            for h in hosts:
+                key = f"{h['service']}@{h['host']}"
+                if key not in seen:
+                    pool.append(h)
+                    seen.add(key)
+
+            if not dry:
+                _save_json(HOSTS_FILE, pool)
+                log.info(f"  total: {len(pool)} unique hosts")
+
+            if i < len(combos) - 1 and not dry:
+                time.sleep(4)
+
+        hosts = pool
     else:
-        if not FOFA_KEY:
-            log.error("FOFA_KEY must be set in .env")
-            return
-        hosts = _fetch_api(dry, limit, queries, combined_query)
+        combined_query = " || ".join(f"({q})" for q, _, _ in queries)
+
+        if method == "web":
+            if not FOFA_WEB_HEADER:
+                log.error("FOFA_WEB_HEADER must be set in .env for web method")
+                return
+            hosts = _fetch_web(dry, limit, queries, combined_query)
+            if hosts is None:
+                return
+        else:
+            if not FOFA_KEY:
+                log.error("FOFA_KEY must be set in .env")
+                return
+            hosts = _fetch_api(dry, limit, queries, combined_query)
 
     if dry:
         return
@@ -334,13 +417,22 @@ async def _check_all():
             tasks.append(_check_host(session, h, p, s))
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    now = time.time()
     working = []
-    for r in results:
-        if r and not isinstance(r, Exception):
+    notworking = []
+    for entry, r in zip(hosts, results):
+        if isinstance(r, dict) and "error" not in r:
             working.append(r)
+        else:
+            reason = r.get("error", str(r)) if isinstance(r, dict) else str(r)
+            notworking.append({
+                "service": entry.get("service", "a1111"),
+                "host": entry["host"],
+                "reason": reason,
+                "last_checked": now,
+            })
 
     existing = _load_json(WORKING_FILE)
-    now = time.time()
     seen = {f"{h['service']}@{h['host']}" for h in existing}
     for h in working:
         key = f"{h['service']}@{h['host']}"
@@ -356,7 +448,8 @@ async def _check_all():
 
     existing.sort(key=lambda h: (h.get("gpu") or "", h.get("host", "")))
     _save_json(WORKING_FILE, existing)
-    log.info(f"check: {len(working)} working, {len(existing)} total in working registry")
+    _save_json(NOTWORKING_FILE, notworking)
+    log.info(f"check: {len(hosts)} checked, {len(working)} working, {len(notworking)} notworking")
 
 
 def check():
@@ -388,7 +481,8 @@ def main():
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-s", "--service", nargs="+", default=["all"], choices=["all", "comfyui", "a1111"], help="services to search (default: all)")
-    parser.add_argument("-m", "--method", choices=["api", "web"], default="api", help="fetch method (default: api)")
+    parser.add_argument("-m", "--method", choices=["api", "web"], default="web", help="fetch method (default: web)")
+    parser.add_argument("--notricks", action="store_true", help="disable country/port query variations")
     args = parser.parse_args()
 
     if args.action is None:
@@ -406,6 +500,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            STEPS[step](dry=args.dry, limit=args.limit, services=args.service, method=args.method)
+            STEPS[step](dry=args.dry, limit=args.limit, services=args.service, method=args.method, notricks=args.notricks)
         else:
             STEPS[step]()
