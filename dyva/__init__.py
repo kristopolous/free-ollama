@@ -1562,24 +1562,90 @@ async def handle_txt2img(request):
     except json.JSONDecodeError:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
-    hosts = []
-    if os.path.exists(GRAFLEX_WORKING):
-        with open(GRAFLEX_WORKING) as f:
-            hosts = json.load(f)
-    hosts = [h for h in hosts if h.get("service") == "a1111"]
+    IMG_KEY = "__a1111__"
+
+    last = get_last(IMG_KEY)
+    if last:
+        last_host, _ = last
+        log.debug(f"Reusing {last_host} for txt2img")
+        try:
+            async with session.post(
+                f"http://{last_host}/sdapi/v1/txt2img", json=body,
+                timeout=aiohttp.ClientTimeout(total=TIMEOUT),
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return web.json_response(data)
+                add_bad(last_host, IMG_KEY)
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+            pass
+
+    servers = load_servers()
+    hosts = [s.get("server") for s in servers if s.get("service") == "a1111"]
     if not hosts:
         return web.json_response({"error": "no available image-gen hosts"}, status=503)
 
-    host = hosts[0]["host"]
-    url = f"http://{host}/sdapi/v1/txt2img"
-    try:
-        async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as resp:
-            if resp.status != 200:
-                return web.json_response({"error": f"upstream error: {resp.status}"}, status=resp.status)
-            data = await resp.json()
+    good = load_good()
+    hosts.sort(key=lambda h: 0 if f"{h} {IMG_KEY}" in good else 1)
+
+    async def _race(host_list):
+        done = asyncio.Event()
+        result_queue = asyncio.Queue()
+        host_iter = iter(host_list)
+        iter_lock = asyncio.Lock()
+
+        async def worker():
+            while not done.is_set():
+                async with iter_lock:
+                    try:
+                        host = next(host_iter)
+                    except StopIteration:
+                        return
+                try:
+                    async with session.post(
+                        f"http://{host}/sdapi/v1/txt2img", json=body,
+                        timeout=aiohttp.ClientTimeout(total=TIMEOUT),
+                    ) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            set_last(IMG_KEY, host, "")
+                            add_good(host, IMG_KEY)
+                            await result_queue.put(data)
+                            done.set()
+                            return
+                        add_bad(host, IMG_KEY)
+                except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+                    pass
+
+        tasks = [asyncio.create_task(worker()) for _ in range(WORKER_COUNT)]
+        try:
+            while True:
+                try:
+                    return result_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    if all(t.done() for t in tasks):
+                        return None
+                await asyncio.sleep(0.1)
+        finally:
+            done.set()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Phase 1: try good + untested hosts (skip known-bad)
+    live_hosts = [h for h in hosts if f"{h} {IMG_KEY}" not in load_bad()]
+    data = await _race(live_hosts)
+    if data:
+        return web.json_response(data)
+
+    # Phase 2: exhausted — try previously bad hosts
+    bad_hosts = [h for h in hosts if f"{h} {IMG_KEY}" in load_bad()]
+    if bad_hosts:
+        data = await _race(bad_hosts)
+        if data:
             return web.json_response(data)
-    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-        return web.json_response({"error": f"host unreachable: {e}"}, status=502)
+
+    return web.json_response({"error": "all image-gen hosts failed"}, status=502)
 
 
 def make_app():
