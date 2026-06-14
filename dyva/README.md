@@ -1,6 +1,6 @@
 # dyva
 
-OpenAI-compatible, ollama-compatible, and a1111-compatible proxy that routes inference to free Ollama servers, and A1111 hosts.
+OpenAI-compatible, comfyui, ollama-compatible, and a1111-compatible proxy that routes inference to free Ollama servers, and A1111 hosts.
 
 ## Quickstart
 
@@ -12,6 +12,8 @@ dyva -p 8080
 ---
 
 ## API Reference
+
+For the latest there's a swagger document on `/docs` of the running instance 
 
 ### `POST /v1/chat/completions`
 
