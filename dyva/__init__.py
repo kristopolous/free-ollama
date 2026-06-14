@@ -1570,11 +1570,14 @@ async def handle_txt2img(request):
     IMG_KEY = "__a1111__"
 
     model_filter = body.pop("model", None)
+    activity_label = (model_filter or body.get("prompt", "txt2img"))[:60]
 
     last = get_last(IMG_KEY)
     if last:
         last_host, _ = last
         log.debug(f"Reusing {last_host} for txt2img")
+        await broadcast_activity(last_host, activity_label, "trying",
+            f"txt2img: {activity_label} on {last_host}")
         try:
             async with session.post(
                 f"http://{last_host}/sdapi/v1/txt2img", json=body,
@@ -1582,10 +1585,15 @@ async def handle_txt2img(request):
             ) as r:
                 if r.status == 200:
                     data = await r.json()
+                    await broadcast_activity(last_host, activity_label, "connected",
+                        f"txt2img ✓", duration=0)
                     return web.json_response(data)
                 add_bad(last_host, IMG_KEY)
-        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
-            pass
+            await broadcast_activity(last_host, activity_label, "failed",
+                f"txt2img: HTTP {r.status}")
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
+            await broadcast_activity(last_host, activity_label, "failed",
+                f"txt2img: {type(_e).__name__}")
 
     servers = load_servers()
     candidates = [s for s in servers if s.get("service") == "a1111"]
@@ -1615,7 +1623,10 @@ async def handle_txt2img(request):
                         host = next(host_iter)
                     except StopIteration:
                         return
+                await broadcast_activity(host, activity_label, "trying",
+                    f"txt2img: {activity_label}")
                 try:
+                    t0 = time.time()
                     async with session.post(
                         f"http://{host}/sdapi/v1/txt2img", json=body,
                         timeout=aiohttp.ClientTimeout(total=TIMEOUT),
@@ -1624,12 +1635,17 @@ async def handle_txt2img(request):
                             data = await r.json()
                             set_last(IMG_KEY, host, "")
                             add_good(host, IMG_KEY)
+                            await broadcast_activity(host, activity_label, "connected",
+                                f"txt2img ✓", duration=time.time() - t0)
                             await result_queue.put(data)
                             done.set()
                             return
                         add_bad(host, IMG_KEY)
-                except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
-                    pass
+                        await broadcast_activity(host, activity_label, "failed",
+                            f"txt2img: HTTP {r.status}")
+                except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
+                    await broadcast_activity(host, activity_label, "failed",
+                        f"txt2img: {type(_e).__name__}")
 
         tasks = [asyncio.create_task(worker()) for _ in range(WORKER_COUNT)]
         try:
@@ -1682,13 +1698,20 @@ async def handle_txt2img(request):
                             host = next(host_iter)
                         except StopIteration:
                             return
+                    await broadcast_activity(host, activity_label, "trying",
+                        f"txt2img (comfy): {activity_label}")
+                    t0 = time.time()
                     data = await _txt2img_comfyui(session, host, body)
                     if data:
                         set_last(IMG_KEY, host, "")
                         add_good(host, IMG_KEY)
+                        await broadcast_activity(host, activity_label, "connected",
+                            f"txt2img (comfy) ✓", duration=time.time() - t0)
                         await result_queue.put(data)
                         done.set()
                         return
+                    await broadcast_activity(host, activity_label, "failed",
+                        f"txt2img (comfy): no response")
 
             tasks = [asyncio.create_task(worker()) for _ in range(min(3, len(host_list)))]
             try:
