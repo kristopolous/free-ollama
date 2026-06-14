@@ -9,6 +9,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
     "curlify>=3.0.0",
+    "aiohttp-swagger3>=0.10.0",
 ]
 
 [tool.setuptools]

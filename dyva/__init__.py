@@ -14,6 +14,7 @@ import importlib.metadata
 
 import aiohttp
 from aiohttp import web
+from aiohttp_swagger3 import SwaggerDocs, SwaggerInfo, SwaggerUiSettings
 
 LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
 logging.basicConfig(
@@ -820,6 +821,19 @@ async def _proxy_generate(request, session):
 
 
 async def handle_dashboard(request):
+    """
+    Dashboard (HTML)
+    ---
+    tags: [UI]
+    summary: Dashboard with server status, models, and activity
+    responses:
+      '200':
+        description: HTML dashboard page
+        content:
+          text/html:
+            schema:
+              type: string
+    """
     bad = load_bad()
     good = load_good()
     servers = load_servers()
@@ -894,6 +908,31 @@ async def handle_dashboard(request):
 
 
 async def handle_v1_models(request):
+    """
+    List models (OpenAI-compatible)
+    ---
+    tags: [Models]
+    summary: List available models (OpenAI /v1/models format)
+    responses:
+      '200':
+        description: List of models
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                object:
+                  type: string
+                data:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      count:
+                        type: integer
+    """
     resp = _check_local(request)
     if resp:
         return resp
@@ -905,6 +944,15 @@ async def handle_v1_models(request):
 
 
 async def handle_clear_bad(request):
+    """
+    Clear bad hosts list
+    ---
+    tags: [Admin]
+    summary: Clear all failed host+model pairs and redirect to dashboard
+    responses:
+      '302':
+        description: Redirect to dashboard
+    """
     global _bad_cache
     _bad_cache = None
     if os.path.exists(BAD_FILE):
@@ -913,11 +961,49 @@ async def handle_clear_bad(request):
 
 
 async def handle_refresh_cache(request):
+    """
+    Refresh server cache
+    ---
+    tags: [Admin]
+    summary: Re-fetch server lists from all sources and redirect to dashboard
+    responses:
+      '302':
+        description: Redirect to dashboard
+    """
     refresh_cache()
     raise web.HTTPFound("/")
 
 
 async def handle_api_tags(request):
+    """
+    List models (Ollama-compatible)
+    ---
+    tags: [Models]
+    summary: List available models (Ollama /api/tags format)
+    responses:
+      '200':
+        description: List of models
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                models:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      model:
+                        type: string
+                      modified_at:
+                        type: string
+                      size:
+                        type: integer
+                      digest:
+                        type: string
+    """
     graffiti = [
         ":::::::-.  ",  " ;;,   `';,",  " `[[     [[",  "  $$,    $$",
         "  888_,o8P'",  "  MMMMP'`  ",  " ...    :::",  " ;;     ;;;",
@@ -983,10 +1069,39 @@ async def handle_api_tags(request):
 
 
 async def handle_api_version(request):
+    """
+    Get server version
+    ---
+    tags: [Info]
+    summary: Return the dyva proxy version
+    responses:
+      '200':
+        description: Version info
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: string
+    """
     return web.json_response({"version": "0.5.0"})
 
 
 async def handle_api_activity(request):
+    """
+    Activity stream (SSE)
+    ---
+    tags: [Monitoring]
+    summary: Server-sent events stream of real-time proxy activity
+    responses:
+      '200':
+        description: SSE stream of activity events
+        content:
+          text/event-stream:
+            schema:
+              type: string
+    """
     response = web.StreamResponse()
     response.headers["Content-Type"] = "text/event-stream"
     response.headers["Cache-Control"] = "no-cache"
@@ -1020,12 +1135,48 @@ async def handle_api_activity(request):
 
 
 async def handle_refresh(request):
+    """
+    Refresh server cache
+    ---
+    tags: [Admin]
+    summary: Re-fetch server lists from all sources
+    responses:
+      '200':
+        description: Cache refreshed
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                message:
+                  type: string
+    """
     await broadcast_activity("", "", "searching", "refreshing server cache...")
     refresh_cache()
     return web.json_response({"status": "ok", "message": "cache refreshed"})
 
 
 async def handle_api_ps(request):
+    """
+    Running models (Ollama-compatible)
+    ---
+    tags: [Models]
+    summary: List currently cached models (Ollama /api/ps format)
+    responses:
+      '200':
+        description: List of running models
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                models:
+                  type: array
+                  items:
+                    type: object
+    """
     models_list = []
     fake_sizes = [13, 24, 48, 70, 8, 32]
     fake_params = ["7B", "8B",  "13B", "24B", "32B", "70B"]
@@ -1055,6 +1206,31 @@ async def handle_api_ps(request):
 
 
 async def handle_api_show(request):
+    """
+    Show model info (Ollama-compatible)
+    ---
+    tags: [Models]
+    summary: Get details about a specific model (Ollama /api/show format)
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              model:
+                type: string
+              name:
+                type: string
+      description: Model name in JSON body or ?model= query param
+    responses:
+      '200':
+        description: Model details
+        content:
+          application/json:
+            schema:
+              type: object
+    """
     model = ""
     ct = request.content_type or ""
     if ct == "application/json" or ct == "application/x-ndjson":
@@ -1089,6 +1265,22 @@ async def handle_api_show(request):
 
 
 async def handle_api_pull(request):
+    """
+    Pull/refresh models (Ollama-compatible)
+    ---
+    tags: [Admin]
+    summary: Refresh server cache (Ollama /api/pull format)
+    responses:
+      '200':
+        description: Cache refreshed
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+    """
     refresh_cache()
     return web.json_response({"status": "success"})
 
@@ -1105,6 +1297,60 @@ def _check_local(request):
 
 
 async def handle_ollama_chat(request):
+    """
+    Chat completion (Ollama format)
+    ---
+    tags: [Chat]
+    summary: Chat completion using Ollama /api/chat format. Proxies to upstream Ollama servers.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [model]
+            properties:
+              model:
+                type: string
+                description: Model name
+              messages:
+                type: array
+                description: Chat messages
+                items:
+                  type: object
+                  properties:
+                    role:
+                      type: string
+                      enum: [system, user, assistant]
+                    content:
+                      type: string
+              stream:
+                type: boolean
+                default: false
+              options:
+                type: object
+                properties:
+                  temperature:
+                    type: number
+                  num_predict:
+                    type: integer
+    responses:
+      '200':
+        description: Chat completion response (NDJSON stream or JSON)
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: object
+      '400':
+        description: Invalid request
+      '404':
+        description: Model not found
+      '502':
+        description: All servers failed
+    """
     resp = _check_local(request)
     if resp:
         return resp
@@ -1124,6 +1370,59 @@ async def handle_ollama_chat(request):
 
 
 async def handle_openai_chat(request):
+    """
+    Chat completion (OpenAI format)
+    ---
+    tags: [Chat]
+    summary: Chat completion using OpenAI /v1/chat/completions format. Translates to Ollama format and proxies upstream.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [model, messages]
+            properties:
+              model:
+                type: string
+                description: Model name
+              messages:
+                type: array
+                description: Chat messages
+                items:
+                  type: object
+                  properties:
+                    role:
+                      type: string
+                      enum: [system, user, assistant]
+                    content:
+                      type: string
+              stream:
+                type: boolean
+                default: false
+              temperature:
+                type: number
+              max_tokens:
+                type: integer
+              top_p:
+                type: number
+    responses:
+      '200':
+        description: Chat completion response (SSE stream or JSON)
+        content:
+          text/event-stream:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: object
+      '400':
+        description: Invalid request
+      '404':
+        description: Model not found
+      '502':
+        description: All servers failed
+    """
     resp = _check_local(request)
     if resp:
         return resp
@@ -1143,6 +1442,47 @@ async def handle_openai_chat(request):
 
 
 async def handle_ollama_generate(request):
+    """
+    Text generation (Ollama format)
+    ---
+    tags: [Generation]
+    summary: Text completion using Ollama /api/generate format. Proxies to upstream Ollama servers.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [model, prompt]
+            properties:
+              model:
+                type: string
+                description: Model name
+              prompt:
+                type: string
+                description: Input prompt
+              stream:
+                type: boolean
+                default: false
+              options:
+                type: object
+    responses:
+      '200':
+        description: Generation response (NDJSON stream or JSON)
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: object
+      '400':
+        description: Invalid request
+      '404':
+        description: Model not found
+      '502':
+        description: All servers failed
+    """
     resp = _check_local(request)
     if resp:
         return resp
@@ -1151,6 +1491,68 @@ async def handle_ollama_generate(request):
 
 
 async def handle_txt2img(request):
+    """
+    Text-to-image generation (A1111 format)
+    ---
+    tags: [Image]
+    summary: Generate images from text prompts. Proxies to A1111 Stable Diffusion WebUI servers.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              prompt:
+                type: string
+                description: Text prompt
+              negative_prompt:
+                type: string
+              steps:
+                type: integer
+                default: 20
+              width:
+                type: integer
+                default: 512
+              height:
+                type: integer
+                default: 512
+              cfg_scale:
+                type: number
+                default: 7
+              sampler_name:
+                type: string
+                default: Euler
+              seed:
+                type: integer
+                default: -1
+              batch_size:
+                type: integer
+                default: 1
+    responses:
+      '200':
+        description: Generated images (base64-encoded)
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                images:
+                  type: array
+                  items:
+                    type: string
+                    description: Base64-encoded PNG
+                parameters:
+                  type: string
+                info:
+                  type: string
+      '400':
+        description: Invalid request
+      '502':
+        description: Upstream error
+      '503':
+        description: No available image-gen hosts
+    """
     resp = _check_local(request)
     if resp:
         return resp
@@ -1199,23 +1601,28 @@ def make_app():
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
-    app.router.add_get("/", handle_dashboard)
-    app.router.add_get("/dashboard", handle_dashboard)
-    app.router.add_get("/v1/models", handle_v1_models)
-    app.router.add_get("/clear-bad", handle_clear_bad)
-    app.router.add_get("/refresh-cache", handle_refresh_cache)
-    app.router.add_get("/api/tags", handle_api_tags)
-    app.router.add_get("/api/ps", handle_api_ps)
-    app.router.add_get("/api/version", handle_api_version)
-    app.router.add_get("/api/activity", handle_api_activity)
-    app.router.add_get("/refresh", handle_refresh)
-    # app.router.add_get("/api/show", handle_api_show)
-    app.router.add_post("/api/show", handle_api_show)
-    app.router.add_post("/api/pull", handle_api_pull)
-    app.router.add_post("/api/chat", handle_ollama_chat)
-    app.router.add_post("/api/generate", handle_ollama_generate)
-    app.router.add_post("/v1/chat/completions", handle_openai_chat)
-    app.router.add_post("/sdapi/v1/txt2img", handle_txt2img)
+    swagger = SwaggerDocs(
+        app,
+        info=SwaggerInfo(title="dyva", version=VERSION, description="Ollama/OpenAI-compatible proxy that routes to free servers"),
+        swagger_ui_settings=SwaggerUiSettings(path="/docs"),
+    )
+
+    swagger.add_get("/", handle_dashboard)
+    swagger.add_get("/dashboard", handle_dashboard)
+    swagger.add_get("/v1/models", handle_v1_models)
+    swagger.add_get("/clear-bad", handle_clear_bad)
+    swagger.add_get("/refresh-cache", handle_refresh_cache)
+    swagger.add_get("/api/tags", handle_api_tags)
+    swagger.add_get("/api/ps", handle_api_ps)
+    swagger.add_get("/api/version", handle_api_version)
+    swagger.add_get("/api/activity", handle_api_activity)
+    swagger.add_get("/refresh", handle_refresh)
+    swagger.add_post("/api/show", handle_api_show)
+    swagger.add_post("/api/pull", handle_api_pull)
+    swagger.add_post("/api/chat", handle_ollama_chat)
+    swagger.add_post("/api/generate", handle_ollama_generate)
+    swagger.add_post("/v1/chat/completions", handle_openai_chat)
+    swagger.add_post("/sdapi/v1/txt2img", handle_txt2img)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)
