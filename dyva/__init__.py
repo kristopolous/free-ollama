@@ -862,14 +862,12 @@ async def handle_dashboard(request):
         for h in sorted(bad)[:30]
     )
     bad_more = f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else ""
-    cache_mtime = os.path.getmtime(CACHE_FILE) if os.path.exists(CACHE_FILE) else 0
-    cache_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cache_mtime)) if cache_mtime else "never"
     html = html.replace("__PORT__", str(PORT))
     html = html.replace("__WORKER_COUNT__", str(WORKER_COUNT))
     html = html.replace("__TIMEOUT__", str(TIMEOUT))
     html = html.replace("__SERVER_COUNT__", str(len(servers)))
     html = html.replace("__MODEL_COUNT__", str(len(models)))
-    html = html.replace("__CACHE_UPDATED__", cache_time)
+    html = html.replace("__DYVA_VERSION__", VERSION)
     html = html.replace("__MODEL_ROWS__", model_rows)
     html = html.replace("__MODEL_MORE__", model_more)
     html = html.replace("__LAST_ROWS__", last_rows)
@@ -891,20 +889,6 @@ async def handle_dashboard(request):
     html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
     html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
     html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
-
-    image_gen = []
-    if os.path.exists(GRAFLEX_WORKING):
-        with open(GRAFLEX_WORKING) as f:
-            image_gen = json.load(f)
-    image_gen.sort(key=lambda h: (h.get("model_count", 0) or 0, h.get("host", "")))
-    image_gen_rows = "".join(
-        f'<div class="model-item"><span class="host-name">{h.get("host", "")}</span><span class="host-model">{h.get("model_count", 0)} models</span></div>'
-        for h in image_gen[:30]
-    )
-    image_gen_more = f'<div class="more">... and {len(image_gen) - 30} more</div>' if len(image_gen) > 30 else ""
-    html = html.replace("__IMAGE_GEN_ROWS__", image_gen_rows)
-    html = html.replace("__IMAGE_GEN_MORE__", image_gen_more)
-    html = html.replace("__IMAGE_GEN_COUNT__", str(len(image_gen)))
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 

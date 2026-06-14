@@ -12,8 +12,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;col
 .header-text h1{font-size:1.5rem;margin-bottom:2px}
 .header-text .sub{color:#999;font-size:.85rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:12px}
-.card{background:#1e1e1e;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.4);max-height:70vh;overflow-y:auto}
-.card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
+.card{background:transparent;border-radius:8px;padding:0;box-shadow:none;overflow:visible}
+.card-inner{background:#1e1e1e;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.4);max-height:70vh;overflow-y:auto}
+.card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px;cursor:pointer;user-select:none}
 
 .status-line{padding:2px 0;font-size:.78rem}
 .status-searching{color:#888}
@@ -39,10 +40,9 @@ input[type=text]:focus{border-color:#888}
 .bad{background:#3a1a1a;color:#e55}
 .good{background:#1a3a1a;color:#4a4}
 .more{font-size:.8rem;color:#666;margin-top:6px}
-.card h2{cursor:pointer;user-select:none}
 .card h2::before{content:"▼";display:inline-block;font-size:.65rem;margin-right:6px;transition:transform .15s;color:#666}
 .card.collapsed h2::before{transform:rotate(-90deg)}
-.card.collapsed>div,.card.collapsed>.more,.card.collapsed>input{display:none}
+.card.collapsed .card-inner{display:none}
 </style>
 </head>
 <body>
@@ -50,51 +50,50 @@ input[type=text]:focus{border-color:#888}
 <img src="dyva.avif" alt="" width="48" height="48">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub">__WORKER_COUNT__ workers &middot; __TIMEOUT__s timeout &middot; __SERVER_COUNT__ servers &middot; __MODEL_COUNT__ models &middot; Cached: __CACHE_UPDATED__ <a href="refresh-cache" id="refreshCache" style="font-size:.75rem;font-weight:normal;color:#66a;cursor:pointer;text-decoration:none">[ Update Cache ]</a></p>
+<p class="sub">__WORKER_COUNT__ workers &middot; __TIMEOUT__s timeout &middot; __SERVER_COUNT__ servers &middot; __MODEL_COUNT__ models &middot; v__DYVA_VERSION__ &middot; <a href="/docs" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">docs</a></p>
 </div>
 </div>
 <div class="grid">
 
 <div class="card">
 <h2>Activity</h2>
-<div id="activityList"></div>
+<div class="card-inner"><div id="activityList"></div></div>
 </div>
 <div class="card">
 <h2>Models</h2>
+<div class="card-inner">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter...">
 <div id="modelList">
 __MODEL_ROWS__
 </div>
 __MODEL_MORE__
 </div>
+</div>
 <div class="card">
 <h2>Last Successful</h2>
-__LAST_ROWS__
+<div class="card-inner">__LAST_ROWS__</div>
 </div>
 <div class="card">
 <h2>Good Hosts <span class="badge good">__GOOD_COUNT__</span></h2>
+<div class="card-inner">
 <div>
 __GOOD_ROWS__
 </div>
 __GOOD_MORE__
 </div>
+</div>
 <div class="card">
 <h2>Bad Hosts <span class="badge bad">__BAD_COUNT__</span> <a href="clear-bad" id="clearBad" style="font-size:.75rem;font-weight:normal;color:#c33;cursor:pointer;text-decoration:none">[ Clear ]</a></h2>
+<div class="card-inner">
 <div>
 __BAD_ROWS__
 </div>
 __BAD_MORE__
 </div>
-<div class="card">
-<h2>Image-Gen Hosts <span class="badge good">__IMAGE_GEN_COUNT__</span></h2>
-<div>
-__IMAGE_GEN_ROWS__
-</div>
-__IMAGE_GEN_MORE__
 </div>
 <div class="card" id="hostCard" style="display:none">
 <h2 id="hostCardTitle">Hosts</h2>
-<div id="hostList"></div>
+<div class="card-inner"><div id="hostList"></div></div>
 </div>
 </div>
 <div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#77a" href="https://github.com/kristopolous/free-ollama">obviously open source</a></div>
@@ -109,11 +108,6 @@ evtSource.onmessage=function(e){try{var d=JSON.parse(e.data);if(!d.message)retur
 function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
 document.getElementById('clearBad').addEventListener('click',function(e){e.preventDefault();
   var x=new XMLHttpRequest();x.open('GET','clear-bad');
-  x.onload=function(){location.reload()};x.send()})
-
-document.getElementById('refreshCache').addEventListener('click',function(e){e.preventDefault();
-  var x=new XMLHttpRequest();
-  x.open('GET','refresh-cache');
   x.onload=function(){location.reload()};x.send()})
 
 document.querySelectorAll('.card').forEach(function(card){
