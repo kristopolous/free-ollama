@@ -53,8 +53,12 @@ cache() {
         exit
     fi
     if [[ -n "$1" ]] || [[ ! -s "$_db" ]] || [[ -n "$(find "$_db" -mmin +1440)" ]]; then
-        echo "Updating cache..." > /dev/stderr
-	dyva --refresh
+        if ! command -v dyva > /dev/null 2>&1; then
+            echo "Can't find dyva in your path"
+        else
+            echo "Updating cache..." > /dev/stderr
+            dyva --refresh
+        fi
     fi
 }
 
