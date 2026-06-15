@@ -1899,10 +1899,10 @@ def banner():
         VERSION="(git)"
     print(f"""
  \\\\                                        //
-  l'>     8888b.  Yb  dP Yb    dP   db    <-l
-  ll       8I  Yb  YbdP   Yb  dP   dPYb    ll
-  llama~   8I  dY   8P     YbdP   dP  Yb   llama~
-  || ||   8888Y"   dP       YP   dP    Yb  || ||
+  l'>     DDDDd.  YY  yY Vv    vV   aa    <-l
+  ll       DD  Dd  YyyY   Vv  vV   aAAa    ll
+  llama~   DD  Dd   yY     VvvV   aA  Aa   llama~
+  || ||   DDDDd"   yY       VV   aA    Aa  || ||
   '' ''               {VERSION}                '' ''
 """)
 
