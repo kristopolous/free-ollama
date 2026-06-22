@@ -91,19 +91,27 @@ def refresh_cache():
     _db = f'{CACHE_DIR}/free-ollama.json'
 
     for url, loc in [
-       ( 'https://awesome-ollama-server.vercel.app/data.json', f"{_db}-vercel.tmp" ),
+       ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp" ),
        ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
        ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" )
     ]:
-      response = requests.get(url)
+      try:
+        response = requests.get(url)
+        logging.info(f"Grabbing {url}")
+      except Exception as ex:
+        logging.warning(f"Unable to get {url}: {ex}")
+
       with open(loc, "w") as f:
         f.write(response.text)
 
     host_map = {}
 
-    with open(f'{_db}-vercel.tmp', 'r') as f:
-      for row in json.loads(f.read()):
-        host_map[row.get('server')] = row
+    with open(f'{_db}-forrany.tmp', 'r') as f:
+      try:
+        for row in json.loads(f.read()):
+          host_map[row.get('server')] = row
+      except Exception as ex:
+        logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
 
     with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
       for r in csv.reader(csvfile):
@@ -942,20 +950,6 @@ async def handle_clear_bad(request):
     _bad_cache = None
     if os.path.exists(BAD_FILE):
         os.remove(BAD_FILE)
-    raise web.HTTPFound("/")
-
-
-async def handle_refresh_cache(request):
-    """
-    Refresh server cache
-    ---
-    tags: [Admin]
-    summary: Re-fetch server lists from all sources and redirect to dashboard
-    responses:
-      '302':
-        description: Redirect to dashboard
-    """
-    refresh_cache()
     raise web.HTTPFound("/")
 
 
@@ -1872,12 +1866,13 @@ def make_app():
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)
-    swagger.add_get("/refresh-cache", handle_refresh_cache)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
     swagger.add_get("/api/version", handle_api_version)
     swagger.add_get("/api/activity", handle_api_activity)
+
     swagger.add_get("/refresh", handle_refresh)
+
     swagger.add_post("/api/show", handle_api_show)
     swagger.add_post("/api/pull", handle_api_pull)
     swagger.add_post("/api/chat", handle_ollama_chat)
@@ -1919,12 +1914,12 @@ def main():
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
 
-    banner()
     if args.refresh:
         refresh_cache()
         print("Refreshed cache")
         sys.exit(0)
 
+    banner()
     if args.version:
         sys.exit(0)
 
