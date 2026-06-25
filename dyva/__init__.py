@@ -1945,12 +1945,12 @@ def banner():
     except Exception as e:
         VERSION="(git)"
     print(f"""
- \\\\                                        //
-  l'>     DDDDd.  YY  yY Vv    vV   aa    <-l
-  ll       DD  Dd  YyyY   Vv  vV   aAAa    ll
-  llama~   DD  Dd   yY     VvvV   aA  Aa   llama~
-  || ||   DDDDd"   yY       VV   aA    Aa  || ||
-  '' ''               {VERSION}                '' ''
+\\\\       DDDDd.  YY  yY Vv    vV   aa     //
+ l'>      DD  Dd  YyyY   Vv  vV   aAAa   <-l
+ ll       DD  Dd   yY     VvvV   aA  Aa   ll
+ llama~  DDDDd"   yY       VV   aA    Aa  llama~
+ || ||               v{VERSION}               || ||
+ '' ''               𝗔𝗟𝗣𝗔𝗖𝗔               '' ''
 """)
 
 def main():
