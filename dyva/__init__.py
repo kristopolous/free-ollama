@@ -330,23 +330,39 @@ def to_ollama(body):
             pass
         else:
             body["format"] = rf
+    for m in body.get("messages", []):
+        if m.get("content") is None:
+            m["content"] = ""
     return body
 
 
+def _fmt_tool_calls(tcs):
+    out = []
+    for i, tc in enumerate(tcs):
+        fn = tc.get("function", {})
+        args = fn.get("arguments", {})
+        if isinstance(args, dict):
+            args = json.dumps(args)
+        out.append({
+            "id": f"call_{int(time.time())}_{i}",
+            "type": "function",
+            "function": {"name": fn.get("name", ""), "arguments": args},
+        })
+    return out
+
+
 def to_openai(resp, model):
+    msg = dict(resp.get("message", {}))
+    tcs = msg.pop("tool_calls", None)
+    if tcs:
+        msg["tool_calls"] = _fmt_tool_calls(tcs)
+    fr = "tool_calls" if tcs else "stop"
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": resp.get("message", {}).get("content", ""),
-            },
-            "finish_reason": "stop",
-        }],
+        "choices": [{"index": 0, "message": msg, "finish_reason": fr}],
         "usage": {
             "prompt_tokens": resp.get("prompt_eval_count", 0),
             "completion_tokens": resp.get("eval_count", 0),
@@ -362,17 +378,13 @@ def err_obj(msg, code=None):
     return {"error": e}
 
 
-def sse_chunk(model, content, done=False, finish_reason="stop"):
+def sse_chunk(model, delta, done=False, finish_reason="stop"):
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {} if not content else {"content": content},
-            "finish_reason": finish_reason if done else None,
-        }],
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason if done else None}],
     }
 
 
@@ -674,8 +686,11 @@ async def _forward_stream(request, response, resp, first_line, host, full, model
     try:
         if openai_format:
             first = json.loads(first_line)
-            content = first.get("message", {}).get("content", "")
-            await response.write(sse_str(sse_chunk(full, content)).encode())
+            msg = dict(first.get("message", {}))
+            tcs = msg.pop("tool_calls", None)
+            if tcs:
+                msg["tool_calls"] = _fmt_tool_calls(tcs)
+            await response.write(sse_str(sse_chunk(full, msg)).encode())
         else:
             await response.write(first_line + b"\n")
 
@@ -686,12 +701,15 @@ async def _forward_stream(request, response, resp, first_line, host, full, model
             try:
                 if openai_format:
                     obj = json.loads(line)
-                    content = obj.get("message", {}).get("content", "")
-                    if content:
-                        await response.write(sse_str(sse_chunk(full, content)).encode())
                     if obj.get("done"):
                         fr = obj.get("done_reason", "stop")
-                        await response.write(sse_str(sse_chunk(full, "", done=True, finish_reason=fr)).encode())
+                        await response.write(sse_str(sse_chunk(full, {}, done=True, finish_reason=fr)).encode())
+                    else:
+                        msg = dict(obj.get("message", {}))
+                        tcs = msg.pop("tool_calls", None)
+                        if tcs:
+                            msg["tool_calls"] = _fmt_tool_calls(tcs)
+                        await response.write(sse_str(sse_chunk(full, msg)).encode())
                 else:
                     await response.write(line + b"\n")
                     obj = json.loads(line)
@@ -737,7 +755,7 @@ async def _proxy_chat(request, session, model, opayload, do_stream, openai_forma
             return stream_resp
         if openai_format:
             return web.Response(
-                text=sse_str({"error": "all servers failed"}) + sse_str(sse_chunk("", "", done=True)),
+                text=sse_str({"error": "all servers failed"}) + sse_str(sse_chunk("", {}, done=True)),
                 content_type="text/event-stream",
             )
         return web.json_response(err_obj("all servers failed"), status=502)
