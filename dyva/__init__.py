@@ -1116,7 +1116,7 @@ async def handle_api_version(request):
                 version:
                   type: string
     """
-    return web.json_response({"version": "0.5.0"})
+    return web.json_response({"version": f"DYVA-{VERSION}"})
 
 
 async def handle_api_activity(request):
