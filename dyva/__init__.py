@@ -313,15 +313,24 @@ def all_models():
 
 
 def to_ollama(body):
-    msg = body.get("messages", [])
-    opts = {}
-    if "temperature" in body:
-        opts["temperature"] = body["temperature"]
     if "max_tokens" in body:
-        opts["num_predict"] = body["max_tokens"]
-    if "top_p" in body:
-        opts["top_p"] = body["top_p"]
-    return {"model": body.get("model", ""), "messages": msg, "options": opts}
+        body["num_predict"] = body["max_tokens"]
+    if "response_format" in body:
+        rf = body.pop("response_format")
+        tp = rf.get("type", "") if isinstance(rf, dict) else ""
+        if tp == "json_object":
+            body["format"] = "json"
+        elif tp == "json_schema":
+            js = rf.get("json_schema", {})
+            if isinstance(js, dict) and "schema" in js:
+                body["format"] = js["schema"]
+            else:
+                body["format"] = rf
+        elif tp == "text":
+            pass
+        else:
+            body["format"] = rf
+    return body
 
 
 def to_openai(resp, model):
