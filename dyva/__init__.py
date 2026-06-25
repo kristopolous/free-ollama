@@ -32,6 +32,7 @@ LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 GRAFLEX_WORKING = os.path.join(CACHE_DIR, "image-gen-working.json")
 _last_cache = None
 _LOCAL = False
+_CURLIFY = False
 
 PORT = 11434
 TIMEOUT = 30
@@ -392,6 +393,20 @@ def sse_str(obj):
     return f"data: {json.dumps(obj)}\n\n"
 
 
+def _curlify(method, url, json_body):
+    if not _CURLIFY:
+        return
+    try:
+        import requests as req_lib
+        import curlify
+        r = req_lib.Request(method.upper(), url, json=json_body, headers={"Content-Type": "application/json"})
+        s = req_lib.Session()
+        p = s.prepare_request(r)
+        logging.info(curlify.to_curl(p))
+    except Exception as e:
+        logging.debug(f"curlify failed: {e}")
+
+
 async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat"):
     done = asyncio.Event()
     result_queue = asyncio.Queue()
@@ -419,6 +434,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             start = time.time()
             tag = f"{host} {full}"
             p = dict(payload, model=full, stream=do_stream)
+            _curlify("POST", f"{host}{endpoint}", p)
             try:
                 resp = await asyncio.wait_for(
                     session.post(f"{host}{endpoint}", json=p),
@@ -554,6 +570,7 @@ async def _try_one(session, host, model, full_model, opayload):
     tag = f"{host} {full_model}"
     start = time.time()
     payload = dict(opayload, model=full_model, stream=False)
+    _curlify("POST", f"{host}/api/chat", payload)
     try:
         resp = await asyncio.wait_for(
             session.post(f"{host}/api/chat", json=payload),
@@ -612,6 +629,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
     tag = f"{host} {full_model}"
     start = time.time()
     p = dict(payload, model=full_model, stream=do_stream)
+    _curlify("POST", f"{host}{endpoint}", p)
     try:
         resp = await asyncio.wait_for(
             session.post(f"{host}{endpoint}", json=p),
@@ -800,6 +818,7 @@ async def _proxy_generate(request, session):
                 f"trying: {last_host} for {model}", wid=wid)
             start = time.time()
             p = dict(body, model=last_full, stream=False)
+            _curlify("POST", f"{last_host}{endpoint}", p)
             try:
                 r = await asyncio.wait_for(
                     session.post(f"{last_host}{endpoint}", json=p),
@@ -1400,7 +1419,7 @@ async def handle_openai_chat(request):
                   properties:
                     role:
                       type: string
-                      enum: [system, user, assistant]
+                      type: string
                     content:
                       type: string
               stream:
@@ -1929,7 +1948,7 @@ def banner():
 """)
 
 def main():
-    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL
+    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY
 
     parser = argparse.ArgumentParser(description="dumpster-dyva - Like the Ollama :cloud models, but you don't pay.")
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
@@ -1938,6 +1957,7 @@ def main():
     parser.add_argument("-r", "--refresh",  action="store_true", help="refresh cache")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
     parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
+    parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
 
@@ -1954,6 +1974,7 @@ def main():
     TIMEOUT = args.timeout
     PORT = args.port
     _LOCAL = args.local
+    _CURLIFY = args.curlify
     log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, LOCAL={_LOCAL}")
 
     app = make_app()
