@@ -1209,29 +1209,24 @@ async def handle_api_ps(request):
                     type: object
     """
     models_list = []
-    fake_sizes = [13, 24, 48, 70, 8, 32]
-    fake_params = ["7B", "8B",  "13B", "24B", "32B", "70B"]
-    fake_quants = ["Q4_K_M", "Q5_K_M", "Q8_0", "Q4_0", "Q6_K", "Q3_K_L"]
     if _last_cache:
         for i, (model, entry) in enumerate(_last_cache.items()):
-            gb = fake_sizes[i % len(fake_sizes)]
-            size_bytes = gb * 1073741824
             expires_at = "9999-12-31T23:59:59.000000Z"
             models_list.append({
                 "name": model,
                 "model": model,
-                "size": size_bytes,
+                "size": 0,
                 "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                 "details": {
                     "parent_model": "",
                     "format": "gguf",
                     "family": "llama",
                     "families": None,
-                    "parameter_size": fake_params[i % len(fake_params)],
-                    "quantization_level": fake_quants[i % len(fake_quants)],
+                    "parameter_size": "N/A",
+                    "quantization_level": "N/A"
                 },
                 "expires_at": expires_at,
-                "size_vram": size_bytes,
+                "size_vram": 0
             })
     return web.json_response({"models": models_list})
 
