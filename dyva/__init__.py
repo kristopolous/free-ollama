@@ -272,6 +272,12 @@ async def probe_host(session, host):
 
 
 def find_servers(sub):
+    if '/' in sub:
+        res = []
+        for model in sub.split('/'):
+            res += find_servers(model)
+        return res
+
     servers = load_servers()
     bad = load_bad()
     good = load_good()
@@ -285,12 +291,12 @@ def find_servers(sub):
             continue
         host = s.get("server", "")
         key = f"{host} {sub}"
-        if key in bad:
-            continue
-        is_good = key in good
-        _last = get_last(sub)
-        is_last = _last is not None and host == _last[0]
-        matched.append((-2 if is_last else (-1 if is_good else 0), host, ms))
+        if key in bad: 
+            matched.append((1, host, ms))
+        else:
+            _last = get_last(sub)
+            is_last = _last is not None and host == _last[0]
+            matched.append((-2 if is_last else (-1 if key in good else 0), host, ms))
     matched.sort(key=lambda x: x[0])
     return matched
 

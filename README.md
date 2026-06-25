@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 It will cycle through and find working hosts automatically. 
 
-You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable.
+You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable. You can also do fallbacks such as "gemma?4/qwen3.6" 
 
 Run it yourself:
 
