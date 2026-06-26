@@ -43,6 +43,11 @@ SERVICE_CONFIG = {
         "fofa_query": 'title="ComfyUI"',
         "check_path": "/models/checkpoints",
     },
+    "ollama": {
+        "port": 11434,
+        "fofa_query": 'body="ollama"',
+        "check_path": "/api/tags",
+    },
 }
 
 
@@ -59,7 +64,17 @@ def _save_json(path, data):
         json.dump(data, f, indent=2)
 
 
+def _save_json_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
 async def _check_host(session, host, port, service):
+    from datetime import datetime, timezone
+
     cfg = SERVICE_CONFIG[service]
     url = f"http://{host}:{port}{cfg['check_path']}"
     try:
@@ -73,6 +88,10 @@ async def _check_host(session, host, port, service):
             data = await resp.json()
             await resp.release()
             models = [m.get("title", "") for m in data if isinstance(m, dict)]
+        elif service == "ollama":
+            data = await resp.json()
+            await resp.release()
+            models = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
         else:
             data = await resp.json()
             await resp.release()
@@ -82,7 +101,7 @@ async def _check_host(session, host, port, service):
             "host": f"{host}:{port}",
             "models": models,
             "model_count": len(models),
-            "last_checked": time.time(),
+            "checked": datetime.now(timezone.utc).isoformat(),
         }
     except asyncio.TimeoutError:
         return {"error": "timeout"}
@@ -331,59 +350,81 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
 
 
 async def _check_all(service, name=None):
+    from datetime import datetime, timezone
+
     hosts_file = _cache_file(name, "hosts")
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
 
     hosts = _load_json(hosts_file)
+    if not service and hosts:
+        service = hosts[0].get("service", "")
     hosts = [h for h in hosts if h.get("service") == service]
     if not hosts:
-        log.warning(f"check: no {service} hosts — run fetch first")
+        log.warning(f"check: no {service or '?'} hosts — run fetch first")
         return
 
+    existing_working = _load_json(working_file)
+    done = {f"{h['service']}@{h['host']}" for h in existing_working if h.get("models")}
+
+    to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
+    if not to_check:
+        log.info(f"check: all {len(hosts)} hosts already have model data")
+        existing_working.sort(key=lambda h: (h.get("checked", ""), h.get("host", "")))
+        _save_json_atomic(working_file, existing_working)
+        return
+
+    log.info(f"check: {len(to_check)} to check ({len(done)} already have models)")
+
     connector = aiohttp.TCPConnector(limit=50)
+    wlock = asyncio.Lock()
+
+    async def check_one(entry):
+        host_port = entry["host"].split(":")
+        h = host_port[0]
+        p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+        result = await _check_host(session, h, p, service)
+
+        key = f"{service}@{entry['host']}"
+        ok = False
+        async with wlock:
+            if isinstance(result, dict) and "error" not in result:
+                result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
+                working = _load_json(working_file)
+                found = False
+                for i, w in enumerate(working):
+                    if f"{w['service']}@{w['host']}" == key:
+                        working[i] = result
+                        found = True
+                        break
+                if not found:
+                    working.append(result)
+                working.sort(key=lambda h: (h.get("checked", ""), h.get("host", "")))
+                _save_json_atomic(working_file, working)
+                log.info(f"  + {entry['host']}: {result['model_count']} models")
+                ok = True
+            else:
+                reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
+                nr = {"service": service, "host": entry["host"], "reason": reason, "checked": datetime.now(timezone.utc).isoformat()}
+                notworking = _load_json(notworking_file)
+                found = False
+                for i, n in enumerate(notworking):
+                    if f"{n['service']}@{n['host']}" == key:
+                        notworking[i] = nr
+                        found = True
+                        break
+                if not found:
+                    notworking.append(nr)
+                _save_json_atomic(notworking_file, notworking)
+                log.info(f"  - {entry['host']}: {reason}")
+        return ok
+
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
-        tasks = []
-        for entry in hosts:
-            host_port = entry["host"].split(":")
-            h = host_port[0]
-            p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-            tasks.append(_check_host(session, h, p, service))
+        tasks = [check_one(entry) for entry in to_check]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    now = time.time()
-    working = []
-    notworking = []
-    for entry, r in zip(hosts, results):
-        if isinstance(r, dict) and "error" not in r:
-            working.append(r)
-        else:
-            reason = r.get("error", str(r)) if isinstance(r, dict) else str(r)
-            notworking.append({
-                "service": service,
-                "host": entry["host"],
-                "reason": reason,
-                "last_checked": now,
-            })
-
-    existing = _load_json(working_file)
-    seen = {f"{h['service']}@{h['host']}" for h in existing}
-    for h in working:
-        key = f"{h['service']}@{h['host']}"
-        h["last_checked"] = now
-        if key not in seen:
-            existing.append(h)
-            seen.add(key)
-        else:
-            for i, e in enumerate(existing):
-                if f"{e['service']}@{e['host']}" == key:
-                    existing[i] = h
-                    break
-
-    existing.sort(key=lambda h: (h.get("gpu") or "", h.get("host", "")))
-    _save_json(working_file, existing)
-    _save_json(notworking_file, notworking)
-    log.info(f"check: {len(hosts)} checked, {len(working)} working, {len(notworking)} notworking")
+        success = sum(1 for r in results if r is True)
+        failed = sum(1 for r in results if r is False)
+        log.info(f"check: {len(to_check)} checked, {success} working, {failed} notworking")
 
 
 def check(service, name=None):
@@ -410,7 +451,7 @@ def main():
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-m", "--method", choices=["api", "web"], default="web", help="fetch method (default: web)")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
-    parser.add_argument("-n", "--name", help="cache file name (requires --query)")
+    parser.add_argument("-n", "--name", help="cache file name prefix (default: image-gen)")
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
@@ -418,10 +459,8 @@ def main():
 
     if args.query and not args.name:
         parser.error("--query requires --name")
-    if args.name and not args.query:
-        parser.error("--name requires --query")
-    if not args.service and not args.query:
-        parser.error("either --service or --query is required")
+    if not args.service and not args.query and not args.name:
+        parser.error("either --service, --query, or --name is required")
 
     parts = args.action.split("-")
 
