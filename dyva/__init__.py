@@ -648,9 +648,9 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         return None
 
     if resp.status != 200:
+        await resp.release()
         dur = time.time() - start
         log.debug(f"  \u2717 {tag}  (status {resp.status})")
-        await resp.release()
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
@@ -684,6 +684,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
         return None
+
     if "error" in first:
         dur = time.time() - start
         log.debug(f"  \u2717 {tag}  (error: {first['error']})")
@@ -692,6 +693,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - error: {first['error']}", duration=dur, wid=wid)
         return None
+
     dur = time.time() - start
     log.debug(f"  \u2713 {tag}")
     set_last(model, host, full_model)
@@ -746,7 +748,20 @@ async def _forward_stream(request, response, resp, first_line, host, full, model
         await resp.release()
 
 
+def chat_fmt(data, model, openai_format):
+    if openai_format:
+        return web.json_response(to_openai(data, model))
+    else:
+        return web.json_response(data)
+
 async def _proxy_chat(request, session, model, opayload, do_stream, openai_format):
+    if '/' in model:
+        res = []
+        for m in model.split('/'):
+            res = await _proxy_chat(request, session, m, opayload, do_stream, openai_format)
+            res += find_servers(model)
+        return res
+
     last = get_last(model)
     if last:
         last_host, last_full = last
@@ -761,10 +776,7 @@ async def _proxy_chat(request, session, model, opayload, do_stream, openai_forma
         else:
             data = await _try_one(session, last_host, model, last_full, opayload)
             if data:
-                if openai_format:
-                    return web.json_response(to_openai(data, model))
-                else:
-                    return web.json_response(data)
+                return chat_fmt(data, model, openai_format)
 
     servers = find_servers(model)
     if not servers:
@@ -782,14 +794,12 @@ async def _proxy_chat(request, session, model, opayload, do_stream, openai_forma
                 text=sse_str({"error": "all servers failed"}) + sse_str(sse_chunk("", {}, done=True)),
                 content_type="text/event-stream",
             )
-        return web.json_response(err_obj("all servers failed"), status=502)
+    else:
+        result = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False)
 
-    result = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False)
-    if result:
-        _, host, full, data = result
-        if openai_format:
-            return web.json_response(to_openai(data, model))
-        return web.json_response(data)
+        if result:
+            _, host, full, data = result
+            return chat_fmt(data, model, openai_format)
 
     return web.json_response(err_obj("all servers failed"), status=502)
 
@@ -1309,8 +1319,6 @@ async def handle_api_pull(request):
     """
     refresh_cache()
     return web.json_response({"status": "success"})
-
-
 
 
 def _check_local(request):
