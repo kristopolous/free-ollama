@@ -105,7 +105,7 @@ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 
 ## What's graflex do?
 
-Check out [graflex/README.md](graflex/README.md).
+It's a fofa scraper for discovering hosts. Check out the [the readme](graflex).
 
 ## Usage
 
