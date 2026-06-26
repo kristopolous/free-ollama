@@ -117,7 +117,7 @@ def refresh_cache():
 
     with open(f'{_db}-graflex.tmp', 'r') as f:
       for row in json.loads(f.read()):
-        ip = row.get('url')
+        ip = row.get('url').rstrip('/')
         if ip not in host_map:
           host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
   
@@ -125,28 +125,28 @@ def refresh_cache():
 
     with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
       for r in csv.reader(csvfile):
-        ip = r[0]
+        ip = r[0].rstrip('/')
         models = [m.strip() for m in r[1].split(',')]
         if ip not in host_map:
           host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
   
         host_map[ip]['models'] += models
 
-    if os.path.exists(f'{CACHE_DIR}/image-gen-working.json'):
-      with open(f'{CACHE_DIR}/image-gen-working.json', 'r') as f:
-        for row in json.loads(f.read()):
-          if 'host' in row:
-            row['server'] = row['host']
-          host_map[row.get('server')] = row
-
     with open(f'{_db}-spider.tmp', 'r') as f:
       for row in json.loads(f.read()):
-        ip = row.get('url')
+        ip = row.get('url').rstrip('/')
         models = [ n.get('name') for n in row.get('models') ]
         if ip not in host_map:
           host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
 
         host_map[ip]['models'] += models
+
+    if os.path.exists(f'{CACHE_DIR}/image-gen-working.json'):
+      with open(f'{CACHE_DIR}/image-gen-working.json', 'r') as f:
+        for row in json.loads(f.read()):
+          if 'host' in row:
+            row['server'] = row['host'].rstrip('/')
+          host_map[row.get('server')] = row
 
     for k,v in host_map.items():
       if 'service' not in v:
