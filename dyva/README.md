@@ -48,4 +48,4 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 
 ## Server Discovery
 
-dyva aggregates servers from multiple sources. The tool graflex is a from scratch general purpose aggregator that constitutes one of these sources.
+dyva aggregates servers from multiple sources. The tool [graflex](../graflex) is a from scratch general purpose aggregator that constitutes one of these sources.
