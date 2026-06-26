@@ -1367,38 +1367,6 @@ async def handle_ollama_chat(request):
     ---
     tags: [Chat]
     summary: Chat completion using Ollama /api/chat format. Proxies to upstream Ollama servers.
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            type: object
-            required: [model]
-            properties:
-              model:
-                type: string
-                description: Model name
-              messages:
-                type: array
-                description: Chat messages
-                items:
-                  type: object
-                  properties:
-                    role:
-                      type: string
-                      enum: [system, user, assistant]
-                    content:
-                      type: string
-              stream:
-                type: boolean
-                default: false
-              options:
-                type: object
-                properties:
-                  temperature:
-                    type: number
-                  num_predict:
-                    type: integer
     responses:
       '200':
         description: Chat completion response (NDJSON stream or JSON)
@@ -1440,37 +1408,6 @@ async def handle_openai_chat(request):
     ---
     tags: [Chat]
     summary: Chat completion using OpenAI /v1/chat/completions format. Translates to Ollama format and proxies upstream.
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            type: object
-            required: [model, messages]
-            properties:
-              model:
-                type: string
-                description: Model name
-              messages:
-                type: array
-                description: Chat messages
-                items:
-                  type: object
-                  properties:
-                    role:
-                      type: string
-                      type: string
-                    content:
-                      type: string
-              stream:
-                type: boolean
-                default: false
-              temperature:
-                type: number
-              max_tokens:
-                type: integer
-              top_p:
-                type: number
     responses:
       '200':
         description: Chat completion response (SSE stream or JSON)
