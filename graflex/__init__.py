@@ -20,6 +20,11 @@ HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
 
+
+def _cache_file(name, suffix):
+    prefix = name or "image-gen"
+    return os.path.join(CACHE_DIR, f"{prefix}-{suffix}.json")
+
 TIMEOUT = 60
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
@@ -240,22 +245,34 @@ def _parse_fofa_html(html_path, service):
     return hosts
 
 
-def fetch(dry=False, limit=2, service="a1111", method="api"):
+def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None):
+    hosts_file = _cache_file(name, "hosts")
+
     if method == "web":
         from datetime import datetime
         run_ts = datetime.now().strftime("%Y%m%d%H%M%S")
 
         countries = [None] + ["CN", "US", "CA", "JP", "KR"]
-        ports = [None, str(SERVICE_CONFIG[service]["port"])]
-        servers = [None] + ["uvicorn", "nginx"]
+        if isinstance(ports, str):
+            port_list = [s.strip() for s in ports.split(",")]
+        else:
+            port_list = [None]
+            if service:
+                port_list.append(str(SERVICE_CONFIG[service]["port"]))
+        if isinstance(servers, str):
+            server_list = [None] + [s.strip() for s in servers.split(",")]
+        else:
+            server_list = [None] + ["uvicorn", "nginx"]
 
-        pool = _load_json(HOSTS_FILE)
+        pool = _load_json(hosts_file)
         seen = {f"{h['service']}@{h['host']}" for h in pool}
-        combos = [(c, p, s) for c in countries for p in ports for s in servers]
+        combos = [(c, p, s) for c in countries for p in port_list for s in server_list]
 
         for i, (country, port, server) in enumerate(combos):
-            cfg = SERVICE_CONFIG[service]
-            qparts = [cfg["fofa_query"]]
+            if query:
+                qparts = [query]
+            else:
+                qparts = [SERVICE_CONFIG[service]["fofa_query"]]
             if port:
                 qparts.append(f'port="{port}"')
             if country:
@@ -266,7 +283,8 @@ def fetch(dry=False, limit=2, service="a1111", method="api"):
             if not dry:
                 log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}  query={combined}")
 
-            hosts = _fetch_web(dry, limit, service, combined, country, port, server, run_ts)
+            svc = service or name or "unknown"
+            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts)
             if hosts is None:
                 continue
 
@@ -277,7 +295,7 @@ def fetch(dry=False, limit=2, service="a1111", method="api"):
                     seen.add(key)
 
             if not dry:
-                _save_json(HOSTS_FILE, pool)
+                _save_json(hosts_file, pool)
                 log.info(f"  total: {len(pool)} unique hosts")
 
             if i < len(combos) - 1 and not dry:
@@ -288,12 +306,15 @@ def fetch(dry=False, limit=2, service="a1111", method="api"):
         if not FOFA_KEY:
             log.error("FOFA_KEY must be set in .env")
             return
+        if not service:
+            log.error("--service is required for API method")
+            return
         hosts = _fetch_api(dry, limit, service)
 
     if dry:
         return
 
-    existing = _load_json(HOSTS_FILE)
+    existing = _load_json(hosts_file)
     seen = {f"{h['service']}@{h['host']}" for h in existing}
     for h in hosts:
         key = f"{h['service']}@{h['host']}"
@@ -301,13 +322,16 @@ def fetch(dry=False, limit=2, service="a1111", method="api"):
             existing.append(h)
             seen.add(key)
 
-    _save_json(HOSTS_FILE, existing)
+    _save_json(hosts_file, existing)
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
 
 
-async def _check_all(service):
+async def _check_all(service, name=None):
+    hosts_file = _cache_file(name, "hosts")
+    working_file = _cache_file(name, "working")
+    notworking_file = _cache_file(name, "notworking")
 
-    hosts = _load_json(HOSTS_FILE)
+    hosts = _load_json(hosts_file)
     hosts = [h for h in hosts if h.get("service") == service]
     if not hosts:
         log.warning(f"check: no {service} hosts — run fetch first")
@@ -338,7 +362,7 @@ async def _check_all(service):
                 "last_checked": now,
             })
 
-    existing = _load_json(WORKING_FILE)
+    existing = _load_json(working_file)
     seen = {f"{h['service']}@{h['host']}" for h in existing}
     for h in working:
         key = f"{h['service']}@{h['host']}"
@@ -353,13 +377,13 @@ async def _check_all(service):
                     break
 
     existing.sort(key=lambda h: (h.get("gpu") or "", h.get("host", "")))
-    _save_json(WORKING_FILE, existing)
-    _save_json(NOTWORKING_FILE, notworking)
+    _save_json(working_file, existing)
+    _save_json(notworking_file, notworking)
     log.info(f"check: {len(hosts)} checked, {len(working)} working, {len(notworking)} notworking")
 
 
-def check(service):
-    asyncio.run(_check_all(service))
+def check(service, name=None):
+    asyncio.run(_check_all(service, name))
 
 
 def main():
@@ -376,18 +400,29 @@ def main():
     )
 
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
-    parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG), required=True, help="service to search for")
+    parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG), help="service to search for")
     parser.add_argument("-a", "--action", choices=["fetch", "check", "fetch-check"], required=True, help="action to perform")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-m", "--method", choices=["api", "web"], default="web", help="fetch method (default: web)")
+    parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
+    parser.add_argument("-n", "--name", help="cache file name (requires --query)")
+    parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
+    parser.add_argument("--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
     args = parser.parse_args()
+
+    if args.query and not args.name:
+        parser.error("--query requires --name")
+    if args.name and not args.query:
+        parser.error("--name requires --query")
+    if not args.service and not args.query:
+        parser.error("either --service or --query is required")
 
     parts = args.action.split("-")
 
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method)
+            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports)
         elif step == "check":
-            check(service=args.service)
+            check(service=args.service, name=args.name)
