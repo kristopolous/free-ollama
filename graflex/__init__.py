@@ -146,8 +146,9 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
     cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_WEB_HEADER)
 
     if dry:
-        log.info(f"# Web method: GET {url}")
-        log.info(f"# Cookie: {cookie_header[:80]}...")
+        log.info(f"# query: {combined}")
+        log.info(f"# url: GET {url}")
+        log.info(f"# cookie: {cookie_header[:80]}...")
         return []
 
     headers = {
@@ -245,16 +246,19 @@ def _parse_fofa_html(html_path, service):
     return hosts
 
 
-def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None):
+def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None):
     hosts_file = _cache_file(name, "hosts")
 
     if method == "web":
         from datetime import datetime
         run_ts = datetime.now().strftime("%Y%m%d%H%M%S")
 
-        countries = [None] + ["CN", "US", "CA", "JP", "KR"]
+        if isinstance(countries, str):
+            country_list = [None] + [s.strip() for s in countries.split(",")]
+        else:
+            country_list = [None] + ["CN", "US", "CA", "JP", "KR"]
         if isinstance(ports, str):
-            port_list = [s.strip() for s in ports.split(",")]
+            port_list = [None] + [s.strip() for s in ports.split(",")]
         else:
             port_list = [None]
             if service:
@@ -266,7 +270,7 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
 
         pool = _load_json(hosts_file)
         seen = {f"{h['service']}@{h['host']}" for h in pool}
-        combos = [(c, p, s) for c in countries for p in port_list for s in server_list]
+        combos = [(c, p, s) for c in country_list for p in port_list for s in server_list]
 
         for i, (country, port, server) in enumerate(combos):
             if query:
@@ -409,6 +413,7 @@ def main():
     parser.add_argument("-n", "--name", help="cache file name (requires --query)")
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
+    parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     args = parser.parse_args()
 
     if args.query and not args.name:
@@ -423,6 +428,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports)
+            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries)
         elif step == "check":
             check(service=args.service, name=args.name)
