@@ -48,10 +48,4 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 
 ## Server Discovery
 
-dyva aggregates servers from three sources on startup (and every 24h):
-
-1. [forrany/Awesome-Ollama-Server](https://github.com/forrany/Awesome-Ollama-Server)
-2. [PuddinCat/OllamaSpider](https://github.com/PuddinCat/OllamaSpider)
-3. [happyshua/ollamalist](https://github.com/happyshua/ollamalist)
-
-Cache files live in `~/.cache/free-ollama/`.
+dyva aggregates servers from multiple sources. The tool graflex is a from scratch general purpose aggregator that constitutes one of these sources.
