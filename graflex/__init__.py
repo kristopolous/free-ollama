@@ -72,44 +72,91 @@ def _save_json_atomic(path, data):
     os.replace(tmp, path)
 
 
+def _entry_host(entry):
+    url = entry.get("url") or ""
+    if url:
+        return url.split("://", 1)[1]
+    return entry.get("host", "")
+
+
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
     from datetime import datetime, timezone
 
     cfg = SERVICE_CONFIG[service]
-    url = f"http://{host}:{port}{cfg['check_path']}"
-    try:
-        resp = await asyncio.wait_for(
-            session.get(url), timeout=timeout
-        )
-        if resp.status != 200:
-            await resp.release()
-            return {"error": f"HTTP {resp.status}"}
-        if service == "a1111":
-            data = await resp.json()
-            await resp.release()
-            models = [m.get("title", "") for m in data if isinstance(m, dict)]
-        elif service == "ollama":
-            data = await resp.json()
-            await resp.release()
-            models = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
-        else:
-            data = await resp.json()
-            await resp.release()
-            models = data if isinstance(data, list) else []
-        return {
-            "service": service,
-            "host": f"{host}:{port}",
-            "models": models,
-            "checked": datetime.now(timezone.utc).isoformat(),
-        }
-    except asyncio.TimeoutError:
-        return {"error": "timeout"}
-    except OSError as e:
-        return {"error": str(e)}
-    except json.JSONDecodeError:
-        return {"error": "bad JSON"}
-    except Exception as e:
-        return {"error": str(e)}
+    path = cfg["check_path"]
+    last_error = None
+    for scheme in ("http", "https"):
+        url = f"{scheme}://{host}:{port}{path}"
+        base_url = f"{scheme}://{host}:{port}/"
+        try:
+            resp = await asyncio.wait_for(
+                session.get(url), timeout=timeout
+            )
+            if resp.status != 200:
+                await resp.release()
+                last_error = {"error": f"HTTP {resp.status} ({scheme})"}
+                continue
+            if service == "a1111":
+                data = await resp.json()
+                await resp.release()
+                models = [m.get("title", "") for m in data if isinstance(m, dict)]
+                return {
+                    "service": service,
+                    "url": base_url,
+                    "models": models,
+                    "checked": datetime.now(timezone.utc).isoformat(),
+                }
+            elif service == "ollama":
+                data = await resp.json()
+                await resp.release()
+                models = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
+                model = models[0] if models else None
+                if not model:
+                    last_error = {"error": "no real models"}
+                    continue
+                show_body = {"model": model}
+                show_resp = await asyncio.wait_for(
+                    session.post(f"{base_url}api/show", json=show_body), timeout=timeout
+                )
+                if show_resp.status != 200:
+                    await show_resp.release()
+                    last_error = {"error": f"show HTTP {show_resp.status} ({scheme})"}
+                    continue
+                show_data = await show_resp.json()
+                await show_resp.release()
+                details = show_data.get("details") or {}
+                if details.get("family") or details.get("parameter_size") or details.get("quantization_level"):
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+                last_error = {"error": f"empty show ({scheme})"}
+                continue
+            else:
+                data = await resp.json()
+                await resp.release()
+                models = data if isinstance(data, list) else []
+                return {
+                    "service": service,
+                    "url": base_url,
+                    "models": models,
+                    "checked": datetime.now(timezone.utc).isoformat(),
+                }
+        except asyncio.TimeoutError:
+            if scheme == "http":
+                return {"error": f"timeout (http)"}
+            last_error = {"error": f"timeout (https)"}
+        except OSError as e:
+            last_error = {"error": f"{e} ({scheme})"}
+        except json.JSONDecodeError:
+            last_error = {"error": f"bad JSON ({scheme})"}
+        except aiohttp.ContentTypeError:
+            last_error = {"error": f"bad JSON ({scheme})"}
+        except Exception as e:
+            last_error = {"error": f"{e} ({scheme})"}
+    return last_error
 
 
 def _fetch_api(dry, limit, service):
@@ -364,14 +411,20 @@ async def _check_all(service, name=None, check_timeout=60):
         return
 
     existing_working = _load_json(working_file)
-    existing_notworking = _load_json(notworking_file)
-    done = {f"{h['service']}@{h['host']}" for h in existing_working if h.get("models")}
-    done.update(f"{h['service']}@{h['host']}" for h in existing_notworking if h.get("result") == "error")
+    existing_notworking_raw = _load_json(notworking_file)
+    if isinstance(existing_notworking_raw, dict):
+        existing_notworking = existing_notworking_raw
+    elif isinstance(existing_notworking_raw, list):
+        existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
+    else:
+        existing_notworking = {}
+    done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working if h.get("models")}
+    done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values() if n.get("result") == "error")
 
     to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
     if not to_check:
         log.info(f"check: all {len(hosts)} hosts already have model data")
-        existing_working.sort(key=lambda h: (h.get("checked", ""), h.get("host", "")))
+        existing_working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
         _save_json_atomic(working_file, existing_working)
         return
 
@@ -395,34 +448,30 @@ async def _check_all(service, name=None, check_timeout=60):
                 working = _load_json(working_file)
                 found = False
                 for i, w in enumerate(working):
-                    if f"{w['service']}@{w['host']}" == key:
+                    if f"{w['service']}@{_entry_host(w)}" == key:
                         working[i] = result
                         found = True
                         break
                 if not found:
                     working.append(result)
-                working.sort(key=lambda h: (h.get("checked", ""), h.get("host", "")))
+                working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
                 _save_json_atomic(working_file, working)
                 log.info(f"+ {entry['host']}: {len(result['models'])} models")
                 ok = True
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
-                result_type = "error" if reason.startswith("HTTP ") or reason == "bad JSON" else "unreachable"
-                nr = {"service": service, "host": entry["host"], "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
+                result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason == "bad JSON" or "no real" in reason or "empty show" in reason) else "unreachable"
+                nr = {"service": service, "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file)
-                found = False
-                for i, n in enumerate(notworking):
-                    if f"{n['service']}@{n['host']}" == key:
-                        notworking[i] = nr
-                        found = True
-                        break
-                if not found:
-                    notworking.append(nr)
+                if not isinstance(notworking, dict):
+                    notworking = {}
+                nkey = entry["host"]
+                notworking[nkey] = nr
                 _save_json_atomic(notworking_file, notworking)
                 log.info(f"- {entry['host']}: {reason}")
         return ok
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
         tasks = [check_one(entry) for entry in to_check]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         success = sum(1 for r in results if r is True)

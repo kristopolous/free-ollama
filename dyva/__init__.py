@@ -94,7 +94,8 @@ def refresh_cache():
     for url, loc in [
        ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp" ),
        ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
-       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" )
+       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" ),
+       ( 'https://9ol.es/tmp/ollama-working.json', f"{_db}-graflex.tmp" )
     ]:
       try:
         response = requests.get(url)
@@ -113,6 +114,14 @@ def refresh_cache():
           host_map[row.get('server')] = row
       except Exception as ex:
         logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
+
+    with open(f'{_db}-graflex.tmp', 'r') as f:
+      for row in json.loads(f.read()):
+        ip = row.get('url')
+        if ip not in host_map:
+          host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+  
+        host_map[ip]['models'] += row.get('models')
 
     with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
       for r in csv.reader(csvfile):
@@ -1919,6 +1928,7 @@ def make_app():
 
     async def on_startup(app):
         app["session"] = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=False),
             timeout=aiohttp.ClientTimeout(total=None),
         )
         app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)
@@ -1971,8 +1981,8 @@ def banner():
         VERSION="(git)"
     print(f"""
 \\\\       DDDDd.  YY  yY Vv    vV   aa     //
- l'>      DD  Dd  YyyY   Vv  vV   aAAa   <-l
- ll       DD  Dd   yY     VvvV   aA  Aa   ll
+ l'>      DD  dD  YyyY   Vv  vV   aAAa   <-l
+ ll       DD  dD   yY     VvvV   aA  Aa   ll
  llama~  DDDDd"   yY       VV   aA    Aa  llama~
  || ||               v{VERSION}               || ||
  '' ''               𝗔𝗟𝗣𝗔𝗖𝗔               '' ''

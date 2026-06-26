@@ -6,9 +6,9 @@ SERVICE="${1:-ollama}"
 case "$SERVICE" in
   ollama)
     QUERY="body='ollama is running'"
-    PORTS="11434,8080,80,443,8983"
+    PORTS="11434,10443,8085,10001,8080,80,443,8983,28017,21,5060,5601"
     SERVERS="nginx,cloudflare,Apache"
-    COUNTRIES="US,AU,IN,JP,DE,CA,BR,CN"
+    COUNTRIES="US,AU,IN,JP,DE,CA,BR,CN.IE,FR,ES,ID,IT,SE"
     ;;
   comfyui)
     QUERY='title="ComfyUI"'
@@ -28,4 +28,4 @@ case "$SERVICE" in
     ;;
 esac
 
-exec python -m graflex -q "$QUERY" -a fetch -n "$SERVICE" -p "$PORTS" --servers "$SERVERS" -c "$COUNTRIES"
+exec ./graflex.py -q "$QUERY" -a fetch -n "$SERVICE" -p "$PORTS" --servers "$SERVERS" -c "$COUNTRIES"
