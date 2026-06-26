@@ -1,6 +1,6 @@
 # graflex
 
-Discover public image-generation servers via FOFA.
+Discover public internet hosts via FOFA search engine.
 
 ## Setup
 
@@ -22,50 +22,82 @@ FOFA_WEB_HEADER="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
 ## Usage
 
 ```bash
-# API method
+# Standard image-gen services (A1111 / ComfyUI)
 graflex -s a1111 -a fetch-check
+graflex -s comfyui -a fetch-check
 
-# Web method (paste Cookie header in FOFA_WEB_HEADER)
-graflex -s a1111 -a fetch-check --method web
+# Custom FOFA query — saves results to ollama-hosts.json
+graflex -q 'body="ollama"' -a fetch -n ollama -p 11434
+
+# Custom query with full axis overrides
+graflex -q "body='ollama is running'" -a fetch -n ollama \
+  -p 11434,8080,80,443,8983 \
+  --servers 'nginx,cloudflare,Apache' \
+  -c 'US,AU,IN,JP,DE,CA,BR,CN'
+
+# Check hosts from a named cache file
+graflex -s ollama -a check -n ollama
+
+# Check without explicit service (infers from data)
+graflex -a check -n ollama
 
 # Dry run — shows plaintext queries instead of hitting FOFA
 graflex -s a1111 -a fetch -d
-
-# Custom FOFA query with named cache files
-graflex -a fetch -q 'body="ollama"' -n ollama -p 11434
-
-# Override the country/port/server cycling axes
-graflex -s a1111 -a fetch -d --countries 'DE,FR,GB' -p '8080,9090' --servers 'apache,nginx'
-
-# Just check existing hosts
-graflex -s a1111 -a check
-
-# Options
-graflex -s a1111 -a fetch-check --limit 10
-graflex -s comfyui -a fetch-check
 ```
 
-The `fetch` step queries FOFA, cycling through combinations of country, port, and server
-to maximize results. Results are saved to `~/.cache/free-ollama/{name}-hosts.json`
-(default: `image-gen-hosts.json`).
+## Shell script
 
-The `check` step probes each host to find working endpoints and saves results to
-`~/.cache/free-ollama/{name}-working.json` (default: `image-gen-working.json`).
+`graflex.sh` wraps the fetch command with curated defaults per service:
 
-### Options
+```bash
+# Fetch hosts for ollama (or comfyui / a1111)
+./graflex.sh ollama
+```
+
+Sources at `graflex/graflex.sh` — easy to tweak and redistribute.
+```
+
+## Services
+
+| Service | Default Port | Check Endpoint |
+|---------|-------------|----------------|
+| `a1111` | 7860 | `/sdapi/v1/sd-models` |
+| `comfyui` | 8188 | `/models/checkpoints` |
+| `ollama` | 11434 | `/api/tags` |
+
+## How it works
+
+### Fetch
+
+Queries FOFA in cycles across all combinations of country, port, and server to
+maximize coverage. Each axis can be overridden with comma-separated values
+(via `-c`, `-p`, `--servers`) — a `None` entry for "no filter" is always
+prepended.
+
+Results saved to `~/.cache/free-ollama/{name}-hosts.json` (default: `image-gen-hosts.json`).
+
+### Check
+
+Probes each host from the seed list that doesn't already have model data in
+the working file. After each host, the result is written to disk atomically
+(write to `.tmp` then `os.replace`) so partial progress is never lost on crash.
+
+Each result includes a `checked` field with an ISO 8601 timestamp.
+
+Working: `~/.cache/free-ollama/{name}-working.json` (default: `image-gen-working.json`)
+Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notworking.json`)
+
+## Options
 
 | Flag | Description |
 |------|-------------|
-| `-s`, `--service` | Service to search for (`a1111` or `comfyui`) |
+| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`) |
 | `-a`, `--action` | Action: `fetch`, `check`, or `fetch-check` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `-l`, `--limit` | Max results per query (default: 2) |
 | `-m`, `--method` | Fetch method: `api` or `web` (default: web) |
 | `-q`, `--query` | Custom FOFA query (requires `--name`) |
-| `-n`, `--name` | Cache file name prefix (requires `--query`) |
+| `-n`, `--name` | Cache file name prefix (default: `image-gen`) |
 | `-c`, `--countries` | Comma-separated country codes to cycle |
 | `-p`, `--ports` | Comma-separated port values to cycle |
 | `--servers` | Comma-separated server values to cycle |
-
-Each cycling axis (`--countries`, `--ports`, `--servers`) automatically prepends an
-unfiltered `None` entry so queries without that filter are also tried.

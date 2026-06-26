@@ -72,14 +72,14 @@ def _save_json_atomic(path, data):
     os.replace(tmp, path)
 
 
-async def _check_host(session, host, port, service):
+async def _check_host(session, host, port, service, timeout=TIMEOUT):
     from datetime import datetime, timezone
 
     cfg = SERVICE_CONFIG[service]
     url = f"http://{host}:{port}{cfg['check_path']}"
     try:
         resp = await asyncio.wait_for(
-            session.get(url), timeout=TIMEOUT
+            session.get(url), timeout=timeout
         )
         if resp.status != 200:
             await resp.release()
@@ -100,7 +100,6 @@ async def _check_host(session, host, port, service):
             "service": service,
             "host": f"{host}:{port}",
             "models": models,
-            "model_count": len(models),
             "checked": datetime.now(timezone.utc).isoformat(),
         }
     except asyncio.TimeoutError:
@@ -349,7 +348,7 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
 
 
-async def _check_all(service, name=None):
+async def _check_all(service, name=None, check_timeout=60):
     from datetime import datetime, timezone
 
     hosts_file = _cache_file(name, "hosts")
@@ -365,7 +364,9 @@ async def _check_all(service, name=None):
         return
 
     existing_working = _load_json(working_file)
+    existing_notworking = _load_json(notworking_file)
     done = {f"{h['service']}@{h['host']}" for h in existing_working if h.get("models")}
+    done.update(f"{h['service']}@{h['host']}" for h in existing_notworking if h.get("result") == "error")
 
     to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
     if not to_check:
@@ -374,16 +375,17 @@ async def _check_all(service, name=None):
         _save_json_atomic(working_file, existing_working)
         return
 
-    log.info(f"check: {len(to_check)} to check ({len(done)} already have models)")
+    log.info(f"check: {len(to_check)} to check ({len(done)} already done)")
 
-    connector = aiohttp.TCPConnector(limit=50)
+    sem = asyncio.Semaphore(10)
     wlock = asyncio.Lock()
 
     async def check_one(entry):
-        host_port = entry["host"].split(":")
-        h = host_port[0]
-        p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-        result = await _check_host(session, h, p, service)
+        async with sem:
+            host_port = entry["host"].split(":")
+            h = host_port[0]
+            p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+            result = await _check_host(session, h, p, service, timeout=check_timeout)
 
         key = f"{service}@{entry['host']}"
         ok = False
@@ -401,11 +403,12 @@ async def _check_all(service, name=None):
                     working.append(result)
                 working.sort(key=lambda h: (h.get("checked", ""), h.get("host", "")))
                 _save_json_atomic(working_file, working)
-                log.info(f"  + {entry['host']}: {result['model_count']} models")
+                log.info(f"+ {entry['host']}: {len(result['models'])} models")
                 ok = True
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
-                nr = {"service": service, "host": entry["host"], "reason": reason, "checked": datetime.now(timezone.utc).isoformat()}
+                result_type = "error" if reason.startswith("HTTP ") or reason == "bad JSON" else "unreachable"
+                nr = {"service": service, "host": entry["host"], "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file)
                 found = False
                 for i, n in enumerate(notworking):
@@ -416,10 +419,10 @@ async def _check_all(service, name=None):
                 if not found:
                     notworking.append(nr)
                 _save_json_atomic(notworking_file, notworking)
-                log.info(f"  - {entry['host']}: {reason}")
+                log.info(f"- {entry['host']}: {reason}")
         return ok
 
-    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
         tasks = [check_one(entry) for entry in to_check]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         success = sum(1 for r in results if r is True)
@@ -427,8 +430,8 @@ async def _check_all(service, name=None):
         log.info(f"check: {len(to_check)} checked, {success} working, {failed} notworking")
 
 
-def check(service, name=None):
-    asyncio.run(_check_all(service, name))
+def check(service, name=None, check_timeout=60):
+    asyncio.run(_check_all(service, name, check_timeout))
 
 
 def main():
@@ -455,6 +458,7 @@ def main():
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
+    parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     args = parser.parse_args()
 
     if args.query and not args.name:
@@ -469,4 +473,4 @@ def main():
         if step == "fetch":
             fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries)
         elif step == "check":
-            check(service=args.service, name=args.name)
+            check(service=args.service, name=args.name, check_timeout=args.check_timeout)
