@@ -398,6 +398,9 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
 async def _check_all(service, name=None, check_timeout=60):
     from datetime import datetime, timezone
 
+    if name is None:
+        name = service
+
     hosts_file = _cache_file(name, "hosts")
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
@@ -407,7 +410,7 @@ async def _check_all(service, name=None, check_timeout=60):
         service = hosts[0].get("service", "")
     hosts = [h for h in hosts if h.get("service") == service]
     if not hosts:
-        log.warning(f"check: no {service or '?'} hosts — run fetch first")
+        log.warning(f"check: no {service or '?'} hosts - run fetch first")
         return
 
     existing_working = _load_json(working_file)
