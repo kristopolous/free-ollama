@@ -365,7 +365,7 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
 
             if not dry:
                 _save_json(hosts_file, pool)
-                log.info(f"  total: {len(pool)} unique hosts")
+                log.info(f"  total: {len(pool)}")
 
             if i < len(combos) - 1 and not dry:
                 time.sleep(4)
