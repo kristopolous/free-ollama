@@ -18,9 +18,9 @@ case "$SERVICE" in
     ;;
   a1111)
     QUERY='icon_hash="2075038152" && body="Stable Diffusion"'
-    PORTS="7860,8080,80,443"
-    SERVERS="nginx,cloudflare"
-    COUNTRIES="US,AU,IN,JP,DE,CA,BR,CN"
+    PORTS="7860,7861,8080,80,443,10000"
+    SERVERS="nginx,cloudflare,uvicorn"
+    COUNTRIES="US,AU,IN,JP,DE,ES,RU,CA,BR,CN,KR"
     ;;
   *)
     echo "Usage: $0 [ollama|comfyui|a1111]" >&2
