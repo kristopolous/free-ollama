@@ -95,7 +95,7 @@ def refresh_cache():
        ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp" ),
        ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
        ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" ),
-       ( 'https://9ol.es/tmp/ollama-working.json', f"{_db}-graflex.tmp" )
+       ( 'https://9ol.es/graflex.json', f"{_db}-graflex.tmp" )
     ]:
       try:
         response = requests.get(url)

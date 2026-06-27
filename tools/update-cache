@@ -1,0 +1,2 @@
+#!/bin/bash
+jq -s '.[0] + .[1]' $HOME/.cache/free-ollama/a1111-working.json $HOME/.cache/free-ollama/ollama-working.json | pv | ssh 9ol.es "cat > www/graflex.json"
