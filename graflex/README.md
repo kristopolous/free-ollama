@@ -1,6 +1,8 @@
 # graflex
 
-Discover public internet hosts via FOFA search engine.
+Discover public internet hosts via FOFA search engine. 
+
+This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json)
 
 ## Setup
 
