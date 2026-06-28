@@ -1902,6 +1902,7 @@ def make_app():
     swagger.add_post("/api/chat", handle_ollama_chat)
     swagger.add_post("/api/generate", handle_ollama_generate)
     swagger.add_post("/v1/chat/completions", handle_openai_chat)
+    swagger.add_post("/chat/completions", handle_openai_chat)
     swagger.add_get("/sdapi/v1/sd-models", handle_sd_models)
     swagger.add_post("/sdapi/v1/txt2img", handle_txt2img)
 
