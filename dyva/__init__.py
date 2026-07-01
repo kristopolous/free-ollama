@@ -944,8 +944,14 @@ async def handle_dashboard(request):
     tpl_dir = os.path.join(os.path.dirname(__file__), "static")
     with open(os.path.join(tpl_dir, "dashboard.html")) as f:
         html = f.read()
+    def _model_status(mid):
+        hosts = model_hosts.get(mid, [])
+        g = sum(1 for h in hosts if f"{h} {mid}" in good)
+        b = sum(1 for h in hosts if f"{h} {mid}" in bad)
+        u = len(hosts) - g - b
+        return f"{g}/{b}/{u}"
     model_rows = "".join(
-        f'<div class="model-item" data-name="{m["id"]}"><span class="model-name">{m["id"]}</span><span class="model-count">{m["count"]}</span></div>'
+        f'<div class="model-item" data-name="{m["id"]}"><span class="model-name">{m["id"]}</span><span class="model-count">{_model_status(m["id"])}</span></div>'
         for m in models
     )
     model_more = ""
