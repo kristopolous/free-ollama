@@ -6,9 +6,9 @@ SERVICE="${1:-ollama}"
 case "$SERVICE" in
   ollama)
     QUERY="body='ollama is running'"
-    PORTS="11434,10443,8085,10001,8080,80,443,8983,28017,21,5060,5601"
+    PORTS="11434,10443,8085,10001,8080,80,443,1194,110,8983,28017,21,5060,5601"
     SERVERS="nginx,cloudflare,Apache"
-    COUNTRIES="US,AU,IN,JP,DE,CA,BR,CN.IE,FR,ES,ID,IT,SE"
+    COUNTRIES="US,AU,IN,JP,DE,CA,RU,BR,CN,ID,IE,FR,ES,ID,IT,SE,PL"
     ;;
   comfyui)
     QUERY='title="ComfyUI"'

@@ -1331,6 +1331,31 @@ async def handle_api_show(request):
     })
 
 
+async def handle_ollama_stop(request):
+    """
+    Stop the dyva server
+    ---
+    tags: [Admin]
+    summary: Shut down the dyva proxy server immediately
+    responses:
+      '200':
+        description: Server shutting down
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    loop = asyncio.get_event_loop()
+    loop.call_soon(loop.stop)
+    return web.json_response({"status": "shutting down"})
+
+
 async def handle_api_pull(request):
     """
     Pull/refresh models (Ollama-compatible)
@@ -1898,6 +1923,7 @@ def make_app():
     swagger.add_get("/refresh", handle_refresh)
 
     swagger.add_post("/api/show", handle_api_show)
+    swagger.add_post("/api/stop", handle_ollama_stop)
     swagger.add_post("/api/pull", handle_api_pull)
     swagger.add_post("/api/chat", handle_ollama_chat)
     swagger.add_post("/api/generate", handle_ollama_generate)
