@@ -944,6 +944,15 @@ async def handle_dashboard(request):
     tpl_dir = os.path.join(os.path.dirname(__file__), "static")
     with open(os.path.join(tpl_dir, "dashboard.html")) as f:
         html = f.read()
+    model_hosts = {}
+    for s in servers:
+        host = s.get("server", "")
+        for m in s.get("models", []):
+            if ":cloud" in m or len(m) == 0:
+                continue
+            model_hosts.setdefault(m, []).append(host)
+    for m in model_hosts:
+        model_hosts[m].sort()
     def _model_status(mid):
         hosts = model_hosts.get(mid, [])
         g = sum(1 for h in hosts if f"{h} {mid}" in good)
