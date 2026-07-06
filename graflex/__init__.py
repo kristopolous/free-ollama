@@ -159,13 +159,17 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
     return last_error
 
 
-def _fetch_api(dry, limit, service):
+def _fetch_api(dry, limit, service, fids=None):
     import base64
     import requests
     import curlify
 
     cfg = SERVICE_CONFIG[service]
     query = cfg["fofa_query"]
+    if fids:
+        fid_parts = [f'fid="{s.strip()}"' for s in fids.split(",")]
+        fid_filter = "(" + " || ".join(fid_parts) + ")" if len(fid_parts) > 1 else fid_parts[0]
+        query += " && " + fid_filter
     qb64 = base64.b64encode(query.encode()).decode()
     params = {"key": FOFA_KEY, "qbase64": qb64, "size": limit}
     req = requests.Request("GET", FOFA_API, params=params)
@@ -311,7 +315,7 @@ def _parse_fofa_html(html_path, service):
     return hosts
 
 
-def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None):
+def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None):
     hosts_file = _cache_file(name, "hosts")
 
     if method == "web":
@@ -348,6 +352,10 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
                 qparts.append(f'country="{country}"')
             if server:
                 qparts.append(f'server="{server}"')
+            if fids:
+                fid_parts = [f'fid="{s.strip()}"' for s in fids.split(",")]
+                fid_filter = "(" + " || ".join(fid_parts) + ")" if len(fid_parts) > 1 else fid_parts[0]
+                qparts.append(fid_filter)
             combined = " && ".join(qparts)
             if not dry:
                 log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}  query={combined}")
@@ -378,7 +386,7 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
         if not service:
             log.error("--service is required for API method")
             return
-        hosts = _fetch_api(dry, limit, service)
+        hosts = _fetch_api(dry, limit, service, fids=fids)
 
     if dry:
         return
@@ -509,6 +517,7 @@ def main():
     parser.add_argument("-n", "--name", help="cache file name prefix (default: image-gen)")
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
+    parser.add_argument("-f", "--fid", dest="fids", help="comma-separated FID values to filter by")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     args = parser.parse_args()
@@ -523,6 +532,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries)
+            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids)
         elif step == "check":
             check(service=args.service, name=args.name, check_timeout=args.check_timeout)

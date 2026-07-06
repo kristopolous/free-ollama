@@ -993,15 +993,6 @@ async def handle_dashboard(request):
     html = html.replace("__BAD_COUNT__", str(len(bad)))
     html = html.replace("__BAD_ROWS__", bad_rows)
     html = html.replace("__BAD_MORE__", bad_more)
-    model_hosts = {}
-    for s in servers:
-        host = s.get("server", "")
-        for m in s.get("models", []):
-            if ":cloud" in m or len(m) == 0:
-                continue
-            model_hosts.setdefault(m, []).append(host)
-    for m in model_hosts:
-        model_hosts[m].sort()
     html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
     html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
     html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))

@@ -37,6 +37,9 @@ graflex -q "body='ollama is running'" -a fetch -n ollama \
   --servers 'nginx,cloudflare,Apache' \
   -c 'US,AU,IN,JP,DE,CA,BR,CN'
 
+# Filter by specific FIDs (comma-separated)
+graflex -s comfyui -a fetch -f "xxx,yyy"
+
 # Check hosts from a named cache file
 graflex -s ollama -a check -n ollama
 
@@ -102,4 +105,5 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-n`, `--name` | Cache file name prefix (default: `image-gen`) |
 | `-c`, `--countries` | Comma-separated country codes to cycle |
 | `-p`, `--ports` | Comma-separated port values to cycle |
+| `-f`, `--fid` | Comma-separated FID values to filter by |
 | `--servers` | Comma-separated server values to cycle |
