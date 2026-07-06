@@ -26,6 +26,7 @@ def _cache_file(name, suffix):
     return os.path.join(CACHE_DIR, f"{prefix}-{suffix}.json")
 
 TIMEOUT = 60
+BACKOFF = 15
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
 FOFA_WEB_HEADER = os.getenv("FOFA_WEB_HEADER", "")
@@ -237,16 +238,16 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
             break
         except RuntimeError:
             if attempt < 2:
-                log.warning("rate limited, retrying in 12s")
-                time.sleep(12)
+                log.warning(f"rate limited, retrying in {BACKOFF}s")
+                time.sleep(BACKOFF)
             else:
                 log.warning("rate limited")
                 return None
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
             if code in (429, 403) and attempt < 2:
-                log.warning(f"rate limited ({code}), retrying in 12s")
-                time.sleep(12)
+                log.warning(f"rate limited ({code}), retrying in {BACKOFF}s")
+                time.sleep(BACKOFF)
             else:
                 if code in (429, 403):
                     log.warning(f"rate limited  ({code})")
