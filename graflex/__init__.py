@@ -160,17 +160,15 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
     return last_error
 
 
-def _fetch_api(dry, limit, service, fids=None):
+def _fetch_api(dry, limit, service, fid=None):
     import base64
     import requests
     import curlify
 
     cfg = SERVICE_CONFIG[service]
     query = cfg["fofa_query"]
-    if fids:
-        fid_parts = [f'fid="{s.strip()}"' for s in fids.split(",")]
-        fid_filter = "(" + " || ".join(fid_parts) + ")" if len(fid_parts) > 1 else fid_parts[0]
-        query += " && " + fid_filter
+    if fid:
+        query += f' && fid="{fid}"'
     qb64 = base64.b64encode(query.encode()).decode()
     params = {"key": FOFA_KEY, "qbase64": qb64, "size": limit}
     req = requests.Request("GET", FOFA_API, params=params)
@@ -337,12 +335,16 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
             server_list = [None] + [s.strip() for s in servers.split(",")]
         else:
             server_list = [None] + ["uvicorn", "nginx"]
+        if isinstance(fids, str):
+            fid_list = [None] + [s.strip() for s in fids.split(",")]
+        else:
+            fid_list = [None]
 
         pool = _load_json(hosts_file)
         seen = {f"{h['service']}@{h['host']}" for h in pool}
-        combos = [(c, p, s) for c in country_list for p in port_list for s in server_list]
+        combos = [(c, p, s, f) for c in country_list for p in port_list for s in server_list for f in fid_list]
 
-        for i, (country, port, server) in enumerate(combos):
+        for i, (country, port, server, fid) in enumerate(combos):
             if query:
                 qparts = [query]
             else:
@@ -353,13 +355,11 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
                 qparts.append(f'country="{country}"')
             if server:
                 qparts.append(f'server="{server}"')
-            if fids:
-                fid_parts = [f'fid="{s.strip()}"' for s in fids.split(",")]
-                fid_filter = "(" + " || ".join(fid_parts) + ")" if len(fid_parts) > 1 else fid_parts[0]
-                qparts.append(fid_filter)
+            if fid:
+                qparts.append(f'fid="{fid}"')
             combined = " && ".join(qparts)
             if not dry:
-                log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}  query={combined}")
+                log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}, fid={fid}  query={combined}")
 
             svc = service or name or "unknown"
             hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts)
@@ -387,7 +387,12 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
         if not service:
             log.error("--service is required for API method")
             return
-        hosts = _fetch_api(dry, limit, service, fids=fids)
+        if fids:
+            hosts = []
+            for fid in [s.strip() for s in fids.split(",")]:
+                hosts.extend(_fetch_api(dry, limit, service, fid=fid))
+        else:
+            hosts = _fetch_api(dry, limit, service)
 
     if dry:
         return
