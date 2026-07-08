@@ -426,8 +426,14 @@ def _curlify(method, url, json_body):
 async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat"):
     done = asyncio.Event()
     result_queue = asyncio.Queue()
+    errors = []
+    errors_lock = asyncio.Lock()
     server_iter = iter(servers)
     iter_lock = asyncio.Lock()
+
+    async def _collect_err(msg):
+        async with errors_lock:
+            errors.append(msg)
 
     async def worker():
         resp = None
@@ -466,8 +472,10 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 dur = time.time() - start
                 code = resp.status
                 try:
-                    body = await resp.read()
-                    log.warning(f"upstream error {code} from {host}{endpoint}: {body.decode('utf-8', errors='replace')[:500]}")
+                    raw = await resp.read()
+                    body = raw.decode('utf-8', errors='replace')[:500]
+                    log.warning(f"upstream error {code} from {host}{endpoint}: {body}")
+                    await _collect_err(f"{host}: {body}")
                 except Exception:
                     pass
                 await resp.release()
@@ -499,6 +507,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 if "error" in data:
                     dur = time.time() - start
                     add_bad(host, model)
+                    await _collect_err(f"{host}: {data['error']}")
                     await broadcast_activity(host, model, "failed",
                         f"failure: {host} for {model} - error: {data['error']}", duration=dur, wid=wid)
                     continue
@@ -543,6 +552,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 await resp.release()
                 resp = None
                 add_bad(host, model)
+                await _collect_err(f"{host}: {first['error']}")
                 await broadcast_activity(host, model, "failed",
                     f"failure: {host} for {model} - error: {first['error']}", duration=dur, wid=wid)
                 continue
@@ -581,7 +591,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    return result
+    return result, errors
 
 
 async def _try_one(session, host, model, full_model, opayload):
@@ -601,13 +611,15 @@ async def _try_one(session, host, model, full_model, opayload):
         dur = time.time() - start
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-        return None
+        return None, None
 
     if resp.status != 200:
         dur = time.time() - start
+        err_msg = None
         try:
-            body = await resp.read()
-            log.warning(f"upstream error {resp.status} from {host}/api/chat: {body.decode('utf-8', errors='replace')[:500]}")
+            raw = await resp.read()
+            err_msg = raw.decode('utf-8', errors='replace')[:500]
+            log.warning(f"upstream error {resp.status} from {host}/api/chat: {err_msg}")
         except Exception:
             pass
         await resp.release()
@@ -615,20 +627,20 @@ async def _try_one(session, host, model, full_model, opayload):
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
-        return None
+        return None, err_msg
 
     try:
         data = await resp.json()
     except asyncio.TimeoutError:
         await resp.release()
-        return None
+        return None, None
     except json.JSONDecodeError:
         await resp.release()
         dur = time.time() - start
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-        return None
+        return None, None
     await resp.release()
 
     if "error" in data:
@@ -637,7 +649,7 @@ async def _try_one(session, host, model, full_model, opayload):
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - error: {data['error']}", duration=dur, wid=wid)
-        return None
+        return None, data["error"]
 
     dur = time.time() - start
     log.debug(f"  \u2713 {tag}")
@@ -645,7 +657,7 @@ async def _try_one(session, host, model, full_model, opayload):
     add_good(host, model)
     await broadcast_activity(host, model, "connected",
         f"success: {host} for {model}", duration=dur, wid=wid)
-    return data
+    return data, None
 
 
 async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
@@ -665,13 +677,15 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         dur = time.time() - start
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-        return None
+        return None, None
 
     if resp.status != 200:
         dur = time.time() - start
+        err_msg = None
         try:
-            body = await resp.read()
-            log.warning(f"upstream error {resp.status} from {host}{endpoint}: {body.decode('utf-8', errors='replace')[:500]}")
+            raw = await resp.read()
+            err_msg = raw.decode('utf-8', errors='replace')[:500]
+            log.warning(f"upstream error {resp.status} from {host}{endpoint}: {err_msg}")
         except Exception:
             pass
         await resp.release()
@@ -679,7 +693,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
-        return None
+        return None, err_msg
 
     try:
         it = resp.content
@@ -689,7 +703,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         await resp.release()
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-        return None
+        return None, None
 
     if not first_line or not first_line.strip():
         dur = time.time() - start
@@ -698,7 +712,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - empty response", duration=dur, wid=wid)
-        return None
+        return None, None
     try:
         first = json.loads(first_line)
     except json.JSONDecodeError:
@@ -708,7 +722,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-        return None
+        return None, None
 
     if "error" in first:
         dur = time.time() - start
@@ -717,7 +731,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         add_bad(host, model)
         await broadcast_activity(host, model, "failed",
             f"failure: {host} for {model} - error: {first['error']}", duration=dur, wid=wid)
-        return None
+        return None, first["error"]
 
     dur = time.time() - start
     log.debug(f"  \u2713 {tag}")
@@ -725,7 +739,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
     add_good(host, model)
     await broadcast_activity(host, model, "connected",
         f"success: {host} for {model}", duration=dur, wid=wid)
-    return resp, first_line, first
+    return (resp, first_line, first), None
 
 
 async def _forward_stream(request, response, resp, first_line, host, full, openai_format):
@@ -788,46 +802,56 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
         model_list = [model_in]
 
     last = get_last(model_list[0])
+    last_host_err = None
     if last:
         last_host, last_full = last
         log.debug(f"Reusing {last_host} for {model_list[0]}")
         if do_stream:
-            result = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True)
+            result, last_host_err = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True)
             if result:
                 resp, first_line, first = result
                 stream_resp = web.StreamResponse()
                 await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format)
                 return stream_resp
         else:
-            data = await _try_one(session, last_host, model_list[0], last_full, opayload)
+            data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload)
             if data:
                 return chat_fmt(data, model_list[0], openai_format)
 
     servers = find_servers(model_in)
     if not servers:
-        return web.json_response(err_obj(f"no available servers for '{model_in}'", "model_not_found"), status=404)
+        err_msg = f"no available servers for '{model_in}'"
+        if last_host_err:
+            err_msg += f": {last_host_err}"
+        return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
     for model in model_list:
         if do_stream:
-            result = await _race_servers(session, model, servers, opayload, do_stream=True)
+            result, errors = await _race_servers(session, model, servers, opayload, do_stream=True)
             if result:
                 _, host, full, resp, first_line, first = result
                 stream_resp = web.StreamResponse()
                 await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format)
                 return stream_resp
+            msg = "all servers failed"
+            if errors:
+                msg += ": " + "; ".join(dict.fromkeys(errors))
             if openai_format:
                 return web.Response(
-                    text=sse_str({"error": "all servers failed"}) + sse_str(sse_chunk("", {}, done=True)),
+                    text=sse_str({"error": msg}) + sse_str(sse_chunk("", {}, done=True)),
                     content_type="text/event-stream",
                 )
         else:
-            result = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False)
+            result, errors = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False)
 
             if result:
                 _, host, full, data = result
                 return chat_fmt(data, model, openai_format)
 
-    return web.json_response(err_obj("all servers failed"), status=502)
+    msg = "all servers failed"
+    if errors:
+        msg += ": " + "; ".join(dict.fromkeys(errors))
+    return web.json_response(err_obj(msg), status=502)
 
 
 async def _proxy_generate(request, session):
@@ -844,11 +868,12 @@ async def _proxy_generate(request, session):
     endpoint = "/api/generate"
 
     last = get_last(model)
+    last_host_err = None
     if last:
         last_host, last_full = last
         log.debug(f"Reusing {last_host} for {model}")
         if do_stream:
-            result = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
+            result, last_host_err = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
             if result:
                 resp, first_line, first = result
                 stream_resp = web.StreamResponse()
@@ -887,13 +912,16 @@ async def _proxy_generate(request, session):
                         return web.json_response(data)
                     dur = time.time() - start
                     add_bad(last_host, model)
+                    if data and "error" in data:
+                        last_host_err = data["error"]
                     await broadcast_activity(last_host, model, "failed",
                         f"failure: {last_host} for {model} - bad response", duration=dur, wid=wid)
                 else:
                     dur = time.time() - start
                     try:
-                        err_body = await r.read()
-                        log.warning(f"upstream error {r.status} from {last_host}{endpoint}: {err_body.decode('utf-8', errors='replace')[:500]}")
+                        raw = await r.read()
+                        last_host_err = raw.decode('utf-8', errors='replace')[:500]
+                        log.warning(f"upstream error {r.status} from {last_host}{endpoint}: {last_host_err}")
                     except Exception:
                         pass
                     await r.release()
@@ -903,23 +931,32 @@ async def _proxy_generate(request, session):
 
     servers = find_servers(model)
     if not servers:
-        return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
+        err_msg = f"no available servers for '{model}'"
+        if last_host_err:
+            err_msg += f": {last_host_err}"
+        return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
     if do_stream:
-        result = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint)
+        result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint)
         if result:
             _, host, full, resp, first_line, first = result
             stream_resp = web.StreamResponse()
             await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format=False)
             return stream_resp
-        return web.json_response(err_obj("all servers failed"), status=502)
+        msg = "all servers failed"
+        if errors:
+            msg += ": " + "; ".join(dict.fromkeys(errors))
+        return web.json_response(err_obj(msg), status=502)
 
-    result = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint)
+    result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint)
     if result:
         _, host, full, data = result
         return web.json_response(data)
 
-    return web.json_response(err_obj("all servers failed"), status=502)
+    msg = "all servers failed"
+    if errors:
+        msg += ": " + "; ".join(dict.fromkeys(errors))
+    return web.json_response(err_obj(msg), status=502)
 
 
 async def handle_dashboard(request):
@@ -1049,6 +1086,38 @@ async def handle_clear_bad(request):
     _bad_cache = None
     if os.path.exists(BAD_FILE):
         os.remove(BAD_FILE)
+    raise web.HTTPFound("/")
+
+
+async def handle_next_host(request):
+    """
+    Skip the last successful host for a model, marking it bad so a different host is tried next.
+    ---
+    tags: [Admin]
+    summary: Skip last successful host for a model
+    parameters:
+      - in: query
+        name: model
+        schema:
+          type: string
+        required: true
+        description: Model name to skip the last host for
+    responses:
+      '200':
+        description: Success
+    """
+    model = request.query.get("model")
+    if not model:
+        return web.json_response({"error": "missing model parameter"}, status=400)
+
+    last = get_last(model)
+    if last:
+        last_host, _ = last
+        add_bad(last_host, model)
+        if _last_cache is not None and model in _last_cache:
+            del _last_cache[model]
+            save_last()
+
     raise web.HTTPFound("/")
 
 
@@ -1921,6 +1990,7 @@ def make_app():
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)
+    swagger.add_get("/next-host", handle_next_host)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
     swagger.add_get("/api/version", handle_api_version)

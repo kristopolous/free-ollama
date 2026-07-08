@@ -93,7 +93,7 @@ __BAD_MORE__
 </div>
 <div class="card" id="hostCard" style="display:none">
 <h2 id="hostCardTitle">Hosts</h2>
-<div class="card-inner"><div id="hostList"></div></div>
+<div class="card-inner"><div id="hostList"></div><div style="margin-top:8px;text-align:right"><a id="nextHostBtn" href="#" style="font-size:.82rem;color:#77a;cursor:pointer;text-decoration:none">[ next ]</a></div></div>
 </div>
 </div>
 <div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#77a" href="https://github.com/kristopolous/free-ollama">obviously open source</a></div>
@@ -123,10 +123,12 @@ document.querySelectorAll('.card').forEach(function(card){
   })
 })
 
+var _currentModel=null;
 var modelHosts=JSON.parse(document.getElementById('modelHostsData').textContent);
 var goodHosts=new Set(JSON.parse(document.getElementById('goodHostsData').textContent||'[]'));
 var badHosts=new Set(JSON.parse(document.getElementById('badHostsData').textContent||'[]'));
-document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('#modelList .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';var name=this.getAttribute('data-name');var hosts=modelHosts[name]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=name+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;if(goodHosts.has(h+' '+name)){s.classList.add('host-good')}else if(badHosts.has(h+' '+name)){s.classList.add('host-bad')}else{s.classList.add('host-untested')}d.appendChild(s);list.appendChild(d)})})})
+document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('#modelList .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';_currentModel=this.getAttribute('data-name');var hosts=modelHosts[_currentModel]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;if(goodHosts.has(h+' '+_currentModel)){s.classList.add('host-good')}else if(badHosts.has(h+' '+_currentModel)){s.classList.add('host-bad')}else{s.classList.add('host-untested')}d.appendChild(s);list.appendChild(d)})})})
+document.getElementById('nextHostBtn').addEventListener('click',function(e){e.preventDefault();if(!_currentModel)return;var x=new XMLHttpRequest();x.open('GET','next-host?model='+encodeURIComponent(_currentModel));x.onload=function(){location.reload()};x.send()})
 </script>
 </body>
 </html>
