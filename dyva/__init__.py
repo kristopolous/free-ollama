@@ -1960,6 +1960,122 @@ async def _txt2img_comfyui(session, host, body):
     return None
 
 
+COMFYUI_KEY = "__comfyui__"
+
+
+def _find_comfyui_host(model_filter=None):
+    servers = load_servers()
+    candidates = [s for s in servers if s.get("service") == "comfyui"]
+    if model_filter:
+        candidates = [
+            s for s in candidates
+            if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
+                   for m in s.get("models", []))
+        ]
+    hosts = [s.get("server") for s in candidates if s.get("server")]
+    bad = load_bad()
+    good = load_good()
+    hosts.sort(key=lambda h: 0 if f"{h} {COMFYUI_KEY}" in good else (1 if f"{h} {COMFYUI_KEY}" not in bad else 2))
+    last = get_last(COMFYUI_KEY)
+    if last:
+        lh = last[0]
+        hosts = [lh] + [h for h in hosts if h != lh]
+    return hosts
+
+
+async def handle_comfyui_proxy(request):
+    """
+    ComfyUI pass-through proxy
+    ---
+    tags: [ComfyUI]
+    summary: Proxy any ComfyUI API request to a discovered host. Supports /prompt, /queue, /history, /view, /models, /system_stats, etc.
+    description: |
+      Forward ComfyUI workflow requests to a discovered ComfyUI host.
+
+      Strip the `/comfyui` prefix and proxy to a working host. Use `?host=ip:port` to target a specific host.
+
+      Supported endpoints:
+      - `POST /comfyui/prompt` — Submit a workflow
+      - `GET  /comfyui/queue` — View queue state
+      - `POST /comfyui/queue` — Modify queue (clear, delete)
+      - `POST /comfyui/interrupt` — Cancel current execution
+      - `GET  /comfyui/history` — Full execution history
+      - `GET  /comfyui/history/{prompt_id}` — History for a specific prompt
+      - `GET  /comfyui/view?filename=X&type=output` — Retrieve output image
+      - `GET  /comfyui/models/{type}` — List models (checkpoints, loras, etc.)
+      - `GET  /comfyui/system_stats` — Server info
+      - `GET  /comfyui/object_info` — Full node catalogue
+    parameters:
+      - in: query
+        name: host
+        schema:
+          type: string
+        description: Target a specific ComfyUI host (ip:port)
+    responses:
+      '200':
+        description: Proxied response from ComfyUI host
+      '502':
+        description: Upstream error
+      '503':
+        description: No available ComfyUI hosts
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+
+    session = request.app["session"]
+    tail = request.match_info.get("tail", "")
+    target_host = request.query.get("host")
+
+    if target_host:
+        hosts = [target_host]
+    else:
+        hosts = _find_comfyui_host()
+
+    if not hosts:
+        return web.json_response({"error": "no available ComfyUI hosts"}, status=503)
+
+    upstream_path = f"/{tail}" if tail else "/"
+    body = await request.read()
+    query = str(request.query_string)
+
+    last = get_last(COMFYUI_KEY)
+    if last and not target_host:
+        hosts = [last[0]] + [h for h in hosts if h != last[0]]
+
+    last_err = None
+    for host in hosts:
+        url = f"http://{host}{upstream_path}"
+        if query:
+            url += f"?{query}"
+
+        is_prompt = (tail.rstrip("/") == "prompt" and request.method == "POST")
+
+        try:
+            async with session.request(
+                request.method, url,
+                data=body if body else None,
+                headers={"Content-Type": request.content_type} if request.content_type else None,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as upstream:
+                resp_body = await upstream.read()
+                if upstream.status >= 400:
+                    last_err = f"HTTP {upstream.status}"
+                    continue
+                if is_prompt:
+                    set_last(COMFYUI_KEY, host, "")
+                return web.Response(
+                    body=resp_body,
+                    status=upstream.status,
+                    content_type=upstream.content_type,
+                )
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            last_err = str(e)
+            continue
+
+    return web.json_response({"error": f"all ComfyUI hosts failed: {last_err}"}, status=502)
+
+
 def make_app():
     app = web.Application()
 
@@ -2007,6 +2123,8 @@ def make_app():
     swagger.add_post("/chat/completions", handle_openai_chat)
     swagger.add_get("/sdapi/v1/sd-models", handle_sd_models)
     swagger.add_post("/sdapi/v1/txt2img", handle_txt2img)
+
+    app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)
