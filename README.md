@@ -68,6 +68,15 @@ txt2img -m   # list available SD models
 
 Works with the same auto-discovery as the LLM proxy. ComfyUI hosts are used as fallback with a basic txt2img workflow. Full ComfyUI workflow pass-through is available under `/comfyui/` — see the [dyva docs](dyva) for details.
 
+In code:
+
+```python
+from dyva.imagegen import imagegen
+img = await imagegen(prompt="a sunset")
+```
+
+See [examples/imagegen](examples/imagegen) for the full CLI example.
+
 <hr>
 
 ## Method 2: Artisanal Ollamas in Terminal Space

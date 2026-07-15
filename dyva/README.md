@@ -70,6 +70,36 @@ txt2img -m "sd_v15" "a cat" # use a specific model
 
 The proxy first tries A1111 hosts, then falls back to ComfyUI hosts with a basic txt2img workflow.
 
+#### Library
+
+`dyva.imagegen` provides a reusable async/sync function:
+
+```python
+from dyva.imagegen import imagegen, imagegen_sync
+
+# async
+img_bytes = await imagegen(prompt="a sunset", width=1024, height=768)
+
+# sync
+img_bytes = imagegen_sync(prompt="a cat in a spacesuit")
+```
+
+Returns raw PNG bytes. All parameters are keyword-only:
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `prompt` | *(required)* | Text prompt |
+| `model` | `None` | SD model name to match |
+| `width` | `512` | Image width |
+| `height` | `512` | Image height |
+| `steps` | `30` | Sampling steps |
+| `cfg_scale` | `7` | CFG scale |
+| `sampler_name` | `"Euler"` | Sampler |
+| `negative_prompt` | `""` | Negative prompt |
+| `seed` | `-1` | Seed (-1 = random) |
+| `host` | `"127.0.0.1"` | dyva proxy host |
+| `port` | `11434` | dyva proxy port |
+
 ### ComfyUI Pass-Through
 
 All ComfyUI workflow endpoints are proxied under `/comfyui/`. The prefix is stripped and the request is forwarded to a discovered ComfyUI host.

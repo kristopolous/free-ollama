@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""
+Image generation using dyva.imagegen.
+
+Usage:
+    # one-shot: generate and save
+    ./examples/imagegen "a sunset over mountains" -o sunset.png
+
+    # list models
+    ./examples/imagegen -m
+
+    # pipe prompt from stdin
+    echo "a cat in a spacesuit" | ./examples/imagegen -o cat.png
+
+Programmatic usage (in your own code):
+
+    import asyncio
+    from dyva.imagegen import imagegen, imagegen_sync
+
+    # async
+    async def main():
+        img = await imagegen(prompt="a sunset", width=1024, height=768)
+        with open("sunset.png", "wb") as f:
+            f.write(img)
+
+    asyncio.run(main())
+
+    # sync
+    img = imagegen_sync(prompt="a sunset")
+    with open("sunset.png", "wb") as f:
+        f.write(img)
+"""
+import argparse
+import base64
+import json
+import sys
+import urllib.request
+
+
+def _list_models(host, port):
+    url = f"http://{host}:{port}/sdapi/v1/sd-models"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    for m in data.get("data", []):
+        hosts = m.get("hosts", [])
+        print(m["id"])
+        if hosts:
+            print(f"    hosts: {', '.join(hosts)}")
+
+
+def main():
+    p = argparse.ArgumentParser(description="Generate images via dyva proxy")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=11434)
+    p.add_argument("--width", type=int, default=512)
+    p.add_argument("--height", type=int, default=512)
+    p.add_argument("--steps", type=int, default=30)
+    p.add_argument("-m", "--model", nargs="?", const="__list__", default=None,
+                   help="model name (use without value to list)")
+    p.add_argument("-o", "--output", help="output file (default: stdout)")
+    p.add_argument("prompt", nargs="?", help="text prompt")
+    args = p.parse_args()
+
+    if args.model == "__list__":
+        _list_models(args.host, args.port)
+        return
+
+    prompt = args.prompt or sys.stdin.read().strip()
+    if not prompt:
+        p.print_help()
+        sys.exit(1)
+
+    from dyva.imagegen import imagegen_cli
+
+    try:
+        img = imagegen_cli(
+            prompt,
+            model=args.model,
+            width=args.width,
+            height=args.height,
+            steps=args.steps,
+            host=args.host,
+            port=args.port,
+        )
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.output:
+        with open(args.output, "wb") as f:
+            f.write(img)
+        print(f"wrote {len(img)} bytes to {args.output}")
+    else:
+        sys.stdout.buffer.write(base64.b64encode(img))
+
+
+if __name__ == "__main__":
+    main()
