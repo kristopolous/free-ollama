@@ -746,7 +746,12 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
     content_type = "text/event-stream" if openai_format else "application/x-ndjson"
     response.headers["Content-Type"] = content_type
     response.headers["Cache-Control"] = "no-cache"
-    await response.prepare(request)
+    try:
+        await response.prepare(request)
+    except (BrokenPipeError, ConnectionResetError, aiohttp.ClientConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        log.debug("Client disconnected before response headers sent")
+        await resp.release()
+        return
 
     try:
         if openai_format:
