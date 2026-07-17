@@ -3,7 +3,9 @@ import argparse
 import json
 import sys
 import urllib.request
-import base64
+
+from dyva.imagegen import imagegen_cli
+
 
 def _base_url(args):
     return f"http://{args.host}:{args.port}"
@@ -28,7 +30,7 @@ def _list_models(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate images via dyva proxy (A1111 txt2img)")
+    parser = argparse.ArgumentParser(description="Generate images via dyva proxy (A1111 + ComfyUI)")
     parser.add_argument("--host", default="127.0.0.1", help="dyva proxy host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=11434, help="dyva proxy port (default: 11434)")
     parser.add_argument("--width", type=int, default=512, help="image width (default: 512)")
@@ -50,38 +52,26 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    payload = {
-        "prompt": prompt,
-        "width": args.width,
-        "height": args.height,
-        "steps": args.steps,
-    }
-    if args.model:
-        payload["model"] = args.model
-
-    url = f"{_base_url(args)}/sdapi/v1/txt2img"
-    body = json.dumps(payload).encode()
-
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            data = json.loads(resp.read())
+        img_bytes = imagegen_cli(
+            prompt,
+            model=args.model,
+            width=args.width,
+            height=args.height,
+            steps=args.steps,
+            host=args.host,
+            port=args.port,
+        )
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    images = data.get("images", [])
-    if not images:
-        print("error: no images in response", file=sys.stderr)
-        sys.exit(1)
-
-    raw = base64.b64decode(images[0])
-
     if args.output:
         with open(args.output, "wb") as f:
-            f.write(raw)
+            f.write(img_bytes)
     else:
-        sys.stdout.buffer.write(raw)
+        import base64
+        sys.stdout.buffer.write(base64.b64encode(img_bytes))
 
 if __name__ == "__main__":
     main()

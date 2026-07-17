@@ -56,6 +56,27 @@ Also let's take a moment and appreciate that magnificent icon, generated with on
 <img width="450" alt="dyva" src="https://github.com/user-attachments/assets/33f0f350-2913-4729-a0a9-1400ff02ef75" />
 </center>
 
+### Image Generation
+
+Generate images via discovered A1111 and ComfyUI hosts:
+
+```bash
+txt2img "a sunset over mountains" -o sunset.png
+txt2img --width 1024 --height 768 "cyberpunk city"
+txt2img -m   # list available SD models
+```
+
+Works with the same auto-discovery as the LLM proxy. ComfyUI hosts are used as fallback with a basic txt2img workflow. Full ComfyUI workflow pass-through is available under `/comfyui/` — see the [dyva docs](dyva) for details.
+
+In code:
+
+```python
+from dyva.imagegen import imagegen
+img = await imagegen(prompt="a sunset")
+```
+
+See [examples/imagegen](examples/imagegen) for the full CLI example.
+
 <hr>
 
 ## Method 2: Artisanal Ollamas in Terminal Space
