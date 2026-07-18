@@ -282,8 +282,8 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
     hosts = _parse_fofa_html(out_path, service)
     if not hosts:
         page = getattr(resp, "text", "")
-        if "0 results" not in page:
-            log.warning(f"! no hosts parsed but '0 results' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
+        if "no data for past year" not in page.lower():
+            log.warning(f"! no hosts parsed but 'no data for past year' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
     else:
         log.info(f"  saved to {out_path}")
 
@@ -327,7 +327,7 @@ def _parse_fofa_html(html_path, service):
             "host": f"{host}:{port}",
         })
 
-    log.info(f"  parsed {len(hosts)} hosts from {html_path}")
+    log.info(f"  {len(hosts)} hosts from {html_path}")
     return hosts
 
 
