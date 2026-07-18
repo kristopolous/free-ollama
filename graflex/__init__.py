@@ -206,7 +206,7 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False):
     return hosts
 
 
-def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False):
+def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, fid=None):
     import base64
     import re
     import requests
@@ -274,7 +274,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
 
     tmp_dir = "/tmp/graflex"
     os.makedirs(tmp_dir, exist_ok=True)
-    label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}"
+    label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{fid or 'any'}"
     out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
     with open(out_path, "w") as f:
         f.write(resp.text)
@@ -379,7 +379,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                 log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}, fid={fid}  query={combined}")
 
             svc = service or name or "unknown"
-            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify)
+            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify, fid=fid)
             if hosts is None:
                 continue
 
