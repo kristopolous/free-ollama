@@ -239,26 +239,29 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         log.info(f"# cookie: {cookie_header[:80]}...")
         return []
 
+    backoff = BACKOFF
     for attempt in range(3):
         try:
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
             body = resp.text.lower()
-            if "rate limit" in body or "too many requests" in body:
+            if "rate limit" in body or "too many requests" in body or "api request frequency out of limit" in body:
                 raise RuntimeError("rate limited")
             break
         except RuntimeError:
             if attempt < 2:
-                log.warning(f"rate limited, retrying in {BACKOFF}s")
-                time.sleep(BACKOFF)
+                log.warning(f"rate limited, retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = int(backoff * 1.2)
             else:
                 log.warning("rate limited")
                 return None
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
             if code in (429, 403) and attempt < 2:
-                log.warning(f"rate limited ({code}), retrying in {BACKOFF}s")
-                time.sleep(BACKOFF)
+                log.warning(f"rate limited ({code}), retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = int(backoff * 1.2)
             else:
                 if code in (429, 403):
                     log.warning(f"rate limited  ({code})")
