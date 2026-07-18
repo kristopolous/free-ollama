@@ -13,14 +13,13 @@ pip install -e .
 Create a `.env` file:
 
 ```env
-# For API method (free tier doesn't allow this)
+# Required — FOFA API key
 FOFA_KEY=your_fofa_api_key
 
-# Required for API method — FOFA now requires Authorization header
+# Required — FOFA Authorization header token
 FOFA_AUTHORIZATION=your_fofa_authorization_token
 
-# For web method — paste the full Cookie header from your browser
-# while logged into en.fofa.info
+# Optional — Cookie header from browser (for web method fallback)
 FOFA_COOKIE="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
 ```
 
