@@ -1,6 +1,6 @@
 # graflex
 
-Discover public internet hosts via FOFA search engine. 
+Discover public internet hosts via FOFA search engine without paying FOFA. Because let's be real, it wouldn't be free ollama if you had to pay Shodan/FOFA.
 
 This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json)
 
