@@ -161,10 +161,10 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
     return last_error
 
 
-def _fetch_api(dry, limit, service, fid=None):
+def _fetch_api(dry, limit, service, fid=None, curlify=False):
     import base64
     import requests
-    import curlify
+    import curlify as curlify_mod
 
     cfg = SERVICE_CONFIG[service]
     query = cfg["fofa_query"]
@@ -177,8 +177,11 @@ def _fetch_api(dry, limit, service, fid=None):
         headers["Authorization"] = FOFA_AUTHORIZATION
     req = requests.Request("GET", FOFA_API, params=params, headers=headers)
     prepared = req.prepare()
+    if curlify:
+        log.info(curlify_mod.to_curl(prepared))
+        return []
     if dry:
-        log.info(curlify.to_curl(prepared))
+        log.info(curlify_mod.to_curl(prepared))
         return []
 
     try:
@@ -203,21 +206,16 @@ def _fetch_api(dry, limit, service, fid=None):
     return hosts
 
 
-def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None):
+def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False):
     import base64
     import re
     import requests
+    import curlify as curlify_mod
 
     qb64 = base64.b64encode(combined.encode()).decode()
     url = f"{FOFA_WEB}?qbase64={qb64}"
 
     cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_COOKIE) if FOFA_COOKIE else ""
-
-    if dry:
-        log.info(f"# query: {combined}")
-        log.info(f"# url: GET {url}")
-        log.info(f"# cookie: {cookie_header[:80]}...")
-        return []
 
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
@@ -228,6 +226,18 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         headers["Cookie"] = cookie_header
     if FOFA_AUTHORIZATION:
         headers["Authorization"] = FOFA_AUTHORIZATION
+
+    if curlify:
+        req = requests.Request("GET", url, headers=headers)
+        prepared = req.prepare()
+        log.info(curlify_mod.to_curl(prepared))
+        return []
+
+    if dry:
+        log.info(f"# query: {combined}")
+        log.info(f"# url: GET {url}")
+        log.info(f"# cookie: {cookie_header[:80]}...")
+        return []
 
     for attempt in range(3):
         try:

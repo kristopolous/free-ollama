@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SERVICE="${1:-ollama}"
+shift 2>/dev/null || true
+EXTRA_ARGS=("$@")
 
 case "$SERVICE" in
   ollama)
@@ -34,4 +36,4 @@ case "$SERVICE" in
     ;;
 esac
 
-exec ./graflex.py -q "$QUERY" -f "$FID" -a fetch -n "$SERVICE" -p "$PORTS" --servers "$SERVERS" -c "$COUNTRIES"
+exec ./graflex.py -q "$QUERY" -f "$FID" -a fetch -n "$SERVICE" -p "$PORTS" --servers "$SERVERS" -c "$COUNTRIES" "${EXTRA_ARGS[@]}"

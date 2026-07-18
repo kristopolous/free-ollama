@@ -50,6 +50,9 @@ graflex -a check -n ollama
 
 # Dry run — shows plaintext queries instead of hitting FOFA
 graflex -s a1111 -a fetch -d
+# Print curl commands for FOFA API requests
+gralex -s a1111 -a fetch --curlify -m api
+gralex -q 'body="ollama"' -a fetch -n ollama --curlify
 ```
 
 ## Shell script
@@ -101,6 +104,7 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`) |
 | `-a`, `--action` | Action: `fetch`, `check`, or `fetch-check` |
 | `-d`, `--dry` | Print what would be done without making requests |
+| `--curlify` | Print curl command instead of executing (useful for debugging API requests) |
 | `-l`, `--limit` | Max results per query (default: 2) |
 | `-m`, `--method` | Fetch method: `api` or `web` (default: web) |
 | `-q`, `--query` | Custom FOFA query (requires `--name`) |
