@@ -1010,14 +1010,16 @@ async def handle_dashboard(request):
         f'<div class="model-item"><span class="host-name">{entry["host"]}</span><span class="host-model">{model}</span></div>'
         for model, entry in list(_last_cache.items())[:20]
     ) if _last_cache else '<div style="color:#999;font-size:.85rem">None</div>'
+    good_valid = [h for h in good if " " in h]
     good_rows = "".join(
         f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
-        for h in sorted(good, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
+        for h in sorted(good_valid, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
     )
     good_more = f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else ""
+    bad_valid = [h for h in bad if " " in h]
     bad_rows = "".join(
         f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
-        for h in sorted(bad)[:30]
+        for h in sorted(bad_valid)[:30]
     )
     bad_more = f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else ""
     html = html.replace("__PORT__", str(PORT))
