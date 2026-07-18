@@ -318,7 +318,7 @@ def _parse_fofa_html(html_path, service):
     return hosts
 
 
-def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None):
+def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None):
     hosts_file = _cache_file(name, "hosts")
 
     if method == "web":
@@ -366,7 +366,7 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
                 log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}, fid={fid}  query={combined}")
 
             svc = service or name or "unknown"
-            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts)
+            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify)
             if hosts is None:
                 continue
 
@@ -394,9 +394,9 @@ def fetch(dry=False, limit=2, service=None, method="api", query=None, name=None,
         if fids:
             hosts = []
             for fid in [s.strip() for s in fids.split(",")]:
-                hosts.extend(_fetch_api(dry, limit, service, fid=fid))
+                hosts.extend(_fetch_api(dry, limit, service, fid=fid, curlify=curlify))
         else:
-            hosts = _fetch_api(dry, limit, service)
+            hosts = _fetch_api(dry, limit, service, curlify=curlify)
 
     if dry:
         return
@@ -522,6 +522,7 @@ def main():
     parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG), help="service to search for")
     parser.add_argument("-a", "--action", choices=["fetch", "check", "fetch-check"], required=True, help="action to perform")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
+    parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-m", "--method", choices=["api", "web"], default="web", help="fetch method (default: web)")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
@@ -543,6 +544,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            fetch(dry=args.dry, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids)
+            fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids)
         elif step == "check":
             check(service=args.service, name=args.name, check_timeout=args.check_timeout)
