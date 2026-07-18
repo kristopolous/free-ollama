@@ -292,8 +292,6 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         page = getattr(resp, "text", "")
         if "no data for past year" not in page.lower():
             log.warning(f"! no hosts parsed but 'no data for past year' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
-    else:
-        log.info(f"  {out_path}")
 
     return hosts
 
