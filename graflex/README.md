@@ -64,7 +64,7 @@ gralex -q 'body="ollama"' -a fetch -n ollama --curlify
 ./graflex.sh ollama
 ```
 
-Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 18 hours. The tests over it takes a while as well. 
+Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 18 hours. The tests over it takes a while as well. It's re-entrent and cam be run in parallel. Doing so *shouldn't* affect results or performance.  Famous last words...
 
 
 ## Services
