@@ -29,7 +29,8 @@ TIMEOUT = 60
 BACKOFF = 15
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
-FOFA_WEB_HEADER = os.getenv("FOFA_WEB_HEADER", "")
+FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
+FOFA_AUTHORIZATION = os.getenv("FOFA_AUTHORIZATION", "")
 FOFA_API = "https://fofa.info/api/v1/search/all"
 FOFA_WEB = "https://en.fofa.info/result"
 
@@ -171,7 +172,10 @@ def _fetch_api(dry, limit, service, fid=None):
         query += f' && fid="{fid}"'
     qb64 = base64.b64encode(query.encode()).decode()
     params = {"key": FOFA_KEY, "qbase64": qb64, "size": limit}
-    req = requests.Request("GET", FOFA_API, params=params)
+    headers = {}
+    if FOFA_AUTHORIZATION:
+        headers["Authorization"] = FOFA_AUTHORIZATION
+    req = requests.Request("GET", FOFA_API, params=params, headers=headers)
     prepared = req.prepare()
     if dry:
         log.info(curlify.to_curl(prepared))
@@ -207,11 +211,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
     qb64 = base64.b64encode(combined.encode()).decode()
     url = f"{FOFA_WEB}?qbase64={qb64}"
 
-    if not FOFA_WEB_HEADER:
-        log.error("FOFA_WEB_HEADER must be set in .env for web method")
-        return None
-
-    cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_WEB_HEADER)
+    cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_COOKIE) if FOFA_COOKIE else ""
 
     if dry:
         log.info(f"# query: {combined}")
@@ -223,8 +223,11 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Cookie": cookie_header,
     }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    if FOFA_AUTHORIZATION:
+        headers["Authorization"] = FOFA_AUTHORIZATION
 
     for attempt in range(3):
         try:
@@ -504,9 +507,10 @@ def check(service, name=None, check_timeout=60):
 def main():
     load_dotenv()
 
-    global FOFA_KEY, FOFA_WEB_HEADER
+    global FOFA_KEY, FOFA_COOKIE, FOFA_AUTHORIZATION
     FOFA_KEY = os.getenv("FOFA_KEY", "")
-    FOFA_WEB_HEADER = os.getenv("FOFA_WEB_HEADER", "")
+    FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
+    FOFA_AUTHORIZATION = os.getenv("FOFA_AUTHORIZATION", "")
 
     logging.basicConfig(
         level=getattr(logging, os.getenv("LOGLEVEL", "INFO").upper(), logging.INFO),

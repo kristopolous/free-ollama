@@ -16,9 +16,12 @@ Create a `.env` file:
 # For API method (free tier doesn't allow this)
 FOFA_KEY=your_fofa_api_key
 
+# Required for API method — FOFA now requires Authorization header
+FOFA_AUTHORIZATION=your_fofa_authorization_token
+
 # For web method — paste the full Cookie header from your browser
 # while logged into en.fofa.info
-FOFA_WEB_HEADER="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
+FOFA_COOKIE="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
 ```
 
 ## Usage
