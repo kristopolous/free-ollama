@@ -27,6 +27,7 @@ def _cache_file(name, suffix):
 
 TIMEOUT = 60
 BACKOFF = 15
+SLEEP_DEFAULT = 4
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
 FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
@@ -337,7 +338,7 @@ def _parse_fofa_html(html_path, service):
     return hosts
 
 
-def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None):
+def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT):
     hosts_file = _cache_file(name, "hosts")
 
     if method == "web":
@@ -399,8 +400,8 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                 _save_json(hosts_file, pool)
                 log.info(f"  total: {len(pool)}\n")
 
-            if i < len(combos) - 1 and not dry:
-                time.sleep(4)
+            if i < len(combos) - 1 and not dry and not curlify:
+                time.sleep(sleep)
 
         hosts = pool
     else:
@@ -551,6 +552,7 @@ def main():
     parser.add_argument("-f", "--fid", dest="fids", help="comma-separated FID values to filter by")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
+    parser.add_argument("--sleep", type=int, default=SLEEP_DEFAULT, help=f"seconds to sleep between requests (default: {SLEEP_DEFAULT})")
     args = parser.parse_args()
 
     if args.query and not args.name:
@@ -563,6 +565,6 @@ def main():
     for step in parts:
         log.info(f"--- {step} ---")
         if step == "fetch":
-            fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids)
+            fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep)
         elif step == "check":
             check(service=args.service, name=args.name, check_timeout=args.check_timeout)
