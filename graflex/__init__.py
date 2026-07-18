@@ -283,7 +283,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
     if not hosts:
         page = getattr(resp, "text", "")
         if "0 results" not in page:
-            log.warning(f"no hosts parsed but '0 results' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
+            log.warning(f"! no hosts parsed but '0 results' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
     else:
         log.info(f"  saved to {out_path}")
 
@@ -299,7 +299,7 @@ def _parse_fofa_html(html_path, service):
 
     values = re.findall(r'data-clipboard-text="([^"]+)"', content)
     if not values:
-        log.warning("no results")
+        log.warning("! no results")
         return []
 
     seen = set()
