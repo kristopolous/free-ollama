@@ -206,7 +206,7 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False):
     return hosts
 
 
-def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, fid=None):
+def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, fid=None, fid_idx=0):
     import base64
     import re
     import requests
@@ -268,13 +268,21 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
                 else:
                     log.error(f"FOFA web request failed: {e}")
                 return None
+        except requests.exceptions.ConnectionError as e:
+            if attempt < 2:
+                log.warning(f"connection error, retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = int(backoff * 1.2)
+            else:
+                log.error(f"FOFA web request failed: {e}")
+                return None
         except Exception as e:
             log.error(f"FOFA web request failed: {e}")
             return None
 
     tmp_dir = "/tmp/graflex"
     os.makedirs(tmp_dir, exist_ok=True)
-    label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{fid or 'any'}"
+    label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{fid_idx}"
     out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
     with open(out_path, "w") as f:
         f.write(resp.text)
@@ -285,7 +293,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         if "no data for past year" not in page.lower():
             log.warning(f"! no hosts parsed but 'no data for past year' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
     else:
-        log.info(f"  saved to {out_path}")
+        log.info(f"  {out_path}")
 
     return hosts
 
@@ -359,7 +367,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
 
         pool = _load_json(hosts_file)
         seen = {f"{h['service']}@{h['host']}" for h in pool}
-        combos = [(c, p, s, f) for c in country_list for p in port_list for s in server_list for f in fid_list]
+        combos = [(c, p, s, f) for f in fid_list for s in server_list for p in port_list for c in country_list]
 
         for i, (country, port, server, fid) in enumerate(combos):
             if query:
@@ -376,10 +384,10 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                 qparts.append(f'fid="{fid}"')
             combined = " && ".join(qparts)
             if not dry:
-                log.info(f"[{i+1}/{len(combos)}] country={country}, port={port}, server={server}, fid={fid}  query={combined}")
+                log.info(f"[{i+1}/{len(combos)}] country={country} port={port} server={server} fid={fid}")
 
             svc = service or name or "unknown"
-            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify, fid=fid)
+            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify, fid_idx=i)
             if hosts is None:
                 continue
 
