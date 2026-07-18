@@ -285,7 +285,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         if "0 results" not in page:
             log.warning(f"no hosts parsed but '0 results' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
     else:
-        log.info(f"saved to {out_path}")
+        log.info(f"  saved to {out_path}")
 
     return hosts
 
@@ -327,7 +327,7 @@ def _parse_fofa_html(html_path, service):
             "host": f"{host}:{port}",
         })
 
-    log.info(f"parsed {len(hosts)} hosts from {html_path}")
+    log.info(f"  parsed {len(hosts)} hosts from {html_path}")
     return hosts
 
 
@@ -391,7 +391,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
 
             if not dry:
                 _save_json(hosts_file, pool)
-                log.info(f"  total: {len(pool)}")
+                log.info(f"  total: {len(pool)}\n")
 
             if i < len(combos) - 1 and not dry:
                 time.sleep(4)
