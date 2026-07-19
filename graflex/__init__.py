@@ -149,8 +149,8 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 }
         except asyncio.TimeoutError:
             if scheme == "http":
-                return {"error": f"timeout (http)"}
-            last_error = {"error": f"timeout (https)"}
+                return {"error": f"timeout"}
+            last_error = {"error": f"timeout"}
         except OSError as e:
             last_error = {"error": f"{e} ({scheme})"}
         except json.JSONDecodeError:
@@ -246,6 +246,14 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
             body = resp.text.lower()
+            if "daily usage limit" in body:
+                tmp_dir = "/tmp/graflex"
+                label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{fid_idx}"
+                out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+                log.error(f"daily usage limit hit, resume by using --session {run_ts}")
+                raise SystemExit(1)
             if "rate limit" in body or "too many requests" in body or "api request frequency out of limit" in body:
                 raise RuntimeError("rate limited")
             break
@@ -338,12 +346,14 @@ def _parse_fofa_html(html_path, service):
     return hosts
 
 
-def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT):
+def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None):
     hosts_file = _cache_file(name, "hosts")
 
     if method == "web":
         from datetime import datetime
-        run_ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
+        if session:
+            log.info(f"resuming session {run_ts}")
 
         if isinstance(countries, str):
             country_list = [None] + [s.strip() for s in countries.split(",")]
@@ -384,6 +394,14 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             combined = " && ".join(qparts)
             if not dry:
                 log.info(f"[{i+1}/{len(combos)}] country={country} port={port} server={server} fid={fid}")
+
+            if session:
+                label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{i}"
+                out_path = os.path.join("/tmp/graflex", f"fofa-results-{label}-{run_ts}.txt")
+                if os.path.exists(out_path):
+                    if not dry:
+                        log.info(f"  skip (already fetched)")
+                    continue
 
             svc = service or name or "unknown"
             hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify, fid_idx=i)
@@ -553,6 +571,7 @@ def main():
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--sleep", type=int, default=SLEEP_DEFAULT, help=f"seconds to sleep between requests (default: {SLEEP_DEFAULT})")
+    parser.add_argument("--session", help="resume a previous session by providing its run timestamp (the run_ts from the log)")
     args = parser.parse_args()
 
     if args.query and not args.name:
@@ -562,9 +581,12 @@ def main():
 
     parts = args.action.split("-")
 
-    for step in parts:
-        log.info(f"--- {step} ---")
-        if step == "fetch":
-            fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep)
-        elif step == "check":
-            check(service=args.service, name=args.name, check_timeout=args.check_timeout)
+    try:
+        for step in parts:
+            log.info(f"--- {step} ---")
+            if step == "fetch":
+                fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session)
+            elif step == "check":
+                check(service=args.service, name=args.name, check_timeout=args.check_timeout)
+    except SystemExit as e:
+        sys.exit(e.code)
