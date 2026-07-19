@@ -48,11 +48,22 @@ graflex -s ollama -a check -n ollama
 # Check without explicit service (infers from data)
 graflex -a check -n ollama
 
+# Check only new hosts (skip all previously-tested hosts)
+graflex -s ollama -a check-new -n ollama
+
+# Check all hosts (recheck everything, ignore previous results)
+graflex -s ollama -a check-all -n ollama
+
 # Dry run — shows plaintext queries instead of hitting FOFA
 graflex -s a1111 -a fetch -d
 # Print curl commands for FOFA API requests
 gralex -s a1111 -a fetch --curlify -m api
 gralex -q 'body="ollama"' -a fetch -n ollama --curlify
+
+# Resume a run that hit the daily usage limit (use the run_ts from the error message)
+graflex -s ollama -a fetch \
+  -c "TH,MX,MY,NZ,..." -p "11434,..." --servers "nginx,..." \
+  --session 20260718120000
 ```
 
 ## Shell script
@@ -84,15 +95,25 @@ maximize coverage. Each axis can be overridden with comma-separated values
 (via `-c`, `-p`, `--servers`) — a `None` entry for "no filter" is always
 prepended.
 
+If FOFA's daily usage limit is hit (3000 on the free tier), graflex exits with a
+message showing the session timestamp. Resume later with `--session <run_ts>` to
+skip all previously-fetched combinations and pick up where you left off.
+
 Results saved to `~/.cache/free-ollama/{name}-hosts.json` (default: `image-gen-hosts.json`).
 
 ### Check
 
-Probes each host from the seed list that doesn't already have model data in
-the working file. After each host, the result is written to disk atomically
-(write to `.tmp` then `os.replace`) so partial progress is never lost on crash.
+Probes each host from the seed list. After each host, the result is written to
+disk atomically (write to `.tmp` then `os.replace`) so partial progress is never
+lost on crash.
 
 Each result includes a `checked` field with an ISO 8601 timestamp.
+
+| Action | Behavior |
+|--------|----------|
+| `check` | Skips hosts already in the working file and hosts with `result: "error"` in the not-working file. Rechecks `unreachable` hosts. |
+| `check-new` | Skips all hosts with any previous record (working or not-working). Only checks hosts never tested before. |
+| `check-all` | Rechecks every host regardless of previous status. |
 
 Working: `~/.cache/free-ollama/{name}-working.json` (default: `image-gen-working.json`)
 Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notworking.json`)
@@ -102,7 +123,7 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | Flag | Description |
 |------|-------------|
 | `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`) |
-| `-a`, `--action` | Action: `fetch`, `check`, or `fetch-check` |
+| `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, or `fetch-check` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging API requests) |
 | `-l`, `--limit` | Max results per query (default: 2) |
@@ -113,3 +134,6 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-p`, `--ports` | Comma-separated port values to cycle |
 | `-f`, `--fid` | Comma-separated FID values to filter by |
 | `--servers` | Comma-separated server values to cycle |
+| `--session` | Resume a previous session by providing its run timestamp (the `run_ts` from the log) |
+| `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
+| `--sleep` | Seconds to sleep between requests (default: 4) |

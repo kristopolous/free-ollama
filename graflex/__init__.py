@@ -451,7 +451,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
 
 
-async def _check_all(service, name=None, check_timeout=60):
+async def _check_all(service, name=None, check_timeout=60, check_new=False, check_all=False):
     from datetime import datetime, timezone
 
     if name is None:
@@ -477,8 +477,13 @@ async def _check_all(service, name=None, check_timeout=60):
         existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
     else:
         existing_notworking = {}
-    done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working if h.get("models")}
-    done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values() if n.get("result") == "error")
+    done = set()
+    if not check_all:
+        done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working if h.get("models")}
+        if check_new:
+            done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values())
+        else:
+            done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values() if n.get("result") == "error")
 
     to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
     if not to_check:
@@ -538,8 +543,8 @@ async def _check_all(service, name=None, check_timeout=60):
         log.info(f"check: {len(to_check)} checked, {success} working, {failed} notworking")
 
 
-def check(service, name=None, check_timeout=60):
-    asyncio.run(_check_all(service, name, check_timeout))
+def check(service, name=None, check_timeout=60, check_new=False, check_all=False):
+    asyncio.run(_check_all(service, name, check_timeout, check_new, check_all))
 
 
 def main():
@@ -558,7 +563,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG), help="service to search for")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "fetch-check"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "fetch-check"], required=True, help="action to perform")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
@@ -580,6 +585,8 @@ def main():
         parser.error("either --service, --query, or --name is required")
 
     parts = args.action.split("-")
+    check_new = args.action == "check-new"
+    check_all = args.action == "check-all"
 
     try:
         for step in parts:
@@ -587,6 +594,6 @@ def main():
             if step == "fetch":
                 fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session)
             elif step == "check":
-                check(service=args.service, name=args.name, check_timeout=args.check_timeout)
+                check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all)
     except SystemExit as e:
         sys.exit(e.code)
