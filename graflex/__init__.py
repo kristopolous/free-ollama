@@ -78,7 +78,7 @@ def _save_json_atomic(path, data):
 def _entry_host(entry):
     url = entry.get("url") or ""
     if url:
-        return url.split("://", 1)[1]
+        return url.split("://", 1)[1].rstrip("/")
     return entry.get("host", "")
 
 
@@ -479,10 +479,11 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         existing_notworking = {}
     done = set()
     if not check_all:
-        done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working if h.get("models")}
         if check_new:
+            done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working}
             done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values())
         else:
+            done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working if h.get("models")}
             done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values() if n.get("result") == "error")
 
     to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
