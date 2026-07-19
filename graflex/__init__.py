@@ -524,6 +524,9 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                 ok = True
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
+                if "Network is unreachable" in reason or "No route to host" in reason:
+                    log.info(f"~ {entry['host']}: {reason} (skipped, network issue)")
+                    return False
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason == "bad JSON" or "no real" in reason or "empty show" in reason) else "unreachable"
                 nr = {"service": service, "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file)
