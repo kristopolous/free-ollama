@@ -451,7 +451,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
 
 
-async def _check_all(service, name=None, check_timeout=60, check_new=False, check_all=False):
+async def _check_all(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10):
     from datetime import datetime, timezone
 
     if name is None:
@@ -495,7 +495,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
 
     log.info(f"check: {len(to_check)} to check ({len(done)} already done)")
 
-    sem = asyncio.Semaphore(10)
+    sem = asyncio.Semaphore(workers)
     wlock = asyncio.Lock()
 
     async def check_one(entry):
@@ -547,8 +547,8 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         log.info(f"check: {len(to_check)} checked, {success} working, {failed} notworking")
 
 
-def check(service, name=None, check_timeout=60, check_new=False, check_all=False):
-    asyncio.run(_check_all(service, name, check_timeout, check_new, check_all))
+def check(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10):
+    asyncio.run(_check_all(service, name, check_timeout, check_new, check_all, workers))
 
 
 def main():
@@ -580,6 +580,7 @@ def main():
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--sleep", type=int, default=SLEEP_DEFAULT, help=f"seconds to sleep between requests (default: {SLEEP_DEFAULT})")
+    parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")
     parser.add_argument("--session", help="resume a previous session by providing its run timestamp (the run_ts from the log)")
     args = parser.parse_args()
 
@@ -598,6 +599,6 @@ def main():
             if step == "fetch":
                 fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session)
             elif step == "check":
-                check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all)
+                check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers)
     except SystemExit as e:
         sys.exit(e.code)
