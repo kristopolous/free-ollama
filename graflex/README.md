@@ -135,5 +135,6 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-f`, `--fid` | Comma-separated FID values to filter by |
 | `--servers` | Comma-separated server values to cycle |
 | `--session` | Resume a previous session by providing its run timestamp (the `run_ts` from the log) |
+| `-w`, `--workers` | Max parallel check workers (default: 10) |
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
 | `--sleep` | Seconds to sleep between requests (default: 4) |
