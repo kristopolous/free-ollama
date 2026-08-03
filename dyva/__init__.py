@@ -100,46 +100,51 @@ def refresh_cache():
       try:
         response = requests.get(url)
         logging.info(f"Grabbing {url}")
+        # If this fails we try to use the existing one
+        with open(loc, "w") as f:
+          f.write(response.text)
       except Exception as ex:
         logging.warning(f"Unable to get {url}: {ex}")
 
-      with open(loc, "w") as f:
-        f.write(response.text)
 
     host_map = {}
 
-    with open(f'{_db}-forrany.tmp', 'r') as f:
-      try:
+    if os.path.exists(f'{_db}-forrany.tmp'):
+      with open(f'{_db}-forrany.tmp', 'r') as f:
+        try:
+          for row in json.loads(f.read()):
+            host_map[row.get('server')] = row
+        except Exception as ex:
+          logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
+
+    if os.path.exists(f'{_db}-graflex.tmp'):
+      with open(f'{_db}-graflex.tmp', 'r') as f:
         for row in json.loads(f.read()):
-          host_map[row.get('server')] = row
-      except Exception as ex:
-        logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
+          ip = row.get('url').rstrip('/')
+          if ip not in host_map:
+            host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+    
+          host_map[ip]['models'] += row.get('models')
 
-    with open(f'{_db}-graflex.tmp', 'r') as f:
-      for row in json.loads(f.read()):
-        ip = row.get('url').rstrip('/')
-        if ip not in host_map:
-          host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
-  
-        host_map[ip]['models'] += row.get('models')
+    if os.path.exists(f"{_db}-happyshua.tmp"):
+      with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
+        for r in csv.reader(csvfile):
+          ip = r[0].rstrip('/')
+          models = [m.strip() for m in r[1].split(',')]
+          if ip not in host_map:
+            host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+    
+          host_map[ip]['models'] += models
 
-    with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
-      for r in csv.reader(csvfile):
-        ip = r[0].rstrip('/')
-        models = [m.strip() for m in r[1].split(',')]
-        if ip not in host_map:
-          host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
-  
-        host_map[ip]['models'] += models
+    if os.path.exists(f"{_db}-spider.tmp"):
+      with open(f'{_db}-spider.tmp', 'r') as f:
+        for row in json.loads(f.read()):
+          ip = row.get('url').rstrip('/')
+          models = [ n.get('name') for n in row.get('models') ]
+          if ip not in host_map:
+            host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
 
-    with open(f'{_db}-spider.tmp', 'r') as f:
-      for row in json.loads(f.read()):
-        ip = row.get('url').rstrip('/')
-        models = [ n.get('name') for n in row.get('models') ]
-        if ip not in host_map:
-          host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
-
-        host_map[ip]['models'] += models
+          host_map[ip]['models'] += models
 
     if os.path.exists(f'{CACHE_DIR}/image-gen-working.json'):
       with open(f'{CACHE_DIR}/image-gen-working.json', 'r') as f:
