@@ -354,6 +354,19 @@ def to_ollama(body):
     for m in body.get("messages", []):
         if m.get("content") is None:
             m["content"] = ""
+        tcs = m.get("tool_calls")
+        if tcs:
+            out = []
+            for tc in tcs:
+                fn = tc.get("function", {})
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                out.append({"function": {"name": fn.get("name", ""), "arguments": args}})
+            m["tool_calls"] = out
     return body
 
 
