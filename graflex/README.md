@@ -63,7 +63,7 @@ gralex -q 'body="ollama"' -a fetch -n ollama --curlify
 # Resume a run that hit the daily usage limit (use the run_ts from the error message)
 graflex -s ollama -a fetch \
   -c "TH,MX,MY,NZ,..." -p "11434,..." --servers "nginx,..." \
-  --session 20260718120000
+  --id 20260718120000
 ```
 
 ## Shell script
@@ -96,7 +96,7 @@ maximize coverage. Each axis can be overridden with comma-separated values
 prepended.
 
 If FOFA's daily usage limit is hit (3000 on the free tier), graflex exits with a
-message showing the session timestamp. Resume later with `--session <run_ts>` to
+message showing the session timestamp. Resume later with `--id <run_ts>` to
 skip all previously-fetched combinations and pick up where you left off.
 
 Results saved to `~/.cache/free-ollama/{name}-hosts.json` (default: `image-gen-hosts.json`).
@@ -134,8 +134,8 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-p`, `--ports` | Comma-separated port values to cycle |
 | `-f`, `--fid` | Comma-separated FID values to filter by |
 | `--servers` | Comma-separated server values to cycle |
-| `--session` | Resume a previous session by providing its run timestamp (the `run_ts` from the log) |
+| `-i`, `--id` | Resume a previous session by providing its run timestamp (the `run_ts` from the log) |
 | `-w`, `--workers` | Max parallel check workers (default: 10) |
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
-| `--sleep` | Seconds to sleep between requests (default: 4) |
-| `--shuffle` | Shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order |
+| `-z`, `--sleep` | Seconds to sleep between requests (default: 4) |
+| `-r`, `--random` | Shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order |
