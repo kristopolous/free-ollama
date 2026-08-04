@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import datetime
 import fnmatch
 import csv
 import json
@@ -17,12 +18,35 @@ from aiohttp import web
 from aiohttp_swagger3 import SwaggerDocs, SwaggerInfo, SwaggerUiSettings
 
 LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
+
+LOG_FORMAT = "%(asctime)s %(srcaddr)s %(levelname)s %(message)s"
+
+
+class ApacheStyleFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        tz = datetime.timezone(datetime.timedelta(seconds=time.localtime().tm_gmtoff))
+        return datetime.datetime.fromtimestamp(record.created, tz=tz).strftime("[%d/%b/%Y:%H:%M:%S %z]")
+
+
 logging.basicConfig(
     level=getattr(logging, LOGLEVEL, logging.INFO),
-    format="%(message)s",
-    stream=sys.stderr,
+    handlers=[logging.StreamHandler(sys.stderr)],
 )
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(ApacheStyleFormatter(LOG_FORMAT, defaults={"srcaddr": "-"}))
 log = logging.getLogger("dumpster-dyva")
+
+access_logger = logging.getLogger("aiohttp.access")
+access_logger.propagate = False
+access_logger.addHandler(logging.StreamHandler(sys.stderr))
+access_logger.handlers[-1].setFormatter(logging.Formatter("%(message)s"))
+
+
+def log_upstream(code, host, endpoint, body, remote=None):
+    log.warning(
+        f"upstream error {code} from {host}{endpoint}: {body}",
+        extra={"srcaddr": remote or "-"},
+    )
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
@@ -441,7 +465,7 @@ def _curlify(method, url, json_body):
         logging.debug(f"curlify failed: {e}")
 
 
-async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat"):
+async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None):
     done = asyncio.Event()
     result_queue = asyncio.Queue()
     errors = []
@@ -492,7 +516,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 try:
                     raw = await resp.read()
                     body = raw.decode('utf-8', errors='replace')[:500]
-                    log.warning(f"upstream error {code} from {host}{endpoint}: {body}")
+                    log_upstream(code, host, endpoint, body, remote=remote)
                     await _collect_err(f"{host}: {body}")
                 except Exception:
                     pass
@@ -612,7 +636,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     return result, errors
 
 
-async def _try_one(session, host, model, full_model, opayload):
+async def _try_one(session, host, model, full_model, opayload, remote=None):
     wid = asyncio.current_task().get_name()
     await broadcast_activity(host, model, "trying",
         f"trying: {host} for {model}", wid=wid)
@@ -637,7 +661,7 @@ async def _try_one(session, host, model, full_model, opayload):
         try:
             raw = await resp.read()
             err_msg = raw.decode('utf-8', errors='replace')[:500]
-            log.warning(f"upstream error {resp.status} from {host}/api/chat: {err_msg}")
+            log_upstream(resp.status, host, "/api/chat", err_msg, remote=remote)
         except Exception:
             pass
         await resp.release()
@@ -678,7 +702,7 @@ async def _try_one(session, host, model, full_model, opayload):
     return data, None
 
 
-async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat"):
+async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat", remote=None):
     wid = asyncio.current_task().get_name()
     await broadcast_activity(host, model, "trying",
         f"trying: {host} for {model}", wid=wid)
@@ -703,7 +727,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
         try:
             raw = await resp.read()
             err_msg = raw.decode('utf-8', errors='replace')[:500]
-            log.warning(f"upstream error {resp.status} from {host}{endpoint}: {err_msg}")
+            log_upstream(resp.status, host, endpoint, err_msg, remote=remote)
         except Exception:
             pass
         await resp.release()
@@ -830,14 +854,14 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
         last_host, last_full = last
         log.debug(f"Reusing {last_host} for {model_list[0]}")
         if do_stream:
-            result, last_host_err = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True)
+            result, last_host_err = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True, remote=request.remote)
             if result:
                 resp, first_line, first = result
                 stream_resp = web.StreamResponse()
                 await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format)
                 return stream_resp
         else:
-            data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload)
+            data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload, remote=request.remote)
             if data:
                 return chat_fmt(data, model_list[0], openai_format)
 
@@ -850,7 +874,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
     for model in model_list:
         if do_stream:
-            result, errors = await _race_servers(session, model, servers, opayload, do_stream=True)
+            result, errors = await _race_servers(session, model, servers, opayload, do_stream=True, remote=request.remote)
             if result:
                 _, host, full, resp, first_line, first = result
                 stream_resp = web.StreamResponse()
@@ -865,7 +889,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     content_type="text/event-stream",
                 )
         else:
-            result, errors = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False)
+            result, errors = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False, remote=request.remote)
 
             if result:
                 _, host, full, data = result
@@ -896,7 +920,7 @@ async def _proxy_generate(request, session):
         last_host, last_full = last
         log.debug(f"Reusing {last_host} for {model}")
         if do_stream:
-            result, last_host_err = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint)
+            result, last_host_err = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint, remote=request.remote)
             if result:
                 resp, first_line, first = result
                 stream_resp = web.StreamResponse()
@@ -944,7 +968,7 @@ async def _proxy_generate(request, session):
                     try:
                         raw = await r.read()
                         last_host_err = raw.decode('utf-8', errors='replace')[:500]
-                        log.warning(f"upstream error {r.status} from {last_host}{endpoint}: {last_host_err}")
+                        log_upstream(r.status, last_host, endpoint, last_host_err, remote=request.remote)
                     except Exception:
                         pass
                     await r.release()
@@ -960,7 +984,7 @@ async def _proxy_generate(request, session):
         return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
     if do_stream:
-        result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint)
+        result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote)
         if result:
             _, host, full, resp, first_line, first = result
             stream_resp = web.StreamResponse()
@@ -971,7 +995,7 @@ async def _proxy_generate(request, session):
             msg += ": " + "; ".join(dict.fromkeys(errors))
         return web.json_response(err_obj(msg), status=502)
 
-    result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint)
+    result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote)
     if result:
         _, host, full, data = result
         return web.json_response(data)
@@ -2209,7 +2233,13 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        web.run_app(app, host=args.host or "0.0.0.0", port=PORT, print=lambda *a: None)
+        web.run_app(
+            app,
+            host=args.host or "0.0.0.0",
+            port=PORT,
+            access_log_format='%t %a "%r" %s %b "%{Referer}i" "%{User-Agent}i"',
+            print=lambda *a: None,
+        )
 
     except (KeyboardInterrupt, SystemExit):
         log.info("Server exiting by keyboard interrupt")
