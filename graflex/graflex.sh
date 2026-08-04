@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SLEEP=10
 SERVICE="${1:-ollama}"
 shift 2>/dev/null || true
 EXTRA_ARGS=("$@")
@@ -36,4 +37,12 @@ case "$SERVICE" in
     ;;
 esac
 
-exec ./graflex.py -q "$QUERY" -f "$FID" -a fetch -n "$SERVICE" -p "$PORTS" --servers "$SERVERS" -c "$COUNTRIES" "${EXTRA_ARGS[@]}"
+exec ./graflex.py \
+      --servers "$SERVERS" \
+      --sleep $SLEEP \
+      -a fetch \
+      -c "$COUNTRIES" "${EXTRA_ARGS[@]}" \
+      -f "$FID" \
+      -n "$SERVICE" \
+      -p "$PORTS" \
+      -q "$QUERY" 
