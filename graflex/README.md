@@ -138,3 +138,4 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-w`, `--workers` | Max parallel check workers (default: 10) |
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
 | `--sleep` | Seconds to sleep between requests (default: 4) |
+| `--shuffle` | Shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order |

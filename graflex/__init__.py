@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import sys
 import time
 
@@ -80,6 +81,21 @@ def _entry_host(entry):
     if url:
         return url.split("://", 1)[1].rstrip("/")
     return entry.get("host", "")
+
+
+def _fmt_duration(seconds):
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, _ = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins or not parts:
+        parts.append(f"{mins}m")
+    return " ".join(parts)
 
 
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
@@ -346,7 +362,7 @@ def _parse_fofa_html(html_path, service):
     return hosts
 
 
-def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None):
+def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False):
     hosts_file = _cache_file(name, "hosts")
 
     if method == "web":
@@ -374,10 +390,17 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         else:
             fid_list = [None]
 
+        if shuffle:
+            random.shuffle(country_list)
+            random.shuffle(port_list)
+            random.shuffle(server_list)
+            random.shuffle(fid_list)
+
         pool = _load_json(hosts_file)
         seen = {f"{h['service']}@{h['host']}" for h in pool}
         combos = [(c, p, s, f) for f in fid_list for s in server_list for p in port_list for c in country_list]
 
+        start = time.time()
         for i, (country, port, server, fid) in enumerate(combos):
             if query:
                 qparts = [query]
@@ -417,6 +440,11 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             if not dry:
                 _save_json(hosts_file, pool)
                 log.info(f"  total: {len(pool)}\n")
+
+                done = i + 1
+                elapsed = time.time() - start
+                eta = elapsed * (len(combos) / done) - elapsed
+                log.info(f"  eta: {_fmt_duration(eta)} left\n")
 
             if i < len(combos) - 1 and not dry and not curlify:
                 time.sleep(sleep)
@@ -582,6 +610,7 @@ def main():
     parser.add_argument("--sleep", type=int, default=SLEEP_DEFAULT, help=f"seconds to sleep between requests (default: {SLEEP_DEFAULT})")
     parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")
     parser.add_argument("--session", help="resume a previous session by providing its run timestamp (the run_ts from the log)")
+    parser.add_argument("--shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
     args = parser.parse_args()
 
     if args.query and not args.name:
@@ -597,7 +626,7 @@ def main():
         for step in parts:
             log.info(f"--- {step} ---")
             if step == "fetch":
-                fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session)
+                fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle)
             elif step == "check":
                 check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers)
     except SystemExit as e:
