@@ -28,6 +28,7 @@ def _cache_file(name, suffix):
 
 TIMEOUT = 60
 BACKOFF = 15
+MAX_BACKOFF = 300
 SLEEP_DEFAULT = 4
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
@@ -96,6 +97,21 @@ def _fmt_duration(seconds):
     if mins or not parts:
         parts.append(f"{mins}m")
     return " ".join(parts)
+
+
+def _is_offline_msg(msg):
+    msg = str(msg).lower()
+    return (
+        "temporary failure in name resolution" in msg
+        or "failed to resolve" in msg
+        or "network is unreachable" in msg
+        or "no route to host" in msg
+        or "getaddrinfo failed" in msg
+    )
+
+
+def _is_offline_error(exc):
+    return type(exc).__name__ == "NameResolutionError" or _is_offline_msg(str(exc))
 
 
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
@@ -201,17 +217,28 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False):
         log.info(curlify_mod.to_curl(prepared))
         return []
 
-    try:
-        with requests.Session() as s:
-            resp = s.send(prepared, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("error"):
-            log.error(f"FOFA error: {data.get('error')}")
+    backoff = BACKOFF
+    while True:
+        try:
+            with requests.Session() as s:
+                resp = s.send(prepared, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("error"):
+                log.error(f"FOFA error: {data.get('error')}")
+                return []
+            break
+        except requests.exceptions.ConnectionError as e:
+            if _is_offline_error(e):
+                log.warning(f"offline ({e}); retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff = min(int(backoff * 1.2), MAX_BACKOFF)
+                continue
+            log.error(f"FOFA API request failed: {e}")
             return []
-    except Exception as e:
-        log.error(f"FOFA API request failed: {e}")
-        return []
+        except Exception as e:
+            log.error(f"FOFA API request failed: {e}")
+            return []
 
     hosts = []
     for row in data.get("results", []):
@@ -257,7 +284,8 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         return []
 
     backoff = BACKOFF
-    for attempt in range(3):
+    attempt = 0
+    while True:
         try:
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
@@ -278,6 +306,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
                 log.warning(f"rate limited, retrying in {backoff}s")
                 time.sleep(backoff)
                 backoff = int(backoff * 1.2)
+                attempt += 1
             else:
                 log.warning("rate limited")
                 return None
@@ -287,6 +316,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
                 log.warning(f"rate limited ({code}), retrying in {backoff}s")
                 time.sleep(backoff)
                 backoff = int(backoff * 1.2)
+                attempt += 1
             else:
                 if code in (429, 403):
                     log.warning(f"rate limited  ({code})")
@@ -294,10 +324,16 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
                     log.error(f"FOFA web request failed: {e}")
                 return None
         except requests.exceptions.ConnectionError as e:
+            if _is_offline_error(e):
+                log.warning(f"offline ({e}); retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff = min(int(backoff * 1.2), MAX_BACKOFF)
+                continue
             if attempt < 2:
                 log.warning(f"connection error, retrying in {backoff}s")
                 time.sleep(backoff)
                 backoff = int(backoff * 1.2)
+                attempt += 1
             else:
                 log.error(f"FOFA web request failed: {e}")
                 return None
@@ -531,7 +567,15 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             host_port = entry["host"].split(":")
             h = host_port[0]
             p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-            result = await _check_host(session, h, p, service, timeout=check_timeout)
+            backoff = BACKOFF
+            while True:
+                result = await _check_host(session, h, p, service, timeout=check_timeout)
+                if isinstance(result, dict) and "error" in result and _is_offline_msg(result["error"]):
+                    log.warning(f"~ {entry['host']}: {result['error']} (offline, retrying in {backoff}s...)")
+                    await asyncio.sleep(backoff)
+                    backoff = min(int(backoff * 1.2), MAX_BACKOFF)
+                    continue
+                break
 
         key = f"{service}@{entry['host']}"
         ok = False
@@ -553,9 +597,6 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                 ok = True
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
-                if "Network is unreachable" in reason or "No route to host" in reason:
-                    log.info(f"~ {entry['host']}: {reason} (skipped, network issue)")
-                    return False
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason == "bad JSON" or "no real" in reason or "empty show" in reason) else "unreachable"
                 nr = {"service": service, "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file)

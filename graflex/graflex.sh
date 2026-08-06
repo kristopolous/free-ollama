@@ -20,8 +20,7 @@ case "$SERVICE" in
     PORTS="8188,8080,80,443"
     SERVERS="nginx,cloudflare"
     COUNTRIES="US,AU,IN,JP,DE,CA,BR,CN"
-    FID="2zn7oqmRiwaUu3+PzyTjvw==,7aBY0X9WxdeghtrJGx1MEQ==,MJ7K0wma6lKOVne5ksgrSw==,yhjkkd4AnCsogP9Ms1QgVA==
-"
+    FID="2zn7oqmRiwaUu3+PzyTjvw==,7aBY0X9WxdeghtrJGx1MEQ==,MJ7K0wma6lKOVne5ksgrSw==,yhjkkd4AnCsogP9Ms1QgVA=="
     ;;
 
   a1111)
@@ -31,6 +30,7 @@ case "$SERVICE" in
     COUNTRIES="TH,MX,MY,NZ,BH,SG,KR,GB,AE,US,AU,IN,JP,DE,CA,RU,IL,BR,CN,IE,FR,ES,ID,IT,CH,ZA,HK,PL"
     FID="4OeA79EXS7Z+DdzkAvrBag==,WPcuJSTXuzZQIeov/h9jgA==,NCPjfTODiuNabsua2LTY7Q==,SWCeWGsQp4gTPi4YvgrIdQ=="
     ;;
+
   *)
     echo "Usage: $0 [ollama|comfyui|a1111]" >&2
     exit 1
@@ -38,11 +38,12 @@ case "$SERVICE" in
 esac
 
 exec ./graflex.py \
+      --action "fetch" \
+      --countries "$COUNTRIES" "${EXTRA_ARGS[@]}" \
+      --fid   "$FID" \
+      --ports "$PORTS" \
+      --query "$QUERY" \
+      --random \
       --servers "$SERVERS" \
-      --sleep $SLEEP \
-      -a fetch \
-      -c "$COUNTRIES" "${EXTRA_ARGS[@]}" \
-      -f "$FID" \
-      -n "$SERVICE" \
-      -p "$PORTS" \
-      -q "$QUERY" 
+      --service "$SERVICE" \
+      --sleep   "$SLEEP"
