@@ -45,6 +45,8 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `*` | `/comfyui/{path}` | ComfyUI pass-through proxy |
 | `GET` | `/dashboard` | Dashboard UI |
 | `GET` | `/clear-bad` | Clear failed host+model pairs |
+| `GET` | `/next-host` | Remove a model from the last-successful list |
+| `GET` | `/skip-good` | Move a good host+model pair into the bad list |
 | `GET` | `/refresh` | Re-fetch server lists from all sources |
 
 ### Text-to-Image

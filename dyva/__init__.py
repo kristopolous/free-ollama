@@ -7,9 +7,11 @@ import csv
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import requests
 import importlib.metadata
 
@@ -247,6 +249,22 @@ def add_good(host, model):
             f.write(f"{key}\n")
         if _good_cache is not None:
             _good_cache.add(key)
+
+
+def remove_good(host, model):
+    global _good_cache
+    key = f"{host} {model}"
+    good = load_good()
+    if key not in good:
+        return
+    good.discard(key)
+    if os.path.exists(GOOD_FILE):
+        with open(GOOD_FILE) as f:
+            lines = f.readlines()
+        with open(GOOD_FILE, "w") as f:
+            for line in lines:
+                if line.strip() != key:
+                    f.write(line)
 
 
 def load_last():
@@ -1049,12 +1067,12 @@ async def handle_dashboard(request):
     )
     model_more = ""
     last_rows = "".join(
-        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><span class="host-model">{model}</span></div>'
+        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><a class="skip-link" href="next-host?model={urllib.parse.quote(model)}" data-skip-model="{urllib.parse.quote(model)}">skip</a><span class="host-model">{model}</span></div>'
         for model, entry in list(_last_cache.items())[:20]
     ) if _last_cache else '<div style="color:#999;font-size:.85rem">None</div>'
     good_valid = [h for h in good if " " in h]
     good_rows = "".join(
-        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
+        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><a class="skip-link" href="skip-good?host={urllib.parse.quote(h.split(" ", 1)[0])}&model={urllib.parse.quote(h.split(" ", 1)[1])}">skip</a><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
         for h in sorted(good_valid, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
     )
     good_more = f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else ""
@@ -1140,17 +1158,17 @@ async def handle_clear_bad(request):
 
 async def handle_next_host(request):
     """
-    Skip the last successful host for a model, marking it bad so a different host is tried next.
+    Skip a model's last successful host, removing it from the last-successful list so another host is tried.
     ---
     tags: [Admin]
-    summary: Skip last successful host for a model
+    summary: Remove a model's last successful host from the last-successful list
     parameters:
       - in: query
         name: model
         schema:
           type: string
         required: true
-        description: Model name to skip the last host for
+        description: Model name to remove from the last-successful list
     responses:
       '200':
         description: Success
@@ -1159,13 +1177,44 @@ async def handle_next_host(request):
     if not model:
         return web.json_response({"error": "missing model parameter"}, status=400)
 
-    last = get_last(model)
-    if last:
-        last_host, _ = last
-        add_bad(last_host, model)
-        if _last_cache is not None and model in _last_cache:
-            del _last_cache[model]
-            save_last()
+    load_last()
+    if model in _last_cache:
+        del _last_cache[model]
+        save_last()
+
+    raise web.HTTPFound("/")
+
+
+async def handle_skip_good(request):
+    """
+    Skip a good host, moving it from the good list into the bad list.
+    ---
+    tags: [Admin]
+    summary: Move a good host+model pair into the bad list
+    parameters:
+      - in: query
+        name: host
+        schema:
+          type: string
+        required: true
+        description: Host to skip
+      - in: query
+        name: model
+        schema:
+          type: string
+        required: true
+        description: Model to skip the host for
+    responses:
+      '200':
+        description: Success
+    """
+    host = request.query.get("host")
+    model = request.query.get("model")
+    if not host or not model:
+        return web.json_response({"error": "missing host or model parameter"}, status=400)
+
+    add_bad(host, model)
+    remove_good(host, model)
 
     raise web.HTTPFound("/")
 
@@ -1377,11 +1426,14 @@ async def handle_api_ps(request):
     if _last_cache:
         for i, (model, entry) in enumerate(_last_cache.items()):
             expires_at = "9999-12-31T23:59:59.000000Z"
+            full = entry.get("full", model)
+            host = entry.get("host", "unknown")
+            digest = re.sub(r"^https?://", "", host)
             models_list.append({
-                "name": model,
-                "model": model,
+                "name": full,
+                "model": full,
                 "size": 0,
-                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "digest": digest,
                 "details": {
                     "parent_model": "",
                     "format": "gguf",
@@ -1436,6 +1488,8 @@ async def handle_api_show(request):
 
     hosts = [h[1].rstrip("/v1") for h in find_servers(model)]
     system_val = " ".join(hosts) if hosts else "No hosts available for this model."
+    last = get_last(model)
+    license_val = f"{re.sub(r'^https?://', '', last[0])} {last[1]}" if last else ""
     details = {
         "parent_model": "",
         "format": "gguf",
@@ -1451,7 +1505,8 @@ async def handle_api_show(request):
         "system": system_val,
         "details": details,
         "model_info": {},
-        "capabilities": ["completion", "vision", "audio", "tools", "thinking"]
+        "capabilities": ["completion", "vision", "audio", "tools", "thinking"],
+        "license": license_val,
     })
 
 
@@ -2156,6 +2211,7 @@ def make_app():
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)
     swagger.add_get("/next-host", handle_next_host)
+    swagger.add_get("/skip-good", handle_skip_good)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
     swagger.add_get("/api/version", handle_api_version)
