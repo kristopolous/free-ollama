@@ -13,7 +13,7 @@ dyva -p 8080
 
 | Flag | Description |
 |------|-------------|
-| `-p`, `--port` | Port to listen on (default: 8080) |
+| `-p`, `--port` | Port to listen on (default: 11434) |
 | `-u`, `--host` | Host address to bind (default: all interfaces) |
 | `-t`, `--timeout` | Request timeout seconds (default: 30) |
 | `-w`, `--workers` | Concurrent workers (default: 3) |
