@@ -806,6 +806,8 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
     content_type = "text/event-stream" if openai_format else "application/x-ndjson"
     response.headers["Content-Type"] = content_type
     response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
+    response.headers["X-Dyva-Model"] = full
     try:
         await response.prepare(request)
     except (BrokenPipeError, ConnectionResetError, aiohttp.ClientConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
@@ -881,7 +883,10 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
         else:
             data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload, remote=request.remote)
             if data:
-                return chat_fmt(data, model_list[0], openai_format)
+                resp = chat_fmt(data, model_list[0], openai_format)
+                resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", last_host)
+                resp.headers["X-Dyva-Model"] = last_full
+                return resp
 
     servers = find_servers(model_in)
     if not servers:
@@ -911,7 +916,10 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
             if result:
                 _, host, full, data = result
-                return chat_fmt(data, model, openai_format)
+                resp = chat_fmt(data, model, openai_format)
+                resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
+                resp.headers["X-Dyva-Model"] = full
+                return resp
 
     msg = "all servers failed"
     if errors:
