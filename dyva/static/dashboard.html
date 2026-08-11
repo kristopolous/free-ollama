@@ -389,12 +389,12 @@ function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').
 function mdRender(text){
   var out=String(text||'');
   var math=[];
-  out=out.replace(/\$\$([\s\S]+?)\$\$/g,function(_,m){math.push({d:1,s:m});return '~{M'+(math.length-1)+'}~'});
-  out=out.replace(/\$([^$\n]+?)\$/g,function(_,m){math.push({d:0,s:m});return '~{M'+(math.length-1)+'}~'});
+  out=out.replace(/\$\$([\s\S]+?)\$\$/g,function(_,m){math.push({d:1,s:m});return 'katexmath'+(math.length-1)});
+  out=out.replace(/\$([^$\n]+?)\$/g,function(_,m){math.push({d:0,s:m});return 'katexmath'+(math.length-1)});
   if(window.marked){try{out=window.marked.parse(out)}catch(e){}}
   else{out=escHtml(out).replace(/\n/g,'<br>')}
   if(window.DOMPurify){try{out=window.DOMPurify.sanitize(out)}catch(e){}}
-  out=out.replace(/~\{M(\d+)\}~/g,function(_,i){
+  out=out.replace(/katexmath(\d+)/g,function(_,i){
     var m=math[+i];
     if(!m)return '';
     if(window.katex){
