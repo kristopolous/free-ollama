@@ -30,8 +30,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;col
 .panel{display:none}
 .panel.active{display:block}
 #chat.panel.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
-footer{margin-top:auto;text-align:center;padding-top:1rem;flex-shrink:0}
-footer a{text-decoration:none;color:#77a}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:12px}
 .card{background:transparent;border-radius:8px;padding:0;box-shadow:none;overflow:visible}
@@ -76,7 +74,12 @@ button:hover{background:#4a4a7a}
 button:disabled{opacity:.5;cursor:default}
 .messages{border:1px solid #333;border-radius:8px;background:#181818;height:46vh;overflow-y:auto;padding:.75em;margin-bottom:.75em}
 .msg{margin-bottom:.75em}
-.msg .role{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.25em}
+.msg .role{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.25em;display:flex;align-items:center;gap:.4em}
+.msg .actions{display:none;align-items:center;gap:.2em}
+.msg:hover .actions{display:flex}
+.msg .actions .act{cursor:pointer;color:#77a;font-size:.85rem;padding:1px 5px;border-radius:3px;user-select:none;line-height:1.2}
+.msg .actions .act:hover{background:#2a2a4a}
+.msg .editbox{width:100%;min-height:3em;background:#111;border:1px solid #444;border-radius:6px;color:#eee;padding:.5em;font-size:.85rem;font-family:ui-monospace,monospace;outline:none;resize:vertical}
 .msg.user .role{color:#77a}
 .msg .body{background:#1e1e1e;border-radius:8px;padding:.7em;font-size:.9rem;overflow-wrap:anywhere;line-height:1.45}
 .msg .body .error{color:#c33}
@@ -130,7 +133,7 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <img src="dyva.avif" alt="" width="48" height="48">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub">__WORKER_COUNT__ workers &middot; __TIMEOUT__s timeout &middot; __SERVER_COUNT__ servers &middot; __MODEL_COUNT__ models &middot; v__DYVA_VERSION__ &middot; <a href="/docs" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">docs</a></p>
+<p class="sub">__WORKER_COUNT__ workers &middot; __TIMEOUT__s timeout &middot; __SERVER_COUNT__ servers &middot; __MODEL_COUNT__ models &middot; v__DYVA_VERSION__ &middot; <a href="/docs" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">docs</a> &middot; <a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">source</a></p>
 </div>
 </div>
 
@@ -283,7 +286,6 @@ __SD_MODELS__
 <div id="imgResult"></div>
 </div>
 
-<footer><a target=_blank href="https://github.com/kristopolous/free-ollama/tree/main/dyva">obviously open source</a></footer>
 <script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
 <script id="goodHostsData" type="application/json">__GOOD_HOSTS_DATA__</script>
 <script id="badHostsData" type="application/json">__BAD_HOSTS_DATA__</script>
@@ -354,16 +356,30 @@ function deleteChat(id){
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
 }
-function addMsg(role,text){
+function addMsg(role,text,index){
   var d=document.createElement('div');d.className='msg '+role;
   var r=document.createElement('div');r.className='role';r.textContent=role==='user'?'You':'Assistant';
   var b=document.createElement('div');b.className='body';
   if(role==='assistant'){
     b.innerHTML=mdRender(text);
     highlightBlocks(b);
+    if(index!==undefined){
+      var m=currentChat.messages[index];
+      if(m&&(m.host||m.model||m.tps))setAssistantLabel(r,m.host,m.model,m.tps);
+    }
   }
   else b.textContent=text;
-  d.appendChild(r);d.appendChild(b);chatLog.appendChild(d);
+  d.appendChild(r);d.appendChild(b);
+  if(role==='user'&&index!==undefined){
+    var acts=document.createElement('span');acts.className='actions';
+    var pen=document.createElement('span');pen.className='act';pen.textContent='✎';pen.title='Edit';
+    pen.addEventListener('click',function(e){e.stopPropagation();editUserMsg(index)});
+    var rel=document.createElement('span');rel.className='act';rel.textContent='⟳';rel.title='Try again';
+    rel.addEventListener('click',function(e){e.stopPropagation();retryUserMsg(index)});
+    acts.appendChild(pen);acts.appendChild(rel);
+    r.appendChild(acts);
+  }
+  chatLog.appendChild(d);
   chatLog.scrollTop=chatLog.scrollHeight;
   return {roleEl:r,bodyEl:b};
 }
@@ -394,7 +410,80 @@ function scheduleStreamRender(){
 }
 function renderMessages(){
   chatLog.innerHTML='';
-  currentChat.messages.forEach(function(m){addMsg(m.role,m.content)});
+  currentChat.messages.forEach(function(m,i){addMsg(m.role,m.content,i)});
+}
+function findChatIndex(id){
+  var chats=loadChats();
+  for(var k=0;k<chats.length;k++){if(String(chats[k].id)===String(id))return k}
+  return -1;
+}
+function chatInView(chatId){return String(currentChat.id)===String(chatId)}
+function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render){
+  if(!content)return;
+  var msg={role:'assistant',content:content,host:host||'',model:fmodel||'',tps:tps};
+  var inView=chatInView(chatId);
+  var chats=loadChats(),i=findChatIndex(chatId);
+  if(inView&&i<0){
+    currentChat.messages.push(msg);
+    saveCurrentChat();
+    renderSidebar();
+    return;
+  }
+  if(i>=0){
+    chats[i].messages.push(msg);
+    persistChats(chats);
+    if(inView){
+      currentChat.messages=chats[i].messages.slice();
+      renderSidebar();
+      if(render)renderMessages();
+    }
+  }
+}
+function editUserMsg(index){
+  if(index<0||index>=currentChat.messages.length)return;
+  var m=currentChat.messages[index];
+  if(m.role!=='user')return;
+  var msgEl=chatLog.children[index];
+  if(!msgEl)return;
+  var bodyEl=msgEl.querySelector('.body');
+  if(!bodyEl)return;
+  var ta=document.createElement('textarea');
+  ta.className='editbox';
+  ta.value=m.content;
+  bodyEl.replaceWith(ta);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length,ta.value.length);
+  var finished=false;
+  function done(save){
+    if(finished)return;finished=true;
+    var val=save?ta.value:m.content;
+    if(ta.parentNode){
+      var b=document.createElement('div');b.className='body';b.textContent=val;
+      ta.replaceWith(b);
+    }
+    m.content=val;
+    if(index===0)currentChat.title=val.replace(/\s+/g,' ').slice(0,40);
+    if(save){saveCurrentChat();renderSidebar();}
+  }
+  ta.addEventListener('keydown',function(e){
+    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();done(true);}
+    else if(e.key==='Escape'){done(false);}
+  });
+  ta.addEventListener('blur',function(){done(true);});
+}
+function retryUserMsg(index){
+  if(index<0||index>=currentChat.messages.length)return;
+  var m=currentChat.messages[index];
+  if(m.role!=='user')return;
+  var text=m.content;
+  currentChat.messages=currentChat.messages.slice(0,index);
+  saveCurrentChat();
+  renderMessages();
+  renderSidebar();
+  var input=document.getElementById('chatInput');
+  input.value=text;
+  input.focus();
+  sendChat();
 }
 function setAssistantLabel(el,host,fmodel,tps){
   var s='ASSISTANT';
@@ -428,26 +517,35 @@ async function sendChat(){
     chatLog.scrollTop=chatLog.scrollHeight;
     return;
   }
+  var chatId=currentChat.id;
+  var chatCreated=currentChat.createdAt;
   currentChat.model=model;
-  addMsg('user',text);
-  var bubble=addMsg('assistant','');
-  bubble.bodyEl.classList.add('streaming');
   currentChat.messages.push({role:'user',content:text});
   if(!currentChat.title)currentChat.title=text.replace(/\s+/g,' ').slice(0,40);
+  var chatTitle=currentChat.title;
+  addMsg('user',text,currentChat.messages.length-1);
+  var bubble=addMsg('assistant','');
+  bubble.bodyEl.classList.add('streaming');
   input.value='';
   btn.disabled=true;
+  function live(){return chatInView(chatId)&&bubble.bodyEl.isConnected}
   try{
     var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:currentChat.messages,stream:true})});
     var host=resp.headers.get('X-Dyva-Host')||'';
     var fmodel=resp.headers.get('X-Dyva-Model')||model;
-    setAssistantLabel(bubble.roleEl,host,fmodel);
     if(!resp.ok){
       var msg='HTTP '+resp.status;
       try{var j=await resp.json();msg=(j.error&&(j.error.message||j.error))||msg}catch(e){}
-      bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(msg)+'</span>';
-      currentChat.messages.pop();
+      if(live()){
+        bubble.bodyEl.classList.remove('streaming');
+        bubble.bodyEl.removeAttribute('data-stream');
+        bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(msg)+'</span>';
+        saveCurrentChat();
+        renderSidebar();
+      }
       return;
     }
+    if(live())setAssistantLabel(bubble.roleEl,host,fmodel);
     var reader=resp.body.getReader();
     var dec=new TextDecoder();
     var acc='',full='',tps=null;
@@ -464,36 +562,44 @@ async function sendChat(){
         try{d=JSON.parse(line)}catch(e){continue}
         if(d.message&&d.message.content){
           full+=d.message.content;
-          bubble.bodyEl.setAttribute('data-stream',full);
-          scheduleStreamRender();
+          if(live()){
+            bubble.bodyEl.setAttribute('data-stream',full);
+            scheduleStreamRender();
+          }
         }
         if(d.done){
           if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
-          setAssistantLabel(bubble.roleEl,host,fmodel,tps);
-          bubble.bodyEl.classList.remove('streaming');
-          bubble.bodyEl.removeAttribute('data-stream');
-          bubble.bodyEl.innerHTML=mdRender(full);
-          highlightBlocks(bubble.bodyEl);
-          chatLog.scrollTop=chatLog.scrollHeight;
-          if(full)currentChat.messages.push({role:'assistant',content:full});
-          saveCurrentChat();
-          renderSidebar();
+          var wasLive=live();
+          if(wasLive){
+            setAssistantLabel(bubble.roleEl,host,fmodel,tps);
+            bubble.bodyEl.classList.remove('streaming');
+            bubble.bodyEl.removeAttribute('data-stream');
+            bubble.bodyEl.innerHTML=mdRender(full);
+            highlightBlocks(bubble.bodyEl);
+            chatLog.scrollTop=chatLog.scrollHeight;
+          }
+          pushAssistant(chatId,chatCreated,chatTitle,model,full,host,fmodel,tps,wasLive);
           return;
         }
       }
     }
-    bubble.bodyEl.classList.remove('streaming');
-    bubble.bodyEl.removeAttribute('data-stream');
-    bubble.bodyEl.innerHTML=mdRender(full);
-    highlightBlocks(bubble.bodyEl);
-    setAssistantLabel(bubble.roleEl,host,fmodel,tps);
-    if(full)currentChat.messages.push({role:'assistant',content:full});
-    saveCurrentChat();
-    renderSidebar();
+    var wasLive=live();
+    if(wasLive){
+      bubble.bodyEl.classList.remove('streaming');
+      bubble.bodyEl.removeAttribute('data-stream');
+      bubble.bodyEl.innerHTML=mdRender(full);
+      highlightBlocks(bubble.bodyEl);
+      setAssistantLabel(bubble.roleEl,host,fmodel,tps);
+    }
+    pushAssistant(chatId,chatCreated,chatTitle,model,full,host,fmodel,tps,wasLive);
   }catch(ex){
-    bubble.bodyEl.classList.remove('streaming');
-    bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(ex.message)+'</span>';
-    currentChat.messages.pop();
+    if(live()){
+      bubble.bodyEl.classList.remove('streaming');
+      bubble.bodyEl.removeAttribute('data-stream');
+      bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(ex.message)+'</span>';
+      saveCurrentChat();
+      renderSidebar();
+    }
   }
   finally{btn.disabled=false;}
 }
