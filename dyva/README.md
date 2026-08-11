@@ -6,7 +6,7 @@ OpenAI-compatible proxy that routes inference to free Ollama servers, A1111 host
 
 ```bash
 pip install -e .
-dyva -p 8080
+dyva
 ```
 
 ## CLI Options
@@ -43,7 +43,7 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `POST` | `/sdapi/v1/txt2img` | Text-to-image (A1111 + ComfyUI fallback) |
 | `GET` | `/sdapi/v1/sd-models` | List discovered SD models |
 | `*` | `/comfyui/{path}` | ComfyUI pass-through proxy |
-| `GET` | `/dashboard` | Dashboard UI |
+| `GET` | `/dashboard` | Dashboard UI (Server Room / Chat / Image tabs) |
 | `GET` | `/dashboard-data` | JSON snapshot of the last-successful/good/bad lists |
 | `GET` | `/clear-bad` | Clear failed host+model pairs |
 | `GET` | `/next-host` | Remove a model from the last-successful list |

@@ -4,23 +4,29 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dumpster Dyva</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Slackey&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px}
-.header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px;display:flex;flex-direction:column;min-height:100vh}
+.header{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-shrink:0}
 .header img{flex-shrink:0}
-.header-text h1{font-size:1.5rem;margin-bottom:2px}
+.header-text h1{font-family:"Slackey",sans-serif;font-weight:400;font-size:1.7rem;margin-bottom:2px}
 .header-text .sub{color:#999;font-size:.85rem}
-.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tabs{display:flex;gap:8px;margin-bottom:16px;flex-shrink:0}
 .tab{padding:8px 18px;border:none;border-radius:6px;background:#1e1e1e;color:#999;font-size:.9rem;cursor:pointer}
 .tab:hover{background:#2a2a3a}
 .tab.active{background:#2a2a4a;color:#eee}
 .panel{display:none}
 .panel.active{display:block}
+#chat.panel.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+footer{margin-top:auto;text-align:center;padding-top:1rem;flex-shrink:0}
+footer a{text-decoration:none;color:#77a}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:12px}
 .card{background:transparent;border-radius:8px;padding:0;box-shadow:none;overflow:visible}
@@ -63,29 +69,30 @@ textarea{resize:vertical;min-height:64px}
 button{background:#3a3a5a;color:#eee;border:none;border-radius:6px;padding:10px 20px;font-size:.9rem;cursor:pointer}
 button:hover{background:#4a4a7a}
 button:disabled{opacity:.5;cursor:default}
-.messages{border:1px solid #333;border-radius:8px;background:#181818;height:46vh;overflow-y:auto;padding:12px;margin-bottom:12px}
-.msg{margin-bottom:12px}
-.msg .role{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+.messages{border:1px solid #333;border-radius:8px;background:#181818;height:46vh;overflow-y:auto;padding:.75em;margin-bottom:.75em}
+.msg{margin-bottom:.75em}
+.msg .role{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.25em}
 .msg.user .role{color:#77a}
-.msg .body{background:#1e1e1e;border-radius:8px;padding:10px;font-size:.9rem;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.45}
+.msg .body{background:#1e1e1e;border-radius:8px;padding:.7em;font-size:.9rem;overflow-wrap:anywhere;line-height:1.45}
 .msg .body .error{color:#c33}
-.msg.user .body{background:#222a3a}
-.msg.assistant .body pre{background:#111;border:1px solid #333;border-radius:6px;padding:8px;overflow-x:auto;white-space:pre;margin:6px 0}
-.msg.assistant .body code{font-family:ui-monospace,monospace;font-size:.82rem;background:#111;padding:1px 4px;border-radius:4px}
+.msg.user .body{background:#222a3a;white-space:pre-wrap}
+.msg.assistant .body pre{background:#111;border:1px solid #333;border-radius:6px;padding:.6em;overflow-x:auto;white-space:pre;margin:.6em 0}
+.msg.assistant .body code{font-family:ui-monospace,monospace;font-size:.82rem;background:#111;padding:.05em .3em;border-radius:4px}
 .msg.assistant .body pre code{background:none;padding:0}
 .msg.assistant .body a{color:#77a}
-.msg.assistant .body blockquote{border-left:3px solid #444;margin:6px 0;padding:2px 10px;color:#aaa}
-.msg.assistant .body table{border-collapse:collapse;margin:6px 0}
-.msg.assistant .body th,.msg.assistant .body td{border:1px solid #444;padding:4px 8px}
-.msg.assistant .body ul,.msg.assistant .body ol{margin:0;padding-left:22px}
-.msg.assistant .body li{margin:1px 0}
-.msg.assistant .body p{margin:2px 0}
-.msg.assistant .body h1,.msg.assistant .body h2,.msg.assistant .body h3,.msg.assistant .body h4{margin:8px 0 4px}
-.msg.assistant .body hr{border:none;border-top:1px solid #444;margin:8px 0}
+.msg.assistant .body blockquote{border-left:3px solid #444;margin:.6em 0;padding:.2em .7em;color:#aaa}
+.msg.assistant .body table{border-collapse:collapse;margin:.6em 0}
+.msg.assistant .body th,.msg.assistant .body td{border:1px solid #444;padding:.3em .5em}
+.msg.assistant .body ul,.msg.assistant .body ol{margin:.4em 0;padding-left:1.4em}
+.msg.assistant .body li{margin:.15em 0}
+.msg.assistant .body p{margin:.35em 0}
+.msg.assistant .body h1,.msg.assistant .body h2,.msg.assistant .body h3,.msg.assistant .body h4{margin:.7em 0 .3em}
+.msg.assistant .body hr{border:none;border-top:1px solid #444;margin:.7em 0}
 .input-row{display:flex;gap:8px}
 .input-row textarea{flex:1;min-height:64px}
-.input-row button{align-self:flex-end}
-.chat-layout{display:flex;gap:12px;height:70vh}
+.input-row button{align-self:flex-end;display:flex;align-items:center;justify-content:center;padding:10px 14px;height:100%}
+.input-row button svg{width:1.1em;height:1.1em}
+.chat-layout{display:flex;gap:12px;flex:1;min-height:0;max-height:calc(100vh - 13rem)}
 .chat-sidebar{width:220px;flex-shrink:0;border:1px solid #333;border-radius:8px;background:#181818;display:flex;flex-direction:column;overflow:hidden}
 .sidebar-new{margin:10px;flex-shrink:0}
 .chat-list{flex:1;overflow-y:auto;padding:0 6px 10px}
@@ -95,8 +102,10 @@ button:disabled{opacity:.5;cursor:default}
 .chat-item .title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .chat-item .del{opacity:0;color:#c66;cursor:pointer;font-size:.85rem;padding:0 4px}
 .chat-item:hover .del{opacity:1}
-.chat-main{flex:1;display:flex;flex-direction:column;min-width:0}
-.chat-main .messages{height:auto;flex:1;min-height:0}
+.chat-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.chat-main .messages{height:auto;flex:1;min-height:0;overflow-y:auto}
+.chat-main .field,.chat-main .input-row{flex-shrink:0}
+.chat-main .field{margin-bottom:.5em}
 .field{margin-bottom:12px}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .slider-row{display:grid;grid-template-columns:180px 1fr 56px;gap:10px;align-items:center;margin-bottom:12px}
@@ -121,12 +130,12 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 </div>
 
 <div class="tabs">
-<button class="tab active" data-tab="server">Server Room</button>
+<button class="tab active" data-tab="serverroom">Server Room</button>
 <button class="tab" data-tab="chat">Chat</button>
 <button class="tab" data-tab="image">Image</button>
 </div>
 
-<div id="server" class="panel active">
+<div id="serverroom" class="panel active">
 <div class="grid">
 
 <div class="card">
@@ -183,17 +192,16 @@ __BAD_MORE__
 <div id="chatList" class="chat-list"></div>
 </div>
 <div class="chat-main">
+<div id="chatMessages" class="messages"></div>
 <div class="field">
-<label for="chatModel">Model</label>
-<input id="chatModel" type="text" list="chatModels" placeholder="type or select a model..." autocomplete="off">
+<input id="chatModel" type="text" list="chatModels" placeholder="model" autocomplete="off">
 <datalist id="chatModels">
 __CHAT_MODELS__
 </datalist>
 </div>
-<div id="chatMessages" class="messages"></div>
 <div class="input-row">
 <textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
-<button id="chatSend">Send</button>
+<button id="chatSend" title="Send"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg></button>
 </div>
 </div>
 </div>
@@ -270,7 +278,7 @@ __SD_MODELS__
 <div id="imgResult"></div>
 </div>
 
-<div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#77a" href="https://github.com/kristopolous/free-ollama/tree/main/dyva">obviously open source</a></div>
+<footer><a target=_blank href="https://github.com/kristopolous/free-ollama/tree/main/dyva">obviously open source</a></footer>
 <script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
 <script id="goodHostsData" type="application/json">__GOOD_HOSTS_DATA__</script>
 <script id="badHostsData" type="application/json">__BAD_HOSTS_DATA__</script>
@@ -308,7 +316,7 @@ document.getElementById('nextHostBtn').addEventListener('click',function(e){e.pr
 <script>
 var chatLog=document.getElementById('chatMessages');
 var storeKey='dyva_playground_chats';
-var currentChat={id:Date.now(),createdAt:Date.now(),title:'',messages:[]};
+var currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};
 function loadChats(){try{return JSON.parse(localStorage.getItem(storeKey))||[]}catch(e){return[]}}
 function persistChats(chats){try{localStorage.setItem(storeKey,JSON.stringify(chats))}catch(e){}}
 function saveCurrentChat(){
@@ -316,7 +324,7 @@ function saveCurrentChat(){
   if(!currentChat.messages.length)return;
   var i=-1;
   for(var k=0;k<chats.length;k++){if(chats[k].id===currentChat.id){i=k;break}}
-  var copy={id:currentChat.id,createdAt:currentChat.createdAt,title:currentChat.title,messages:currentChat.messages.slice()};
+  var copy={id:currentChat.id,createdAt:currentChat.createdAt,title:currentChat.title,model:currentChat.model||'',messages:currentChat.messages.slice()};
   if(i>=0)chats[i]=copy;else chats.unshift(copy);
   persistChats(chats);
 }
@@ -337,7 +345,7 @@ function renderSidebar(){
   });
 }
 function deleteChat(id){
-  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',messages:[]};renderMessages();}
+  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();}
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
 }
@@ -390,12 +398,13 @@ function setAssistantLabel(el,host,fmodel,tps){
   if(tps!==undefined&&tps!==null&&!isNaN(tps))s+=' '+tps+' tps';
   el.textContent=s;
 }
-function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',messages:[]};renderMessages();renderSidebar();}
+function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();}
 function loadChatById(id){
   saveCurrentChat();
   var c=loadChats().find(function(x){return String(x.id)===String(id)});
   if(!c)return;
-  currentChat={id:c.id,createdAt:c.createdAt,title:c.title,messages:c.messages.slice()};
+  currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'',messages:c.messages.slice()};
+  document.getElementById('chatModel').value=currentChat.model;
   renderMessages();
   renderSidebar();
 }
@@ -407,7 +416,14 @@ async function sendChat(){
   var input=document.getElementById('chatInput');
   var text=input.value.trim();
   var btn=document.getElementById('chatSend');
-  if(!model||!text)return;
+  if(!text)return;
+  if(!model){
+    var b=addMsg('assistant','');
+    b.bodyEl.innerHTML='<span class="error">No models found matching &quot;'+escHtml(model)+'&quot; - choose one before continuing</span>';
+    chatLog.scrollTop=chatLog.scrollHeight;
+    return;
+  }
+  currentChat.model=model;
   addMsg('user',text);
   var bubble=addMsg('assistant','');
   bubble.bodyEl.classList.add('streaming');
@@ -536,14 +552,19 @@ async function generateImage(){
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
 
+function activateTab(name){
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});
+  document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
+}
+function tabFromHash(){
+  var h=location.hash.replace(/^#/,'');
+  return (h==='serverroom'||h==='chat'||h==='image')?h:'serverroom';
+}
 document.querySelectorAll('.tab').forEach(function(t){
-  t.addEventListener('click',function(){
-    document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active');});
-    document.querySelectorAll('.panel').forEach(function(x){x.classList.remove('active');});
-    t.classList.add('active');
-    document.getElementById(t.getAttribute('data-tab')).classList.add('active');
-  });
+  t.addEventListener('click',function(){location.hash=t.getAttribute('data-tab');});
 });
+window.addEventListener('hashchange',function(){activateTab(tabFromHash());});
+activateTab(tabFromHash());
 </script>
 </body>
 </html>
