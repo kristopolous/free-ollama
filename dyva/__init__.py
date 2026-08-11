@@ -1024,6 +1024,31 @@ async def _proxy_generate(request, session):
     return web.json_response(err_obj(msg), status=502)
 
 
+def _last_rows_html():
+    if not _last_cache:
+        return '<div style="color:#999;font-size:.85rem">None</div>'
+    return "".join(
+        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><a class="skip-link" href="next-host?model={urllib.parse.quote(model)}" data-skip-model="{urllib.parse.quote(model)}">skip</a><span class="host-model">{model}</span></div>'
+        for model, entry in list(_last_cache.items())[:20]
+    )
+
+
+def _good_rows_html(good):
+    good_valid = [h for h in good if " " in h]
+    return "".join(
+        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><a class="skip-link" href="skip-good?host={urllib.parse.quote(h.split(" ", 1)[0])}&model={urllib.parse.quote(h.split(" ", 1)[1])}">skip</a><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
+        for h in sorted(good_valid, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
+    )
+
+
+def _bad_rows_html(bad):
+    bad_valid = [h for h in bad if " " in h]
+    return "".join(
+        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
+        for h in sorted(bad_valid)[:30]
+    )
+
+
 async def handle_dashboard(request):
     """
     Dashboard (HTML)
@@ -1066,21 +1091,10 @@ async def handle_dashboard(request):
         for m in models
     )
     model_more = ""
-    last_rows = "".join(
-        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><a class="skip-link" href="next-host?model={urllib.parse.quote(model)}" data-skip-model="{urllib.parse.quote(model)}">skip</a><span class="host-model">{model}</span></div>'
-        for model, entry in list(_last_cache.items())[:20]
-    ) if _last_cache else '<div style="color:#999;font-size:.85rem">None</div>'
-    good_valid = [h for h in good if " " in h]
-    good_rows = "".join(
-        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><a class="skip-link" href="skip-good?host={urllib.parse.quote(h.split(" ", 1)[0])}&model={urllib.parse.quote(h.split(" ", 1)[1])}">skip</a><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
-        for h in sorted(good_valid, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
-    )
+    last_rows = _last_rows_html()
+    good_rows = _good_rows_html(good)
     good_more = f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else ""
-    bad_valid = [h for h in bad if " " in h]
-    bad_rows = "".join(
-        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
-        for h in sorted(bad_valid)[:30]
-    )
+    bad_rows = _bad_rows_html(bad)
     bad_more = f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else ""
     html = html.replace("__PORT__", str(PORT))
     html = html.replace("__WORKER_COUNT__", str(WORKER_COUNT))
@@ -1101,6 +1115,34 @@ async def handle_dashboard(request):
     html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
     html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
     return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def handle_dashboard_data(request):
+    """
+    Dashboard data (JSON)
+    ---
+    tags: [UI]
+    summary: Current last-successful, good, and bad host lists for live dashboard updates
+    responses:
+      '200':
+        description: Current list state
+        content:
+          application/json:
+            schema:
+              type: object
+    """
+    bad = load_bad()
+    good = load_good()
+    load_last()
+    return web.json_response({
+        "last": _last_rows_html(),
+        "good": _good_rows_html(good),
+        "bad": _bad_rows_html(bad),
+        "good_count": len(good),
+        "bad_count": len(bad),
+        "good_more": f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else "",
+        "bad_more": f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else "",
+    })
 
 
 async def handle_v1_models(request):
@@ -2208,6 +2250,7 @@ def make_app():
 
     swagger.add_get("/", handle_dashboard)
     swagger.add_get("/dashboard", handle_dashboard)
+    swagger.add_get("/dashboard-data", handle_dashboard_data)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)
     swagger.add_get("/next-host", handle_next_host)

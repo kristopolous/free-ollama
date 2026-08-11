@@ -44,6 +44,7 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `GET` | `/sdapi/v1/sd-models` | List discovered SD models |
 | `*` | `/comfyui/{path}` | ComfyUI pass-through proxy |
 | `GET` | `/dashboard` | Dashboard UI |
+| `GET` | `/dashboard-data` | JSON snapshot of the last-successful/good/bad lists |
 | `GET` | `/clear-bad` | Clear failed host+model pairs |
 | `GET` | `/next-host` | Remove a model from the last-successful list |
 | `GET` | `/skip-good` | Move a good host+model pair into the bad list |

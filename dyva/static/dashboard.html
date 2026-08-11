@@ -73,24 +73,28 @@ __MODEL_MORE__
 </div>
 <div class="card">
 <h2>Last Successful</h2>
-<div class="card-inner">__LAST_ROWS__</div>
+<div class="card-inner"><div id="lastList">__LAST_ROWS__</div></div>
 </div>
 <div class="card">
-<h2>Good Hosts <span class="badge good">__GOOD_COUNT__</span></h2>
+<h2>Good Hosts <span id="goodCount" class="badge good">__GOOD_COUNT__</span></h2>
 <div class="card-inner">
-<div>
+<div id="goodList">
 __GOOD_ROWS__
 </div>
+<div id="goodMore">
 __GOOD_MORE__
 </div>
 </div>
+</div>
 <div class="card">
-<h2>Bad Hosts <span class="badge bad">__BAD_COUNT__</span> <a href="clear-bad" id="clearBad" style="font-size:.75rem;font-weight:normal;color:#c33;cursor:pointer;text-decoration:none">[ Clear ]</a></h2>
+<h2>Bad Hosts <span id="badCount" class="badge bad">__BAD_COUNT__</span> <a href="clear-bad" id="clearBad" style="font-size:.75rem;font-weight:normal;color:#c33;cursor:pointer;text-decoration:none">[ Clear ]</a></h2>
 <div class="card-inner">
-<div>
+<div id="badList">
 __BAD_ROWS__
 </div>
+<div id="badMore">
 __BAD_MORE__
+</div>
 </div>
 </div>
 <div class="card" id="hostCard" style="display:none">
@@ -98,14 +102,15 @@ __BAD_MORE__
 <div class="card-inner"><div id="hostList"></div><div style="margin-top:8px;text-align:right"><a id="nextHostBtn" href="#" style="font-size:.82rem;color:#77a;cursor:pointer;text-decoration:none">[ next ]</a></div></div>
 </div>
 </div>
-<div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#77a" href="https://github.com/kristopolous/free-ollama">obviously open source</a></div>
+<div style="text-align:center;margin-top:1rem"><a target=_blank style="text-decoration:none;color:#77a" href="https://github.com/kristopolous/free-ollama/tree/main/dyva">obviously open source</a></div>
 <script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
 <script id="goodHostsData" type="application/json">__GOOD_HOSTS_DATA__</script>
 <script id="badHostsData" type="application/json">__BAD_HOSTS_DATA__</script>
 <script>
 var evtSource=new EventSource('api/activity');
 var paused=false;
-evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
+function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more;document.getElementById('goodCount').textContent=d.good_count;document.getElementById('badCount').textContent=d.bad_count}catch(ex){}};x.send()}
+evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.25rem'})
 </script>
 <script>
