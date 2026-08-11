@@ -2291,7 +2291,7 @@ def banner():
  ll       DD  dD   yY     VvvV   aA  Aa   ll
  llama~  DDDDd"   yY       VV   aA    Aa  llama~
  || ||               v{VERSION}               || ||
- '' ''               𝗔𝗟𝗣𝗔𝗖𝗔               '' ''
+ '' ''               𝘽𝙃𝘼𝙍𝘼𝙇               '' ''
 """)
 
 def main():
