@@ -6,6 +6,8 @@
 <title>Playground</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px;max-width:900px;margin:0 auto}
@@ -225,7 +227,10 @@ function addMsg(role,text){
   var d=document.createElement('div');d.className='msg '+role;
   var r=document.createElement('div');r.className='role';r.textContent=role==='user'?'You':'Assistant';
   var b=document.createElement('div');b.className='body';
-  if(role==='assistant')b.innerHTML=mdRender(text);
+  if(role==='assistant'){
+    b.innerHTML=mdRender(text);
+    highlightBlocks(b);
+  }
   else b.textContent=text;
   d.appendChild(r);d.appendChild(b);chatLog.appendChild(d);
   chatLog.scrollTop=chatLog.scrollHeight;
@@ -240,12 +245,18 @@ function mdRender(text){
   return out;
 }
 var renderTimer=null;
+function highlightBlocks(scope){
+  if(!window.hljs)return;
+  var blocks=(scope||document).querySelectorAll('pre code');
+  for(var i=0;i<blocks.length;i++){try{window.hljs.highlightElement(blocks[i])}catch(e){}}
+}
 function scheduleStreamRender(){
   if(renderTimer)return;
   renderTimer=setTimeout(function(){
     renderTimer=null;
     document.querySelectorAll('.msg.assistant .body.streaming').forEach(function(el){
       el.innerHTML=mdRender(el.getAttribute('data-stream')||'');
+      highlightBlocks(el);
     });
     chatLog.scrollTop=chatLog.scrollHeight;
   },60);
@@ -323,6 +334,7 @@ async function sendChat(){
           bubble.bodyEl.classList.remove('streaming');
           bubble.bodyEl.removeAttribute('data-stream');
           bubble.bodyEl.innerHTML=mdRender(full);
+          highlightBlocks(bubble.bodyEl);
           chatLog.scrollTop=chatLog.scrollHeight;
           if(full)currentChat.messages.push({role:'assistant',content:full});
           saveCurrentChat();
@@ -334,6 +346,7 @@ async function sendChat(){
     bubble.bodyEl.classList.remove('streaming');
     bubble.bodyEl.removeAttribute('data-stream');
     bubble.bodyEl.innerHTML=mdRender(full);
+    highlightBlocks(bubble.bodyEl);
     setAssistantLabel(bubble.roleEl,host,fmodel,tps);
     if(full)currentChat.messages.push({role:'assistant',content:full});
     saveCurrentChat();
