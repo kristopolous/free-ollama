@@ -37,6 +37,7 @@ case "$SERVICE" in
     ;;
 esac
 
+set -x
 exec ./graflex.py \
       --action "fetch" \
       --countries "$COUNTRIES" "${EXTRA_ARGS[@]}" \
@@ -44,6 +45,7 @@ exec ./graflex.py \
       --ports "$PORTS" \
       --query "$QUERY" \
       --random \
+      --name    "$SERVICE" \
       --servers "$SERVERS" \
       --service "$SERVICE" \
       --sleep   "$SLEEP"
