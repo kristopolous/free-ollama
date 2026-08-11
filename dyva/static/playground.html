@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playground</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px;max-width:900px;margin:0 auto}
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.header h1{font-size:1.5rem}
+.header .sub{color:#999;font-size:.85rem}
+.header a{font-size:.82rem;color:#77a;text-decoration:none;margin-left:12px}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{padding:8px 18px;border:none;border-radius:6px;background:#1e1e1e;color:#999;font-size:.9rem;cursor:pointer}
+.tab.active{background:#2a2a4a;color:#eee}
+.panel{display:none}
+.panel.active{display:block}
+label{display:block;font-size:.8rem;color:#999;margin-bottom:6px}
+input[type=text],input[type=number],textarea,select{width:100%;padding:8px 10px;border:1px solid #444;border-radius:6px;background:#2a2a2a;color:#eee;font-size:.85rem;outline:none;font-family:ui-monospace,monospace}
+input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:#888}
+textarea{resize:vertical;min-height:64px}
+button{background:#3a3a5a;color:#eee;border:none;border-radius:6px;padding:10px 20px;font-size:.9rem;cursor:pointer}
+button:hover{background:#4a4a7a}
+button:disabled{opacity:.5;cursor:default}
+.model-row{margin-bottom:12px}
+.messages{border:1px solid #333;border-radius:8px;background:#181818;height:46vh;overflow-y:auto;padding:12px;margin-bottom:12px}
+.msg{margin-bottom:12px}
+.msg .role{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+.msg.user .role{color:#77a}
+.msg .body{background:#1e1e1e;border-radius:8px;padding:10px;font-size:.9rem;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.45}
+.msg.user .body{background:#222a3a}
+.input-row{display:flex;gap:8px}
+.input-row textarea{flex:1;min-height:64px}
+.input-row button{align-self:flex-end}
+.chat-top{display:flex;gap:8px;margin-bottom:12px}
+.chat-top select{flex:1}
+.chat-top button{padding:8px 14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.field{margin-bottom:12px}
+.slider-row{display:grid;grid-template-columns:180px 1fr 56px;gap:10px;align-items:center;margin-bottom:12px}
+.slider-row label{display:flex;justify-content:space-between;margin:0}
+.slider-row .val{font-family:ui-monospace,monospace;font-size:.82rem;color:#77a;text-align:right}
+input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
+.check-row{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:.85rem;color:#aaa}
+.check-row input{accent-color:#77a}
+#imgResult{margin-top:14px}
+#imgResult img{max-width:100%;border-radius:8px;border:1px solid #333;margin-top:10px}
+#imgResult .status{color:#888;font-size:.85rem}
+#imgResult .error{color:#c33;font-size:.85rem}
+</style>
+</head>
+<body>
+<div class="header">
+<div>
+<h1>Playground</h1>
+<div class="sub">chat &amp; image experiments against the proxy</div>
+</div>
+<div><a href="/">dashboard</a><a href="/docs" target="_blank">docs</a></div>
+</div>
+
+<div class="tabs">
+<button class="tab active" data-tab="chat">Chat</button>
+<button class="tab" data-tab="image">Image</button>
+</div>
+
+<div id="chat" class="panel active">
+<div class="chat-top">
+<select id="chatHistorySelect" title="conversation history">
+<option value="">-- new chat --</option>
+</select>
+<button id="chatNew">New chat</button>
+<button id="chatDelete" title="delete this conversation">Del</button>
+</div>
+<div class="field">
+<label for="chatModel">Model</label>
+<input id="chatModel" type="text" list="chatModels" placeholder="type or select a model..." autocomplete="off">
+<datalist id="chatModels">
+__CHAT_MODELS__
+</datalist>
+</div>
+<div id="chatMessages" class="messages"></div>
+<div class="input-row">
+<textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
+<button id="chatSend">Send</button>
+</div>
+</div>
+
+<div id="image" class="panel">
+<div class="field">
+<label for="sdModel">SD Model</label>
+<input id="sdModel" type="text" list="sdModels" placeholder="type or select an SD model..." autocomplete="off">
+<datalist id="sdModels">
+__SD_MODELS__
+</datalist>
+</div>
+<div class="grid">
+<div class="field">
+<label for="imgWidth">Width</label>
+<input id="imgWidth" type="number" value="512" min="256" max="2048" step="64">
+</div>
+<div class="field">
+<label for="imgHeight">Height</label>
+<input id="imgHeight" type="number" value="512" min="256" max="2048" step="64">
+</div>
+</div>
+<div class="field">
+<label for="posPrompt">Positive prompt</label>
+<textarea id="posPrompt" rows="3" placeholder="a cyberpunk city at night, neon lights..."></textarea>
+</div>
+<div class="field">
+<label for="negPrompt">Negative prompt</label>
+<textarea id="negPrompt" rows="2" placeholder="blurry, low quality, watermark"></textarea>
+</div>
+<div class="slider-row">
+<label for="imgSteps">Steps</label>
+<input id="imgSteps" type="range" min="1" max="150" value="20">
+<span class="val" id="imgStepsVal">20</span>
+</div>
+<div class="slider-row">
+<label for="imgCfg">CFG scale</label>
+<input id="imgCfg" type="range" min="1" max="30" step="0.5" value="7">
+<span class="val" id="imgCfgVal">7</span>
+</div>
+<div class="slider-row">
+<label for="imgSeed">Seed</label>
+<input id="imgSeed" type="range" min="0" max="999999" value="0">
+<span class="val" id="imgSeedVal">0</span>
+</div>
+<div class="slider-row">
+<label for="imgBatch">Batch size</label>
+<input id="imgBatch" type="range" min="1" max="4" value="1">
+<span class="val" id="imgBatchVal">1</span>
+</div>
+<div class="field">
+<label for="imgSampler">Sampler</label>
+<select id="imgSampler">
+<option>Euler</option>
+<option>Euler a</option>
+<option>LMS</option>
+<option>Heun</option>
+<option>DPM2</option>
+<option>DPM++ 2M</option>
+<option>DPM++ 2M Karras</option>
+<option>DPM++ SDE</option>
+<option>DPM++ SDE Karras</option>
+<option>DDIM</option>
+<option>UniPC</option>
+<option>PLMS</option>
+</select>
+</div>
+<div class="check-row">
+<input id="imgRandomSeed" type="checkbox" checked>
+<label for="imgRandomSeed" style="margin:0">Random seed</label>
+</div>
+<button id="imgGenerate">Generate</button>
+<div id="imgResult"></div>
+</div>
+
+<script>
+var chatLog=document.getElementById('chatMessages');
+var chatHistory=[];
+function addMsg(role,text){
+  var d=document.createElement('div');d.className='msg '+role;
+  var r=document.createElement('div');r.className='role';r.textContent=role==='user'?'You':'Assistant';
+  var b=document.createElement('div');b.className='body';b.textContent=text;
+  d.appendChild(r);d.appendChild(b);chatLog.appendChild(d);
+  chatLog.scrollTop=chatLog.scrollHeight;
+  return b;
+}
+async function sendChat(){
+  var model=document.getElementById('chatModel').value.trim();
+  var input=document.getElementById('chatInput');
+  var text=input.value.trim();
+  var btn=document.getElementById('chatSend');
+  if(!model||!text)return;
+  addMsg('user',text);
+  var bubble=addMsg('assistant','');
+  chatHistory.push({role:'user',content:text});
+  input.value='';
+  btn.disabled=true;
+  try{
+    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:chatHistory,stream:true})});
+    if(!resp.ok){
+      var msg='HTTP '+resp.status;
+      try{var j=await resp.json();msg=(j.error&&(j.error.message||j.error))||msg}catch(e){}
+      bubble.textContent='Error: '+msg;
+      chatHistory.pop();
+      return;
+    }
+    var reader=resp.body.getReader();
+    var dec=new TextDecoder();
+    var acc='',full='';
+    while(true){
+      var step=await reader.read();
+      if(step.done)break;
+      acc+=dec.decode(step.value,{stream:true});
+      var idx;
+      while((idx=acc.indexOf('\n'))>=0){
+        var line=acc.slice(0,idx).trim();
+        acc=acc.slice(idx+1);
+        if(!line)continue;
+        var d;
+        try{d=JSON.parse(line)}catch(e){continue}
+        if(d.message&&d.message.content){full+=d.message.content;bubble.textContent=full;chatLog.scrollTop=chatLog.scrollHeight;}
+        if(d.done){if(full)chatHistory.push({role:'assistant',content:full});return;}
+      }
+    }
+    if(full)chatHistory.push({role:'assistant',content:full});
+  }catch(ex){bubble.textContent='Error: '+ex.message;chatHistory.pop();}
+  finally{btn.disabled=false;}
+}
+document.getElementById('chatSend').addEventListener('click',sendChat);
+document.getElementById('chatInput').addEventListener('keydown',function(e){
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
+});
+
+function bindSlider(id,out){
+  var s=document.getElementById(id),o=document.getElementById(out);
+  s.addEventListener('input',function(){o.textContent=s.value;});
+}
+bindSlider('imgSteps','imgStepsVal');
+bindSlider('imgCfg','imgCfgVal');
+bindSlider('imgSeed','imgSeedVal');
+bindSlider('imgBatch','imgBatchVal');
+document.getElementById('imgSeed').addEventListener('input',function(){
+  document.getElementById('imgRandomSeed').checked=false;
+});
+document.getElementById('imgRandomSeed').addEventListener('change',function(){
+  if(this.checked){document.getElementById('imgSeed').value=0;document.getElementById('imgSeedVal').textContent=0;}
+});
+
+async function generateImage(){
+  var btn=document.getElementById('imgGenerate');
+  var result=document.getElementById('imgResult');
+  var seed=document.getElementById('imgRandomSeed').checked?-1:parseInt(document.getElementById('imgSeed').value)||0;
+  var body={
+    model:document.getElementById('sdModel').value.trim()||undefined,
+    prompt:document.getElementById('posPrompt').value.trim(),
+    negative_prompt:document.getElementById('negPrompt').value.trim(),
+    width:parseInt(document.getElementById('imgWidth').value)||512,
+    height:parseInt(document.getElementById('imgHeight').value)||512,
+    steps:parseInt(document.getElementById('imgSteps').value)||20,
+    cfg_scale:parseFloat(document.getElementById('imgCfg').value)||7,
+    seed:seed,
+    batch_size:parseInt(document.getElementById('imgBatch').value)||1,
+    sampler_name:document.getElementById('imgSampler').value,
+  };
+  btn.disabled=true;
+  result.innerHTML='<div class="status">generating...</div>';
+  try{
+    var resp=await fetch('sdapi/v1/txt2img',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!resp.ok){
+      var msg='HTTP '+resp.status;
+      try{var j=await resp.json();msg=j.error||msg}catch(e){}
+      result.innerHTML='<div class="error">Error: '+msg+'</div>';
+      return;
+    }
+    var d=await resp.json();
+    var imgs=d.images||[];
+    if(!imgs.length){result.innerHTML='<div class="error">No images returned</div>';return;}
+    result.innerHTML='';
+    imgs.forEach(function(b64){
+      var img=document.createElement('img');
+      img.src='data:image/png;base64,'+b64;
+      result.appendChild(img);
+    });
+  }catch(ex){result.innerHTML='<div class="error">Error: '+ex.message+'</div>';}
+  finally{btn.disabled=false;}
+}
+document.getElementById('imgGenerate').addEventListener('click',generateImage);
+
+document.querySelectorAll('.tab').forEach(function(t){
+  t.addEventListener('click',function(){
+    document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active');});
+    document.querySelectorAll('.panel').forEach(function(x){x.classList.remove('active');});
+    t.classList.add('active');
+    document.getElementById(t.getAttribute('data-tab')).classList.add('active');
+  });
+});
+</script>
+</body>
+</html>
