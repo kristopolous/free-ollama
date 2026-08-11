@@ -1094,6 +1094,18 @@ async def handle_dashboard(request):
         b = sum(1 for h in hosts if f"{h} {mid}" in bad)
         u = len(hosts) - g - b
         return f"{g}/{b}/{u}"
+    chat_options = "".join(
+        f'<option value="{m["id"]}"></option>'
+        for m in sorted(all_models(), key=lambda x: x["id"].lower())
+    )
+    sd_models = set()
+    for s in load_servers():
+        if s.get("service") != "a1111":
+            continue
+        for m in s.get("models", []):
+            title = m.split(" [")[0] if " [" in m else m
+            sd_models.add(title)
+    sd_options = "".join(f'<option value="{h}"></option>' for h in sorted(sd_models))
     model_rows = "".join(
         f'<div class="model-item" data-name="{m["id"]}"><span class="model-name">{m["id"]}</span><span class="model-count">{_model_status(m["id"])}</span></div>'
         for m in models
@@ -1122,6 +1134,8 @@ async def handle_dashboard(request):
     html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
     html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
     html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
+    html = html.replace("__CHAT_MODELS__", chat_options)
+    html = html.replace("__SD_MODELS__", sd_options)
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
@@ -1152,39 +1166,6 @@ async def handle_dashboard_data(request):
         "bad_more": f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else "",
     })
 
-
-async def handle_playground(request):
-    """
-    Playground (HTML)
-    ---
-    tags: [UI]
-    summary: Interactive chat and image generation playground
-    responses:
-      '200':
-        description: HTML playground page
-        content:
-          text/html:
-            schema:
-              type: string
-    """
-    chat_options = "".join(
-        f'<option value="{m["id"]}"></option>'
-        for m in sorted(all_models(), key=lambda x: x["id"].lower())
-    )
-    sd_models = set()
-    for s in load_servers():
-        if s.get("service") != "a1111":
-            continue
-        for m in s.get("models", []):
-            title = m.split(" [")[0] if " [" in m else m
-            sd_models.add(title)
-    sd_options = "".join(f'<option value="{h}"></option>' for h in sorted(sd_models))
-    tpl_dir = os.path.join(os.path.dirname(__file__), "static")
-    with open(os.path.join(tpl_dir, "playground.html")) as f:
-        html = f.read()
-    html = html.replace("__CHAT_MODELS__", chat_options)
-    html = html.replace("__SD_MODELS__", sd_options)
-    return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
 async def handle_v1_models(request):
@@ -2293,7 +2274,6 @@ def make_app():
     swagger.add_get("/", handle_dashboard)
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
-    swagger.add_get("/playground", handle_playground)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)
     swagger.add_get("/next-host", handle_next_host)
