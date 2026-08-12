@@ -420,7 +420,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         if isinstance(servers, str):
             server_list = [None] + [s.strip() for s in servers.split(",")]
         else:
-            server_list = [None] + ["uvicorn", "nginx"]
+            server_list = [None]
         if isinstance(fids, str):
             fid_list = [None] + [s.strip() for s in fids.split(",")]
         else:
@@ -475,12 +475,11 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
 
             if not dry:
                 _save_json(hosts_file, pool)
-                log.info(f"  total: {len(pool)}\n")
 
                 done = i + 1
                 elapsed = time.time() - start
                 eta = elapsed * (len(combos) / done) - elapsed
-                log.info(f"  eta: {_fmt_duration(eta)} left\n")
+                log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)} left\n")
 
             if i < len(combos) - 1 and not dry and not curlify:
                 time.sleep(sleep)

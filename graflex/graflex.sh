@@ -5,6 +5,8 @@ SLEEP=10
 SERVICE="${1:-ollama}"
 shift 2>/dev/null || true
 EXTRA_ARGS=("$@")
+FID=
+SERVERS=
 
 case "$SERVICE" in
   ollama)
@@ -26,9 +28,9 @@ case "$SERVICE" in
   a1111)
     QUERY='icon_hash="2075038152" && body="Stable Diffusion"'
     PORTS="7860,7861,8080,80,443,10000"
-    SERVERS="nginx,cloudflare,uvicorn"
+    #SERVERS="nginx,cloudflare,uvicorn"
     COUNTRIES="TH,MX,MY,NZ,BH,SG,KR,GB,AE,US,AU,IN,JP,DE,CA,RU,IL,BR,CN,IE,FR,ES,ID,IT,CH,ZA,HK,PL"
-    FID="4OeA79EXS7Z+DdzkAvrBag==,WPcuJSTXuzZQIeov/h9jgA==,NCPjfTODiuNabsua2LTY7Q==,SWCeWGsQp4gTPi4YvgrIdQ=="
+    #FID="4OeA79EXS7Z+DdzkAvrBag==,WPcuJSTXuzZQIeov/h9jgA==,NCPjfTODiuNabsua2LTY7Q==,SWCeWGsQp4gTPi4YvgrIdQ=="
     ;;
 
   *)
@@ -37,13 +39,19 @@ case "$SERVICE" in
     ;;
 esac
 
+fid=()
+servers=()
+
+[[ -n "$FID" ]] && fid=( "--fid" $FID )
+[[ -n "$SERVERS" ]] && servers=( "--servers" $SERVERS )
+
+set -x
 exec ./graflex.py \
       --action "fetch" \
-      --countries "$COUNTRIES" "${EXTRA_ARGS[@]}" \
-      --fid   "$FID" \
+      --countries "$COUNTRIES" "${EXTRA_ARGS[@]}" "${fid[@]}" \
       --ports "$PORTS" \
       --query "$QUERY" \
       --random \
-      --servers "$SERVERS" \
+      --name    "$SERVICE" "${servers[@]}" \
       --service "$SERVICE" \
       --sleep   "$SLEEP"

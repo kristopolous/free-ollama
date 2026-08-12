@@ -3,7 +3,7 @@
 OpenAI-compatible proxy that routes inference to free Ollama servers, A1111 hosts, and ComfyUI hosts.
 
 Complete with even a little chat thingy. Look at the thingy
-<img width="911" alt="dumpster" src="https://github.com/user-attachments/assets/ec9a1669-0a7b-4bd0-a74c-e1924c30303e" />
+<img width="930" alt="dumpster" src="https://github.com/user-attachments/assets/162b7938-1284-446a-b99e-f56acb895706" />
 
 
 ## Quickstart
