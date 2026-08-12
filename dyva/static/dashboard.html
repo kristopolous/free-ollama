@@ -115,7 +115,7 @@ button:disabled{opacity:.5;cursor:default}
 .msg .files img{max-width:160px;max-height:160px;border-radius:6px;border:1px solid #333}
 .msg .file-chip{display:inline-block;background:#222a3a;border:1px solid #333;border-radius:6px;padding:3px 8px;font-size:.75rem;color:#77a;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-layout{display:flex;gap:12px;flex:1;min-height:0;max-height:calc(100vh - 10rem)}
-.chat-toolbar{display:none}
+.chat-menu-btn{display:none}
 .chat-backdrop{display:none}
 @media(max-width:640px){
   body{padding:10px}
@@ -127,8 +127,7 @@ button:disabled{opacity:.5;cursor:default}
   .tabs .tab{flex:1;text-align:center;padding:8px 6px}
   #chat.panel.active{min-height:0}
   .chat-layout{max-height:none;gap:0}
-  .chat-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-shrink:0}
-  .chat-menu-btn{padding:8px 12px;font-size:1rem}
+  .chat-menu-btn{display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:8px 12px;font-size:1rem;height:100%}
   .chat-sidebar{position:fixed;top:0;bottom:0;left:0;width:240px;max-width:80vw;z-index:100;border-radius:0;border-right:1px solid #333;box-shadow:0 0 24px rgba(0,0,0,.6);transform:translateX(-100%);transition:transform .2s ease}
   .chat-sidebar.open{transform:translateX(0)}
   .chat-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99}
@@ -233,9 +232,6 @@ __BAD_MORE__
 </div>
 
 <div id="chat" class="panel">
-<div class="chat-toolbar">
-<button id="chatMenuBtn" class="chat-menu-btn" title="Chat history">☰</button>
-</div>
 <div class="chat-backdrop" id="chatBackdrop"></div>
 <div class="chat-layout">
 <div class="chat-sidebar" id="chatSidebar">
@@ -246,6 +242,7 @@ __BAD_MORE__
 <div id="chatMessages" class="messages"></div>
 <div class="field">
 <div class="model-picker">
+<button id="chatMenuBtn" class="chat-menu-btn" title="Chat history">☰</button>
 <input id="chatModel" type="text" placeholder="model" autocomplete="off" spellcheck="false">
 <span id="chatModelCount" class="model-count-badge" title="matching servers">-</span>
 </div>
