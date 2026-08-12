@@ -31,6 +31,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;col
 .tab.active{background:#2a2a4a;color:#eee}
 .panel{display:none}
 .panel.active{display:block}
+body.chat{overflow:hidden}
 #chat.panel.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:12px}
@@ -116,6 +117,9 @@ button:disabled{opacity:.5;cursor:default}
 .chat-main .messages{height:auto;flex:1;min-height:0;overflow-y:auto}
 .chat-main .field,.chat-main .input-row{flex-shrink:0}
 .chat-main .field{margin-bottom:.5em}
+.model-picker{display:flex;gap:8px;align-items:center}
+.model-picker input{flex:1}
+.model-count-badge{flex-shrink:0;background:#2a2a3a;color:#77a;border-radius:6px;padding:.5em .7em;font-size:.85rem;font-family:ui-monospace,monospace;min-width:2.4em;text-align:center}
 .field{margin-bottom:12px}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .slider-row{display:grid;grid-template-columns:180px 1fr 56px;gap:10px;align-items:center;margin-bottom:12px}
@@ -204,10 +208,10 @@ __BAD_MORE__
 <div class="chat-main">
 <div id="chatMessages" class="messages"></div>
 <div class="field">
-<input id="chatModel" type="text" list="chatModels" placeholder="model" autocomplete="off">
-<datalist id="chatModels">
-__CHAT_MODELS__
-</datalist>
+<div class="model-picker">
+<input id="chatModel" type="text" placeholder="model" autocomplete="off" spellcheck="false">
+<span id="chatModelCount" class="model-count-badge" title="matching models">-</span>
+</div>
 </div>
 <div class="input-row">
 <textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
@@ -289,6 +293,7 @@ __SD_MODELS__
 </div>
 
 <script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
+<script id="chatModelsData" type="application/json">__CHAT_MODELS__</script>
 <script id="goodHostsData" type="application/json">__GOOD_HOSTS_DATA__</script>
 <script id="badHostsData" type="application/json">__BAD_HOSTS_DATA__</script>
 <script>
@@ -512,10 +517,20 @@ function loadChatById(id){
   if(!c)return;
   currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'',messages:c.messages.slice()};
   document.getElementById('chatModel').value=currentChat.model;
+  updateModelCount();
   renderMessages();
   renderSidebar();
 }
 document.getElementById('chatNew').addEventListener('click',newChat);
+var chatModels=JSON.parse(document.getElementById('chatModelsData').textContent||'[]');
+function updateModelCount(){
+  var q=document.getElementById('chatModel').value.trim().toLowerCase();
+  var n=0;
+  if(q){for(var i=0;i<chatModels.length;i++){if(chatModels[i].toLowerCase().indexOf(q)>=0)n++;}}
+  document.getElementById('chatModelCount').textContent=q?String(n):'-';
+}
+document.getElementById('chatModel').addEventListener('input',updateModelCount);
+updateModelCount();
 renderSidebar();
 
 async function sendChat(){
@@ -679,6 +694,7 @@ document.getElementById('imgGenerate').addEventListener('click',generateImage);
 function activateTab(name){
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
+  document.body.classList.toggle('chat',name==='chat');
 }
 function tabFromHash(){
   var h=location.hash.replace(/^#/,'');

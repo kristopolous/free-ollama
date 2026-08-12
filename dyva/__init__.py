@@ -1094,10 +1094,7 @@ async def handle_dashboard(request):
         b = sum(1 for h in hosts if f"{h} {mid}" in bad)
         u = len(hosts) - g - b
         return f"{g}/{b}/{u}"
-    chat_options = "".join(
-        f'<option value="{m["id"]}"></option>'
-        for m in sorted(all_models(), key=lambda x: x["id"].lower())
-    )
+    chat_models = sorted((m["id"] for m in all_models()), key=str.lower)
     sd_models = set()
     for s in load_servers():
         if s.get("service") != "a1111":
@@ -1134,7 +1131,7 @@ async def handle_dashboard(request):
     html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
     html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
     html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
-    html = html.replace("__CHAT_MODELS__", chat_options)
+    html = html.replace("__CHAT_MODELS__", json.dumps(chat_models))
     html = html.replace("__SD_MODELS__", sd_options)
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
