@@ -2,7 +2,7 @@
 
 OpenAI-compatible proxy that routes inference to insecure Ollama, A1111, and ComfyUI hosts.
 
-Complete with even a little chat thingy. Look at the thingy
+Complete with even a little chat thingy. Look at the thingy!
 <img width="930" alt="dumpster" src="https://github.com/user-attachments/assets/162b7938-1284-446a-b99e-f56acb895706" />
 
 
