@@ -101,10 +101,19 @@ button:disabled{opacity:.5;cursor:default}
 .msg.assistant .body p{margin:.35em 0}
 .msg.assistant .body h1,.msg.assistant .body h2,.msg.assistant .body h3,.msg.assistant .body h4{margin:.7em 0 .3em}
 .msg.assistant .body hr{border:none;border-top:1px solid #444;margin:.7em 0}
-.input-row{display:flex;gap:8px}
+.input-row{display:flex;gap:8px;align-items:stretch}
 .input-row textarea{flex:1;min-height:64px}
-.input-row button{align-self:flex-end;display:flex;align-items:center;justify-content:center;padding:10px 14px;height:100%}
+.input-tools{display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+.input-tools button{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:10px 14px}
 .input-row button svg{width:1.1em;height:1.1em}
+.attach-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:.5em}
+.attach-chip{display:flex;align-items:center;gap:6px;background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:3px 6px;font-size:.75rem;color:#ccc;max-width:220px}
+.attach-chip img{width:26px;height:26px;object-fit:cover;border-radius:4px;flex-shrink:0}
+.attach-chip .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attach-chip .x{cursor:pointer;color:#c66;padding:0 2px;flex-shrink:0}
+.msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:.5em}
+.msg .files img{max-width:160px;max-height:160px;border-radius:6px;border:1px solid #333}
+.msg .file-chip{display:inline-block;background:#222a3a;border:1px solid #333;border-radius:6px;padding:3px 8px;font-size:.75rem;color:#77a;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-layout{display:flex;gap:12px;flex:1;min-height:0;max-height:calc(100vh - 10rem)}
 .chat-sidebar{width:220px;flex-shrink:0;border:1px solid #333;border-radius:8px;background:#181818;display:flex;flex-direction:column;overflow:hidden}
 .sidebar-new{margin:10px;flex-shrink:0}
@@ -215,9 +224,14 @@ __BAD_MORE__
 <span id="chatModelCount" class="model-count-badge" title="matching servers">-</span>
 </div>
 </div>
+<div class="attach-row" id="chatAttachments" style="display:none"></div>
 <div class="input-row">
 <textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
+<input id="chatFiles" type="file" multiple accept="image/*,.pdf" style="display:none">
+<div class="input-tools">
+<button id="chatAttach" title="Attach files"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg></button>
 <button id="chatSend" title="Send"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg></button>
+</div>
 </div>
 </div>
 </div>
@@ -340,7 +354,11 @@ function saveCurrentChat(){
   if(!currentChat.messages.length)return;
   var i=-1;
   for(var k=0;k<chats.length;k++){if(chats[k].id===currentChat.id){i=k;break}}
-  var copy={id:currentChat.id,createdAt:currentChat.createdAt,title:currentChat.title,model:currentChat.model||'',messages:currentChat.messages.slice()};
+  var copy={id:currentChat.id,createdAt:currentChat.createdAt,title:currentChat.title,model:currentChat.model||'',messages:currentChat.messages.map(function(m){
+    var c={role:m.role,content:m.content};
+    if(m.files&&m.files.length)c.files=m.files.map(function(f){return {name:f.name,type:f.type,size:f.size}});
+    return c;
+  })};
   if(i>=0)chats[i]=copy;else chats.unshift(copy);
   persistChats(chats);
 }
@@ -377,7 +395,13 @@ function addMsg(role,text,index){
       if(m&&(m.host||m.model||m.tps))setAssistantLabel(r,m.host,m.model,m.tps);
     }
   }
-  else b.textContent=text;
+  else{
+    b.textContent=text;
+    if(index!==undefined){
+      var m=currentChat.messages[index];
+      if(m&&m.files&&m.files.length)renderFiles(b,m.files);
+    }
+  }
   d.appendChild(r);d.appendChild(b);
   if(role==='user'&&index!==undefined){
     var acts=document.createElement('span');acts.className='actions';
@@ -393,6 +417,17 @@ function addMsg(role,text,index){
   return {roleEl:r,bodyEl:b};
 }
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function renderFiles(b,files){
+  var wrap=document.createElement('div');wrap.className='files';
+  files.forEach(function(f){
+    if(f.type&&f.type.indexOf('image/')===0&&f.dataUrl){
+      var im=document.createElement('img');im.src=f.dataUrl;wrap.appendChild(im);
+    }else{
+      var c=document.createElement('span');c.className='file-chip';c.textContent=f.name;wrap.appendChild(c);
+    }
+  });
+  b.appendChild(wrap);
+}
 function mdRender(text){
   var out=String(text||'');
   var math=[];
@@ -496,6 +531,8 @@ function retryUserMsg(index){
   var m=currentChat.messages[index];
   if(m.role!=='user')return;
   var text=m.content;
+  attachments=(m.files||[]).slice();
+  renderAttachments();
   currentChat.messages=currentChat.messages.slice(0,index);
   saveCurrentChat();
   renderMessages();
@@ -556,7 +593,8 @@ async function sendChat(){
   var chatId=currentChat.id;
   var chatCreated=currentChat.createdAt;
   currentChat.model=model;
-  currentChat.messages.push({role:'user',content:text});
+  var userFiles=attachments.slice();
+  currentChat.messages.push({role:'user',content:text,files:userFiles.length?userFiles:undefined});
   if(!currentChat.title)currentChat.title=text.replace(/\s+/g,' ').slice(0,40);
   saveCurrentChat();
   var chatTitle=currentChat.title;
@@ -564,10 +602,19 @@ async function sendChat(){
   var bubble=addMsg('assistant','');
   bubble.bodyEl.classList.add('streaming');
   input.value='';
+  attachments=[];
+  renderAttachments();
   btn.disabled=true;
   function live(){return chatInView(chatId)&&bubble.bodyEl.isConnected}
   try{
-    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:currentChat.messages,stream:true})});
+    var msgs=currentChat.messages.map(function(m){
+      var o={role:m.role,content:m.content};
+      if(m.files&&m.files.length)o.images=m.files.map(function(f){
+        var d=f.dataUrl||'';var i=d.indexOf('base64,');return i>=0?d.slice(i+7):d;
+      });
+      return o;
+    });
+    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:msgs,stream:true})});
     var host=resp.headers.get('X-Dyva-Host')||'';
     var fmodel=resp.headers.get('X-Dyva-Model')||model;
     if(!resp.ok){
@@ -644,6 +691,36 @@ document.getElementById('chatSend').addEventListener('click',sendChat);
 document.getElementById('chatInput').addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
 });
+
+var attachments=[];
+var chatFilesInput=document.getElementById('chatFiles');
+document.getElementById('chatAttach').addEventListener('click',function(e){e.preventDefault();chatFilesInput.click();});
+chatFilesInput.addEventListener('change',function(){
+  var files=Array.prototype.slice.call(chatFilesInput.files);
+  chatFilesInput.value='';
+  files.forEach(function(f){
+    var r=new FileReader();
+    r.onload=function(){attachments.push({name:f.name,type:f.type,size:f.size,dataUrl:r.result});renderAttachments();};
+    r.readAsDataURL(f);
+  });
+});
+function renderAttachments(){
+  var row=document.getElementById('chatAttachments');
+  row.innerHTML='';
+  if(!attachments.length){row.style.display='none';return;}
+  row.style.display='flex';
+  attachments.forEach(function(a,i){
+    var chip=document.createElement('div');chip.className='attach-chip';
+    if(a.type&&a.type.indexOf('image/')===0){
+      var im=document.createElement('img');im.src=a.dataUrl;chip.appendChild(im);
+    }
+    var n=document.createElement('span');n.className='name';n.textContent=a.name;chip.appendChild(n);
+    var x=document.createElement('span');x.className='x';x.textContent='✕';
+    x.addEventListener('click',function(){attachments.splice(i,1);renderAttachments();});
+    chip.appendChild(x);
+    row.appendChild(chip);
+  });
+}
 
 function bindSlider(id,out){
   var s=document.getElementById(id),o=document.getElementById(out);
