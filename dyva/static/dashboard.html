@@ -556,6 +556,7 @@ async function sendChat(){
   currentChat.model=model;
   currentChat.messages.push({role:'user',content:text});
   if(!currentChat.title)currentChat.title=text.replace(/\s+/g,' ').slice(0,40);
+  saveCurrentChat();
   var chatTitle=currentChat.title;
   addMsg('user',text,currentChat.messages.length-1);
   var bubble=addMsg('assistant','');
