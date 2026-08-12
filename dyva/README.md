@@ -1,4 +1,4 @@
-# dyva
+# Dumpster Dyva
 
 OpenAI-compatible proxy that routes inference to free Ollama servers, A1111 hosts, and ComfyUI hosts.
 
