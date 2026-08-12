@@ -2269,7 +2269,7 @@ async def handle_comfyui_proxy(request):
 
 
 def make_app():
-    app = web.Application()
+    app = web.Application(client_max_size=128 * 1024 * 1024)
 
     async def on_startup(app):
         app["session"] = aiohttp.ClientSession(
