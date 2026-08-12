@@ -57,6 +57,7 @@ SERVICE_CONFIG = {
 
 
 def _load_json(path):
+    print(f"Loading {path}")
     if not os.path.exists(path):
         return []
     with open(path) as f:
@@ -451,6 +452,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             if fid:
                 qparts.append(f'fid="{fid}"')
             combined = " && ".join(qparts)
+            print(combined)
             if not dry:
                 log.info(f"[{i+1}/{len(combos)}] country={country} port={port} server={server} fid={fid}")
 
@@ -502,6 +504,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
     if dry:
         return
 
+    # print(f"Loading {hosts_file}")
     existing = _load_json(hosts_file)
     seen = {f"{h['service']}@{h['host']}" for h in existing}
     for h in hosts:

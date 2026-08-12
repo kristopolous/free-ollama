@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+#set -euo pipefail
 
 SLEEP=10
 SERVICE="${1:-ollama}"
@@ -39,6 +39,7 @@ case "$SERVICE" in
     ;;
 esac
 
+shift
 fid=()
 servers=()
 
@@ -46,6 +47,7 @@ servers=()
 [[ -n "$SERVERS" ]] && servers=( "--servers" $SERVERS )
 
 set -x
+
 exec ./graflex.py \
       --action "fetch" \
       --countries "$COUNTRIES" "${EXTRA_ARGS[@]}" "${fid[@]}" \
@@ -54,4 +56,5 @@ exec ./graflex.py \
       --random \
       --name    "$SERVICE" "${servers[@]}" \
       --service "$SERVICE" \
-      --sleep   "$SLEEP"
+      --sleep   "$SLEEP" \
+      "$@"
