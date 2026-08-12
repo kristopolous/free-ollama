@@ -2297,6 +2297,7 @@ def make_app():
     swagger.add_get("/", handle_dashboard)
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
+    swagger.add_get("/dashboard/server-count", handle_server_count)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)
     swagger.add_get("/next-host", handle_next_host)
