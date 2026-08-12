@@ -86,6 +86,8 @@ button:disabled{opacity:.5;cursor:default}
 .msg.user .role{color:#77a}
 .msg .body{background:#1e1e1e;border-radius:8px;padding:.7em;font-size:.9rem;overflow-wrap:anywhere;line-height:1.45}
 .msg .body .error{color:#c33}
+.msg.assistant .body.streaming:empty::before{content:'';display:inline-block;width:.75em;height:.75em;border:2px solid #444;border-top-color:#77a;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
 .msg.user .body{background:#222a3a;white-space:pre-wrap}
 .msg.assistant .body pre{background:#111;border:1px solid #333;border-radius:6px;padding:.6em;overflow-x:auto;white-space:pre;margin:.6em 0}
 .msg.assistant .body code{font-family:ui-monospace,monospace;font-size:.82rem;background:#111;padding:.05em .3em;border-radius:4px}
