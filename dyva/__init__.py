@@ -1164,6 +1164,32 @@ async def handle_dashboard_data(request):
     })
 
 
+async def handle_server_count(request):
+    """
+    Matching server count (JSON)
+    ---
+    tags: [UI]
+    summary: Number of servers whose models match the given chat model string
+    parameters:
+      - in: query
+        name: q
+        schema:
+          type: string
+        required: false
+        description: Model substring to match against
+    responses:
+      '200':
+        description: Count of matching servers
+        content:
+          application/json:
+            schema:
+              type: object
+    """
+    q = request.query.get("q", "").strip()
+    servers = len(find_servers(q)) if q else 0
+    return web.json_response({"q": q, "servers": servers})
+
+
 
 async def handle_v1_models(request):
     """

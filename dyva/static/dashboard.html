@@ -210,7 +210,7 @@ __BAD_MORE__
 <div class="field">
 <div class="model-picker">
 <input id="chatModel" type="text" placeholder="model" autocomplete="off" spellcheck="false">
-<span id="chatModelCount" class="model-count-badge" title="matching models">-</span>
+<span id="chatModelCount" class="model-count-badge" title="matching servers">-</span>
 </div>
 </div>
 <div class="input-row">
@@ -522,12 +522,18 @@ function loadChatById(id){
   renderSidebar();
 }
 document.getElementById('chatNew').addEventListener('click',newChat);
-var chatModels=JSON.parse(document.getElementById('chatModelsData').textContent||'[]');
+var modelCountTimer=null;
 function updateModelCount(){
-  var q=document.getElementById('chatModel').value.trim().toLowerCase();
-  var n=0;
-  if(q){for(var i=0;i<chatModels.length;i++){if(chatModels[i].toLowerCase().indexOf(q)>=0)n++;}}
-  document.getElementById('chatModelCount').textContent=q?String(n):'-';
+  var el=document.getElementById('chatModelCount');
+  var q=document.getElementById('chatModel').value.trim();
+  if(!q){el.textContent='-';el.title='matching servers';return;}
+  if(modelCountTimer)clearTimeout(modelCountTimer);
+  modelCountTimer=setTimeout(function(){
+    fetch('dashboard/server-count?q='+encodeURIComponent(q),{cache:'no-store'})
+      .then(function(r){return r.json()})
+      .then(function(d){el.textContent=String(d.servers);el.title=d.servers+' matching server'+(d.servers===1?'':'s')})
+      .catch(function(){el.textContent='?';});
+  },200);
 }
 document.getElementById('chatModel').addEventListener('input',updateModelCount);
 updateModelCount();
