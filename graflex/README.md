@@ -4,6 +4,8 @@ Discover public internet hosts via FOFA search engine without paying FOFA. Becau
 
 This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json)
 
+Fair warning, running all the probes takes about 10 days. Days with a d.
+
 ## Setup
 
 ```bash
