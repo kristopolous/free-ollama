@@ -6,7 +6,7 @@ This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.jso
 
 Fair warning, running all the probes takes about 10 days. Days with a d. 
 
-Speedup is possible with multiple accounts and probably proxying through an ip pool but the main governor here is the 3k/daily limit per account. I haven't had an ip blacklisted but I haven't tried account cycling to bypass the 3k limit. If I were the coding I'd do like a 5k ip blacklist limit with like a 14 day window. Not that they'd do that but you know, presume reasonability and work around it.
+Speedup is possible with multiple accounts and probably proxying through an ip pool but the main governor here is the 3k/daily limit per account. I haven't had an ip blacklisted but I haven't tried account cycling to bypass the 3k limit. If I were the policy author for FOFA I'd do like a 5k ip blacklist limit with like a 14 day window. Not that they'd do that but you know, presume reasonability and work around it.
 
 ## Setup
 
