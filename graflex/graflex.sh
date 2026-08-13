@@ -9,6 +9,14 @@ FID=
 SERVERS=
 
 case "$SERVICE" in
+  combine)
+    set -x
+    cd ~/.cache/free-ollama
+    jq -s 'add' *-working.json | ssh 9ol.es "cat > www/graflex.json"
+    curl -s 9ol.es/graflex.json > ~/.cache/free-ollama/free-ollama.json-graflex.tmp
+    exit
+    ;;
+
   ollama)
     QUERY="body='ollama is running'"
     PORTS="11434,10443,8085,10001,8080,80,443,1194,110,8983,28017,21,5060,5601"
@@ -34,7 +42,7 @@ case "$SERVICE" in
     ;;
 
   *)
-    echo "Usage: $0 [ollama|comfyui|a1111]" >&2
+    echo "Usage: $0 [ollama|comfyui|a1111|combine]" >&2
     exit 1
     ;;
 esac
