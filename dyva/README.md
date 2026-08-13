@@ -5,13 +5,11 @@ OpenAI-compatible proxy that routes inference to insecure Ollama, A1111, and Com
 Complete with even a little chat thingy. Look at the thingy!
 <img width="930" alt="dumpster" src="https://github.com/user-attachments/assets/162b7938-1284-446a-b99e-f56acb895706" />
 
+"Now now now" you say, from your VC office, "what about mobile?!"
 
-## Quickstart
+Here it is. Running ON MY ACTUAL FUCKING PHONE! (*gasp*)
 
-```bash
-pip install -e .
-dyva
-```
+<img width="384" alt="Screenshot_20260812-005403" src="https://github.com/user-attachments/assets/4dcc41f7-caab-40d1-a00c-23614f396302" />
 
 ## CLI Options
 
