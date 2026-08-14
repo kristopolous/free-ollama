@@ -452,8 +452,9 @@ def mark_vision(host, model):
 def mark_no_vision(host, model):
     caps_map = (load_knowns().get(host) or {}).get("models", {})
     cur = caps_map.get(model) or []
-    if "vision" in cur:
-        _mark_known(host, model, sorted(set(cur) - {"vision"}))
+    new_caps = sorted(set(cur) - {"vision"}) or ["completion"]
+    if new_caps != sorted(cur):
+        _mark_known(host, model, new_caps)
 
 
 async def trial_balloon(session, host, full, model):
