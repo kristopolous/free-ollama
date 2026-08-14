@@ -373,7 +373,21 @@ var chatLog=document.getElementById('chatMessages');
 var storeKey='dyva_playground_chats';
 var currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};
 function loadChats(){try{return JSON.parse(localStorage.getItem(storeKey))||[]}catch(e){return[]}}
-function persistChats(chats){try{localStorage.setItem(storeKey,JSON.stringify(chats))}catch(e){}}
+function persistChats(chats){
+  try{localStorage.setItem(storeKey,JSON.stringify(chats));return}
+  catch(e){}
+  try{
+    var stripped=chats.map(function(c){
+      return Object.assign({},c,{messages:c.messages.map(function(m){
+        var o={role:m.role,content:m.content};
+        if(m.files&&m.files.length)o.files=m.files.map(function(f){return {name:f.name,type:f.type,size:f.size}});
+        return o;
+      })});
+    });
+    localStorage.setItem(storeKey,JSON.stringify(stripped));
+    if(window.console)console.warn('dyva: localStorage full, chat saved without image data');
+  }catch(e){}
+}
 function saveCurrentChat(){
   var chats=loadChats();
   if(!currentChat.messages.length)return;
@@ -381,7 +395,7 @@ function saveCurrentChat(){
   for(var k=0;k<chats.length;k++){if(chats[k].id===currentChat.id){i=k;break}}
   var copy={id:currentChat.id,createdAt:currentChat.createdAt,title:currentChat.title,model:currentChat.model||'',messages:currentChat.messages.map(function(m){
     var c={role:m.role,content:m.content};
-    if(m.files&&m.files.length)c.files=m.files.map(function(f){return {name:f.name,type:f.type,size:f.size}});
+    if(m.files&&m.files.length)c.files=m.files.slice();
     return c;
   })};
   if(i>=0)chats[i]=copy;else chats.unshift(copy);
