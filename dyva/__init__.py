@@ -55,14 +55,20 @@ CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
+KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 GRAFLEX_WORKING = os.path.join(CACHE_DIR, "a1111-working.json")
+CAP_REFRESH_TTL = 3600
 _last_cache = None
+_knowns_cache = None
 _LOCAL = False
 _CURLIFY = False
 
 PORT = 11434
 TIMEOUT = 30
 VERSION = "0"
+
+TRIAL_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
 
 _bad_cache = None
 _good_cache = None
@@ -329,6 +335,32 @@ def match_model(model_name, pattern):
     return pattern in model_name
 
 
+def needs_caps(messages):
+    """Scan a conversation's messages for required model capabilities."""
+    caps = {"completion"}
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("images"):
+            caps.add("vision")
+        if m.get("tool_calls"):
+            caps.add("tools")
+        if m.get("role") == "tool":
+            caps.add("tools")
+        if m.get("audio"):
+            caps.add("audio")
+        content = m.get("content")
+        if isinstance(content, list):
+            for blk in content:
+                if isinstance(blk, dict):
+                    t = blk.get("type")
+                    if t in ("image_url", "file"):
+                        caps.add("vision")
+                    elif t in ("audio", "input_audio"):
+                        caps.add("audio")
+    return sorted(caps)
+
+
 async def probe_host(session, host):
     try:
         resp = await asyncio.wait_for(session.get(f"{host}/api/ps"), timeout=TIMEOUT)
@@ -346,13 +378,142 @@ async def probe_host(session, host):
     return True
 
 
-def find_servers(sub):
+def load_knowns():
+    global _knowns_cache
+    if _knowns_cache is None:
+        _knowns_cache = {}
+        if os.path.exists(KNOWN_FILE):
+            try:
+                with open(KNOWN_FILE) as f:
+                    _knowns_cache = json.load(f)
+            except Exception:
+                _knowns_cache = {}
+    return _knowns_cache
+
+
+def save_knowns():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(KNOWN_FILE, "w") as f:
+        json.dump(_knowns_cache, f, indent=2)
+
+
+def _knowns_refresh_due(host):
+    entry = load_knowns().get(host)
+    return not entry or not entry.get("refreshed") or time.time() - entry["refreshed"] > CAP_REFRESH_TTL
+
+
+async def refresh_host_caps(session, host):
+    """Pull {host}/api/tags and store per-model capabilities in known-hosts.json."""
+    if not _knowns_refresh_due(host):
+        return
+    try:
+        resp = await asyncio.wait_for(session.get(f"{host}/api/tags"), timeout=TIMEOUT)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+        return
+    if resp.status != 200:
+        await resp.release()
+        return
+    try:
+        data = await resp.json()
+    except Exception:
+        await resp.release()
+        return
+    await resp.release()
+    prev = (load_knowns().get(host) or {}).get("models", {})
+    models = {}
+    for m in data.get("models") or []:
+        name = m.get("name")
+        if not name:
+            continue
+        models[name] = sorted(set((m.get("capabilities") or [])) | set(prev.get(name) or []))
+    if not models:
+        return
+    load_knowns()[host] = {"refreshed": time.time(), "models": models}
+    save_knowns()
+
+
+def _known_has(host, model, cap):
+    caps_map = (load_knowns().get(host) or {}).get("models", {})
+    return cap in (caps_map.get(model) or [])
+
+
+def _mark_known(host, model, caps_list):
+    load_knowns().setdefault(host, {}).setdefault("models", {})[model] = caps_list
+    save_knowns()
+
+
+def mark_vision(host, model):
+    caps_map = (load_knowns().get(host) or {}).get("models", {})
+    cur = caps_map.get(model) or []
+    if "vision" not in cur:
+        _mark_known(host, model, sorted(set(cur) | {"vision"}))
+
+
+def mark_no_vision(host, model):
+    caps_map = (load_knowns().get(host) or {}).get("models", {})
+    cur = caps_map.get(model) or []
+    if "vision" in cur:
+        _mark_known(host, model, sorted(set(cur) - {"vision"}))
+
+
+async def trial_balloon(session, host, full, model):
+    """Cheap vision probe: send a 1x1 red pixel with no prompt.
+
+    A model that actually processed the image says it's red; a model whose
+    server dropped the image either admits nothing arrived or hallucinates
+    something else. Returns True (sees), False (no vision), or None (error).
+    """
+    payload = {
+        "model": full,
+        "messages": [{"role": "user", "images": [TRIAL_IMG]}],
+        "stream": False,
+    }
+    start = time.time()
+    _curlify("POST", f"{host}/api/chat", payload)
+    try:
+        resp = await asyncio.wait_for(session.post(f"{host}/api/chat", json=payload), timeout=TIMEOUT)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+        return None
+    if resp.status != 200:
+        await resp.release()
+        return None
+    try:
+        data = await resp.json()
+    except Exception:
+        await resp.release()
+        return None
+    await resp.release()
+    content = (data.get("message") or {}).get("content") or ""
+    sees = TRIAL_SEE_RE.search(content) is not None
+    await broadcast_activity(host, model, "trial",
+        f"trial balloon {full}: {'sees red' if sees else 'no vision'}", duration=time.time() - start)
+    return sees
+
+
+def _model_capable(known_caps, required):
+    if not known_caps:
+        return False
+    return all(r in known_caps for r in required)
+
+
+def _known_capable(host, model, caps):
+    if not caps:
+        return True
+    caps_map = (load_knowns().get(host) or {}).get("models", {})
+    known = caps_map.get(model)
+    if not known:
+        return True
+    return _model_capable(known, caps)
+
+
+def find_servers(sub, caps=None):
     if '/' in sub:
         res = []
         for model in sub.split('/'):
-            res += find_servers(model)
+            res += find_servers(model, caps)
         return res
 
+    knowns = load_knowns() if caps else {}
     servers = load_servers()
     bad = load_bad()
     good = load_good()
@@ -365,6 +526,16 @@ def find_servers(sub):
         if any(":cloud" in m for m in models) and ":cloud" not in sub:
             continue
         host = s.get("server", "")
+        if caps:
+            caps_map = (knowns.get(host) or {}).get("models", {})
+            known = [(m, caps_map[m]) for m in ms if caps_map.get(m)]
+            capable = [m for m, c in known if _model_capable(c, caps)]
+            incapable = [m for m, c in known if not _model_capable(c, caps)]
+            if incapable and len(incapable) == len(ms):
+                continue
+            unknown = [m for m in ms if not caps_map.get(m)]
+            if capable or unknown:
+                ms = capable + unknown + incapable
         key = f"{host} {sub}"
         if key in bad: 
             matched.append((1, host, ms))
@@ -509,7 +680,7 @@ def _curlify(method, url, json_body):
         logging.debug(f"curlify failed: {e}")
 
 
-async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None):
+async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None):
     done = asyncio.Event()
     result_queue = asyncio.Queue()
     errors = []
@@ -538,6 +709,21 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
             if not await probe_host(session, host):
                 continue
+            await refresh_host_caps(session, host)
+
+            if "vision" in (caps or []) and not _known_has(host, full, "vision"):
+                sees = await trial_balloon(session, host, full, model)
+                if sees is None:
+                    continue
+                if sees:
+                    mark_vision(host, full)
+                    await broadcast_activity(host, model, "trying",
+                        f"trial balloon: {full} has vision", wid=wid)
+                else:
+                    mark_no_vision(host, full)
+                    await broadcast_activity(host, model, "failed",
+                        f"trial balloon: {full} has no vision", wid=wid)
+                    continue
 
             start = time.time()
             tag = f"{host} {full}"
@@ -894,9 +1080,13 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
     else:
         model_list = [model_in]
 
+    req_caps = needs_caps(opayload.get("messages", []))
+    if opayload.get("tools"):
+        req_caps = sorted(set(req_caps) | {"tools"})
+
     last = get_last(model_list[0])
     last_host_err = None
-    if last:
+    if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
         last_host, last_full = last
         log.debug(f"Reusing {last_host} for {model_list[0]}")
         if do_stream:
@@ -914,7 +1104,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                 resp.headers["X-Dyva-Model"] = last_full
                 return resp
 
-    servers = find_servers(model_in)
+    servers = find_servers(model_in, req_caps)
     if not servers:
         err_msg = f"no available servers for '{model_in}'"
         if last_host_err:
@@ -923,7 +1113,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
     for model in model_list:
         if do_stream:
-            result, errors = await _race_servers(session, model, servers, opayload, do_stream=True, remote=request.remote)
+            result, errors = await _race_servers(session, model, servers, opayload, do_stream=True, remote=request.remote, caps=req_caps)
             if result:
                 _, host, full, resp, first_line, first = result
                 stream_resp = web.StreamResponse()
@@ -938,7 +1128,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     content_type="text/event-stream",
                 )
         else:
-            result, errors = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False, remote=request.remote)
+            result, errors = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps)
 
             if result:
                 _, host, full, data = result
@@ -966,9 +1156,15 @@ async def _proxy_generate(request, session):
     log.debug(f"Ollama generate request: model={model}, stream={do_stream}")
     endpoint = "/api/generate"
 
+    req_caps = needs_caps(body.get("messages", []))
+    if body.get("images"):
+        req_caps = sorted(set(req_caps) | {"vision"})
+    if body.get("tools"):
+        req_caps = sorted(set(req_caps) | {"tools"})
+
     last = get_last(model)
     last_host_err = None
-    if last:
+    if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
         last_host, last_full = last
         log.debug(f"Reusing {last_host} for {model}")
         if do_stream:
@@ -1028,7 +1224,7 @@ async def _proxy_generate(request, session):
                     await broadcast_activity(last_host, model, "failed",
                         f"failure: {last_host} for {model} - status {r.status}", duration=dur, wid=wid)
 
-    servers = find_servers(model)
+    servers = find_servers(model, req_caps)
     if not servers:
         err_msg = f"no available servers for '{model}'"
         if last_host_err:
@@ -1036,7 +1232,7 @@ async def _proxy_generate(request, session):
         return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
     if do_stream:
-        result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote)
+        result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps)
         if result:
             _, host, full, resp, first_line, first = result
             stream_resp = web.StreamResponse()
@@ -1047,7 +1243,7 @@ async def _proxy_generate(request, session):
             msg += ": " + "; ".join(dict.fromkeys(errors))
         return web.json_response(err_obj(msg), status=502)
 
-    result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote)
+    result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps)
     if result:
         _, host, full, data = result
         return web.json_response(data)

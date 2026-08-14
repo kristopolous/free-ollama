@@ -147,12 +147,17 @@ button.stop:hover{background:#7a3a3a}
 .chat-item .title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .chat-item .del{opacity:0;color:#c66;cursor:pointer;font-size:.85rem;padding:0 4px}
 .chat-item:hover .del{opacity:1}
+.chat-item .dl{opacity:0;color:#77a;cursor:pointer;font-size:.85rem;padding:0 4px}
+.chat-item:hover .dl{opacity:1}
+.chat-item .dl:hover{color:#aae}
 .chat-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
 .chat-main .messages{height:auto;flex:1;min-height:0;overflow-y:auto}
 .chat-main .field,.chat-main .input-row{flex-shrink:0}
 .chat-main .field{margin-bottom:.5em}
 .model-picker{display:flex;gap:8px;align-items:center}
 .model-picker input{flex:1}
+.chat-next-btn{flex-shrink:0;background:#2a2a3a;color:#77a;border:none;border-radius:6px;width:2.2em;height:2.2em;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;line-height:1;padding:0}
+.chat-next-btn:hover{color:#fff;background:#3a3a5a}
 .model-count-badge{flex-shrink:0;background:#2a2a3a;color:#77a;border-radius:6px;padding:.5em .7em;font-size:.85rem;font-family:ui-monospace,monospace;min-width:2.4em;text-align:center}
 .field{margin-bottom:12px}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
@@ -247,6 +252,7 @@ __BAD_MORE__
 <button id="chatMenuBtn" class="chat-menu-btn" title="Chat history">☰</button>
 <input id="chatModel" type="text" placeholder="model" autocomplete="off" spellcheck="false">
 <span id="chatModelCount" class="model-count-badge" title="matching servers">-</span>
+<button id="chatNextBtn" class="chat-next-btn" title="Move on to the next server for this model">▶</button>
 </div>
 </div>
 <div class="attach-row" id="chatAttachments" style="display:none"></div>
@@ -410,9 +416,11 @@ function renderSidebar(){
     item.className='chat-item'+(String(c.id)===String(currentChat.id)?' active':'');
     item.title=fmtWhen(c.createdAt);
     var t=document.createElement('span');t.className='title';t.textContent=c.title||'(untitled)';
+    var dl=document.createElement('span');dl.className='dl';dl.textContent='↓';dl.title='Download JSON';
+    dl.addEventListener('click',function(e){e.stopPropagation();downloadChatJson(c);});
     var del=document.createElement('span');del.className='del';del.textContent='✕';
     del.addEventListener('click',function(e){e.stopPropagation();deleteChat(c.id);});
-    item.appendChild(t);item.appendChild(del);
+    item.appendChild(t);item.appendChild(dl);item.appendChild(del);
     item.addEventListener('click',function(){loadChatById(c.id);});
     list.appendChild(item);
   });
@@ -421,6 +429,46 @@ function deleteChat(id){
   if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();}
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
+}
+function b64toText(b64){
+  try{
+    var s=b64.indexOf(',')>=0?b64.slice(b64.indexOf(',')+1):b64;
+    var bin=atob(s);
+    var bytes=new Uint8Array(bin.length);
+    for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    return new TextDecoder('utf-8').decode(bytes);
+  }catch(e){return ''}
+}
+function chatPayload(c){
+  return {model:c.model||'',messages:(c.messages||[]).map(function(m){
+    if(m.role==='user'&&m.files&&m.files.length){
+      var parts=[];
+      if(m.content)parts.push({type:'text',text:m.content});
+      m.files.forEach(function(f){
+        var b64=f.dataUrl||'';
+        if(!b64)return;
+        var mt=f.type||'application/octet-stream';
+        var name=f.name||'file';
+        var txt=b64toText(b64);
+        if(mt.indexOf('text/')===0||mt.indexOf('json')>=0||mt.indexOf('xml')>=0||mt.indexOf('csv')>=0||mt.indexOf('javascript')>=0||mt.indexOf('shell')>=0){
+          parts.push({type:'text',text:'\n\n--- File: '+name+' ---\n'+(txt||'[binary content]')});
+        }else{
+          parts.push({type:'text',text:'\n\n--- File: '+name+' ('+mt+') ---\n'+b64});
+        }
+      });
+      return {role:m.role,content:parts};
+    }
+    return {role:m.role,content:m.content};
+  })};
+}
+function downloadChatJson(c){
+  var name=String(c.title||'chat').replace(/[\\/:*?"<>|]+/g,'_').replace(/\s+/g,' ').trim().slice(0,80)||'chat';
+  var blob=new Blob([JSON.stringify(chatPayload(c),null,2)],{type:'application/json'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=name+'.json';
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(function(){URL.revokeObjectURL(a.href)},0);
 }
 function addMsg(role,text,index){
   var d=document.createElement('div');d.className='msg '+role;
@@ -615,6 +663,17 @@ function updateModelCount(){
   },200);
 }
 document.getElementById('chatModel').addEventListener('input',updateModelCount);
+document.getElementById('chatNextBtn').addEventListener('click',function(e){
+  e.preventDefault();
+  var model=document.getElementById('chatModel').value.trim();
+  if(!model)return;
+  this.disabled=true;
+  var x=new XMLHttpRequest();
+  x.open('GET','next-host?model='+encodeURIComponent(model));
+  x.onload=function(){location.reload()};
+  x.onerror=function(){location.reload()};
+  x.send();
+});
 updateModelCount();
 renderSidebar();
 
@@ -670,9 +729,14 @@ async function sendChat(){
   try{
     var msgs=currentChat.messages.map(function(m){
       var o={role:m.role,content:m.content};
-      if(m.files&&m.files.length)o.images=m.files.map(function(f){
-        var d=f.dataUrl||'';var i=d.indexOf('base64,');return i>=0?d.slice(i+7):d;
-      });
+      if(m.files&&m.files.length){
+        var imgs=[];
+        m.files.forEach(function(f){
+          var d=f.dataUrl||'';var i=d.indexOf('base64,');
+          if(i>=0)imgs.push(d.slice(i+7));
+        });
+        if(imgs.length)o.images=imgs;
+      }
       return o;
     });
     var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:msgs,stream:true}),signal:ac.signal});
