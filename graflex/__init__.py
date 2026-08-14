@@ -637,7 +637,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             if isinstance(result, dict) and "error" not in result:
                 result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
                 result["host"] = entry["host"]
-                working = _load_json(working_file)
+                working = _load_json(working_file, silent=True)
                 found = False
                 for i, w in enumerate(working):
                     if f"{w['service']}@{_entry_host(w)}" == key:
@@ -654,7 +654,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason) else "unreachable"
                 nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
-                notworking = _load_json(notworking_file)
+                notworking = _load_json(notworking_file, silent=True)
                 if not isinstance(notworking, dict):
                     notworking = {}
                 nkey = entry["host"]
