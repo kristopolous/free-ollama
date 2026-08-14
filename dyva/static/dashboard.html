@@ -75,6 +75,8 @@ textarea{resize:vertical;min-height:64px}
 button{background:#3a3a5a;color:#eee;border:none;border-radius:6px;padding:10px 20px;font-size:.9rem;cursor:pointer}
 button:hover{background:#4a4a7a}
 button:disabled{opacity:.5;cursor:default}
+button.stop{background:#5a2a2a}
+button.stop:hover{background:#7a3a3a}
 .messages{border:1px solid #333;border-radius:8px;background:#181818;height:46vh;overflow-y:auto;padding:.75em;margin-bottom:.75em}
 .msg{margin-bottom:.75em}
 .msg .role{font-size:.72rem;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.25em;display:flex;align-items:center;gap:.4em;position:relative}
@@ -602,11 +604,30 @@ document.getElementById('chatModel').addEventListener('input',updateModelCount);
 updateModelCount();
 renderSidebar();
 
+var currentAbort=null;
+var SEND_ICON='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
+var STOP_ICON='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>';
+function setSendButton(state){
+  var btn=document.getElementById('chatSend');
+  if(state==='streaming'){
+    btn.innerHTML=STOP_ICON;
+    btn.title='Stop generation';
+    btn.classList.add('stop');
+  }else{
+    btn.innerHTML=SEND_ICON;
+    btn.title='Send';
+    btn.classList.remove('stop');
+  }
+}
+function stopChat(){
+  var ac=currentAbort;
+  if(ac){currentAbort=null;ac.abort();}
+}
 async function sendChat(){
+  if(currentAbort)return;
   var model=document.getElementById('chatModel').value.trim();
   var input=document.getElementById('chatInput');
   var text=input.value.trim();
-  var btn=document.getElementById('chatSend');
   if(!text)return;
   if(!model){
     var b=addMsg('assistant','');
@@ -628,7 +649,9 @@ async function sendChat(){
   input.value='';
   attachments=[];
   renderAttachments();
-  btn.disabled=true;
+  setSendButton('streaming');
+  var ac=new AbortController();
+  currentAbort=ac;
   function live(){return chatInView(chatId)&&bubble.bodyEl.isConnected}
   try{
     var msgs=currentChat.messages.map(function(m){
@@ -638,7 +661,7 @@ async function sendChat(){
       });
       return o;
     });
-    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:msgs,stream:true})});
+    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:msgs,stream:true}),signal:ac.signal});
     var host=resp.headers.get('X-Dyva-Host')||'';
     var fmodel=resp.headers.get('X-Dyva-Model')||model;
     if(!resp.ok){
@@ -701,17 +724,39 @@ async function sendChat(){
     }
     pushAssistant(chatId,chatCreated,chatTitle,model,full,host,fmodel,tps,wasLive);
   }catch(ex){
+    var stopped=ac.signal.aborted;
     if(live()){
       bubble.bodyEl.classList.remove('streaming');
       bubble.bodyEl.removeAttribute('data-stream');
-      bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(ex.message)+'</span>';
-      saveCurrentChat();
-      renderSidebar();
+      if(stopped){
+        if(full){
+          bubble.bodyEl.innerHTML=mdRender(full);
+          highlightBlocks(bubble.bodyEl);
+          setAssistantLabel(bubble.roleEl,host,fmodel,tps);
+          chatLog.scrollTop=chatLog.scrollHeight;
+          pushAssistant(chatId,chatCreated,chatTitle,model,full,host,fmodel,tps,true);
+        }else{
+          bubble.bodyEl.textContent='Generation stopped.';
+        }
+        saveCurrentChat();
+        renderSidebar();
+      }else{
+        bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(ex.message)+'</span>';
+        saveCurrentChat();
+        renderSidebar();
+      }
     }
   }
-  finally{btn.disabled=false;}
+  finally{
+    currentAbort=null;
+    setSendButton('idle');
+  }
 }
-document.getElementById('chatSend').addEventListener('click',sendChat);
+document.getElementById('chatSend').addEventListener('click',function(e){
+  e.preventDefault();
+  if(currentAbort)stopChat();
+  else sendChat();
+});
 document.getElementById('chatInput').addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
 });

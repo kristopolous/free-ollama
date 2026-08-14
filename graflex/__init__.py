@@ -132,6 +132,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
         current_path = path
         redirect_count = 0
         max_redirects = 5
+        got_http_response = False
 
         while redirect_count < max_redirects:
             url = f"{current_scheme}://{current_host}:{current_port}{current_path}"
@@ -140,6 +141,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 resp = await asyncio.wait_for(
                     session.get(url, allow_redirects=False), timeout=timeout
                 )
+                got_http_response = True
                 if resp.status in (301, 302, 307, 308):
                     location = resp.headers.get("Location") or ""
                     await resp.release()
@@ -237,6 +239,10 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
             except Exception as e:
                 last_error = {"error": f"{e} ({current_scheme})"}
                 break
+        else:
+            last_error = {"error": "too many redirects"}
+        if got_http_response:
+            break
 
     return last_error
 
@@ -646,7 +652,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                 ok = True
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
-                result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason == "bad JSON" or "no real" in reason or "empty show" in reason) else "unreachable"
+                result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason) else "unreachable"
                 nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file)
                 if not isinstance(notworking, dict):
