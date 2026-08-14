@@ -62,8 +62,9 @@ SERVICE_CONFIG = {
 }
 
 
-def _load_json(path):
-    print(f"Loading {path}")
+def _load_json(path, silent=False):
+    if not silent:
+        print(f"Loading {path}")
     if not os.path.exists(path):
         return []
     with open(path) as f:
@@ -125,7 +126,8 @@ def _is_offline_error(exc):
 
 def _clean_llama_model_name(raw):
     name = raw.rsplit("/", 1)[-1]
-    return re.sub(r"(-\d+-of-\d+)?\.gguf$", "", name)
+    name = re.sub(r"(-\d+-of-\d+)?\.gguf(\.\d+)*$", "", name)
+    return name.lower().replace("_", "-")
 
 
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
@@ -226,6 +228,15 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     last_error = {"error": f"empty show ({current_scheme})"}
                     break
                 elif service == "llama.cpp":
+                    props_resp = await asyncio.wait_for(
+                        session.get(f"{base_url}props", allow_redirects=False), timeout=timeout
+                    )
+                    props_status = props_resp.status
+                    await props_resp.release()
+                    if props_status == 401:
+                        await resp.release()
+                        last_error = {"error": "auth required"}
+                        break
                     data = await resp.json()
                     await resp.release()
                     items = data.get("data", []) if isinstance(data, dict) else []
@@ -685,7 +696,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                 ok = True
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
-                result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason) else "unreachable"
+                result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason or "auth required" in reason) else "unreachable"
                 nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file, silent=True)
                 if not isinstance(notworking, dict):

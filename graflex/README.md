@@ -119,8 +119,12 @@ Each result includes a `checked` field with an ISO 8601 timestamp.
 
 For `llama.cpp`, model ids from `/v1/models` are full file paths (e.g.
 `/models/.../DeepSeek-V3-Bf16-256x20B-BF16-00001-of-00035.gguf`). Only the
-basename is kept, and a trailing `-NNNN-of-NNNN.gguf` / `.gguf` is stripped, so
-that becomes `DeepSeek-V3-Bf16-256x20B-BF16`.
+basename is kept, a trailing `-NNNN-of-NNNN.gguf` / `.gguf` / `.gguf.N`
+(re-download suffix) is stripped, and the name is lowercased with `_` → `-`
+(e.g. `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf.1` → `qwen3.6-35b-a3b-ud-q4-k-xl`).
+
+Hosts are also probed at `/props`; a `401` means the instance is locked down
+with an API key and is rejected (`auth required`).
 
 | Action | Behavior |
 |--------|----------|
