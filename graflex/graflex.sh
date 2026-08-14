@@ -45,7 +45,7 @@ case "$SERVICE" in
   llama.cpp)
     QUERY='server=="llama.cpp"'
     PORTS="8080,8000,8081,8001,8082"
-    COUNTRIES="US,CN,IR,DE,RU,FR,KR,PL,FI,IN,CA"
+    COUNTRIES="US,CN,IR,TW,DE,RU,FR,KR,PL,FI,IN,CA"
     FID="9fQvFf/gWpbFiiDwLkiXOw==,I2Yn1XFvazj+4lCwZ3R86w=="
     ;;
 

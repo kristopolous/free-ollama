@@ -1,10 +1,10 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import random
-import re
 import sys
 import time
 
@@ -124,12 +124,6 @@ def _is_offline_error(exc):
     return type(exc).__name__ == "NameResolutionError" or _is_offline_msg(str(exc))
 
 
-def _clean_llama_model_name(raw):
-    name = raw.rsplit("/", 1)[-1]
-    name = re.sub(r"(-\d+-of-\d+)?\.gguf(\.\d+)*$", "", name)
-    return name.lower().replace("_", "-")
-
-
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
     from datetime import datetime, timezone
     import urllib.parse
@@ -245,7 +239,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     for m in items:
                         if not isinstance(m, dict):
                             continue
-                        name = _clean_llama_model_name(m.get("id", ""))
+                        name = m.get("id", "")
                         if name and name not in seen:
                             seen.add(name)
                             models.append(name)
@@ -347,7 +341,11 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False):
     return hosts
 
 
-def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, fid=None, fid_idx=0):
+def _fid_tag(fid):
+    return hashlib.md5((fid or "").encode()).hexdigest()[:8]
+
+
+def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, label=""):
     import base64
     import re
     import requests
@@ -389,7 +387,6 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
             body = resp.text.lower()
             if "daily usage limit" in body:
                 tmp_dir = "/tmp/graflex"
-                label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{fid_idx}"
                 out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
                 if os.path.exists(out_path):
                     os.remove(out_path)
@@ -440,7 +437,6 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
 
     tmp_dir = "/tmp/graflex"
     os.makedirs(tmp_dir, exist_ok=True)
-    label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{fid_idx}"
     out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
     with open(out_path, "w") as f:
         f.write(resp.text)
@@ -552,8 +548,8 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             if not dry:
                 log.info(f"[{i+1}/{len(combos)}] country={country} port={port} server={server} fid={fid}")
 
+            label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{_fid_tag(fid)}"
             if session:
-                label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{i}"
                 out_path = os.path.join("/tmp/graflex", f"fofa-results-{label}-{run_ts}.txt")
                 if os.path.exists(out_path):
                     if not dry:
@@ -561,7 +557,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                     continue
 
             svc = service or name or "unknown"
-            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify, fid_idx=i)
+            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify, label=label)
             if hosts is None:
                 continue
 
