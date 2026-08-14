@@ -481,7 +481,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                 done = i + 1
                 elapsed = time.time() - start
                 eta = elapsed * (len(combos) / done) - elapsed
-                log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)} left\n")
+                log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}\n")
 
             if i < len(combos) - 1 and not dry and not curlify:
                 time.sleep(sleep)
