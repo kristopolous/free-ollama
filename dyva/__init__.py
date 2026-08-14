@@ -55,7 +55,7 @@ CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
-GRAFLEX_WORKING = os.path.join(CACHE_DIR, "image-gen-working.json")
+GRAFLEX_WORKING = os.path.join(CACHE_DIR, "a1111-working.json")
 _last_cache = None
 _LOCAL = False
 _CURLIFY = False
@@ -172,12 +172,15 @@ def refresh_cache():
 
           host_map[ip]['models'] += models
 
-    if os.path.exists(f'{CACHE_DIR}/image-gen-working.json'):
-      with open(f'{CACHE_DIR}/image-gen-working.json', 'r') as f:
+    if os.path.exists(GRAFLEX_WORKING):
+      with open(GRAFLEX_WORKING, 'r') as f:
         for row in json.loads(f.read()):
           if 'host' in row:
             row['server'] = row['host'].rstrip('/')
-          host_map[row.get('server')] = row
+          elif 'url' in row:
+            row['server'] = row['url'].rstrip('/')
+          if row.get('server'):
+            host_map[row['server']] = row
 
     for k,v in host_map.items():
       if 'service' not in v:
@@ -203,9 +206,25 @@ def load_servers():
     ensure_cache()
     if _servers_cache is None:
         if not os.path.exists(CACHE_FILE):
-            return []
-        with open(CACHE_FILE) as f:
-            _servers_cache = json.load(f)
+            _servers_cache = []
+        else:
+            with open(CACHE_FILE) as f:
+                _servers_cache = json.load(f)
+    # Always merge current a1111 hosts so image-gen works even when the main
+    # cache hasn't been refreshed yet.
+    if os.path.exists(GRAFLEX_WORKING):
+        try:
+            with open(GRAFLEX_WORKING) as f:
+                a1111 = json.load(f)
+            seen = {s.get("server", "").rstrip("/") for s in (_servers_cache or [])}
+            for row in a1111:
+                host = row.get("server", row.get("url", row.get("host", ""))).rstrip("/")
+                if host and host not in seen:
+                    if not row.get("server"):
+                        row["server"] = host
+                    (_servers_cache or []).append(row)
+        except Exception:
+            pass
     return _servers_cache or []
 
 
@@ -467,6 +486,13 @@ def sse_chunk(model, delta, done=False, finish_reason="stop"):
 
 def sse_str(obj):
     return f"data: {json.dumps(obj)}\n\n"
+
+
+def _host_url(host, path):
+    """Build a URL from a host string that may or may not include a scheme."""
+    if re.match(r"^https?://", host):
+        return f"{host.rstrip('/')}{path}"
+    return f"http://{host}{path}"
 
 
 def _curlify(method, url, json_body):
@@ -1096,7 +1122,16 @@ async def handle_dashboard(request):
         return f"{g}/{b}/{u}"
     chat_models = sorted((m["id"] for m in all_models()), key=str.lower)
     sd_models = set()
-    for s in load_servers():
+    # Merge a1111 hosts from the working file so SD models appear even if the
+    # main cache hasn't been refreshed yet.
+    _sd_sources = list(load_servers())
+    if os.path.exists(GRAFLEX_WORKING):
+        try:
+            with open(GRAFLEX_WORKING) as _f:
+                _sd_sources.extend(json.load(_f))
+        except Exception:
+            pass
+    for s in _sd_sources:
         if s.get("service") != "a1111":
             continue
         for m in s.get("models", []):
@@ -1889,7 +1924,7 @@ async def handle_txt2img(request):
             f"txt2img: {activity_label} on {last_host}")
         try:
             async with session.post(
-                f"http://{last_host}/sdapi/v1/txt2img", json=body,
+                _host_url(last_host, "/sdapi/v1/txt2img"), json=body,
                 timeout=aiohttp.ClientTimeout(total=TIMEOUT),
             ) as r:
                 if r.status == 200:
@@ -1937,7 +1972,7 @@ async def handle_txt2img(request):
                 try:
                     t0 = time.time()
                     async with session.post(
-                        f"http://{host}/sdapi/v1/txt2img", json=body,
+                        _host_url(host, "/sdapi/v1/txt2img"), json=body,
                         timeout=aiohttp.ClientTimeout(total=TIMEOUT),
                     ) as r:
                         if r.status == 200:
@@ -2049,7 +2084,7 @@ async def _txt2img_comfyui(session, host, body):
 
     try:
         checkpoints_resp = await session.get(
-            f"http://{host}/models/checkpoints",
+            _host_url(host, "/models/checkpoints"),
             timeout=aiohttp.ClientTimeout(total=30),
         )
         if checkpoints_resp.status != 200:
@@ -2092,7 +2127,7 @@ async def _txt2img_comfyui(session, host, body):
     client_id = str(uuid_mod.uuid4())
     try:
         prompt_resp = await session.post(
-            f"http://{host}/prompt",
+            _host_url(host, "/prompt"),
             json={"prompt": workflow, "client_id": client_id},
             timeout=aiohttp.ClientTimeout(total=30),
         )
@@ -2112,7 +2147,7 @@ async def _txt2img_comfyui(session, host, body):
         await asyncio.sleep(2)
         try:
             hist_resp = await session.get(
-                f"http://{host}/history/{prompt_id}",
+                _host_url(host, f"/history/{prompt_id}"),
                 timeout=aiohttp.ClientTimeout(total=30),
             )
             if hist_resp.status != 200:
@@ -2132,7 +2167,7 @@ async def _txt2img_comfyui(session, host, body):
                 for img in images:
                     try:
                         view_resp = await session.get(
-                            f"http://{host}/view",
+                            _host_url(host, "/view"),
                             params={"filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")},
                             timeout=aiohttp.ClientTimeout(total=30),
                         )
@@ -2237,7 +2272,7 @@ async def handle_comfyui_proxy(request):
 
     last_err = None
     for host in hosts:
-        url = f"http://{host}{upstream_path}"
+        url = _host_url(host, upstream_path)
         if query:
             url += f"?{query}"
 

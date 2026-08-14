@@ -79,10 +79,12 @@ def _save_json_atomic(path, data):
 
 
 def _entry_host(entry):
+    if entry.get("host"):
+        return entry["host"].rstrip("/")
     url = entry.get("url") or ""
     if url:
         return url.split("://", 1)[1].rstrip("/")
-    return entry.get("host", "")
+    return ""
 
 
 def _fmt_duration(seconds):
@@ -117,81 +119,125 @@ def _is_offline_error(exc):
 
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
     from datetime import datetime, timezone
+    import urllib.parse
 
     cfg = SERVICE_CONFIG[service]
     path = cfg["check_path"]
     last_error = None
-    for scheme in ("http", "https"):
-        url = f"{scheme}://{host}:{port}{path}"
-        base_url = f"{scheme}://{host}:{port}/"
-        try:
-            resp = await asyncio.wait_for(
-                session.get(url), timeout=timeout
-            )
-            if resp.status != 200:
-                await resp.release()
-                last_error = {"error": f"HTTP {resp.status} ({scheme})"}
-                continue
-            if service == "a1111":
-                data = await resp.json()
-                await resp.release()
-                models = [m.get("title", "") for m in data if isinstance(m, dict)]
-                return {
-                    "service": service,
-                    "url": base_url,
-                    "models": models,
-                    "checked": datetime.now(timezone.utc).isoformat(),
-                }
-            elif service == "ollama":
-                data = await resp.json()
-                await resp.release()
-                models = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
-                model = models[0] if models else None
-                if not model:
-                    last_error = {"error": "no real models"}
-                    continue
-                show_body = {"model": model}
-                show_resp = await asyncio.wait_for(
-                    session.post(f"{base_url}api/show", json=show_body), timeout=timeout
+
+    for start_scheme in ("http", "https"):
+        current_scheme = start_scheme
+        current_host = host
+        current_port = port
+        current_path = path
+        redirect_count = 0
+        max_redirects = 5
+
+        while redirect_count < max_redirects:
+            url = f"{current_scheme}://{current_host}:{current_port}{current_path}"
+            base_url = f"{current_scheme}://{current_host}:{current_port}/"
+            try:
+                resp = await asyncio.wait_for(
+                    session.get(url, allow_redirects=False), timeout=timeout
                 )
-                if show_resp.status != 200:
-                    await show_resp.release()
-                    last_error = {"error": f"show HTTP {show_resp.status} ({scheme})"}
+                if resp.status in (301, 302, 307, 308):
+                    location = resp.headers.get("Location") or ""
+                    await resp.release()
+                    if not location:
+                        last_error = {"error": f"HTTP {resp.status} redirect without Location"}
+                        break
+
+                    parsed = urllib.parse.urlparse(location)
+                    if parsed.scheme:
+                        current_scheme = parsed.scheme
+                    if parsed.hostname:
+                        current_host = parsed.hostname
+                    if parsed.port:
+                        current_port = parsed.port
+                    elif parsed.scheme == "https":
+                        current_port = 443
+                    elif parsed.scheme == "http":
+                        current_port = 80
+                    # Follow real path redirects; preserve original path when
+                    # the server only changed scheme/host and lazily dropped
+                    # the path (e.g. 'return 301 https://$host/;' in nginx).
+                    if parsed.path and parsed.path != "/":
+                        current_path = parsed.path
+                    if parsed.query:
+                        current_path += f"?{parsed.query}"
+                    redirect_count += 1
                     continue
-                show_data = await show_resp.json()
-                await show_resp.release()
-                details = show_data.get("details") or {}
-                if details.get("family") or details.get("parameter_size") or details.get("quantization_level"):
+
+                if resp.status != 200:
+                    await resp.release()
+                    last_error = {"error": f"HTTP {resp.status} ({current_scheme})"}
+                    break
+
+                if service == "a1111":
+                    data = await resp.json()
+                    await resp.release()
+                    models = [m.get("title", "") for m in data if isinstance(m, dict)]
                     return {
                         "service": service,
                         "url": base_url,
                         "models": models,
                         "checked": datetime.now(timezone.utc).isoformat(),
                     }
-                last_error = {"error": f"empty show ({scheme})"}
-                continue
-            else:
-                data = await resp.json()
-                await resp.release()
-                models = data if isinstance(data, list) else []
-                return {
-                    "service": service,
-                    "url": base_url,
-                    "models": models,
-                    "checked": datetime.now(timezone.utc).isoformat(),
-                }
-        except asyncio.TimeoutError:
-            if scheme == "http":
-                return {"error": f"timeout"}
-            last_error = {"error": f"timeout"}
-        except OSError as e:
-            last_error = {"error": f"{e} ({scheme})"}
-        except json.JSONDecodeError:
-            last_error = {"error": f"bad JSON ({scheme})"}
-        except aiohttp.ContentTypeError:
-            last_error = {"error": f"bad JSON ({scheme})"}
-        except Exception as e:
-            last_error = {"error": f"{e} ({scheme})"}
+                elif service == "ollama":
+                    data = await resp.json()
+                    await resp.release()
+                    models = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
+                    model = models[0] if models else None
+                    if not model:
+                        last_error = {"error": "no real models"}
+                        break
+                    show_body = {"model": model}
+                    show_url = f"{base_url}api/show"
+                    show_resp = await asyncio.wait_for(
+                        session.post(show_url, json=show_body), timeout=timeout
+                    )
+                    if show_resp.status != 200:
+                        await show_resp.release()
+                        last_error = {"error": f"show HTTP {show_resp.status} ({current_scheme})"}
+                        break
+                    show_data = await show_resp.json()
+                    await show_resp.release()
+                    details = show_data.get("details") or {}
+                    if details.get("family") or details.get("parameter_size") or details.get("quantization_level"):
+                        return {
+                            "service": service,
+                            "url": base_url,
+                            "models": models,
+                            "checked": datetime.now(timezone.utc).isoformat(),
+                        }
+                    last_error = {"error": f"empty show ({current_scheme})"}
+                    break
+                else:
+                    data = await resp.json()
+                    await resp.release()
+                    models = data if isinstance(data, list) else []
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+            except asyncio.TimeoutError:
+                last_error = {"error": "timeout"}
+                break
+            except OSError as e:
+                last_error = {"error": f"{e} ({current_scheme})"}
+                break
+            except json.JSONDecodeError:
+                last_error = {"error": f"bad JSON ({current_scheme})"}
+                break
+            except aiohttp.ContentTypeError:
+                last_error = {"error": f"bad JSON ({current_scheme})"}
+                break
+            except Exception as e:
+                last_error = {"error": f"{e} ({current_scheme})"}
+                break
+
     return last_error
 
 
@@ -584,6 +630,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         async with wlock:
             if isinstance(result, dict) and "error" not in result:
                 result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
+                result["host"] = entry["host"]
                 working = _load_json(working_file)
                 found = False
                 for i, w in enumerate(working):
@@ -600,7 +647,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason == "bad JSON" or "no real" in reason or "empty show" in reason) else "unreachable"
-                nr = {"service": service, "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
+                nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file)
                 if not isinstance(notworking, dict):
                     notworking = {}
