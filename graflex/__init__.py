@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 
@@ -52,6 +53,11 @@ SERVICE_CONFIG = {
         "port": 11434,
         "fofa_query": 'body="ollama"',
         "check_path": "/api/tags",
+    },
+    "llama.cpp": {
+        "port": 8080,
+        "fofa_query": 'server=="llama.cpp"',
+        "check_path": "/v1/models",
     },
 }
 
@@ -115,6 +121,11 @@ def _is_offline_msg(msg):
 
 def _is_offline_error(exc):
     return type(exc).__name__ == "NameResolutionError" or _is_offline_msg(str(exc))
+
+
+def _clean_llama_model_name(raw):
+    name = raw.rsplit("/", 1)[-1]
+    return re.sub(r"(-\d+-of-\d+)?\.gguf$", "", name)
 
 
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
@@ -214,6 +225,28 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         }
                     last_error = {"error": f"empty show ({current_scheme})"}
                     break
+                elif service == "llama.cpp":
+                    data = await resp.json()
+                    await resp.release()
+                    items = data.get("data", []) if isinstance(data, dict) else []
+                    models = []
+                    seen = set()
+                    for m in items:
+                        if not isinstance(m, dict):
+                            continue
+                        name = _clean_llama_model_name(m.get("id", ""))
+                        if name and name not in seen:
+                            seen.add(name)
+                            models.append(name)
+                    if not models:
+                        last_error = {"error": "no real models"}
+                        break
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
                 else:
                     data = await resp.json()
                     await resp.release()

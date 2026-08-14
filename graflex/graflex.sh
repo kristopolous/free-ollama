@@ -20,9 +20,9 @@ case "$SERVICE" in
   ollama)
     QUERY="body='ollama is running'"
     PORTS="11434,10443,8085,10001,8080,80,443,1194,110,8983,28017,21,5060,5601"
-    SERVERS="nginx,cloudflare,Apache"
+    #SERVERS="nginx,cloudflare,Apache"
     COUNTRIES="TH,MX,MY,NZ,BH,SG,KR,GB,AE,US,AU,IN,JP,DE,CA,RU,IL,BR,CN,IE,FR,ES,ID,IT,CH,ZA,HK,PL"
-    FID="UsjT+U+5J1db7DhwVOaRww==,gcg43SR+B8fEyFZyAZswOw==,WG5T78I2x/yKvDq/9kLayA==" #,vWJAw3jTn47wQTBzzr6Y5A==" #,IddNyyDw+Bero+vJOQnxFQ=="
+    #FID="UsjT+U+5J1db7DhwVOaRww==,gcg43SR+B8fEyFZyAZswOw==,WG5T78I2x/yKvDq/9kLayA==" #,vWJAw3jTn47wQTBzzr6Y5A==" #,IddNyyDw+Bero+vJOQnxFQ=="
 
     ;;
     
@@ -42,8 +42,15 @@ case "$SERVICE" in
     #FID="4OeA79EXS7Z+DdzkAvrBag==,WPcuJSTXuzZQIeov/h9jgA==,NCPjfTODiuNabsua2LTY7Q==,SWCeWGsQp4gTPi4YvgrIdQ=="
     ;;
 
+  llama.cpp)
+    QUERY='server=="llama.cpp"'
+    PORTS="8080,8000,80,443,3000"
+    SERVERS="nginx,cloudflare,uvicorn"
+    COUNTRIES="US,AU,IN,JP,DE,CA,BR,CN"
+    ;;
+
   *)
-    echo "Usage: $0 [ollama|comfyui|a1111|combine]" >&2
+    echo "Usage: $0 [ollama|comfyui|a1111|llama.cpp|combine]" >&2
     exit 1
     ;;
 esac

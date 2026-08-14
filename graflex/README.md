@@ -34,6 +34,9 @@ FOFA_COOKIE="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
 graflex -s a1111 -a fetch-check
 graflex -s comfyui -a fetch-check
 
+# llama.cpp hosts (server=="llama.cpp")
+graflex -s llama.cpp -a fetch-check
+
 # Custom FOFA query — saves results to ollama-hosts.json
 graflex -q 'body="ollama"' -a fetch -n ollama -p 11434
 
@@ -89,6 +92,7 @@ Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 1
 | `a1111` | 7860 | `/sdapi/v1/sd-models` |
 | `comfyui` | 8188 | `/models/checkpoints` |
 | `ollama` | 11434 | `/api/tags` |
+| `llama.cpp` | 8080 | `/v1/models` |
 
 ## How it works
 
@@ -113,6 +117,11 @@ lost on crash.
 
 Each result includes a `checked` field with an ISO 8601 timestamp.
 
+For `llama.cpp`, model ids from `/v1/models` are full file paths (e.g.
+`/models/.../DeepSeek-V3-Bf16-256x20B-BF16-00001-of-00035.gguf`). Only the
+basename is kept, and a trailing `-NNNN-of-NNNN.gguf` / `.gguf` is stripped, so
+that becomes `DeepSeek-V3-Bf16-256x20B-BF16`.
+
 | Action | Behavior |
 |--------|----------|
 | `check` | Skips hosts already in the working file and hosts with `result: "error"` in the not-working file. Rechecks `unreachable` hosts. |
@@ -126,7 +135,7 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 
 | Flag | Description |
 |------|-------------|
-| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`) |
+| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`) |
 | `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, or `fetch-check` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging API requests) |
