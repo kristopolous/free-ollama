@@ -109,6 +109,21 @@ def _fmt_duration(seconds):
     return " ".join(parts)
 
 
+def _model_name(model):
+    if isinstance(model, str):
+        return model
+    if isinstance(model, dict):
+        for key in ("name", "id", "title"):
+            val = model.get(key)
+            if isinstance(val, str):
+                return val
+    return ""
+
+
+def _filter_models(models):
+    return [m for m in models if not _model_name(m).endswith(":cloud")]
+
+
 def _is_offline_msg(msg):
     msg = str(msg).lower()
     return (
@@ -185,7 +200,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 if service == "a1111":
                     data = await resp.json()
                     await resp.release()
-                    models = [m.get("title", "") for m in data if isinstance(m, dict)]
+                    models = _filter_models([m.get("title", "") for m in data if isinstance(m, dict)])
                     return {
                         "service": service,
                         "url": base_url,
@@ -195,7 +210,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 elif service == "ollama":
                     data = await resp.json()
                     await resp.release()
-                    models = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
+                    models = _filter_models([m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)])
                     model = models[0] if models else None
                     if not model:
                         last_error = {"error": "no real models"}
@@ -243,6 +258,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         if name and name not in seen:
                             seen.add(name)
                             models.append(name)
+                    models = _filter_models(models)
                     if not models:
                         last_error = {"error": "no real models"}
                         break
@@ -255,7 +271,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 else:
                     data = await resp.json()
                     await resp.release()
-                    models = data if isinstance(data, list) else []
+                    models = _filter_models(data if isinstance(data, list) else [])
                     return {
                         "service": service,
                         "url": base_url,
