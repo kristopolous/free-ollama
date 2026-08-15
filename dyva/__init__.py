@@ -524,7 +524,7 @@ def find_servers(sub, caps=None):
         ms = [m for m in models if match_model(m, sub)]
         if not ms:
             continue
-        if any(":cloud" in m for m in models) and ":cloud" not in sub:
+        if any(re.search(r"[:-]cloud", m) for m in models) and not re.search(r"[:-]cloud", sub):
             continue
         host = s.get("server", "")
         if caps:
@@ -553,7 +553,7 @@ def all_models():
     seen = {}
     for s in servers:
         for m in s.get("models", []):
-            if ":cloud" in m or len(m) == 0:
+            if re.search(r"[:-]cloud", m) or len(m) == 0:
                 continue
             if m not in seen:
                 seen[m] = {'id': m, 'count': 1}
@@ -1306,7 +1306,7 @@ async def handle_dashboard(request):
     for s in servers:
         host = s.get("server", "")
         for m in s.get("models", []):
-            if ":cloud" in m or len(m) == 0:
+            if re.search(r"[:-]cloud", m) or len(m) == 0:
                 continue
             model_hosts.setdefault(m, []).append(host)
     for m in model_hosts:
