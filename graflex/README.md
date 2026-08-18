@@ -23,7 +23,7 @@ FOFA_KEY=your_fofa_api_key
 # Required — FOFA Authorization header token
 FOFA_AUTHORIZATION=your_fofa_authorization_token
 
-# Optional — Cookie header from browser (for web method fallback)
+# Optional — Cookie header from browser (required for web method)
 FOFA_COOKIE="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
 ```
 
@@ -36,6 +36,9 @@ graflex -s comfyui -a fetch-check
 
 # llama.cpp hosts (server=="llama.cpp")
 graflex -s llama.cpp -a fetch-check
+
+# vLLM hosts (uvicorn default response on port 8000)
+graflex -s vllm -a fetch-check
 
 # Custom FOFA query — saves results to ollama-hosts.json
 graflex -q 'body="ollama"' -a fetch -n ollama -p 11434
@@ -93,6 +96,7 @@ Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 1
 | `comfyui` | 8188 | `/models/checkpoints` |
 | `ollama` | 11434 | `/api/tags` |
 | `llama.cpp` | 8080 | `/v1/models` |
+| `vllm` | 8000 | `/v1/models` |
 
 ## How it works
 
@@ -122,8 +126,13 @@ For `llama.cpp`, model ids are taken from `/v1/models` `data[].id` verbatim (e.g
 is kept because some instances serve multiple models and the id is what
 disambiguates them.
 
-Hosts are also probed at `/props`; a `401` means the instance is locked down
-with an API key and is rejected (`auth required`).
+For `vllm`, FOFA discovers candidates by matching the uvicorn default response
+(`{"detail": "Not Found"}`) on port 8000. Each candidate is then probed at
+`/v1/models` — most won't respond (hit rate is low), but the ones that do
+reveal their loaded models in the same OpenAI-compatible format as `llama.cpp`.
+
+For `llama.cpp`, hosts are also probed at `/props`; a `401` means the instance
+is locked down with an API key and is rejected (`auth required`).
 
 | Action | Behavior |
 |--------|----------|
@@ -138,7 +147,7 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 
 | Flag | Description |
 |------|-------------|
-| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`) |
+| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`) |
 | `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, or `fetch-check` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging API requests) |
@@ -155,3 +164,11 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
 | `-z`, `--sleep` | Seconds to sleep between requests (default: 4) |
 | `-r`, `--random` | Shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order |
+
+## Common errors
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `FOFA_COOKIE must be set in .env for the web method` | The web fetch method requires a browser cookie to authenticate with FOFA's web interface. | Log into [fofa.info](https://en.fofa.info), open DevTools > Network, copy the `Cookie` header from any request, and set it as `FOFA_COOKIE` in `.env`. |
+| `FOFA access denied — IP flagged as a web crawler` | FOFA has rate-limited or blocked your IP. The response contains `[-3000] IP access is abnormal`. | Wait a while, switch IPs (VPN/proxy), or try again later. This is a fatal error — graflex will not retry. |
+| `daily usage limit hit` | Free tier FOFA accounts are limited to 3000 queries/day. | Resume later with `--id <run_ts>` from the error message. |
