@@ -66,7 +66,7 @@ body.chat{overflow:hidden}
 .card.collapsed h2::before{transform:rotate(-90deg)}
 .card.collapsed .card-inner{display:none}
 
-#chat,#image{max-width:900px}
+#image{max-width:900px}
 label{display:block;font-size:.8rem;color:#999;margin-bottom:6px}
 input[type=text],input[type=number],textarea,select{width:100%;padding:8px 10px;border:1px solid #444;border-radius:6px;background:#2a2a2a;color:#eee;font-size:.85rem;outline:none;font-family:ui-monospace,monospace}
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:#888}
@@ -386,6 +386,8 @@ function persistChats(chats){
     var stripped=chats.map(function(c){
       return Object.assign({},c,{messages:c.messages.map(function(m){
         var o={role:m.role,content:m.content};
+        if(m._meta)o._meta=m._meta;
+        if(m.tps!==undefined)o.tps=m.tps;
         if(m.files&&m.files.length)o.files=m.files.map(function(f){return {name:f.name,type:f.type,size:f.size}});
         return o;
       })});
@@ -401,6 +403,8 @@ function saveCurrentChat(){
   for(var k=0;k<chats.length;k++){if(chats[k].id===currentChat.id){i=k;break}}
   var copy={id:currentChat.id,createdAt:currentChat.createdAt,title:currentChat.title,model:currentChat.model||'',messages:currentChat.messages.map(function(m){
     var c={role:m.role,content:m.content};
+    if(m._meta)c._meta=m._meta;
+    if(m.tps!==undefined)c.tps=m.tps;
     if(m.files&&m.files.length)c.files=m.files.slice();
     return c;
   })};
@@ -479,7 +483,8 @@ function addMsg(role,text,index){
     highlightBlocks(b);
     if(index!==undefined){
       var m=currentChat.messages[index];
-      if(m&&(m.host||m.model||m.tps))setAssistantLabel(r,m.host,m.model,m.tps);
+      var meta=m&&m._meta;
+      if(meta||m&&m.tps)setAssistantLabel(r,meta&&meta.server,meta&&meta.model,m&&m.tps);
     }
   }
   else{
@@ -562,7 +567,7 @@ function findChatIndex(id){
 function chatInView(chatId){return String(currentChat.id)===String(chatId)}
 function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render){
   if(!content)return;
-  var msg={role:'assistant',content:content,host:host||'',model:fmodel||'',tps:tps};
+  var msg={role:'assistant',content:content,_meta:{server:host||'',model:fmodel||''},tps:tps};
   var inView=chatInView(chatId);
   var chats=loadChats(),i=findChatIndex(chatId);
   if(inView&&i<0){
