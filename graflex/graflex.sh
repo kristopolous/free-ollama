@@ -49,17 +49,24 @@ case "$SERVICE" in
     FID="9fQvFf/gWpbFiiDwLkiXOw==,I2Yn1XFvazj+4lCwZ3R86w=="
     ;;
 
+  vllm)
+    PORTS="8080,80,443,8888,8001"
+    COUNTRIES="US,CN,DE,RU,IN,FR,NL,SG,KR,FI,GB"
+    ;;
+
   *)
-    echo "Usage: $0 [ollama|comfyui|a1111|llama.cpp|combine]" >&2
+    echo "Usage: $0 [ollama|comfyui|a1111|vllm|llama.cpp|combine]" >&2
     exit 1
     ;;
 esac
 
 fid=()
 servers=()
+query=()
 
 [[ -n "$FID" ]] && fid=( "--fid" $FID )
 [[ -n "$SERVERS" ]] && servers=( "--servers" $SERVERS )
+[[ -n "$QUERY" ]] && query=( "--servers" $QUERY )
 
 set -x
 
@@ -68,8 +75,7 @@ exec ./graflex.py \
       --countries "$COUNTRIES" \
       "${EXTRA_ARGS[@]}" "${fid[@]}" \
       --ports "$PORTS" \
-      --query "$QUERY" \
-      --random \
+      "${query[@]}" --random \
       --name    "$SERVICE" "${servers[@]}" \
       --service "$SERVICE" \
       --sleep   "$SLEEP" \
