@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ## Method 1: Liberated Infrastructure
 
-**Dyva** is a managed proxy that you can connect to with any OpenAI, Ollama, ComfyUI, llama.cpp, or a1111 compatible client. 
+**Dyva** is a managed proxy that you can connect to with any OpenAI, Ollama, ComfyUI, llama.cpp, vllm, or a1111 compatible client (graflex finds the open ones). 
 
 It will cycle through and find working hosts automatically. 
 
@@ -125,7 +125,7 @@ free-ollama qwen3:latest {0..10} qwen2:1.5 {0..5}
 
 ## What's graflex do?
 
-It's a fofa scraper for discovering hosts. Check out the [the readme](graflex).
+It's a FOFA scraper for discovering hosts. Check out [the readme](graflex).
 
 ## Usage
 
