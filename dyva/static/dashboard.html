@@ -408,7 +408,7 @@ function saveCurrentChat(){
     if(m.files&&m.files.length)c.files=m.files.slice();
     return c;
   })};
-  if(i>=0)chats[i]=copy;else chats.unshift(copy);
+  if(i>=0)chats[i]=copy;else{chats.unshift(copy);if(location.hash!=='#chat/'+currentChat.id)location.hash='chat/'+currentChat.id;}
   persistChats(chats);
 }
 function fmtWhen(ts){var d=new Date(ts);return d.toLocaleDateString()+' '+d.toLocaleTimeString()}
@@ -430,7 +430,7 @@ function renderSidebar(){
   });
 }
 function deleteChat(id){
-  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();}
+  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();location.hash='chat';}
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
 }
@@ -641,7 +641,7 @@ function setAssistantLabel(el,host,fmodel,tps){
   if(tps!==undefined&&tps!==null&&!isNaN(tps))s+=' '+tps+' tps';
   el.textContent=s;
 }
-function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();}
+function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();location.hash='chat';}
 function loadChatById(id){
   closeChatDrawer();
   saveCurrentChat();
@@ -652,6 +652,7 @@ function loadChatById(id){
   updateModelCount();
   renderMessages();
   renderSidebar();
+  if(location.hash!=='#chat/'+id)location.hash='chat/'+id;
 }
 document.getElementById('chatNew').addEventListener('click',newChat);
 var modelCountTimer=null;
@@ -942,20 +943,23 @@ async function generateImage(){
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
 
-function activateTab(name){
+function activateTab(name,chatId){
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
   document.body.classList.toggle('chat',name==='chat');
+  if(name==='chat'&&chatId)loadChatById(chatId);
 }
 function tabFromHash(){
   var h=location.hash.replace(/^#/,'');
-  return (h==='serverroom'||h==='chat'||h==='image')?h:'serverroom';
+  if(h.indexOf('chat/')===0)return{tab:'chat',chatId:h.slice(5)};
+  if(h==='serverroom'||h==='chat'||h==='image')return{tab:h};
+  return{tab:'serverroom'};
 }
 document.querySelectorAll('.tab').forEach(function(t){
   t.addEventListener('click',function(){location.hash=t.getAttribute('data-tab');});
 });
-window.addEventListener('hashchange',function(){activateTab(tabFromHash());});
-activateTab(tabFromHash());
+window.addEventListener('hashchange',function(){var h=tabFromHash();activateTab(h.tab,h.chatId);});
+var init=tabFromHash();activateTab(init.tab,init.chatId);
 </script>
 </body>
 </html>
