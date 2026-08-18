@@ -59,6 +59,11 @@ SERVICE_CONFIG = {
         "fofa_query": 'server=="llama.cpp"',
         "check_path": "/v1/models",
     },
+    "vllm": {
+        "port": 8000,
+        "fofa_query": 'body="{\\"detail\\": \\"Not Found\\"}" && server=="uvicorn" && port==8000',
+        "check_path": "/v1/models",
+    },
 }
 
 
@@ -246,6 +251,29 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         await resp.release()
                         last_error = {"error": "auth required"}
                         break
+                    data = await resp.json()
+                    await resp.release()
+                    items = data.get("data", []) if isinstance(data, dict) else []
+                    models = []
+                    seen = set()
+                    for m in items:
+                        if not isinstance(m, dict):
+                            continue
+                        name = m.get("id", "")
+                        if name and name not in seen:
+                            seen.add(name)
+                            models.append(name)
+                    models = _filter_models(models)
+                    if not models:
+                        last_error = {"error": "no real models"}
+                        break
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+                elif service == "vllm":
                     data = await resp.json()
                     await resp.release()
                     items = data.get("data", []) if isinstance(data, dict) else []
