@@ -260,11 +260,13 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         session.get(f"{base_url}props", allow_redirects=False), timeout=timeout
                     )
                     props_status = props_resp.status
-                    await props_resp.release()
                     if props_status == 401:
+                        await props_resp.release()
                         await resp.release()
                         last_error = {"error": "auth required"}
                         break
+                    props_data = await props_resp.json()
+                    await props_resp.release()
                     data = await resp.json()
                     await resp.release()
                     items = data.get("data", []) if isinstance(data, dict) else []
@@ -281,12 +283,16 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     if not models:
                         last_error = {"error": "no real models"}
                         break
-                    return {
+                    version = props_data.get("build_info") if isinstance(props_data, dict) else None
+                    result = {
                         "service": service,
                         "url": base_url,
                         "models": models,
                         "checked": datetime.now(timezone.utc).isoformat(),
                     }
+                    if version:
+                        result["version"] = version
+                    return result
                 elif service == "vllm":
                     data = await resp.json()
                     await resp.release()
