@@ -233,12 +233,26 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     await show_resp.release()
                     details = show_data.get("details") or {}
                     if details.get("family") or details.get("parameter_size") or details.get("quantization_level"):
-                        return {
+                        version = None
+                        try:
+                            ver_resp = await asyncio.wait_for(
+                                session.get(f"{base_url}api/version", allow_redirects=False), timeout=timeout
+                            )
+                            if ver_resp.status == 200:
+                                ver_data = await ver_resp.json()
+                                version = ver_data.get("version")
+                            await ver_resp.release()
+                        except Exception:
+                            pass
+                        result = {
                             "service": service,
                             "url": base_url,
                             "models": models,
                             "checked": datetime.now(timezone.utc).isoformat(),
                         }
+                        if version:
+                            result["version"] = version
+                        return result
                     last_error = {"error": f"empty show ({current_scheme})"}
                     break
                 elif service == "llama.cpp":
