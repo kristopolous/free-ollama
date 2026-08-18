@@ -408,6 +408,9 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
                     os.remove(out_path)
                 log.error(f"daily usage limit hit, resume by using --id {run_ts}")
                 raise SystemExit(1)
+            if "access is temporarily denied" in body:
+                log.error("FOFA access denied — IP flagged as a web crawler. Try again later or use a different IP/VPN.")
+                raise SystemExit(1)
             if "rate limit" in body or "too many requests" in body or "api request frequency out of limit" in body:
                 raise RuntimeError("rate limited")
             break
@@ -511,6 +514,9 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
     hosts_file = _cache_file(name, "hosts")
 
     if method == "web":
+        if not FOFA_COOKIE:
+            log.error("FOFA_COOKIE must be set in .env for the web method. See README for instructions on how to obtain it from your browser.")
+            return []
         from datetime import datetime
         run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
         if session:
