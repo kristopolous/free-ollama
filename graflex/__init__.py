@@ -472,14 +472,10 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
         except RuntimeError as e:
             msg = str(e)
             if msg == "network unstable":
-                if attempt < 3:
-                    log.warning(f"network unstable, retrying in {backoff}s")
-                    time.sleep(backoff)
-                    backoff = int(backoff * 1.2)
-                    attempt += 1
-                else:
-                    log.warning("network unstable (giving up)")
-                    return None
+                log.warning(f"network unstable, retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = int(backoff * 1.2)
+                continue
             else:
                 if attempt < 2:
                     log.warning(f"rate limited, retrying in {backoff}s")
