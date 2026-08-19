@@ -848,7 +848,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         if resp is not None:
             await resp.release()
 
-    tasks = [asyncio.create_task(worker()) for _ in range(WORKER_COUNT)]
+    tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(servers)))]
 
     while True:
         try:
@@ -2189,7 +2189,7 @@ async def handle_txt2img(request):
                     await broadcast_activity(host, activity_label, "failed",
                         f"txt2img: {type(_e).__name__}")
 
-        tasks = [asyncio.create_task(worker()) for _ in range(WORKER_COUNT)]
+        tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(host_list)))]
         try:
             while True:
                 try:
