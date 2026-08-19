@@ -784,7 +784,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                 nkey = entry["host"]
                 notworking[nkey] = nr
                 _save_json_atomic(notworking_file, notworking)
-                log.info(f"- {entry['host']}: {reason}")
+                log.info(f"  {entry['host']}: {reason}")
         return ok
 
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
