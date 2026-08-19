@@ -380,6 +380,11 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False):
             resp.raise_for_status()
             data = resp.json()
             if data.get("error"):
+                if "network unstable" in data.get("error", "").lower():
+                    log.warning(f"network unstable, retrying in {backoff}s")
+                    time.sleep(backoff)
+                    backoff = min(int(backoff * 1.2), MAX_BACKOFF)
+                    continue
                 log.error(f"FOFA error: {data.get('error')}")
                 return []
             break
@@ -461,16 +466,29 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
                 raise SystemExit(1)
             if "rate limit" in body or "too many requests" in body or "api request frequency out of limit" in body:
                 raise RuntimeError("rate limited")
+            if "network unstable" in body:
+                raise RuntimeError("network unstable")
             break
-        except RuntimeError:
-            if attempt < 2:
-                log.warning(f"rate limited, retrying in {backoff}s")
-                time.sleep(backoff)
-                backoff = int(backoff * 1.2)
-                attempt += 1
+        except RuntimeError as e:
+            msg = str(e)
+            if msg == "network unstable":
+                if attempt < 3:
+                    log.warning(f"network unstable, retrying in {backoff}s")
+                    time.sleep(backoff)
+                    backoff = int(backoff * 1.2)
+                    attempt += 1
+                else:
+                    log.warning("network unstable (giving up)")
+                    return None
             else:
-                log.warning("rate limited")
-                return None
+                if attempt < 2:
+                    log.warning(f"rate limited, retrying in {backoff}s")
+                    time.sleep(backoff)
+                    backoff = int(backoff * 1.2)
+                    attempt += 1
+                else:
+                    log.warning("rate limited")
+                    return None
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
             if code in (429, 403) and attempt < 2:
