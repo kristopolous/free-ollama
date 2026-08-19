@@ -524,7 +524,7 @@ def find_servers(sub, caps=None):
         ms = [m for m in models if match_model(m, sub)]
         if not ms:
             continue
-        if any(re.search(r"[:-]cloud", m) for m in models) and not re.search(r"[:-]cloud", sub):
+        if any(re.search(r"[:-]cloud", m) for m in ms) and not re.search(r"[:-]cloud", sub):
             continue
         host = s.get("server", "")
         if caps:
