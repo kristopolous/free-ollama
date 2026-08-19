@@ -66,7 +66,7 @@ query=()
 
 [[ -n "$FID" ]] && fid=( "--fid" $FID )
 [[ -n "$SERVERS" ]] && servers=( "--servers" $SERVERS )
-[[ -n "$QUERY" ]] && query=( "--servers" $QUERY )
+[[ -n "$QUERY" ]] && query=( "--servers" "$QUERY" )
 
 set -x
 
