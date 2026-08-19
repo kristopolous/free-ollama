@@ -331,8 +331,8 @@ def set_last(model, host, full):
 
 def match_model(model_name, pattern):
     if any(c in pattern for c in "*?["):
-        return fnmatch.fnmatch(model_name, f"*{pattern}*")
-    return pattern in model_name
+        return fnmatch.fnmatch(model_name.lower(), f"*{pattern.lower()}*")
+    return pattern.lower() in model_name.lower()
 
 
 def needs_caps(messages):
@@ -718,6 +718,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     continue
                 if sees:
                     mark_vision(host, full)
+                    set_last(model, host, full)
                     await broadcast_activity(host, model, "trying",
                         f"trial balloon: {full} has vision", wid=wid)
                 else:
