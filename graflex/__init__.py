@@ -61,7 +61,7 @@ SERVICE_CONFIG = {
     },
     "vllm": {
         "port": 8000,
-        "fofa_query": '{"detail": "Not Found"} && server=="uvicorn" && port==8000',
+        "fofa_query": '{"detail": "Not Found"} && server=="uvicorn"',
         "check_path": "/v1/models",
     },
 }
