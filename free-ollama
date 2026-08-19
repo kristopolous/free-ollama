@@ -245,13 +245,15 @@ else
               shift
               _timeout=$1 ;;
             --host)     # Report just the host
-                _host=1 ;;
+              _host=1 ;;
             --mas)      # Report just the host in MAS format
-                _host=1 _mas=1 ;;
+              _host=1 _mas=1 ;;
             --info)     # Run info on the model
-                info=1 ;;
+              info=1 ;;
             --proxy)    # Try to proxy matching ones
-                proxy $2 ;;
+              proxy $2 ;;
+            --version)
+              ./dyva.py --version ;;
             --refresh)  # Refresh the cache
               cache 1
               truncate -s 0 "$_bad"
