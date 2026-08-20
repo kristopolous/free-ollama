@@ -2593,7 +2593,7 @@ def main():
 
     if args.refresh:
         refresh_cache()
-        print("Refreshed cache")
+        log.info("Refreshed cache")
         sys.exit(0)
 
     banner()
