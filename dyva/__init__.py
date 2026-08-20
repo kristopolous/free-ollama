@@ -141,6 +141,16 @@ def refresh_cache():
 
     host_map = {}
 
+    # graflex is the authoritative reference.
+    if os.path.exists(f'{_db}-graflex.tmp'):
+      with open(f'{_db}-graflex.tmp', 'r') as f:
+        for row in json.loads(f.read()):
+          ip = row.get('url').rstrip('/')
+          if ip not in host_map:
+            host_map[ip] = {'tps': 0, 'models': [], 'server': ip, 'version': row.get('version') or ''}
+    
+          host_map[ip]['models'] += row.get('models')
+
     if os.path.exists(f'{_db}-forrany.tmp'):
       with open(f'{_db}-forrany.tmp', 'r') as f:
         try:
@@ -149,22 +159,13 @@ def refresh_cache():
         except Exception as ex:
           logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
 
-    if os.path.exists(f'{_db}-graflex.tmp'):
-      with open(f'{_db}-graflex.tmp', 'r') as f:
-        for row in json.loads(f.read()):
-          ip = row.get('url').rstrip('/')
-          if ip not in host_map:
-            host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
-    
-          host_map[ip]['models'] += row.get('models')
-
     if os.path.exists(f"{_db}-happyshua.tmp"):
       with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
         for r in csv.reader(csvfile):
           ip = r[0].rstrip('/')
           models = [m.strip() for m in r[1].split(',')]
           if ip not in host_map:
-            host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+            host_map[ip] = {'tps': 0, 'models': [], 'server': ip, 'version': ''}
     
           host_map[ip]['models'] += models
 
@@ -174,13 +175,15 @@ def refresh_cache():
           ip = row.get('url').rstrip('/')
           models = [ n.get('name') for n in row.get('models') ]
           if ip not in host_map:
-            host_map[ip] = {'tps': 0, 'models': [], 'server': ip}
+            host_map[ip] = {'tps': 0, 'models': [], 'server': ip, 'version': ''}
 
           host_map[ip]['models'] += models
 
     if os.path.exists(GRAFLEX_WORKING):
       with open(GRAFLEX_WORKING, 'r') as f:
         for row in json.loads(f.read()):
+          if 'version' in row:
+            row['version'] = row['version']
           if 'host' in row:
             row['server'] = row['host'].rstrip('/')
           elif 'url' in row:
