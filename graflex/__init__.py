@@ -554,7 +554,7 @@ def _parse_fofa_html(html_path, service):
 
     values = re.findall(r'data-clipboard-text="([^"]+)"', content)
     if not values:
-        log.warning("! no results")
+        log.warning(f"! NO RESULTS from {html_path}")
         return []
 
     seen = set()
