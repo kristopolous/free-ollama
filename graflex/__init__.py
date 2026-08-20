@@ -310,12 +310,26 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     if not models:
                         last_error = {"error": "no real models"}
                         break
-                    return {
+                    version = None
+                    try:
+                        ver_resp = await asyncio.wait_for(
+                            session.get(f"{base_url}version", allow_redirects=False), timeout=timeout
+                        )
+                        if ver_resp.status == 200:
+                            ver_data = await ver_resp.json()
+                            version = ver_data.get("version")
+                        await ver_resp.release()
+                    except Exception:
+                        pass
+                    result = {
                         "service": service,
                         "url": base_url,
                         "models": models,
                         "checked": datetime.now(timezone.utc).isoformat(),
                     }
+                    if version:
+                        result["version"] = version
+                    return result
                 else:
                     data = await resp.json()
                     await resp.release()
