@@ -61,7 +61,7 @@ SERVICE_CONFIG = {
     },
     "vllm": {
         "port": 8000,
-        "fofa_query": '{"detail": "Not Found"} && server=="uvicorn" && port==8000',
+        "fofa_query": '{"detail": "Not Found"} && server=="uvicorn"',
         "check_path": "/v1/models",
     },
 }
@@ -707,6 +707,20 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
 
 
+async def _is_network_reachable(session, check_hosts, timeout=10):
+    """Quick check if network is reachable by pinging a known-good host."""
+    for entry in check_hosts[:3]:
+        try:
+            host_port = entry["host"].split(":")
+            h = host_port[0]
+            p = int(host_port[1]) if len(host_port) > 1 else 80
+            async with session.get(f"http://{h}:{p}/", timeout=aiohttp.ClientTimeout(total=timeout)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def _check_all(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10):
     from datetime import datetime, timezone
 
@@ -763,6 +777,10 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             while True:
                 result = await _check_host(session, h, p, service, timeout=check_timeout)
                 if isinstance(result, dict) and "error" in result and _is_offline_msg(result["error"]):
+                    reachable = await _is_network_reachable(session, existing_working)
+                    if reachable:
+                        log.warning(f"~ {entry['host']}: {result['error']} (host unreachable, not offline)")
+                        break
                     log.warning(f"~ {entry['host']}: {result['error']} (offline, retrying in {backoff}s...)")
                     await asyncio.sleep(backoff)
                     backoff = min(int(backoff * 1.2), MAX_BACKOFF)
