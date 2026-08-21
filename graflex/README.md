@@ -121,6 +121,9 @@ lost on crash.
 
 Each result includes a `checked` field with an ISO 8601 timestamp.
 
+Progress is reported every 250 completed hosts:
+`Checked: <n> | Runtime: <duration> | Remaining: <n> | ETA: <duration>`.
+
 For `ollama`, a host that answers `/api/tags` but has no pullable (non-`:cloud`)
 models is still recorded as working with an empty `models` list — it is running
 ollama and reachable, so it counts as a good host. `version` comes from
