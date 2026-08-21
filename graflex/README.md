@@ -93,7 +93,7 @@ Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 1
 | Service | Default Port | Check Endpoint |
 |---------|-------------|----------------|
 | `a1111` | 7860 | `/sdapi/v1/sd-models` |
-| `comfyui` | 8188 | `/models/checkpoints` |
+| `comfyui` | 8188 | `/models/checkpoints` + `/api/system_stats` |
 | `ollama` | 11434 | `/api/tags` |
 | `llama.cpp` | 8080 | `/v1/models` |
 | `vllm` | 8000 | `/v1/models` |
@@ -133,6 +133,13 @@ reveal their loaded models in the same OpenAI-compatible format as `llama.cpp`.
 
 For `llama.cpp`, hosts are also probed at `/props`; a `401` means the instance
 is locked down with an API key and is rejected (`auth required`).
+
+For `comfyui`, after listing checkpoints the host is also probed at
+`/api/system_stats` to survey its hardware. When available, the result records
+`version` (`system.comfyui_version`) and, from the first entry in `devices[]`,
+`vram_device` (`name`), `vram_type` (`type`), and `vram_total` (bytes). A
+failed or missing stats response never fails the check — models are still
+recorded.
 
 | Action | Behavior |
 |--------|----------|

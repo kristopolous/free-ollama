@@ -48,6 +48,7 @@ SERVICE_CONFIG = {
         "port": 8188,
         "fofa_query": 'title="ComfyUI"',
         "check_path": "/models/checkpoints",
+        "stats_path": "/api/system_stats",
     },
     "ollama": {
         "port": 11434,
@@ -292,6 +293,40 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     }
                     if version:
                         result["version"] = version
+                    return result
+                elif service == "comfyui":
+                    data = await resp.json()
+                    await resp.release()
+                    models = _filter_models(data if isinstance(data, list) else [])
+                    result = {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+                    try:
+                        stats_resp = await asyncio.wait_for(
+                            session.get(f"{base_url}{cfg['stats_path'].lstrip('/')}", allow_redirects=False), timeout=timeout
+                        )
+                        if stats_resp.status == 200:
+                            stats = await stats_resp.json()
+                            await stats_resp.release()
+                            system = stats.get("system") or {}
+                            version = system.get("comfyui_version")
+                            if version:
+                                result["version"] = version
+                            devices = stats.get("devices") or []
+                            dev = devices[0] if devices and isinstance(devices[0], dict) else {}
+                            if dev.get("name"):
+                                result["vram_device"] = dev["name"]
+                            if dev.get("type"):
+                                result["vram_type"] = dev["type"]
+                            if dev.get("vram_total") is not None:
+                                result["vram_total"] = dev["vram_total"]
+                        else:
+                            await stats_resp.release()
+                    except Exception:
+                        pass
                     return result
                 elif service == "vllm":
                     data = await resp.json()
