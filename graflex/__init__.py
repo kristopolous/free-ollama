@@ -31,6 +31,7 @@ TIMEOUT = 60
 BACKOFF = 15
 MAX_BACKOFF = 300
 SLEEP_DEFAULT = 4
+STATS_EVERY = 250
 
 FOFA_KEY = os.getenv("FOFA_KEY", "")
 FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
@@ -218,44 +219,42 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     await resp.release()
                     models = _filter_models([m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)])
                     model = models[0] if models else None
-                    if not model:
-                        last_error = {"error": "no real models"}
-                        break
-                    show_body = {"model": model}
-                    show_url = f"{base_url}api/show"
-                    show_resp = await asyncio.wait_for(
-                        session.post(show_url, json=show_body), timeout=timeout
-                    )
-                    if show_resp.status != 200:
+                    if model:
+                        show_body = {"model": model}
+                        show_url = f"{base_url}api/show"
+                        show_resp = await asyncio.wait_for(
+                            session.post(show_url, json=show_body), timeout=timeout
+                        )
+                        if show_resp.status != 200:
+                            await show_resp.release()
+                            last_error = {"error": f"show HTTP {show_resp.status} ({current_scheme})"}
+                            break
+                        show_data = await show_resp.json()
                         await show_resp.release()
-                        last_error = {"error": f"show HTTP {show_resp.status} ({current_scheme})"}
-                        break
-                    show_data = await show_resp.json()
-                    await show_resp.release()
-                    details = show_data.get("details") or {}
-                    if details.get("family") or details.get("parameter_size") or details.get("quantization_level"):
-                        version = None
-                        try:
-                            ver_resp = await asyncio.wait_for(
-                                session.get(f"{base_url}api/version", allow_redirects=False), timeout=timeout
-                            )
-                            if ver_resp.status == 200:
-                                ver_data = await ver_resp.json()
-                                version = ver_data.get("version")
-                            await ver_resp.release()
-                        except Exception:
-                            pass
-                        result = {
-                            "service": service,
-                            "url": base_url,
-                            "models": models,
-                            "checked": datetime.now(timezone.utc).isoformat(),
-                        }
-                        if version:
-                            result["version"] = version
-                        return result
-                    last_error = {"error": f"empty show ({current_scheme})"}
-                    break
+                        details = show_data.get("details") or {}
+                        if not (details.get("family") or details.get("parameter_size") or details.get("quantization_level")):
+                            last_error = {"error": f"empty show ({current_scheme})"}
+                            break
+                    version = None
+                    try:
+                        ver_resp = await asyncio.wait_for(
+                            session.get(f"{base_url}api/version", allow_redirects=False), timeout=timeout
+                        )
+                        if ver_resp.status == 200:
+                            ver_data = await ver_resp.json()
+                            version = ver_data.get("version")
+                        await ver_resp.release()
+                    except Exception:
+                        pass
+                    result = {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if version:
+                        result["version"] = version
+                    return result
                 elif service == "llama.cpp":
                     props_resp = await asyncio.wait_for(
                         session.get(f"{base_url}props", allow_redirects=False), timeout=timeout
@@ -788,7 +787,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working}
             done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values())
         else:
-            done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working if h.get("models")}
+            done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working}
             done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values() if n.get("result") == "error")
 
     to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
@@ -802,8 +801,11 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
 
     sem = asyncio.Semaphore(workers)
     wlock = asyncio.Lock()
+    start = time.time()
+    completed = 0
 
     async def check_one(entry):
+        nonlocal completed
         async with sem:
             host_port = entry["host"].split(":")
             h = host_port[0]

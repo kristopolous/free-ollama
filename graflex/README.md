@@ -121,6 +121,11 @@ lost on crash.
 
 Each result includes a `checked` field with an ISO 8601 timestamp.
 
+For `ollama`, a host that answers `/api/tags` but has no pullable (non-`:cloud`)
+models is still recorded as working with an empty `models` list — it is running
+ollama and reachable, so it counts as a good host. `version` comes from
+`/api/version` when available.
+
 For `llama.cpp`, model ids are taken from `/v1/models` `data[].id` verbatim (e.g.
 `/models/.../DeepSeek-V3-Bf16-256x20B-BF16-00001-of-00035.gguf`). The full id
 is kept because some instances serve multiple models and the id is what
@@ -143,7 +148,7 @@ recorded.
 
 | Action | Behavior |
 |--------|----------|
-| `check` | Skips hosts already in the working file and hosts with `result: "error"` in the not-working file. Rechecks `unreachable` hosts. |
+| `check` | Skips hosts already in the working file (including empty-model ollama hosts) and hosts with `result: "error"` in the not-working file. Rechecks `unreachable` hosts. |
 | `check-new` | Skips all hosts with any previous record (working or not-working). Only checks hosts never tested before. |
 | `check-all` | Rechecks every host regardless of previous status. |
 
