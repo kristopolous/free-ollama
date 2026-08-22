@@ -2,6 +2,8 @@
 
 OpenAI and Ollama-compatible proxy that routes inference to insecure Ollama, vllm, llama.cpp, A1111, and ComfyUI hosts.
 
+Compatible enough that the real Ollama CLI thinks it's talking to a real Ollama server — see [below](#use-it-like-ollama).
+
 Complete with even a little chat thingy. Look at the thingy!
 <img width="930" alt="dumpster" src="https://github.com/user-attachments/assets/162b7938-1284-446a-b99e-f56acb895706" />
 
@@ -23,6 +25,25 @@ Here it is. Running ON MY ACTUAL FUCKING PHONE! (*gasp*)
 | `-r`, `--refresh` | Refresh server cache from all sources and exit |
 | `--curlify` | Print `curl` commands of upstream requests to stderr |
 | `-v`, `--version` | Show version |
+
+## Use It Like Ollama
+
+Point the official Ollama CLI at dyva and the everyday commands just work — except instead of one machine's models you see everything the swarm has to offer:
+
+```bash
+export OLLAMA_HOST=http://127.0.0.1:11434   # wherever dyva runs
+
+ollama ls            # every model across all discovered hosts
+ollama ps            # models in use and where they last ran
+ollama show llama3   # metadata for any model
+ollama run llama3    # chat straight from your terminal
+```
+
+`ollama run` streams through the same racing/failover machinery as every other endpoint, so if a host dies mid-sentence the next request lands somewhere else.
+
+Notes:
+- `ollama pull` doesn't download anything (models live on remote hosts) — it just refreshes dyva's server cache.
+- `ollama cp` / `ollama rm` are not supported.
 
 ## API Reference
 
