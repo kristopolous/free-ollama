@@ -174,11 +174,16 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .model-count-badge{flex-shrink:0;background:#2a2a3a;color:#77a;border-radius:6px;padding:.5em .7em;font-size:.85rem;font-family:ui-monospace,monospace;min-width:2.4em;text-align:center}
 .field{margin-bottom:12px}
 .img-params{display:grid;grid-template-columns:2.2fr 1fr;gap:12px;margin-bottom:12px}
-@media(max-width:640px){.img-params{grid-template-columns:1fr}}
 .img-dims{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px}
 .slider-row{display:grid;grid-template-columns:180px 1fr 56px;gap:10px;align-items:center;margin-bottom:12px}
 .slider-row label{display:flex;justify-content:space-between;margin:0}
 .slider-row .val{font-family:ui-monospace,monospace;font-size:.82rem;color:#77a;text-align:right}
+.img-advanced{border:1px solid #333;border-radius:8px;background:#191919;padding:0 10px;margin-bottom:12px}
+.img-advanced>summary{cursor:pointer;padding:8px 0;font-size:.85rem;color:#aaa;user-select:none;list-style:none}
+.img-advanced>summary::-webkit-details-marker{display:none}
+.img-advanced>summary::before{content:'▸ ';color:#666}
+.img-advanced[open]>summary::before{content:'▾ '}
+.img-advanced .slider-row:last-child{padding-bottom:8px}
 input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 .check-row{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:.85rem;color:#aaa}
 .check-row input{accent-color:#77a}
@@ -361,6 +366,8 @@ __SD_MODELS__
 <label for="negPrompt">Negative prompt</label>
 <textarea id="negPrompt" rows="2" placeholder="blurry, low quality, watermark"></textarea>
 </div>
+<details class="img-advanced" id="imgAdvanced">
+<summary>Advanced</summary>
 <div class="slider-row">
 <label for="imgSteps">Steps</label>
 <input id="imgSteps" type="range" min="1" max="150" value="20">
@@ -376,6 +383,7 @@ __SD_MODELS__
 <input id="imgBatch" type="range" min="1" max="4" value="1">
 <span class="val" id="imgBatchVal">1</span>
 </div>
+</details>
 <button id="imgGenerate">Generate</button>
 <div id="imgResult"></div>
 </div>
@@ -394,7 +402,7 @@ __SD_MODELS__
 var evtSource=new EventSource('api/activity');
 var paused=false;
 function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
-evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();if(activeStatus){if(d.status==='connected')activeStatus.textContent='generating\u2026';else if(d.status==='trying'||d.status==='failed')activeStatus.textContent=d.message;}var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
+evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
 document.getElementById('activityBtn').addEventListener('click',function(e){e.stopPropagation();actPop.classList.toggle('open')});
@@ -631,6 +639,12 @@ function mdRender(text){
 var renderTimer=null;
 var streamState=null;
 var activeStatus=null;
+var activeImgStatus=null;
+function paintGenStatus(el,d){
+  if(!el)return;
+  if(d.status==='connected')el.textContent='generating\u2026';
+  else if(d.status==='trying'||d.status==='failed')el.textContent=d.message;
+}
 function paintStream(){
   if(!streamState)return;
   var sp=splitThink(streamState.raw);
@@ -1025,6 +1039,11 @@ function bindSlider(id,out){
 bindSlider('imgSteps','imgStepsVal');
 bindSlider('imgCfg','imgCfgVal');
 bindSlider('imgBatch','imgBatchVal');
+(function(){
+  var d=document.getElementById('imgAdvanced');
+  try{if(localStorage.getItem('dyva_imgadv')==='1')d.open=true}catch(e){}
+  d.addEventListener('toggle',function(){try{localStorage.setItem('dyva_imgadv',d.open?'1':'0')}catch(e){}});
+})();
 
 async function generateImage(){
   var btn=document.getElementById('imgGenerate');
@@ -1044,7 +1063,12 @@ async function generateImage(){
     sampler_name:document.getElementById('imgSampler').value,
   };
   btn.disabled=true;
-  result.innerHTML='<div class="status">generating...</div>';
+  result.innerHTML='';
+  var st=document.createElement('div');
+  st.className='chat-status';
+  st.textContent='finding a server\u2026';
+  result.appendChild(st);
+  activeImgStatus=st;
   try{
     var resp=await fetch('sdapi/v1/txt2img',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!resp.ok){
@@ -1064,7 +1088,7 @@ async function generateImage(){
     });
     loadImgHistory();
   }catch(ex){result.innerHTML='<div class="error">Error: '+ex.message+'</div>';}
-  finally{btn.disabled=false;}
+  finally{btn.disabled=false;if(activeImgStatus===st)activeImgStatus=null;}
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
 
