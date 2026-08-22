@@ -660,12 +660,13 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         seen = {f"{h['service']}@{h['host']}" for h in pool}
         # FIDs are targeted follow-ups: each is fetched as QUERY+fid on its
         # own, never crossed with country/port/server (those intersections
-        # are almost always empty).
-        combos = [(c, p, s, None) for s in server_list for p in port_list for c in country_list]
-        combos += [(None, None, None, fid) for fid in fid_specs]
-
+        # are almost always empty). They run FIRST, before the combinatorics,
+        # since they're the high-value targeted queries.
+        combo_grid = [(c, p, s, None) for s in server_list for p in port_list for c in country_list]
         if shuffle:
-            random.shuffle(combos)
+            random.shuffle(combo_grid)
+
+        combos = [(None, None, None, fid) for fid in fid_specs] + combo_grid
 
         start = time.time()
         for i, (country, port, server, fid) in enumerate(combos):
