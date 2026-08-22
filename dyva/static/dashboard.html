@@ -62,7 +62,7 @@ body.chat{overflow:hidden}
 .htab{background:transparent;color:#999;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 14px;font-size:.8rem;cursor:pointer;display:inline-flex;align-items:center;gap:5px;border-radius:6px 6px 0 0}
 .htab:hover{color:#ccc;background:#26262e;border-bottom-color:#555}
 .htab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
-.htab-clear{color:#c33;font-size:.72rem;text-decoration:underline;cursor:pointer}
+.htab-clear{margin-left:auto;align-self:center;color:#c33;font-size:.75rem;text-decoration:underline;cursor:pointer}
 .htab-clear:hover{color:#e55}
 .more{font-size:.8rem;color:#666;margin-top:6px}
 .card h2::before{content:"▼";display:inline-block;font-size:.65rem;margin-right:6px;transition:transform .15s;color:#666}
@@ -164,6 +164,8 @@ button.stop:hover{background:#7a3a3a}
 .model-count-badge{flex-shrink:0;background:#2a2a3a;color:#77a;border-radius:6px;padding:.5em .7em;font-size:.85rem;font-family:ui-monospace,monospace;min-width:2.4em;text-align:center}
 .field{margin-bottom:12px}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.img-params{display:grid;grid-template-columns:1fr 1fr 1.6fr;gap:12px;margin-bottom:12px}
+@media(max-width:640px){.img-params{grid-template-columns:1fr 1fr}.img-params .field:nth-child(3){grid-column:1/-1}}
 .slider-row{display:grid;grid-template-columns:180px 1fr 56px;gap:10px;align-items:center;margin-bottom:12px}
 .slider-row label{display:flex;justify-content:space-between;margin:0}
 .slider-row .val{font-family:ui-monospace,monospace;font-size:.82rem;color:#77a;text-align:right}
@@ -209,12 +211,13 @@ __MODEL_MORE__
 <div class="card-inner"><div id="activityList"></div></div>
 </div>
 <div class="card">
-<h2>Hosts <a href="clear-bad" id="clearBad" style="font-size:.75rem;font-weight:normal;color:#c33;cursor:pointer;text-decoration:none">[ clear bad ]</a></h2>
+<h2>Hosts</h2>
 <div class="card-inner">
 <div class="host-tabs">
 <button type="button" class="htab active" data-pane="last">Recent</button>
 <button type="button" class="htab" data-pane="good">Good</button>
 <button type="button" class="htab" data-pane="bad">Bad</button>
+<span id="clearBad" class="htab-clear" title="Forget all bad host+model pairs">clear bad</span>
 </div>
 <div id="pane-last">
 <div id="lastList">__LAST_ROWS__</div>
@@ -282,7 +285,7 @@ __BAD_MORE__
 __SD_MODELS__
 </datalist>
 </div>
-<div class="two-col">
+<div class="img-params">
 <div class="field">
 <label for="imgWidth">Width</label>
 <input id="imgWidth" type="number" value="512" min="256" max="2048" step="64">
@@ -290,6 +293,23 @@ __SD_MODELS__
 <div class="field">
 <label for="imgHeight">Height</label>
 <input id="imgHeight" type="number" value="512" min="256" max="2048" step="64">
+</div>
+<div class="field">
+<label for="imgSampler">Sampler</label>
+<select id="imgSampler">
+<option>Euler</option>
+<option>Euler a</option>
+<option>LMS</option>
+<option>Heun</option>
+<option>DPM2</option>
+<option>DPM++ 2M</option>
+<option>DPM++ 2M Karras</option>
+<option>DPM++ SDE</option>
+<option>DPM++ SDE Karras</option>
+<option>DDIM</option>
+<option>UniPC</option>
+<option>PLMS</option>
+</select>
 </div>
 </div>
 <div class="field">
@@ -319,23 +339,6 @@ __SD_MODELS__
 <label for="imgBatch">Batch size</label>
 <input id="imgBatch" type="range" min="1" max="4" value="1">
 <span class="val" id="imgBatchVal">1</span>
-</div>
-<div class="field">
-<label for="imgSampler">Sampler</label>
-<select id="imgSampler">
-<option>Euler</option>
-<option>Euler a</option>
-<option>LMS</option>
-<option>Heun</option>
-<option>DPM2</option>
-<option>DPM++ 2M</option>
-<option>DPM++ 2M Karras</option>
-<option>DPM++ SDE</option>
-<option>DPM++ SDE Karras</option>
-<option>DDIM</option>
-<option>UniPC</option>
-<option>PLMS</option>
-</select>
 </div>
 <div class="check-row">
 <input id="imgRandomSeed" type="checkbox" checked>
