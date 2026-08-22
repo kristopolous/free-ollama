@@ -1121,6 +1121,63 @@ def chat_fmt(data, model, openai_format):
     else:
         return web.json_response(data)
 
+DYVA_INFO_TAG = "__dyva_info__"
+
+
+def _has_info_tag(payload):
+    if DYVA_INFO_TAG in str(payload.get("prompt") or ""):
+        return True
+    for m in payload.get("messages") or []:
+        c = m.get("content")
+        if isinstance(c, str) and DYVA_INFO_TAG in c:
+            return True
+        if isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and DYVA_INFO_TAG in str(part.get("text") or ""):
+                    return True
+    return False
+
+
+def _would_use(model_in, req_caps):
+    """Resolve which host/model a request would be routed to, without sending it."""
+    last = get_last(model_in)
+    if last and _known_capable(last[0], last[1], req_caps) and (
+            "vision" not in req_caps or _known_has(last[0], last[1], "vision")):
+        return {"host": re.sub(r"^https?://", "", last[0]), "model": last[1]}
+    for _prio, host, ms in find_servers(model_in, req_caps):
+        if ms:
+            return {"host": re.sub(r"^https?://", "", host), "model": ms[0]}
+    return None
+
+
+def _info_response(model_in, info, do_stream=False, openai_format=False):
+    if not do_stream:
+        return web.json_response(info)
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}Z"
+    payload = json.dumps(info)
+    if openai_format:
+        text = (sse_str(sse_chunk(model_in, {"role": "assistant", "content": payload})) +
+                sse_str(sse_chunk(model_in, {}, done=True)))
+        return web.Response(text=text, content_type="text/event-stream")
+    first = {
+        "model": model_in, "created_at": now,
+        "message": {"role": "assistant", "content": payload},
+        "done": False,
+    }
+    last = {
+        "model": model_in, "created_at": now,
+        "message": {"role": "assistant", "content": ""},
+        "done": True, "done_reason": "stop",
+        "total_duration": 0, "load_duration": 0,
+        "prompt_eval_count": 0, "prompt_eval_duration": 0,
+        "eval_count": 0, "eval_duration": 0,
+        "dyva_info": info,
+    }
+    return web.Response(
+        text=json.dumps(first) + "\n" + json.dumps(last) + "\n",
+        content_type="application/x-ndjson")
+
+
 async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_format):
     if '/' in model_in:
         model_list = model_in.split('/')
@@ -1130,6 +1187,12 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
     req_caps = needs_caps(opayload.get("messages", []))
     if opayload.get("tools"):
         req_caps = sorted(set(req_caps) | {"tools"})
+
+    if _has_info_tag(opayload):
+        info = _would_use(model_list[0], req_caps)
+        if info is None:
+            return web.json_response(err_obj(f"no available servers for '{model_in}'", "model_not_found"), status=404)
+        return _info_response(model_list[0], info, do_stream=do_stream, openai_format=openai_format)
 
     last = get_last(model_list[0])
     last_host_err = None
@@ -1208,6 +1271,12 @@ async def _proxy_generate(request, session):
         req_caps = sorted(set(req_caps) | {"vision"})
     if body.get("tools"):
         req_caps = sorted(set(req_caps) | {"tools"})
+
+    if _has_info_tag(body):
+        info = _would_use(model, req_caps)
+        if info is None:
+            return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
+        return _info_response(model, info, do_stream=do_stream)
 
     last = get_last(model)
     last_host_err = None

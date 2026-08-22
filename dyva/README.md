@@ -75,6 +75,20 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `GET` | `/skip-good` | Move a good host+model pair into the bad list |
 | `GET` | `/refresh` | Re-fetch server lists from all sources |
 
+#### Routing Probe
+
+Include `__dyva_info__` anywhere in the prompt or messages and dyva won't run inference — instead it returns `{"host": ..., "model": ...}` for the host/model the request *would* have been routed to (last-used host if still eligible, else the top of the race queue):
+
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "qwen",
+  "stream": false,
+  "messages": [{"role": "user", "content": "__dyva_info__"}]
+}'
+```
+
+With `"stream": true` the same info arrives as a normal NDJSON/SSE chat stream — payload in `message.content`, plus a top-level `dyva_info` object on the final chunk.
+
 ### Text-to-Image
 
 The `txt2img` CLI generates images via the proxy:
