@@ -43,7 +43,7 @@ Yeah, 4 letters. I got that. In 2026.
 
 You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
 
-Here's the web interface so you can see the status while you're running it. [I'm running it right now](https://9ol.es/11434/)
+Here's the web interface so you can see the status while you're running it. [I might be running it right now](https://9ol.es/11434/)
 
 Actual documentation? Alright, whatever. [Here you go](dyva).
 <img width="1187" alt="dumpster" src="https://github.com/user-attachments/assets/acee144d-8f76-4ca1-9179-db3f311d0500" />
