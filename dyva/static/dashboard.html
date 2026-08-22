@@ -113,6 +113,7 @@ button.stop:hover{background:#7a3a3a}
 .input-row textarea{flex:1;min-height:64px}
 .input-tools{display:flex;flex-direction:column;gap:8px;flex-shrink:0}
 .input-tools button{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:10px 14px}
+.input-tools button.active{color:#9ab8ff;background:#2a2a4a}
 .input-row button svg{width:1.1em;height:1.1em}
 .attach-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:.5em}
 .attach-chip{display:flex;align-items:center;gap:6px;background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:3px 6px;font-size:.75rem;color:#ccc;max-width:220px}
@@ -121,6 +122,7 @@ button.stop:hover{background:#7a3a3a}
 .attach-chip .x{cursor:pointer;color:#c66;padding:0 2px;flex-shrink:0}
 .msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:.5em}
 .msg .files img{max-width:160px;max-height:160px;border-radius:6px;border:1px solid #333}
+.msg .body p img{max-width:min(360px,100%);border-radius:8px;display:block;margin:6px 0}
 .msg .file-chip{display:inline-block;background:#222a3a;border:1px solid #333;border-radius:6px;padding:3px 8px;font-size:.75rem;color:#77a;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid #3a3a46;background:#17171d;border-radius:4px;padding:.25em .65em}
@@ -318,6 +320,7 @@ __BAD_MORE__
 <textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
 <input id="chatFiles" type="file" multiple accept="image/*,.pdf" style="display:none">
 <div class="input-tools">
+<button id="chatTools" title="Tools: let the model generate images on request"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></button>
 <button id="chatAttach" title="Attach files"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg></button>
 <button id="chatSend" title="Send"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg></button>
 </div>
@@ -603,6 +606,7 @@ function addMsg(role,text,index){
       if(m&&m.files&&m.files.length)renderFiles(b,m.files);
     }
   }
+  if(index!==undefined)d.setAttribute('data-idx',index);
   d.appendChild(r);d.appendChild(b);
   if(role==='user'&&index!==undefined){
     var acts=document.createElement('span');acts.className='actions';
@@ -685,7 +689,7 @@ function scheduleStreamRender(){
 }
 function renderMessages(){
   chatLog.innerHTML='';
-  currentChat.messages.forEach(function(m,i){addMsg(m.role,m.content,i)});
+  currentChat.messages.forEach(function(m,i){if(m&&m._meta&&m._meta.hidden)return;addMsg(m.role,m.content,i)});
 }
 function findChatIndex(id){
   var chats=loadChats();
@@ -715,11 +719,19 @@ function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render
     }
   }
 }
+function appendMsgRecord(chatId,msg){
+  var chats=loadChats(),i=findChatIndex(chatId);
+  if(i>=0){
+    chats[i].messages.push(msg);
+    persistChats(chats);
+    if(chatInView(chatId))currentChat.messages=chats[i].messages.slice();
+  }
+}
 function editUserMsg(index){
   if(index<0||index>=currentChat.messages.length)return;
   var m=currentChat.messages[index];
   if(m.role!=='user')return;
-  var msgEl=chatLog.children[index];
+  var msgEl=chatLog.querySelector('[data-idx="'+index+'"]');
   if(!msgEl)return;
   var bodyEl=msgEl.querySelector('.body');
   if(!bodyEl)return;
@@ -858,6 +870,7 @@ async function sendChat(){
   setSendButton('streaming');
   var msgs=currentChat.messages.map(function(m){
       var o={role:m.role,content:m.content};
+      if(m.tool_calls)o.tool_calls=m.tool_calls;
       if(m.files&&m.files.length){
         var imgs=[];
         m.files.forEach(function(f){
@@ -871,14 +884,74 @@ async function sendChat(){
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
   runStream(chatId,chatCreated,chatTitle,model,msgs,bubble);
 }
-async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble){
+async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
+  depth=depth||0;
+  var useTools=(typeof toolsOn!=='undefined'&&toolsOn)||depth>0;
   var ac=new AbortController();
   currentAbort=ac;
   function live(){return chatInView(chatId)&&bubble.bodyEl.isConnected}
   function clearInflight(){try{localStorage.removeItem('dyva_inflight')}catch(e){}}
   function keepInflight(){try{var m=JSON.parse(localStorage.getItem('dyva_inflight')||'null');if(!m)return;m.n=(m.n||0)+1;if(m.n<=2)localStorage.setItem('dyva_inflight',JSON.stringify(m));else localStorage.removeItem('dyva_inflight')}catch(e){try{localStorage.removeItem('dyva_inflight')}catch(e2){}}}
   try{sessionStorage.setItem('dyva_own','1')}catch(e){}
-  var full='',think='',tps=null,acc='';
+  var full='',think='',tps=null,acc='',toolCalls=[];
+  async function complete(){
+    clearInflight();
+    if(useTools&&toolCalls.length&&depth<3){
+      await runToolRound();
+      return;
+    }
+    finishStream(bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
+  }
+  async function runToolRound(){
+    if(statusEl&&statusEl.parentNode)statusEl.textContent='calling tool\u2026';
+    var results=[],urls=[];
+    for(var i=0;i<toolCalls.length;i++){
+      if(ac.signal.aborted)return;
+      var tc=toolCalls[i]||{},fn=tc.function||{};
+      var args={};
+      try{args=typeof fn.arguments==='string'?JSON.parse(fn.arguments||'{}'):(fn.arguments||{})}catch(e){}
+      if(fn.name==='generate_image'){
+        if(activeStatus===statusEl)statusEl.textContent='generating image\u2026';
+        try{
+          var ib={prompt:String(args.prompt||'').trim().slice(0,2000)};
+          if(args.negative_prompt)ib.negative_prompt=String(args.negative_prompt).trim().slice(0,1000);
+          var r2=await fetch('sdapi/v1/txt2img',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ib),signal:ac.signal});
+          if(r2.ok){
+            var j=await r2.json();
+            var fl=j._dyva_files||[];
+            if(fl.length){
+              fl.forEach(function(f){urls.push('sdapi/v1/images/'+f)});
+              results.push({text:'Images generated successfully:\n'+fl.map(function(f){return 'sdapi/v1/images/'+f}).join('\n'),md:fl.map(function(f){return '![generated image](sdapi/v1/images/'+f+')'}).join('\n\n')});
+            }else results.push({text:'Error: image service returned no images'});
+          }else{
+            var em='HTTP '+r2.status;
+            try{var je=await r2.json();em=je.error||em}catch(e){}
+            results.push({text:'Error generating image: '+em});
+          }
+        }catch(ex){
+          if(ac.signal.aborted)return;
+          results.push({text:'Error generating image: '+ex.message});
+        }
+      }else results.push({text:'Error: unknown tool '+fn.name});
+    }
+    msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
+    results.forEach(function(res){msgs.push({role:'tool',content:res.text,_meta:{hidden:true}})});
+    saveCurrentChat();
+    if(full.trim())appendMsgRecord(chatId,{role:'assistant',content:full});
+    results.forEach(function(res){
+      if(!res.md)return;
+      appendMsgRecord(chatId,{role:'assistant',content:res.md});
+    });
+    var nb=null;
+    if(chatInView(chatId)){
+      renderMessages();
+      nb=addMsg('assistant','');
+      nb.bodyEl.classList.add('streaming');
+    }
+    setSendButton('streaming');
+    try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
+    setTimeout(function(){runStream(chatId,chatCreated,chatTitle,model,msgs,nb,depth+1)},0);
+  }
   streamState={el:bubble.bodyEl,think:'',raw:''};
   var statusEl=document.createElement('div');
   statusEl.className='chat-status';
@@ -886,7 +959,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble){
   bubble.bodyEl.parentNode.insertBefore(statusEl,bubble.bodyEl);
   activeStatus=statusEl;
   try{
-    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:msgs,stream:true}),signal:ac.signal});
+    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(useTools?{model:model,messages:msgs,stream:true,tools:CHAT_TOOLS}:{model:model,messages:msgs,stream:true}),signal:ac.signal});
     var host=resp.headers.get('X-Dyva-Host')||'';
     var fmodel=resp.headers.get('X-Dyva-Model')||model;
     if(!resp.ok){
@@ -926,16 +999,18 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble){
           streamState.think=think;
           if(live())scheduleStreamRender();
         }
+        if(d.message&&d.message.tool_calls){
+          d.message.tool_calls.forEach(function(t){toolCalls.push(t)});
+          if(activeStatus===statusEl)statusEl.textContent='tool: '+(((d.message.tool_calls[0]||{}).function||{}).name||'')+'\u2026';
+        }
         if(d.done){
           if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
-          finishStream(bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
-          clearInflight();
+          await complete();
           return;
         }
       }
     }
-    finishStream(bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
-    clearInflight();
+    await complete();
   }catch(ex){
     var stopped=ac.signal.aborted;
     if(stopped||!document.hidden)clearInflight();else keepInflight();
@@ -1009,6 +1084,18 @@ document.getElementById('chatSend').addEventListener('click',function(e){
 document.getElementById('chatInput').addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
 });
+
+var CHAT_TOOLS=[{type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}}];
+var chatToolsBtn=document.getElementById('chatTools');
+var toolsOn=false;
+try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
+function paintTools(){chatToolsBtn.classList.toggle('active',toolsOn)}
+chatToolsBtn.addEventListener('click',function(){
+  toolsOn=!toolsOn;
+  try{localStorage.setItem('dyva_tools',toolsOn?'1':'0')}catch(e){}
+  paintTools();
+});
+paintTools();
 
 var attachments=[];
 var chatFilesInput=document.getElementById('chatFiles');

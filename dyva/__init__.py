@@ -2143,6 +2143,7 @@ def _save_image_history(data, body, host="", requested_model=""):
                 seed_used = int(info.get("seed"))
             except (TypeError, ValueError):
                 seed_used = None
+        saved = []
         for b64 in (data.get("images") or []):
             try:
                 raw = base64.b64decode(b64)
@@ -2151,6 +2152,7 @@ def _save_image_history(data, body, host="", requested_model=""):
             name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.png"
             with open(os.path.join(IMG_DIR, name), "wb") as f:
                 f.write(raw)
+            saved.append(name)
             history.insert(0, {
                 "file": name,
                 "host": host,
@@ -2166,6 +2168,7 @@ def _save_image_history(data, body, host="", requested_model=""):
                 "when": time.time(),
             })
         data.pop("_dyva_model", None)
+        data["_dyva_files"] = saved
         for entry in history[IMG_HISTORY_MAX:]:
             try:
                 os.remove(os.path.join(IMG_DIR, entry["file"]))
