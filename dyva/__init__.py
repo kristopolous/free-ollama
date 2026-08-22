@@ -2088,7 +2088,7 @@ def _save_image_history(data, body, host="", requested_model=""):
             history.insert(0, {
                 "file": name,
                 "host": host,
-                "model": _resolve_sd_model(data, body),
+                "model": _resolve_sd_model(data, body) or requested_model,
                 "prompt": (body.get("prompt") or "")[:200],
                 "negative_prompt": (body.get("negative_prompt") or "")[:200],
                 "seed": body.get("seed"),
@@ -2142,6 +2142,45 @@ async def handle_image_file(request):
     if not name.endswith(".png") or not os.path.isfile(path):
         return web.json_response({"error": "not found"}, status=404)
     return web.FileResponse(path)
+
+
+async def handle_image_delete(request):
+    """
+    Remove an image from the recent history (JSON)
+    ---
+    tags: [Image]
+    summary: Delete one generated image and its history entry
+    parameters:
+      - in: query
+        name: name
+        schema:
+          type: string
+        required: true
+        description: Image filename as listed by /sdapi/v1/images
+    responses:
+      '200':
+        description: Deletion result
+    """
+    name = os.path.basename(request.query.get("name", ""))
+    if not name.endswith(".png"):
+        return web.json_response({"error": "bad name"}, status=400)
+    try:
+        os.remove(os.path.join(IMG_DIR, name))
+    except OSError:
+        pass
+    removed = False
+    try:
+        with open(IMG_HISTORY_FILE) as f:
+            history = json.load(f)
+        n = len(history)
+        history = [e for e in history if e.get("file") != name]
+        if len(history) != n:
+            with open(IMG_HISTORY_FILE, "w") as f:
+                json.dump(history, f)
+            removed = True
+    except Exception:
+        pass
+    return web.json_response({"removed": removed})
 
 
 async def handle_txt2img(request):
@@ -2222,24 +2261,46 @@ async def handle_txt2img(request):
     IMG_KEY = "__a1111__"
 
     model_filter = body.pop("model", None)
+    requested_model = model_filter or ""
     activity_label = (model_filter or body.get("prompt", "txt2img"))[:60]
 
     last = get_last(IMG_KEY)
     if last:
         last_host, _ = last
+        last_override = None
+        if model_filter:
+            last_models = next(
+                (s.get("models", []) for s in load_servers()
+                 if s.get("server") == last_host and s.get("service") == "a1111"),
+                [])
+            last_match = next(
+                (m for m in last_models
+                 if match_model(m.split(" [")[0] if " [" in m else m, model_filter)),
+                None)
+            if last_match is None:
+                log.debug(f"txt2img: {last_host} has no model matching "
+                          f"{model_filter!r}; not reusing")
+                last = None
+            else:
+                last_override = {"sd_model_checkpoint": last_match}
+    if last:
+        payload = dict(body)
+        if last_override:
+            payload["override_settings"] = last_override
+            payload["override_settings_restore_afterwards"] = True
         log.debug(f"Reusing {last_host} for txt2img")
         await broadcast_activity(last_host, activity_label, "trying",
             f"txt2img: {activity_label} on {last_host}")
         try:
             async with session.post(
-                _host_url(last_host, "/sdapi/v1/txt2img"), json=body,
+                _host_url(last_host, "/sdapi/v1/txt2img"), json=payload,
                 timeout=aiohttp.ClientTimeout(total=TIMEOUT),
             ) as r:
                 if r.status == 200:
                     data = await r.json()
                     await broadcast_activity(last_host, activity_label, "connected",
                         f"txt2img ✓", duration=0)
-                    _save_image_history(data, body, last_host)
+                    _save_image_history(data, body, last_host, requested_model)
                     return web.json_response(data)
                 add_bad(last_host, IMG_KEY)
             await broadcast_activity(last_host, activity_label, "failed",
@@ -2250,12 +2311,18 @@ async def handle_txt2img(request):
 
     servers = load_servers()
     candidates = [s for s in servers if s.get("service") == "a1111"]
+    overrides = {}
     if model_filter:
-        candidates = [
-            s for s in candidates
-            if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
-                   for m in s.get("models", []))
-        ]
+        filtered = []
+        for s in candidates:
+            mm = next(
+                (m for m in s.get("models", [])
+                 if match_model(m.split(" [")[0] if " [" in m else m, model_filter)),
+                None)
+            if mm is not None:
+                filtered.append(s)
+                overrides[s.get("server")] = {"sd_model_checkpoint": mm}
+        candidates = filtered
     hosts = [s.get("server") for s in candidates]
     if not hosts:
         return web.json_response({"error": "no available image-gen hosts"}, status=503)
@@ -2280,8 +2347,14 @@ async def handle_txt2img(request):
                     f"txt2img: {activity_label}")
                 try:
                     t0 = time.time()
+                    ov = overrides.get(host)
+                    payload = (
+                        {**body, "override_settings": ov,
+                         "override_settings_restore_afterwards": True}
+                        if ov else body
+                    )
                     async with session.post(
-                        _host_url(host, "/sdapi/v1/txt2img"), json=body,
+                        _host_url(host, "/sdapi/v1/txt2img"), json=payload,
                         timeout=aiohttp.ClientTimeout(total=TIMEOUT),
                     ) as r:
                         if r.status == 200:
@@ -2320,7 +2393,7 @@ async def handle_txt2img(request):
     live_hosts = [h for h in hosts if f"{h} {IMG_KEY}" not in load_bad()]
     data = await _race(live_hosts)
     if data:
-        _save_image_history(data, body, data.pop("_dyva_host", ""))
+        _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
         return web.json_response(data)
 
     # Phase 2: exhausted — try previously bad hosts
@@ -2328,7 +2401,7 @@ async def handle_txt2img(request):
     if bad_hosts:
         data = await _race(bad_hosts)
         if data:
-            _save_image_history(data, body, data.pop("_dyva_host", ""))
+            _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
             return web.json_response(data)
 
     # Phase 3: try comfyui hosts
@@ -2357,7 +2430,7 @@ async def handle_txt2img(request):
                     await broadcast_activity(host, activity_label, "trying",
                         f"txt2img (comfy): {activity_label}")
                     t0 = time.time()
-                    data = await _txt2img_comfyui(session, host, body)
+                    data = await _txt2img_comfyui(session, host, body, model_filter)
                     if data:
                         set_last(IMG_KEY, host, "")
                         add_good(host, IMG_KEY)
@@ -2387,13 +2460,13 @@ async def handle_txt2img(request):
 
         data = await _race_comfy(comfy_hosts)
         if data:
-            _save_image_history(data, body, data.pop("_dyva_host", ""))
+            _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
             return web.json_response(data)
 
     return web.json_response({"error": "all image-gen hosts failed"}, status=502)
 
 
-async def _txt2img_comfyui(session, host, body):
+async def _txt2img_comfyui(session, host, body, model_filter=None):
     import uuid as uuid_mod
 
     try:
@@ -2408,7 +2481,12 @@ async def _txt2img_comfyui(session, host, body):
         await checkpoints_resp.release()
         if not isinstance(checkpoints, list) or not checkpoints:
             return None
-        ckpt = checkpoints[0]
+        ckpt = None
+        if model_filter:
+            ckpt = next(
+                (c for c in checkpoints if match_model(c, model_filter)), None)
+        if ckpt is None:
+            ckpt = checkpoints[0]
     except Exception:
         return None
 
@@ -2490,7 +2568,9 @@ async def _txt2img_comfyui(session, host, body):
                             await view_resp.release()
                             import base64
                             b64 = base64.b64encode(raw).decode()
-                            return {"images": [b64], "_dyva_model": ckpt, "parameters": "{}", "info": json.dumps({"prompt": body})}
+                            return {"images": [b64], "_dyva_model": ckpt,
+                                    "_dyva_seed": seed, "parameters": "{}",
+                                    "info": json.dumps({"prompt": body})}
                         await view_resp.release()
                     except Exception:
                         pass
@@ -2668,6 +2748,7 @@ def make_app():
     swagger.add_get("/sdapi/v1/sd-models", handle_sd_models)
     swagger.add_post("/sdapi/v1/txt2img", handle_txt2img)
     swagger.add_get("/sdapi/v1/images", handle_image_history)
+    swagger.add_get("/sdapi/v1/images/delete", handle_image_delete)
     swagger.add_get("/sdapi/v1/images/{name}", handle_image_file)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)

@@ -186,8 +186,10 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 .img-side{flex:1 1 300px;min-width:260px}
 .img-side-title{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
 #imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
-.hist-item{display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid #333;border-radius:8px;padding:6px;background:#191919}
+.hist-item{position:relative;display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid #333;border-radius:8px;padding:6px;background:#191919}
 .hist-item:hover{border-color:#77a}
+.hist-del{position:absolute;top:2px;right:4px;color:#555;cursor:pointer;font-size:.75rem;line-height:1;padding:2px 5px;border-radius:4px;z-index:2}
+.hist-del:hover{color:#e55;background:#2a2a2a}
 .hist-item img{width:72px;height:72px;object-fit:cover;border-radius:5px;flex-shrink:0}
 .hist-meta{min-width:0;font-size:.75rem;display:flex;flex-direction:column;gap:2px}
 .hist-prompt{color:#aaa;font-size:.72rem;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1004,14 +1006,29 @@ function loadImgHistory(){
       im.title=bits.filter(Boolean).join(' · ');
       var meta=document.createElement('div');
       meta.className='hist-meta';
+      var p=document.createElement('div');
+      p.className='hist-prompt';
+      var txt=e.prompt||'';
+      p.textContent=txt.length>100?txt.slice(0,100)+'\u2026':txt;
       var m=document.createElement('div');
       m.className='hist-model';
-      m.textContent=e.model||'(auto model)';
+      m.textContent=e.model||'(model unknown)';
       var h=document.createElement('div');
       h.className='hist-host';
       h.textContent=e.host||'(host unknown)';
-      meta.appendChild(m);meta.appendChild(h);
-      item.appendChild(im);item.appendChild(meta);
+      meta.appendChild(p);meta.appendChild(m);meta.appendChild(h);
+      var del=document.createElement('span');
+      del.className='hist-del';
+      del.textContent='\u2715';
+      del.title='Remove from recent';
+      del.addEventListener('click',function(ev){
+        ev.stopPropagation();
+        var x=new XMLHttpRequest();
+        x.open('GET','sdapi/v1/images/delete?name='+encodeURIComponent(e.file));
+        x.onload=function(){loadImgHistory()};
+        x.send();
+      });
+      item.appendChild(im);item.appendChild(meta);item.appendChild(del);
       item.addEventListener('click',function(){openLightbox(e)});
       el.appendChild(item);
     });
