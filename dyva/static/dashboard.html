@@ -23,9 +23,8 @@
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px;display:flex;flex-direction:column;min-height:100vh}
 .header{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-shrink:0;position:relative}
 .header img{flex-shrink:0}
-.activity-btn{margin-left:auto;background:#222;color:#888;border:none;border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative;flex-shrink:0}
+.activity-btn{margin-left:auto;background:#222;color:#999;border:none;border-radius:6px;padding:8px 16px;font-size:.85rem;cursor:pointer;flex-shrink:0}
 .activity-btn:hover{color:#ccc;background:#2a2a3a}
-.activity-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:#555;transition:background .3s}
 .activity-pop{display:none;position:absolute;top:calc(100% + 8px);right:0;width:min(520px,calc(100vw - 24px));max-height:min(60vh,480px);overflow-y:auto;background:#1e1e1e;border:1px solid #333;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:120;padding:12px 14px}
 .activity-pop.open{display:block}
 .ap-head{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:8px;display:flex;align-items:center}
@@ -183,14 +182,15 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 #imgResult .error{color:#c33;font-size:.85rem}
 #image{max-width:none}
 .img-layout{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}
-.img-main{flex:1 1 460px;min-width:0;max-width:900px}
-.img-side{flex:0 1 340px;min-width:200px}
+.img-main{flex:1 1 460px;min-width:0;max-width:640px}
+.img-side{flex:1 1 300px;min-width:260px}
 .img-side-title{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
-#imgHistory{display:flex;flex-direction:column;gap:8px}
+#imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
 .hist-item{display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid #333;border-radius:8px;padding:6px;background:#191919}
 .hist-item:hover{border-color:#77a}
 .hist-item img{width:72px;height:72px;object-fit:cover;border-radius:5px;flex-shrink:0}
 .hist-meta{min-width:0;font-size:.75rem;display:flex;flex-direction:column;gap:2px}
+.hist-prompt{color:#aaa;font-size:.72rem;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hist-model{color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hist-host{color:#777;font-family:ui-monospace,monospace;font-size:.68rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:200;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:24px;cursor:zoom-out}
@@ -206,10 +206,7 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <h1>Dumpster Dyva</h1>
 <p class="sub"><span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;<span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"> v__DYVA_VERSION__ </span>&middot; <a title="a hyperlink, obviously" href="/docs" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">docs</a> &middot; <a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="click it, go ahead" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">source</a></p>
 </div>
-<button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">
-<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-<span id="activityDot" class="activity-dot"></span>
-</button>
+<button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾</button>
 <div id="activityPop" class="activity-pop">
 <div class="ap-head">Activity <span id="pauseBtn" style="font-size:1.1rem;font-weight:normal;cursor:pointer;color:#888;margin-left:auto;border:1px solid #888;border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></div>
 <div id="activityList"></div>
@@ -387,7 +384,10 @@ var evtSource=new EventSource('api/activity');
 var paused=false;
 function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
 evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
-document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.25rem'})
+document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
+var actPop=document.getElementById('activityPop');
+document.getElementById('activityBtn').addEventListener('click',function(e){e.stopPropagation();actPop.classList.toggle('open')});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')actPop.classList.remove('open')});
 </script>
 <script>
 function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}

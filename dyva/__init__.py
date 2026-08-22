@@ -2038,7 +2038,35 @@ async def handle_sd_models(request):
     })
 
 
-def _save_image_history(data, body, host=""):
+def _resolve_sd_model(data, body):
+    """Best-effort name of the SD model that actually produced the images."""
+    model = data.get("_dyva_model")
+    if model:
+        return model
+    try:
+        info = data.get("info")
+        if isinstance(info, str):
+            try:
+                info = json.loads(info)
+            except Exception:
+                info = {}
+        if isinstance(info, dict):
+            m = info.get("sd_model_name")
+            if m:
+                return str(m)
+            # some A1111 forks omit sd_model_name but include it in infotexts
+            for text in info.get("infotexts") or []:
+                m = re.search(r"(?:^|,\s)Model: ([^,]+)", str(text))
+                if m:
+                    name = m.group(1).strip()
+                    if name and name.lower() != "none":
+                        return name
+    except Exception:
+        pass
+    return body.get("model") or ""
+
+
+def _save_image_history(data, body, host="", requested_model=""):
     """Persist generated images to the on-disk thumbnail history (last IMG_HISTORY_MAX)."""
     import base64
     import uuid
@@ -2060,9 +2088,9 @@ def _save_image_history(data, body, host=""):
             history.insert(0, {
                 "file": name,
                 "host": host,
+                "model": _resolve_sd_model(data, body),
                 "prompt": (body.get("prompt") or "")[:200],
                 "negative_prompt": (body.get("negative_prompt") or "")[:200],
-                "model": body.get("model") or "",
                 "seed": body.get("seed"),
                 "steps": body.get("steps"),
                 "cfg_scale": body.get("cfg_scale"),
@@ -2071,6 +2099,7 @@ def _save_image_history(data, body, host=""):
                 "height": body.get("height"),
                 "when": time.time(),
             })
+        data.pop("_dyva_model", None)
         for entry in history[IMG_HISTORY_MAX:]:
             try:
                 os.remove(os.path.join(IMG_DIR, entry["file"]))
@@ -2461,7 +2490,7 @@ async def _txt2img_comfyui(session, host, body):
                             await view_resp.release()
                             import base64
                             b64 = base64.b64encode(raw).decode()
-                            return {"images": [b64], "parameters": "{}", "info": json.dumps({"prompt": body})}
+                            return {"images": [b64], "_dyva_model": ckpt, "parameters": "{}", "info": json.dumps({"prompt": body})}
                         await view_resp.release()
                     except Exception:
                         pass
