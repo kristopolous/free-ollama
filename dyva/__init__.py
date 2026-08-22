@@ -255,6 +255,7 @@ def load_bad():
 
 def add_bad(host, model):
     global _bad_cache
+    model = canon_pattern(model)
     with open(BAD_FILE, "a") as f:
         f.write(f"{host} {model}\n")
     if _bad_cache is not None:
@@ -274,6 +275,7 @@ def load_good():
 
 
 def add_good(host, model):
+    model = canon_pattern(model)
     key = f"{host} {model}"
     good = load_good()
     if key not in good:
@@ -285,6 +287,7 @@ def add_good(host, model):
 
 def remove_good(host, model):
     global _good_cache
+    model = canon_pattern(model)
     key = f"{host} {model}"
     good = load_good()
     if key not in good:
@@ -315,6 +318,7 @@ def save_last():
 
 
 def get_last(model):
+    model = canon_pattern(model)
     if _last_cache is None:
         load_last()
     entry = _last_cache.get(model)
@@ -324,6 +328,7 @@ def get_last(model):
 
 
 def set_last(model, host, full):
+    model = canon_pattern(model)
     if _last_cache is None:
         load_last()
     now = time.time()
@@ -529,6 +534,7 @@ def find_servers(sub, caps=None):
             res += find_servers(model, caps)
         return res
 
+    sub = canon_pattern(sub)
     knowns = load_knowns() if caps else {}
     servers = load_servers()
     bad = load_bad()
@@ -553,12 +559,27 @@ def find_servers(sub, caps=None):
             if capable or unknown:
                 ms = capable + unknown + incapable
         key = f"{host} {sub}"
-        if key in bad: 
+        prefix = f"{host} "
+        if sub:
+            in_bad = key in bad
+            in_good = key in good
+        else:
+            # "any" query: inherit everything known about this host
+            in_bad = any(k.startswith(prefix) for k in bad)
+            in_good = any(k.startswith(prefix) for k in good)
+        if in_bad:
             matched.append((1, host, ms))
         else:
             _last = get_last(sub)
+            if _last is None and not sub:
+                if _last_cache is None:
+                    load_last()
+                _last = next(
+                    ((v["host"], v.get("full", "")) for v in _last_cache.values()
+                     if v.get("host") == host),
+                    None)
             is_last = _last is not None and host == _last[0]
-            matched.append((-2 if is_last else (-1 if key in good else 0), host, ms))
+            matched.append((-2 if is_last else (-1 if in_good else 0), host, ms))
     matched.sort(key=lambda x: x[0])
     return matched
 
@@ -1275,7 +1296,7 @@ def _last_rows_html():
     if not _last_cache:
         return '<div style="color:#999;font-size:.85rem">None</div>'
     return "".join(
-        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><a class="skip-link" href="next-host?model={urllib.parse.quote(model)}" data-skip-model="{urllib.parse.quote(model)}">skip</a><span class="host-model">{model}</span></div>'
+        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><a class="skip-link" href="next-host?model={urllib.parse.quote(model)}" data-skip-model="{urllib.parse.quote(model)}">skip</a><span class="host-model">{model or "(any)"}</span></div>'
         for model, entry in list(_last_cache.items())[:20]
     )
 
@@ -1283,7 +1304,7 @@ def _last_rows_html():
 def _good_rows_html(good):
     good_valid = [h for h in good if " " in h]
     return "".join(
-        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><a class="skip-link" href="skip-good?host={urllib.parse.quote(h.split(" ", 1)[0])}&model={urllib.parse.quote(h.split(" ", 1)[1])}">skip</a><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
+        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><a class="skip-link" href="skip-good?host={urllib.parse.quote(h.split(" ", 1)[0])}&model={urllib.parse.quote(h.split(" ", 1)[1])}">skip</a><span class="host-model">{h.split(" ", 1)[1] or "(any)"}</span></div>'
         for h in sorted(good_valid, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
     )
 
@@ -1291,7 +1312,7 @@ def _good_rows_html(good):
 def _bad_rows_html(bad):
     bad_valid = [h for h in bad if " " in h]
     return "".join(
-        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1]}</span></div>'
+        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1] or "(any)"}</span></div>'
         for h in sorted(bad_valid)[:30]
     )
 
