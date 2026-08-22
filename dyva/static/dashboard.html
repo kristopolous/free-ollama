@@ -58,9 +58,10 @@ body.chat{overflow:hidden}
 .host-model{font-family:ui-monospace,monospace;font-size:.82rem;color:#777}
 .skip-link{opacity:0;color:#77a;font-size:.75rem;text-decoration:underline;margin:0 8px;flex-shrink:0;transition:opacity .1s}
 .model-item:hover .skip-link{opacity:1}
-.badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.75rem;margin-left:6px}
-.bad{background:#3a1a1a;color:#e55}
-.good{background:#1a3a1a;color:#4a4}
+.host-tabs{display:flex;gap:4px;border-bottom:1px solid #333;margin-bottom:12px}
+.htab{background:transparent;color:#999;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 14px;font-size:.8rem;cursor:pointer;display:inline-flex;align-items:center;gap:5px;border-radius:6px 6px 0 0}
+.htab:hover{color:#ccc;background:#26262e;border-bottom-color:#555}
+.htab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
 .more{font-size:.8rem;color:#666;margin-top:6px}
 .card h2::before{content:"▼";display:inline-block;font-size:.65rem;margin-right:6px;transition:transform .15s;color:#666}
 .card.collapsed h2::before{transform:rotate(-90deg)}
@@ -192,10 +193,6 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <div class="grid">
 
 <div class="card">
-<h2>Activity <span id="pauseBtn" style="font-size:1.25rem;font-weight:normal;cursor:pointer;color:#888;margin-left:8px;border:1px solid #888;border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></h2>
-<div class="card-inner"><div id="activityList"></div></div>
-</div>
-<div class="card">
 <h2>Models</h2>
 <div class="card-inner">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter...">
@@ -206,12 +203,21 @@ __MODEL_MORE__
 </div>
 </div>
 <div class="card">
-<h2>Last Successful</h2>
-<div class="card-inner"><div id="lastList">__LAST_ROWS__</div></div>
+<h2>Activity <span id="pauseBtn" style="font-size:1.25rem;font-weight:normal;cursor:pointer;color:#888;margin-left:8px;border:1px solid #888;border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></h2>
+<div class="card-inner"><div id="activityList"></div></div>
 </div>
 <div class="card">
-<h2>Good Hosts <span id="goodCount" class="badge good">__GOOD_COUNT__</span></h2>
+<h2>Hosts <a href="clear-bad" id="clearBad" style="font-size:.75rem;font-weight:normal;color:#c33;cursor:pointer;text-decoration:none">[ clear bad ]</a></h2>
 <div class="card-inner">
+<div class="host-tabs">
+<button type="button" class="htab active" data-pane="last">Recent</button>
+<button type="button" class="htab" data-pane="good">Good</button>
+<button type="button" class="htab" data-pane="bad">Bad</button>
+</div>
+<div id="pane-last">
+<div id="lastList">__LAST_ROWS__</div>
+</div>
+<div id="pane-good" style="display:none">
 <div id="goodList">
 __GOOD_ROWS__
 </div>
@@ -219,15 +225,13 @@ __GOOD_ROWS__
 __GOOD_MORE__
 </div>
 </div>
-</div>
-<div class="card">
-<h2>Bad Hosts <span id="badCount" class="badge bad">__BAD_COUNT__</span> <a href="clear-bad" id="clearBad" style="font-size:.75rem;font-weight:normal;color:#c33;cursor:pointer;text-decoration:none">[ Clear ]</a></h2>
-<div class="card-inner">
+<div id="pane-bad" style="display:none">
 <div id="badList">
 __BAD_ROWS__
 </div>
 <div id="badMore">
 __BAD_MORE__
+</div>
 </div>
 </div>
 </div>
@@ -346,15 +350,26 @@ __SD_MODELS__
 <script>
 var evtSource=new EventSource('api/activity');
 var paused=false;
-function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more;document.getElementById('goodCount').textContent=d.good_count;document.getElementById('badCount').textContent=d.bad_count}catch(ex){}};x.send()}
+function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
 evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.25rem'})
 </script>
 <script>
 function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
-document.getElementById('clearBad').addEventListener('click',function(e){e.preventDefault();
+document.getElementById('clearBad').addEventListener('click',function(e){e.preventDefault();e.stopPropagation();
   var x=new XMLHttpRequest();x.open('GET','clear-bad');
   x.onload=function(){location.reload()};x.send()})
+
+document.querySelectorAll('.htab').forEach(function(t){
+  t.addEventListener('click',function(){
+    var pane=t.getAttribute('data-pane');
+    document.querySelectorAll('.htab').forEach(function(x){x.classList.toggle('active',x===t)});
+    ['good','bad','last'].forEach(function(p){document.getElementById('pane-'+p).style.display=p===pane?'':'none'});
+    localStorage.setItem('dyva_hostpane',pane);
+  })
+});
+var savedPane=localStorage.getItem('dyva_hostpane');
+if(savedPane&&savedPane!=='last'){var pb=document.querySelector('.htab[data-pane="'+savedPane+'"]');if(pb)pb.click()}
 
 document.querySelectorAll('.card').forEach(function(card){
   var h2=card.querySelector('h2');
