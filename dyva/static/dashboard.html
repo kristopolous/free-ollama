@@ -21,8 +21,14 @@
 ::-webkit-scrollbar-thumb:hover{background:#4a4a7a}
 *{scrollbar-width:thin;scrollbar-color:#444 #181818}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px;display:flex;flex-direction:column;min-height:100vh}
-.header{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-shrink:0}
+.header{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-shrink:0;position:relative}
 .header img{flex-shrink:0}
+.activity-btn{margin-left:auto;background:#222;color:#888;border:none;border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative;flex-shrink:0}
+.activity-btn:hover{color:#ccc;background:#2a2a3a}
+.activity-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:#555;transition:background .3s}
+.activity-pop{display:none;position:absolute;top:calc(100% + 8px);right:0;width:min(520px,calc(100vw - 24px));max-height:min(60vh,480px);overflow-y:auto;background:#1e1e1e;border:1px solid #333;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:120;padding:12px 14px}
+.activity-pop.open{display:block}
+.ap-head{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:8px;display:flex;align-items:center}
 .header-text h1{font-family:"Slackey",sans-serif;font-weight:400;font-size:1.7rem;margin-bottom:2px}
 .header-text .sub{color:#999;font-size:.85rem}
 .tabs{display:flex;gap:0;margin-bottom:16px;flex-shrink:0;border-bottom:1px solid #333}
@@ -180,9 +186,13 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 .img-main{flex:1 1 460px;min-width:0;max-width:900px}
 .img-side{flex:0 1 340px;min-width:200px}
 .img-side-title{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
-#imgHistory{display:flex;flex-wrap:wrap;gap:8px}
-#imgHistory img{width:100px;height:100px;object-fit:cover;border-radius:6px;border:1px solid #333;cursor:zoom-in}
-#imgHistory img:hover{border-color:#77a}
+#imgHistory{display:flex;flex-direction:column;gap:8px}
+.hist-item{display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid #333;border-radius:8px;padding:6px;background:#191919}
+.hist-item:hover{border-color:#77a}
+.hist-item img{width:72px;height:72px;object-fit:cover;border-radius:5px;flex-shrink:0}
+.hist-meta{min-width:0;font-size:.75rem;display:flex;flex-direction:column;gap:2px}
+.hist-model{color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hist-host{color:#777;font-family:ui-monospace,monospace;font-size:.68rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:200;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:24px;cursor:zoom-out}
 #lightbox.open{display:flex}
 #lightbox img{max-width:90vw;max-height:78vh;border-radius:8px}
@@ -195,6 +205,14 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
 <p class="sub"><span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;<span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"> v__DYVA_VERSION__ </span>&middot; <a title="a hyperlink, obviously" href="/docs" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">docs</a> &middot; <a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="click it, go ahead" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">source</a></p>
+</div>
+<button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+<span id="activityDot" class="activity-dot"></span>
+</button>
+<div id="activityPop" class="activity-pop">
+<div class="ap-head">Activity <span id="pauseBtn" style="font-size:1.1rem;font-weight:normal;cursor:pointer;color:#888;margin-left:auto;border:1px solid #888;border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></div>
+<div id="activityList"></div>
 </div>
 </div>
 
@@ -216,10 +234,6 @@ __MODEL_ROWS__
 </div>
 __MODEL_MORE__
 </div>
-</div>
-<div class="card">
-<h2>Activity <span id="pauseBtn" style="font-size:1.25rem;font-weight:normal;cursor:pointer;color:#888;margin-left:8px;border:1px solid #888;border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></h2>
-<div class="card-inner"><div id="activityList"></div></div>
 </div>
 <div class="card">
 <h2>Hosts</h2>
@@ -979,6 +993,8 @@ function loadImgHistory(){
     var el=document.getElementById('imgHistory');
     el.innerHTML='';
     (list||[]).forEach(function(e){
+      var item=document.createElement('div');
+      item.className='hist-item';
       var im=document.createElement('img');
       im.src='sdapi/v1/images/'+encodeURIComponent(e.file);
       im.loading='lazy';
@@ -986,8 +1002,18 @@ function loadImgHistory(){
       if(e.model)bits.push(e.model);
       if(e.seed!==undefined&&e.seed!==null)bits.push('seed '+e.seed);
       im.title=bits.filter(Boolean).join(' · ');
-      im.addEventListener('click',function(){openLightbox(e)});
-      el.appendChild(im);
+      var meta=document.createElement('div');
+      meta.className='hist-meta';
+      var m=document.createElement('div');
+      m.className='hist-model';
+      m.textContent=e.model||'(auto model)';
+      var h=document.createElement('div');
+      h.className='hist-host';
+      h.textContent=e.host||'(host unknown)';
+      meta.appendChild(m);meta.appendChild(h);
+      item.appendChild(im);item.appendChild(meta);
+      item.addEventListener('click',function(){openLightbox(e)});
+      el.appendChild(item);
     });
   }).catch(function(){});
 }

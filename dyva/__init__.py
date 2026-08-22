@@ -2038,7 +2038,7 @@ async def handle_sd_models(request):
     })
 
 
-def _save_image_history(data, body):
+def _save_image_history(data, body, host=""):
     """Persist generated images to the on-disk thumbnail history (last IMG_HISTORY_MAX)."""
     import base64
     import uuid
@@ -2059,6 +2059,7 @@ def _save_image_history(data, body):
                 f.write(raw)
             history.insert(0, {
                 "file": name,
+                "host": host,
                 "prompt": (body.get("prompt") or "")[:200],
                 "negative_prompt": (body.get("negative_prompt") or "")[:200],
                 "model": body.get("model") or "",
@@ -2209,7 +2210,7 @@ async def handle_txt2img(request):
                     data = await r.json()
                     await broadcast_activity(last_host, activity_label, "connected",
                         f"txt2img ✓", duration=0)
-                    _save_image_history(data, body)
+                    _save_image_history(data, body, last_host)
                     return web.json_response(data)
                 add_bad(last_host, IMG_KEY)
             await broadcast_activity(last_host, activity_label, "failed",
@@ -2260,6 +2261,7 @@ async def handle_txt2img(request):
                             add_good(host, IMG_KEY)
                             await broadcast_activity(host, activity_label, "connected",
                                 f"txt2img ✓", duration=time.time() - t0)
+                            data["_dyva_host"] = host
                             await result_queue.put(data)
                             done.set()
                             return
@@ -2289,7 +2291,7 @@ async def handle_txt2img(request):
     live_hosts = [h for h in hosts if f"{h} {IMG_KEY}" not in load_bad()]
     data = await _race(live_hosts)
     if data:
-        _save_image_history(data, body)
+        _save_image_history(data, body, data.pop("_dyva_host", ""))
         return web.json_response(data)
 
     # Phase 2: exhausted — try previously bad hosts
@@ -2297,7 +2299,7 @@ async def handle_txt2img(request):
     if bad_hosts:
         data = await _race(bad_hosts)
         if data:
-            _save_image_history(data, body)
+            _save_image_history(data, body, data.pop("_dyva_host", ""))
             return web.json_response(data)
 
     # Phase 3: try comfyui hosts
@@ -2332,6 +2334,7 @@ async def handle_txt2img(request):
                         add_good(host, IMG_KEY)
                         await broadcast_activity(host, activity_label, "connected",
                             f"txt2img (comfy) ✓", duration=time.time() - t0)
+                        data["_dyva_host"] = host
                         await result_queue.put(data)
                         done.set()
                         return
@@ -2355,7 +2358,7 @@ async def handle_txt2img(request):
 
         data = await _race_comfy(comfy_hosts)
         if data:
-            _save_image_history(data, body)
+            _save_image_history(data, body, data.pop("_dyva_host", ""))
             return web.json_response(data)
 
     return web.json_response({"error": "all image-gen hosts failed"}, status=502)
