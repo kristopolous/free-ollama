@@ -59,6 +59,7 @@ KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 GRAFLEX_WORKING = os.path.join(CACHE_DIR, "a1111-working.json")
 IMG_DIR = os.path.join(CACHE_DIR, "images")
 IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
+CHATS_FILE = os.path.join(CACHE_DIR, "chats.json")
 IMG_HISTORY_MAX = 100
 CAP_REFRESH_TTL = 3600
 _last_cache = None
@@ -339,6 +340,14 @@ def match_model(model_name, pattern):
     if any(c in pattern for c in "*?["):
         return fnmatch.fnmatch(model_name.lower(), f"*{pattern.lower()}*")
     return pattern.lower() in model_name.lower()
+
+
+def canon_pattern(pattern):
+    """Collapse equivalent model queries to one canonical form so good/bad/last
+    state is shared: 'GEMMA*', 'gemma', '*gemma*' all become 'gemma';
+    '*', '**' and '' all become '' (= any). Safe because match_model() wraps
+    patterns in *...* anyway, so edge stars never change the match set."""
+    return (pattern or "").strip().lower().strip("*").strip()
 
 
 def needs_caps(messages):
@@ -2197,6 +2206,88 @@ async def handle_image_delete(request):
     return web.json_response({"removed": removed})
 
 
+CHATS_KEEP = 200
+
+
+def _load_chats_disk():
+    try:
+        with open(CHATS_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_chats_disk(chats):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    tmp = CHATS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(chats[:CHATS_KEEP], f, ensure_ascii=False)
+    os.replace(tmp, CHATS_FILE)
+
+
+async def handle_chats_get(request):
+    """
+    Stored chat sessions
+    ---
+    tags: [UI]
+    summary: Global chat history stored on the server disk
+    responses:
+      '200':
+        description: Full list of saved chats (newest first)
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                chats:
+                  type: array
+                  items:
+                    type: object
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    return web.json_response({"chats": _load_chats_disk()})
+
+
+async def handle_chats_post(request):
+    """
+    Replace all stored chat sessions
+    ---
+    tags: [UI]
+    summary: Overwrite global chat history with the posted list
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              chats:
+                type: array
+                items:
+                  type: object
+    responses:
+      '200':
+        description: Saved
+      '400':
+        description: Invalid payload
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    chats = body.get("chats") if isinstance(body, dict) else None
+    if not isinstance(chats, list):
+        return web.json_response({"error": 'expected {"chats": [...]}'}, status=400)
+    _save_chats_disk(chats)
+    return web.json_response({"ok": True})
+
+
 async def handle_txt2img(request):
     """
     Text-to-image generation (A1111 format)
@@ -2764,6 +2855,8 @@ def make_app():
     swagger.add_get("/sdapi/v1/images", handle_image_history)
     swagger.add_get("/sdapi/v1/images/delete", handle_image_delete)
     swagger.add_get("/sdapi/v1/images/{name}", handle_image_file)
+    swagger.add_get("/api/chats", handle_chats_get)
+    swagger.add_post("/api/chats", handle_chats_post)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
 

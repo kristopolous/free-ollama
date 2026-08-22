@@ -70,7 +70,6 @@ body.chat{overflow:hidden}
 .htab-clear{margin-left:auto;align-self:center;color:#c33;font-size:.75rem;text-decoration:underline;cursor:pointer}
 .htab-clear:hover{color:#e55}
 .more{font-size:.8rem;color:#666;margin-top:6px}
-.card h2::before{content:"▼";display:inline-block;font-size:.65rem;margin-right:6px;transition:transform .15s;color:#666}
 .card.collapsed h2::before{transform:rotate(-90deg)}
 .card.collapsed .card-inner{display:none}
 
@@ -126,8 +125,6 @@ button.stop:hover{background:#7a3a3a}
 
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid #3a3a46;background:#17171d;border-radius:4px;padding:.25em .65em}
 details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;user-select:none}
-details.thinkbox>summary::before{content:'▸ ';color:#666}
-details.thinkbox[open]>summary::before{content:'▾ '}
 .think-body{white-space:pre-wrap;color:#7c7c88;font-size:.8rem;line-height:1.45;font-style:italic;margin-top:.3em;max-height:320px;overflow:auto}
 .chat-layout{display:flex;gap:12px;flex:1;min-height:0;max-height:calc(100vh - 10rem)}
 .chat-menu-btn{display:none}
@@ -439,24 +436,42 @@ document.getElementById('nextHostBtn').addEventListener('click',function(e){e.pr
 var chatLog=document.getElementById('chatMessages');
 var storeKey='dyva_playground_chats';
 var currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};
-function loadChats(){try{return JSON.parse(localStorage.getItem(storeKey))||[]}catch(e){return[]}}
+var chatsCache=[];
+function loadChats(){return chatsCache}
 function persistChats(chats){
-  try{localStorage.setItem(storeKey,JSON.stringify(chats));return}
-  catch(e){}
+  chatsCache=chats.slice();
   try{
-    var stripped=chats.map(function(c){
-      return Object.assign({},c,{messages:c.messages.map(function(m){
-        var o={role:m.role,content:m.content};
-        if(m._meta)o._meta=m._meta;
-        if(m.tps!==undefined)o.tps=m.tps;
-        if(m.files&&m.files.length)o.files=m.files.map(function(f){return {name:f.name,type:f.type,size:f.size}});
-        return o;
-      })});
-    });
-    localStorage.setItem(storeKey,JSON.stringify(stripped));
-    if(window.console)console.warn('dyva: localStorage full, chat saved without image data');
+    var x=new XMLHttpRequest();x.open('POST','api/chats',false);
+    x.setRequestHeader('Content-Type','application/json');
+    x.send(JSON.stringify({chats:chats}));
   }catch(e){}
 }
+(function(){
+  var x=new XMLHttpRequest();x.open('GET','api/chats',false);
+  try{x.send()}catch(e){return}
+  if(x.status===200){
+    try{chatsCache=JSON.parse(x.responseText).chats||[]}catch(e){chatsCache=[]}
+  }
+  if(!chatsCache.length){
+    var ls=null;
+    try{ls=JSON.parse(localStorage.getItem(storeKey)||'null')}catch(e){}
+    if(ls&&ls.length){persistChats(ls);if(window.console)console.info('dyva: migrated '+ls.length+' local chat(s) to server storage')}
+  }
+})();
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden||currentAbort)return;
+  try{if(localStorage.getItem('dyva_inflight'))return}catch(e){}
+  var x=new XMLHttpRequest();
+  x.open('GET','api/chats');
+  x.onload=function(){
+    if(x.status!==200)return;
+    try{
+      var nc=JSON.parse(x.responseText).chats||[];
+      if(JSON.stringify(nc)!==JSON.stringify(chatsCache)){chatsCache=nc;renderSidebar()}
+    }catch(e){}
+  };
+  x.send();
+});
 function saveCurrentChat(){
   var chats=loadChats();
   if(!currentChat.messages.length)return;
