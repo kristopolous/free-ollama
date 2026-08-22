@@ -69,9 +69,6 @@ body.chat{overflow:hidden}
 .htab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
 .htab-clear{margin-left:auto;align-self:center;color:#c33;font-size:.75rem;text-decoration:underline;cursor:pointer}
 .htab-clear:hover{color:#e55}
-.htab-search{background:#1a1a1f;border:1px solid #333;color:#ddd;font-size:.75rem;padding:4px 8px;border-radius:6px;width:130px;margin-left:6px;align-self:center;flex-shrink:1;min-width:70px}
-.htab-search:focus{outline:none;border-color:#77a}
-.htab-search::placeholder{color:#666}
 .more{font-size:.8rem;color:#666;margin-top:6px}
 .card h2::before{content:"▼";display:inline-block;font-size:.65rem;margin-right:6px;transition:transform .15s;color:#666}
 .card.collapsed h2::before{transform:rotate(-90deg)}
@@ -383,7 +380,7 @@ __SD_MODELS__
 <div id="imgResult"></div>
 </div>
 <div class="img-side">
-<div class="img-side-title">Recent</div>
+<div class="img-side-title">Recent <input id="imgSearch" class="mini-search" type="text" placeholder="filter model / prompt…" autocomplete="off" spellcheck="false"></div>
 <div id="imgHistory"></div>
 </div>
 </div>
@@ -1089,8 +1086,17 @@ function loadImgHistory(){
       item.addEventListener('click',function(){openLightbox(e)});
       el.appendChild(item);
     });
+    filterImgHistory();
   }).catch(function(){});
 }
+function filterImgHistory(){
+  var q=document.getElementById('imgSearch').value.toLowerCase();
+  var rows=document.querySelectorAll('#imgHistory .hist-item');
+  for(var i=0;i<rows.length;i++){
+    rows[i].style.display=(!q||rows[i].textContent.toLowerCase().indexOf(q)>=0)?'':'none';
+  }
+}
+document.getElementById('imgSearch').addEventListener('input',filterImgHistory);
 var lightbox=document.createElement('div');
 lightbox.id='lightbox';
 lightbox.innerHTML='<img alt=""><div class="cap"></div>';
