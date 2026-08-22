@@ -211,21 +211,6 @@ def load_servers():
         else:
             with open(CACHE_FILE) as f:
                 _servers_cache = json.load(f)
-    # Always merge current a1111 hosts so image-gen works even when the main
-    # cache hasn't been refreshed yet.
-    if os.path.exists(GRAFLEX_WORKING):
-        try:
-            with open(GRAFLEX_WORKING) as f:
-                a1111 = json.load(f)
-            seen = {s.get("server", "").rstrip("/") for s in (_servers_cache or [])}
-            for row in a1111:
-                host = row.get("server", row.get("url", row.get("host", ""))).rstrip("/")
-                if host and host not in seen:
-                    if not row.get("server"):
-                        row["server"] = host
-                    (_servers_cache or []).append(row)
-        except Exception:
-            pass
     return _servers_cache or []
 
 
@@ -1408,8 +1393,12 @@ async def handle_dashboard(request):
     with open(os.path.join(tpl_dir, "dashboard.html")) as f:
         html = f.read()
     model_hosts = {}
+    host_checked = {}
     for s in servers:
         host = s.get("server", "")
+        ck = s.get("checked")
+        if host and ck:
+            host_checked[host] = ck
         for m in s.get("models", []):
             if re.search(r"[:-]cloud", m) or len(m) == 0:
                 continue
@@ -1427,12 +1416,6 @@ async def handle_dashboard(request):
     # Merge a1111 hosts from the working file so SD models appear even if the
     # main cache hasn't been refreshed yet.
     _sd_sources = list(load_servers())
-    if os.path.exists(GRAFLEX_WORKING):
-        try:
-            with open(GRAFLEX_WORKING) as _f:
-                _sd_sources.extend(json.load(_f))
-        except Exception:
-            pass
     for s in _sd_sources:
         if s.get("service") != "a1111":
             continue
@@ -1477,6 +1460,7 @@ async def handle_dashboard(request):
     html = html.replace("__BAD_ROWS__", bad_rows)
     html = html.replace("__BAD_MORE__", bad_more)
     html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
+    html = html.replace("__HOST_CHECKED_DATA__", json.dumps(host_checked))
     html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
     html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
     html = html.replace("__CHAT_MODELS__", json.dumps(chat_models))

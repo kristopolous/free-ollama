@@ -56,10 +56,8 @@ body.chat{overflow:hidden}
 .model-count{color:#888;flex-shrink:0;padding-left:8px;white-space:nowrap}
 .modellist .model-item{cursor:pointer;transition:background .1s;overflow-wrap:anywhere}
 .modellist .model-item:hover{background:#2a2a3a}
-.host-name{font-family:ui-monospace,monospace;font-size:.82rem;overflow-wrap:break-word;flex:1}
-.host-name.host-good{color:#4a4}
-.host-name.host-bad{color:#c33}
-.host-name.host-untested{color:#888}
+.host-name{font-family:ui-monospace,monospace;font-size:.82rem;overflow-wrap:break-word;flex:1;color:#eee}
+.host-checked{color:#777;flex-shrink:0;padding-left:8px;white-space:nowrap;font-size:.78rem}
 .host-model{font-family:ui-monospace,monospace;font-size:.82rem;color:#777}
 .skip-link{opacity:0;color:#77a;font-size:.75rem;text-decoration:underline;margin:0 8px;flex-shrink:0;transition:opacity .1s}
 .model-item:hover .skip-link{opacity:1}
@@ -412,6 +410,7 @@ __SD_MODELS__
 </div>
 
 <script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
+<script id="hostCheckedData" type="application/json">__HOST_CHECKED_DATA__</script>
 <script id="chatModelsData" type="application/json">__CHAT_MODELS__</script>
 <script id="goodHostsData" type="application/json">__GOOD_HOSTS_DATA__</script>
 <script id="badHostsData" type="application/json">__BAD_HOSTS_DATA__</script>
@@ -465,9 +464,11 @@ document.querySelectorAll('.card').forEach(function(card){
 
 var _currentModel=null;
 var modelHosts=JSON.parse(document.getElementById('modelHostsData').textContent);
+var hostChecked=JSON.parse(document.getElementById('hostCheckedData').textContent||'{}');
 var goodHosts=new Set(JSON.parse(document.getElementById('goodHostsData').textContent||'[]'));
 var badHosts=new Set(JSON.parse(document.getElementById('badHostsData').textContent||'[]'));
-document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('.modellist .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';_currentModel=this.getAttribute('data-name');var hosts=modelHosts[_currentModel]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;if(goodHosts.has(h+' '+_currentModel)){s.classList.add('host-good')}else if(badHosts.has(h+' '+_currentModel)){s.classList.add('host-bad')}else{s.classList.add('host-untested')}d.appendChild(s);list.appendChild(d)})})})
+function checkedAgo(iso){if(!iso)return'';var t=Date.parse(iso);if(isNaN(t))return'';var days=Math.floor((Date.now()-t)/86400000);if(days<=0)return'checked today';if(days===1)return'checked 1 day ago';return'checked '+days+' days ago'}
+document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('.modellist .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';_currentModel=this.getAttribute('data-name');var hosts=modelHosts[_currentModel]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;d.appendChild(s);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)})})})
 document.getElementById('nextHostBtn').addEventListener('click',function(e){e.preventDefault();if(!_currentModel)return;var x=new XMLHttpRequest();x.open('GET','next-host?model='+encodeURIComponent(_currentModel));x.onload=function(){location.reload()};x.send()})
 </script>
 <script>
