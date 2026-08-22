@@ -163,9 +163,9 @@ button.stop:hover{background:#7a3a3a}
 .chat-next-btn:hover{color:#fff;background:#3a3a5a}
 .model-count-badge{flex-shrink:0;background:#2a2a3a;color:#77a;border-radius:6px;padding:.5em .7em;font-size:.85rem;font-family:ui-monospace,monospace;min-width:2.4em;text-align:center}
 .field{margin-bottom:12px}
-.two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
-.img-params{display:grid;grid-template-columns:1fr 1fr 1.6fr;gap:12px;margin-bottom:12px}
-@media(max-width:640px){.img-params{grid-template-columns:1fr 1fr}.img-params .field:nth-child(3){grid-column:1/-1}}
+.img-params{display:grid;grid-template-columns:2.2fr 1fr;gap:12px;margin-bottom:12px}
+@media(max-width:640px){.img-params{grid-template-columns:1fr}}
+.img-dims{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px}
 .slider-row{display:grid;grid-template-columns:180px 1fr 56px;gap:10px;align-items:center;margin-bottom:12px}
 .slider-row label{display:flex;justify-content:space-between;margin:0}
 .slider-row .val{font-family:ui-monospace,monospace;font-size:.82rem;color:#77a;text-align:right}
@@ -278,21 +278,13 @@ __BAD_MORE__
 </div>
 
 <div id="image" class="panel">
+<div class="img-params">
 <div class="field">
 <label for="sdModel">SD Model</label>
 <input id="sdModel" type="text" list="sdModels" placeholder="type or select an SD model..." autocomplete="off">
 <datalist id="sdModels">
 __SD_MODELS__
 </datalist>
-</div>
-<div class="img-params">
-<div class="field">
-<label for="imgWidth">Width</label>
-<input id="imgWidth" type="number" value="512" min="256" max="2048" step="64">
-</div>
-<div class="field">
-<label for="imgHeight">Height</label>
-<input id="imgHeight" type="number" value="512" min="256" max="2048" step="64">
 </div>
 <div class="field">
 <label for="imgSampler">Sampler</label>
@@ -310,6 +302,20 @@ __SD_MODELS__
 <option>UniPC</option>
 <option>PLMS</option>
 </select>
+</div>
+</div>
+<div class="img-dims">
+<div class="field">
+<label for="imgWidth">Width</label>
+<input id="imgWidth" type="number" value="512" min="256" max="2048" step="64">
+</div>
+<div class="field">
+<label for="imgHeight">Height</label>
+<input id="imgHeight" type="number" value="512" min="256" max="2048" step="64">
+</div>
+<div class="field">
+<label for="imgSeed">Seed (-1 = random)</label>
+<input id="imgSeed" type="number" value="-1">
 </div>
 </div>
 <div class="field">
@@ -331,18 +337,9 @@ __SD_MODELS__
 <span class="val" id="imgCfgVal">7</span>
 </div>
 <div class="slider-row">
-<label for="imgSeed">Seed</label>
-<input id="imgSeed" type="range" min="0" max="999999" value="0">
-<span class="val" id="imgSeedVal">0</span>
-</div>
-<div class="slider-row">
 <label for="imgBatch">Batch size</label>
 <input id="imgBatch" type="range" min="1" max="4" value="1">
 <span class="val" id="imgBatchVal">1</span>
-</div>
-<div class="check-row">
-<input id="imgRandomSeed" type="checkbox" checked>
-<label for="imgRandomSeed" style="margin:0">Random seed</label>
 </div>
 <button id="imgGenerate">Generate</button>
 <div id="imgResult"></div>
@@ -914,19 +911,13 @@ function bindSlider(id,out){
 }
 bindSlider('imgSteps','imgStepsVal');
 bindSlider('imgCfg','imgCfgVal');
-bindSlider('imgSeed','imgSeedVal');
 bindSlider('imgBatch','imgBatchVal');
-document.getElementById('imgSeed').addEventListener('input',function(){
-  document.getElementById('imgRandomSeed').checked=false;
-});
-document.getElementById('imgRandomSeed').addEventListener('change',function(){
-  if(this.checked){document.getElementById('imgSeed').value=0;document.getElementById('imgSeedVal').textContent=0;}
-});
 
 async function generateImage(){
   var btn=document.getElementById('imgGenerate');
   var result=document.getElementById('imgResult');
-  var seed=document.getElementById('imgRandomSeed').checked?-1:parseInt(document.getElementById('imgSeed').value)||0;
+  var seed=parseInt(document.getElementById('imgSeed').value);
+  if(isNaN(seed))seed=-1;
   var body={
     model:document.getElementById('sdModel').value.trim()||undefined,
     prompt:document.getElementById('posPrompt').value.trim(),
