@@ -56,7 +56,6 @@ BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
-GRAFLEX_WORKING = os.path.join(CACHE_DIR, "a1111-working.json")
 IMG_DIR = os.path.join(CACHE_DIR, "images")
 IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
 CHATS_FILE = os.path.join(CACHE_DIR, "chats.json")
@@ -149,7 +148,7 @@ def refresh_cache():
         for row in json.loads(f.read()):
           ip = row.get('url').rstrip('/')
           if ip not in host_map:
-            host_map[ip] = {'tps': 0, 'service': row.get('service'), 'models': [], 'server': ip, 'version': row.get('version') or ''}
+              host_map[ip] = {'source': 'graflex', 'tps': 0, 'service': row.get('service'), 'models': [], 'server': ip, 'version': row.get('version') or ''}
     
           host_map[ip]['models'] += row.get('models')
 
@@ -157,7 +156,9 @@ def refresh_cache():
       with open(f'{_db}-forrany.tmp', 'r') as f:
         try:
           for row in json.loads(f.read()):
-            host_map[row.get('server')] = row
+            if row.get('server') not in host_map:
+                row['source'] = 'forrany'
+                host_map[row.get('server')] = row
         except Exception as ex:
           logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
 
@@ -167,7 +168,7 @@ def refresh_cache():
           ip = r[0].rstrip('/')
           models = [m.strip() for m in r[1].split(',')]
           if ip not in host_map:
-            host_map[ip] = {'tps': 0, 'models': [], 'server': ip, 'version': ''}
+            host_map[ip] = {'source': 'happyshua', 'tps': 0, 'models': [], 'server': ip, 'version': ''}
     
           host_map[ip]['models'] += models
 
@@ -177,21 +178,10 @@ def refresh_cache():
           ip = row.get('url').rstrip('/')
           models = [ n.get('name') for n in row.get('models') ]
           if ip not in host_map:
-            host_map[ip] = {'tps': 0, 'models': [], 'server': ip, 'version': ''}
+            host_map[ip] = {'source': 'spider', 'tps': 0, 'models': [], 'server': ip, 'version': ''}
 
           host_map[ip]['models'] += models
 
-    if os.path.exists(GRAFLEX_WORKING):
-      with open(GRAFLEX_WORKING, 'r') as f:
-        for row in json.loads(f.read()):
-          if 'version' in row:
-            row['version'] = row['version']
-          if 'host' in row:
-            row['server'] = row['host'].rstrip('/')
-          elif 'url' in row:
-            row['server'] = row['url'].rstrip('/')
-          if row.get('server'):
-            host_map[row['server']] = row
 
     for k,v in host_map.items():
       if 'service' not in v:
