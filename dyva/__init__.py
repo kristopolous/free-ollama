@@ -147,7 +147,7 @@ def refresh_cache():
         for row in json.loads(f.read()):
           ip = row.get('url').rstrip('/')
           if ip not in host_map:
-            host_map[ip] = {'tps': 0, 'models': [], 'server': ip, 'version': row.get('version') or ''}
+            host_map[ip] = {'tps': 0, 'service': row.get('service'), 'models': [], 'server': ip, 'version': row.get('version') or ''}
     
           host_map[ip]['models'] += row.get('models')
 
