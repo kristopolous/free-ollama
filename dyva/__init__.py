@@ -254,10 +254,13 @@ def load_bad():
 def add_bad(host, model):
     global _bad_cache
     model = canon_pattern(model)
+    key = f"{host} {model}"
+    bad = load_bad()
+    if key in bad:
+        return
     with open(BAD_FILE, "a") as f:
-        f.write(f"{host} {model}\n")
-    if _bad_cache is not None:
-        _bad_cache.add(f"{host} {model}")
+        f.write(f"{key}\n")
+    bad.add(key)
 
 
 def load_good():
@@ -746,6 +749,9 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             # untested ones get probed first, caps refreshed only if needed
             trusted = prio < 0
             if not trusted and not await probe_host(session, host):
+                add_bad(host, model)
+                await broadcast_activity(host, model, "failed",
+                    f"unreachable: {host}")
                 continue
             if not trusted and caps and caps != {"completion"}:
                 await refresh_host_caps(session, host)
@@ -776,6 +782,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 )
             except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
                 dur = time.time() - start
+                add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
                     f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
                 continue
@@ -2447,6 +2454,7 @@ async def handle_txt2img(request):
             await broadcast_activity(last_host, activity_label, "failed",
                 f"txt2img: HTTP {r.status}")
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
+            add_bad(last_host, IMG_KEY)
             await broadcast_activity(last_host, activity_label, "failed",
                 f"txt2img: {type(_e).__name__}")
 
@@ -2512,6 +2520,7 @@ async def handle_txt2img(request):
                         await broadcast_activity(host, activity_label, "failed",
                             f"txt2img: HTTP {r.status}")
                 except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
+                    add_bad(host, IMG_KEY)
                     await broadcast_activity(host, activity_label, "failed",
                         f"txt2img: {type(_e).__name__}")
 
@@ -2581,6 +2590,7 @@ async def handle_txt2img(request):
                         await result_queue.put(data)
                         done.set()
                         return
+                    add_bad(host, IMG_KEY)
                     await broadcast_activity(host, activity_label, "failed",
                         f"txt2img (comfy): no response")
 
