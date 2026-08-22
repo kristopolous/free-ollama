@@ -647,19 +647,25 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         else:
             server_list = [None]
         if isinstance(fids, str):
-            fid_list = [None] + [s.strip() for s in fids.split(",")]
+            fid_specs = [s.strip() for s in fids.split(",") if s.strip()]
         else:
-            fid_list = [None]
+            fid_specs = []
 
         if shuffle:
             random.shuffle(country_list)
             random.shuffle(port_list)
             random.shuffle(server_list)
-            random.shuffle(fid_list)
 
         pool = _load_json(hosts_file)
         seen = {f"{h['service']}@{h['host']}" for h in pool}
-        combos = [(c, p, s, f) for f in fid_list for s in server_list for p in port_list for c in country_list]
+        # FIDs are targeted follow-ups: each is fetched as QUERY+fid on its
+        # own, never crossed with country/port/server (those intersections
+        # are almost always empty).
+        combos = [(c, p, s, None) for s in server_list for p in port_list for c in country_list]
+        combos += [(None, None, None, fid) for fid in fid_specs]
+
+        if shuffle:
+            random.shuffle(combos)
 
         start = time.time()
         for i, (country, port, server, fid) in enumerate(combos):

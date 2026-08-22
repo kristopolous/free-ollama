@@ -8,6 +8,7 @@ EXTRA_ARGS=("$@")
 FID=
 SERVERS=
 
+
 case "$SERVICE" in
   combine)
     set -x
@@ -19,11 +20,49 @@ case "$SERVICE" in
 
   ollama)
     QUERY="body='ollama is running'"
-    PORTS="11434,10443,8085,10001,8080,80,443,1194,110,8983,28017,21,5060,5601"
+    PORTS="11434,10443,1025,8085,1024,1025,10001,10000,8080,8083,3000,16000,80,443,1194,110,8983,28017,21,5060,5601"
     SERVERS="nginx,cloudflare,Apache"
     COUNTRIES="TH,FI,MX,TR,IR,AR,TW,MA,MY,NZ,BH,SG,AT,KR,PE,GB,AE,US,NL,AU,IN,VN,JP,DE,CA,RU,IL,BR,BE,CN,IE,FR,UA,ES,ID,IT,CH,ZA,HK,PL"
-    #FID="UsjT+U+5J1db7DhwVOaRww==,gcg43SR+B8fEyFZyAZswOw==,WG5T78I2x/yKvDq/9kLayA==" #,vWJAw3jTn47wQTBzzr6Y5A==" #,IddNyyDw+Bero+vJOQnxFQ=="
-
+    FID=$({ 
+cat << ENDL 
+    +J8tx/XRDAFbY7SwBCK/0A==
+    01xWmwON//u1XKEyOkkEGw==
+    3Q7By8tPfRuNHpFiq0KrqA==
+    3mGLf50yvyPWCWfSET9hDw==
+    3wJ8qv5ND0OwkVt/Kjq4iQ==
+    65wLyEcpOlDyDW4X4g0gZw==
+    AIB814ld1H6MvBd+6OPcCA==
+    AeWKZ15RmMWZotdLMDDv4w==
+    IPVd8GL22c99ET8M4xjbnw==
+    IQHpmTiP8/HzRTww3q1YrQ==
+    IddNyyDw+Bero+vJOQnxFQ==
+    J9855+VtkRUZ4OjziYwE/g==
+    QtId0cK1hK63W7qg3BQGxg==
+    RB7MvyQI2lfLDtfXp/oHFA==
+    TrVIddAZ1noJcqqjy3K0tQ==
+    UsjT+U+5J1db7DhwVOaRww==
+    WG5T78I2x/yKvDq/9kLayA==
+    WoOGi3QvmGKck8Zfv+/7Yg==
+    Zqa7LMrwh7gjCP/4TXKPhw==
+    aZKKpLCZfWu36hzRur+Vwg==
+    gcg43SR+B8fEyFZyAZswOw==
+    hct4Naj+LBOYmss/EnqFgg==
+    hoN2c4Ox+oKTWIv5RyANJQ==
+    jq1/FUEPBJ5UKh2LOcVWZQ==
+    nqM+fMcnax/qO2rEglJ72w==
+    peMs7fD92YTW7k1jkyd9QQ==
+    rI+VQgK8I9EBO92ugxTRhA==
+    sMOJSZs5jy4YSnz10gFtxA==
+    t03y23hXUHgle7AmLZLjmQ==
+    t4uBaTpN5jh8BiX2XaAiqA==
+    u2qfmUZoLDxXxJCFU5i6KQ==
+    vWJAw3jTn47wQTBzzr6Y5A==
+    yrIHyooS22dwg/KebDy5Uw==
+    zCj6cvAuYJ+3bXm6Nt+tSA==
+    /G4zpfxN3GZzxn5JSlEhkw==
+ENDL
+} | tr '\n' ',' | tr -d ' '
+)
     ;;
     
   comfyui)

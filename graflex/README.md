@@ -49,7 +49,7 @@ graflex -q "body='ollama is running'" -a fetch -n ollama \
   --servers 'nginx,cloudflare,Apache' \
   -c 'US,AU,IN,JP,DE,CA,BR,CN'
 
-# Filter by specific FIDs (comma-separated)
+# Filter by specific FIDs (comma-separated; each runs as QUERY+fid on its own)
 graflex -s comfyui -a fetch -f "xxx,yyy"
 
 # Check hosts from a named cache file
@@ -172,13 +172,13 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-n`, `--name` | Cache file name prefix (default: `image-gen`) |
 | `-c`, `--countries` | Comma-separated country codes to cycle |
 | `-p`, `--ports` | Comma-separated port values to cycle |
-| `-f`, `--fid` | Comma-separated FID values to filter by |
+| `-f`, `--fid` | Comma-separated FID values; each is fetched as `QUERY + fid="..."` on its own (not crossed with countries/ports/servers) |
 | `--servers` | Comma-separated server values to cycle |
 | `-i`, `--id` | Resume a previous session by providing its run timestamp (the `run_ts` from the log) |
 | `-w`, `--workers` | Max parallel check workers (default: 10) |
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
 | `-z`, `--sleep` | Seconds to sleep between requests (default: 4) |
-| `-r`, `--random` | Shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order |
+| `-r`, `--random` | Shuffle the combination list (countries × ports × servers plus the FID follow-ups) so the fetch cycles in random order |
 
 ## Common errors
 

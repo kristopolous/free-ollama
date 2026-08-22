@@ -165,6 +165,9 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .chat-item .dl{opacity:0;color:#77a;cursor:pointer;font-size:.85rem;padding:0 4px}
 .chat-item:hover .dl{opacity:1}
 .chat-item .dl:hover{color:#aae}
+.chat-item .re{opacity:0;color:#7a7;cursor:pointer;font-size:.85rem;padding:0 4px}
+.chat-item:hover .re{opacity:1}
+.chat-item .re:hover{color:#9c9}
 .chat-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
 .chat-main .messages{height:auto;flex:1;min-height:0;overflow-y:auto}
 .chat-main .field,.chat-main .input-row{flex-shrink:0}
@@ -531,11 +534,13 @@ function renderSidebar(){
     item.className='chat-item'+(String(c.id)===String(currentChat.id)?' active':'');
     item.title=fmtWhen(c.createdAt);
     var t=document.createElement('span');t.className='title';t.textContent=c.title||'(untitled)';
-    var dl=document.createElement('span');dl.className='dl';dl.textContent='↓';dl.title='Download JSON';
+    var re=document.createElement('span');re.className='re';re.textContent='\u27f3';re.title='Regenerate title';
+    re.addEventListener('click',function(e){e.stopPropagation();regenTitle(c,re);});
+    var dl=document.createElement('span');dl.className='dl';dl.textContent='\u2193';dl.title='Download JSON';
     dl.addEventListener('click',function(e){e.stopPropagation();downloadChatJson(c);});
-    var del=document.createElement('span');del.className='del';del.textContent='✕';
+    var del=document.createElement('span');del.className='del';del.textContent='\u2715';
     del.addEventListener('click',function(e){e.stopPropagation();deleteChat(c.id);});
-    item.appendChild(t);item.appendChild(dl);item.appendChild(del);
+    item.appendChild(t);item.appendChild(re);item.appendChild(dl);item.appendChild(del);
     item.addEventListener('click',function(){loadChatById(c.id);});
     list.appendChild(item);
   });
@@ -544,6 +549,35 @@ function deleteChat(id){
   if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();location.hash='chat';}
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
+}
+async function regenTitle(c,btn){
+  var msgs=(c.messages||[]).filter(function(m){return m.role==='user'&&m.content})
+    .map(function(m){return String(m.content)}).join('\n').slice(0,2000);
+  if(!msgs)return;
+  if(btn)btn.textContent='\u2026';
+  try{
+    var model=c.model||document.getElementById('chatModel').value.trim()||'*';
+    var r=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:model,stream:false,messages:[
+        {role:'system',content:'You generate chat titles. Reply with ONLY a short title (max 5 words) summarizing the user message(s). No quotes, no trailing punctuation.'},
+        {role:'user',content:msgs}]})});
+    if(r.ok){
+      var j=await r.json();
+      var txt=j&&j.message&&j.message.content?String(j.message.content):'';
+      txt=splitThink(txt).c.replace(/<think>[\s\S]*?<\/think>/gi,'');
+      txt=txt.replace(/^["'\s]+|["'.\s]+$/g,'').split('\n')[0].trim().slice(0,60);
+      if(txt){
+        var chats=loadChats(),i=findChatIndex(c.id);
+        if(i>=0){
+          chats[i].title=txt;
+          persistChats(chats);
+          if(String(currentChat.id)===String(c.id))currentChat.title=txt;
+        }
+        renderSidebar();
+      }
+    }
+  }catch(e){}
+  if(btn&&btn.isConnected)btn.textContent='\u27f3';
 }
 function b64toText(b64){
   try{
