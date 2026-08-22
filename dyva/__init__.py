@@ -87,8 +87,6 @@ _ACTIVITY_HISTORY_MAX = 500
 
 
 async def broadcast_activity(host, model, status, message, duration=None, wid=None):
-    if wid:
-        message = f"<{wid.replace('Task-','')}> {message}"
     entry = {'host': host, 'model': model, 'status': status, 'message': message, 'time': time.time()}
     if duration is not None:
         entry['duration'] = round(duration, 2)
@@ -734,7 +732,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         while not done.is_set():
             async with iter_lock:
                 try:
-                    _, host, ms = next(server_iter)
+                    prio, host, ms = next(server_iter)
                 except StopIteration:
                     return
 
@@ -744,9 +742,13 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             await broadcast_activity(host, model, "trying",
                 f"trying: {host} for {model}", wid=wid)
 
-            if not await probe_host(session, host):
+            # last-used / known-good hosts go straight to the request;
+            # untested ones get probed first, caps refreshed only if needed
+            trusted = prio < 0
+            if not trusted and not await probe_host(session, host):
                 continue
-            await refresh_host_caps(session, host)
+            if not trusted and caps and caps != {"completion"}:
+                await refresh_host_caps(session, host)
 
             if "vision" in (caps or []) and not _known_has(host, full, "vision"):
                 sees = await trial_balloon(session, host, full, model)

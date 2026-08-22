@@ -126,6 +126,9 @@ button.stop:hover{background:#7a3a3a}
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid #3a3a46;background:#17171d;border-radius:4px;padding:.25em .65em}
 details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;user-select:none}
 .think-body{white-space:pre-wrap;color:#7c7c88;font-size:.8rem;line-height:1.45;font-style:italic;margin-top:.3em;max-height:320px;overflow:auto}
+
+.chat-status{display:flex;align-items:center;gap:.45em;color:#8a8a96;font-size:.75rem;font-style:italic;margin:.15em 0 .3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-status::before{content:'';flex-shrink:0;width:.6em;height:.6em;border:1.5px solid #444;border-top-color:#77a;border-radius:50%;animation:spin .8s linear infinite}
 .chat-layout{display:flex;gap:12px;flex:1;min-height:0;max-height:calc(100vh - 10rem)}
 .chat-menu-btn{display:none}
 .chat-backdrop{display:none}
@@ -212,7 +215,7 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <img src="dyva.avif" alt="" width="56" height="56">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub"><span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;<span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"> v__DYVA_VERSION__ </span>&middot; <a title="a hyperlink, obviously" href="/docs" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">docs</a> &middot; <a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="click it, go ahead" target="_blank" style="font-size:.75rem;font-weight:normal;color:#77a;cursor:pointer;text-decoration:none">source</a></p>
+<p class="sub"><span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;<span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"> v__DYVA_VERSION__ </span>&middot; <a title="docs" href="/docs" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none">📚</a> &middot; <a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">🐞</a></p>
 </div>
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾</button>
 <div id="activityPop" class="activity-pop">
@@ -289,7 +292,7 @@ __BAD_MORE__
 <div class="field">
 <div class="model-picker">
 <button id="chatMenuBtn" class="chat-menu-btn" title="Chat history">☰</button>
-<input id="chatModel" type="text" placeholder="model" autocomplete="off" spellcheck="false">
+<input id="chatModel" type="text" value="*" placeholder="model (* = anything)" autocomplete="off" spellcheck="false">
 <span id="chatModelCount" class="model-count-badge" title="matching servers">-</span>
 <button id="chatNextBtn" class="chat-next-btn" title="Move on to the next server for this model">▶</button>
 </div>
@@ -391,7 +394,7 @@ __SD_MODELS__
 var evtSource=new EventSource('api/activity');
 var paused=false;
 function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
-evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
+evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();if(activeStatus){if(d.status==='connected')activeStatus.textContent='generating\u2026';else if(d.status==='trying'||d.status==='failed')activeStatus.textContent=d.message;}var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
 document.getElementById('activityBtn').addEventListener('click',function(e){e.stopPropagation();actPop.classList.toggle('open')});
@@ -627,6 +630,7 @@ function mdRender(text){
 }
 var renderTimer=null;
 var streamState=null;
+var activeStatus=null;
 function paintStream(){
   if(!streamState)return;
   var sp=splitThink(streamState.raw);
@@ -737,7 +741,7 @@ function loadChatById(id){
   saveCurrentChat();
   var c=loadChats().find(function(x){return String(x.id)===String(id)});
   if(!c)return;
-  currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'',messages:c.messages.slice()};
+  currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:c.messages.slice()};
   document.getElementById('chatModel').value=currentChat.model;
   updateModelCount();
   renderMessages();
@@ -799,10 +803,8 @@ async function sendChat(){
   var text=input.value.trim();
   if(!text)return;
   if(!model){
-    var b=addMsg('assistant','');
-    b.bodyEl.innerHTML='<span class="error">No models found matching &quot;'+escHtml(model)+'&quot; - choose one before continuing</span>';
-    chatLog.scrollTop=chatLog.scrollHeight;
-    return;
+    model='*';
+    document.getElementById('chatModel').value='*';
   }
   var chatId=currentChat.id;
   var chatCreated=currentChat.createdAt;
@@ -843,6 +845,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble){
   try{sessionStorage.setItem('dyva_own','1')}catch(e){}
   var full='',think='',tps=null,acc='';
   streamState={el:bubble.bodyEl,think:'',raw:''};
+  var statusEl=document.createElement('div');
+  statusEl.className='chat-status';
+  statusEl.textContent='finding a server\u2026';
+  bubble.bodyEl.parentNode.insertBefore(statusEl,bubble.bodyEl);
+  activeStatus=statusEl;
   try{
     var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:msgs,stream:true}),signal:ac.signal});
     var host=resp.headers.get('X-Dyva-Host')||'';
@@ -919,6 +926,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble){
   finally{
     currentAbort=null;
     streamState=null;
+    if(activeStatus===statusEl)activeStatus=null;
+    if(statusEl&&statusEl.parentNode)statusEl.parentNode.removeChild(statusEl);
     try{sessionStorage.removeItem('dyva_own')}catch(e){}
     setSendButton('idle');
   }
