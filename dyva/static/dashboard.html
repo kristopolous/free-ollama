@@ -193,7 +193,10 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 .img-layout{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}
 .img-main{flex:1 1 460px;min-width:0;max-width:640px}
 .img-side{flex:1 1 300px;min-width:260px}
-.img-side-title{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
+.img-side-title{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.mini-search{background:#1a1a1f;border:1px solid #333;color:#ddd;font-size:.75rem;padding:3px 8px;border-radius:6px;width:180px;margin-left:auto;text-transform:none;letter-spacing:0}
+.mini-search:focus{outline:none;border-color:#77a}
+.mini-search::placeholder{color:#666}
 #imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
 .hist-item{position:relative;display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid #333;border-radius:8px;padding:6px;background:#191919}
 .hist-item:hover{border-color:#77a}
@@ -248,7 +251,6 @@ __MODEL_MORE__
 <div class="card-inner">
 <div class="host-tabs">
 <button type="button" class="htab active" data-pane="last">Recent</button>
-<input id="recentSearch" class="htab-search" type="text" placeholder="filter…" autocomplete="off" spellcheck="false">
 <button type="button" class="htab" data-pane="good">Good</button>
 <button type="button" class="htab" data-pane="bad">Bad</button>
 <span id="clearBad" class="htab-clear" title="Forget all bad host+model pairs">clear bad</span>
@@ -394,9 +396,7 @@ __SD_MODELS__
 <script>
 var evtSource=new EventSource('api/activity');
 var paused=false;
-function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;applyRecentFilter();document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
-function applyRecentFilter(){var q=document.getElementById('recentSearch').value.toLowerCase();var rows=document.getElementById('lastList').children;for(var i=0;i<rows.length;i++){rows[i].style.display=(!q||rows[i].textContent.toLowerCase().indexOf(q)>=0)?'':'none'}}
-document.getElementById('recentSearch').addEventListener('input',applyRecentFilter);
+function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
 evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
