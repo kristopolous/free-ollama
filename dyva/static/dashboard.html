@@ -52,10 +52,10 @@ body.chat{overflow:hidden}
 .done-line{color:#666;font-style:italic}
 .model-item{padding:6px 0;border-bottom:1px solid #333;font-size:.85rem;display:flex;justify-content:space-between}
 .model-item:last-child{border:none}
-.model-name{font-family:ui-monospace,monospace;font-size:.82rem}
-.model-count{color:#888}
-#modelList .model-item{cursor:pointer;transition:background .1s;overflow-wrap:anywhere}
-#modelList .model-item:hover{background:#2a2a3a}
+.model-name{font-family:ui-monospace,monospace;font-size:.82rem;max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-count{color:#888;flex-shrink:0;padding-left:8px;white-space:nowrap}
+.modellist .model-item{cursor:pointer;transition:background .1s;overflow-wrap:anywhere}
+.modellist .model-item:hover{background:#2a2a3a}
 .host-name{font-family:ui-monospace,monospace;font-size:.82rem;overflow-wrap:break-word;flex:1}
 .host-name.host-good{color:#4a4}
 .host-name.host-bad{color:#c33}
@@ -242,8 +242,19 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <h2>Models</h2>
 <div class="card-inner">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter...">
-<div id="modelList">
-__MODEL_ROWS__
+<div class="host-tabs">
+<button type="button" class="htab active" data-mpane="text">Text</button>
+<button type="button" class="htab" data-mpane="image">Image</button>
+</div>
+<div id="mpane-text">
+<div id="modelList" class="modellist">
+__MODEL_ROWS_TEXT__
+</div>
+</div>
+<div id="mpane-image" style="display:none">
+<div class="modellist">
+__MODEL_ROWS_IMAGE__
+</div>
 </div>
 __MODEL_MORE__
 </div>
@@ -409,21 +420,31 @@ document.getElementById('activityBtn').addEventListener('click',function(e){e.st
 document.addEventListener('keydown',function(e){if(e.key==='Escape')actPop.classList.remove('open')});
 </script>
 <script>
-function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
+function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
 document.getElementById('clearBad').addEventListener('click',function(e){e.preventDefault();e.stopPropagation();
   var x=new XMLHttpRequest();x.open('GET','clear-bad');
   x.onload=function(){location.reload()};x.send()})
 
-document.querySelectorAll('.htab').forEach(function(t){
+document.querySelectorAll('.htab[data-pane]').forEach(function(t){
   t.addEventListener('click',function(){
     var pane=t.getAttribute('data-pane');
-    document.querySelectorAll('.htab').forEach(function(x){x.classList.toggle('active',x===t)});
+    document.querySelectorAll('.htab[data-pane]').forEach(function(x){x.classList.toggle('active',x===t)});
     ['good','bad','last'].forEach(function(p){document.getElementById('pane-'+p).style.display=p===pane?'':'none'});
     localStorage.setItem('dyva_hostpane',pane);
   })
 });
 var savedPane=localStorage.getItem('dyva_hostpane');
 if(savedPane&&savedPane!=='last'){var pb=document.querySelector('.htab[data-pane="'+savedPane+'"]');if(pb)pb.click()}
+
+document.querySelectorAll('[data-mpane]').forEach(function(t){
+  t.addEventListener('click',function(){
+    var p=t.getAttribute('data-mpane');
+    document.querySelectorAll('[data-mpane]').forEach(function(x){x.classList.toggle('active',x===t)});
+    ['text','image'].forEach(function(k){document.getElementById('mpane-'+k).style.display=k===p?'':'none'});
+    try{localStorage.setItem('dyva_modelpane',p)}catch(e){}
+  })
+});
+try{var savedMpane=localStorage.getItem('dyva_modelpane');if(savedMpane&&savedMpane!=='text'){var mb=document.querySelector('[data-mpane="'+savedMpane+'"]');if(mb)mb.click()}}catch(e){}
 
 document.querySelectorAll('.card').forEach(function(card){
   var h2=card.querySelector('h2');
@@ -440,7 +461,7 @@ var _currentModel=null;
 var modelHosts=JSON.parse(document.getElementById('modelHostsData').textContent);
 var goodHosts=new Set(JSON.parse(document.getElementById('goodHostsData').textContent||'[]'));
 var badHosts=new Set(JSON.parse(document.getElementById('badHostsData').textContent||'[]'));
-document.querySelectorAll('#modelList .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('#modelList .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';_currentModel=this.getAttribute('data-name');var hosts=modelHosts[_currentModel]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;if(goodHosts.has(h+' '+_currentModel)){s.classList.add('host-good')}else if(badHosts.has(h+' '+_currentModel)){s.classList.add('host-bad')}else{s.classList.add('host-untested')}d.appendChild(s);list.appendChild(d)})})})
+document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('.modellist .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';_currentModel=this.getAttribute('data-name');var hosts=modelHosts[_currentModel]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;if(goodHosts.has(h+' '+_currentModel)){s.classList.add('host-good')}else if(badHosts.has(h+' '+_currentModel)){s.classList.add('host-bad')}else{s.classList.add('host-untested')}d.appendChild(s);list.appendChild(d)})})})
 document.getElementById('nextHostBtn').addEventListener('click',function(e){e.preventDefault();if(!_currentModel)return;var x=new XMLHttpRequest();x.open('GET','next-host?model='+encodeURIComponent(_currentModel));x.onload=function(){location.reload()};x.send()})
 </script>
 <script>

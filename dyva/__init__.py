@@ -1374,10 +1374,22 @@ async def handle_dashboard(request):
             title = m.split(" [")[0] if " [" in m else m
             sd_models.add(title)
     sd_options = "".join(f'<option value="{h}"></option>' for h in sorted(sd_models))
-    model_rows = "".join(
-        f'<div class="model-item" data-name="{m["id"]}"><span class="model-name">{m["id"]}</span><span class="model-count">{_model_status(m["id"])}</span></div>'
-        for m in models
-    )
+    # Taxonomy: models served by a1111/comfyui hosts are "image",
+    # everything else (or no service) is "text".
+    image_raw = set()
+    for s in _sd_sources:
+        if s.get("service") not in ("a1111", "comfyui"):
+            continue
+        for m in s.get("models", []):
+            image_raw.add(m)
+            if " [" in m:
+                image_raw.add(m.split(" [")[0])
+    def _model_row(m):
+        return (f'<div class="model-item" data-name="{m["id"]}" title="{m["id"]}">'
+                f'<span class="model-name">{m["id"]}</span>'
+                f'<span class="model-count">{_model_status(m["id"])}</span></div>')
+    text_rows = "".join(_model_row(m) for m in models if m["id"] not in image_raw)
+    image_rows = "".join(_model_row(m) for m in models if m["id"] in image_raw)
     model_more = ""
     last_rows = _last_rows_html()
     good_rows = _good_rows_html(good)
@@ -1390,7 +1402,8 @@ async def handle_dashboard(request):
     html = html.replace("__SERVER_COUNT__", str(len(servers)))
     html = html.replace("__MODEL_COUNT__", str(len(models)))
     html = html.replace("__DYVA_VERSION__", VERSION)
-    html = html.replace("__MODEL_ROWS__", model_rows)
+    html = html.replace("__MODEL_ROWS_TEXT__", text_rows)
+    html = html.replace("__MODEL_ROWS_IMAGE__", image_rows)
     html = html.replace("__MODEL_MORE__", model_more)
     html = html.replace("__LAST_ROWS__", last_rows)
     html = html.replace("__GOOD_ROWS__", good_rows)
