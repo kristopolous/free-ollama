@@ -2077,6 +2077,20 @@ def _save_image_history(data, body, host="", requested_model=""):
                 history = json.load(f)
         except Exception:
             history = []
+        info = data.get("info")
+        if isinstance(info, str):
+            try:
+                info = json.loads(info)
+            except Exception:
+                info = {}
+        if not isinstance(info, dict):
+            info = {}
+        seed_used = data.pop("_dyva_seed", None)
+        if seed_used is None:
+            try:
+                seed_used = int(info.get("seed"))
+            except (TypeError, ValueError):
+                seed_used = None
         for b64 in (data.get("images") or []):
             try:
                 raw = base64.b64decode(b64)
@@ -2091,7 +2105,7 @@ def _save_image_history(data, body, host="", requested_model=""):
                 "model": _resolve_sd_model(data, body) or requested_model,
                 "prompt": (body.get("prompt") or "")[:200],
                 "negative_prompt": (body.get("negative_prompt") or "")[:200],
-                "seed": body.get("seed"),
+                "seed": seed_used if seed_used is not None else body.get("seed"),
                 "steps": body.get("steps"),
                 "cfg_scale": body.get("cfg_scale"),
                 "sampler_name": body.get("sampler_name"),

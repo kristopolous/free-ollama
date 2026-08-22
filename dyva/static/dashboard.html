@@ -69,6 +69,9 @@ body.chat{overflow:hidden}
 .htab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
 .htab-clear{margin-left:auto;align-self:center;color:#c33;font-size:.75rem;text-decoration:underline;cursor:pointer}
 .htab-clear:hover{color:#e55}
+.htab-search{background:#1a1a1f;border:1px solid #333;color:#ddd;font-size:.75rem;padding:4px 8px;border-radius:6px;width:130px;margin-left:6px;align-self:center;flex-shrink:1;min-width:70px}
+.htab-search:focus{outline:none;border-color:#77a}
+.htab-search::placeholder{color:#666}
 .more{font-size:.8rem;color:#666;margin-top:6px}
 .card h2::before{content:"▼";display:inline-block;font-size:.65rem;margin-right:6px;transition:transform .15s;color:#666}
 .card.collapsed h2::before{transform:rotate(-90deg)}
@@ -123,6 +126,12 @@ button.stop:hover{background:#7a3a3a}
 .msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:.5em}
 .msg .files img{max-width:160px;max-height:160px;border-radius:6px;border:1px solid #333}
 .msg .file-chip{display:inline-block;background:#222a3a;border:1px solid #333;border-radius:6px;padding:3px 8px;font-size:.75rem;color:#77a;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+details.thinkbox{margin:.15em 0 .55em;border-left:3px solid #3a3a46;background:#17171d;border-radius:4px;padding:.25em .65em}
+details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;user-select:none}
+details.thinkbox>summary::before{content:'▸ ';color:#666}
+details.thinkbox[open]>summary::before{content:'▾ '}
+.think-body{white-space:pre-wrap;color:#7c7c88;font-size:.8rem;line-height:1.45;font-style:italic;margin-top:.3em;max-height:320px;overflow:auto}
 .chat-layout{display:flex;gap:12px;flex:1;min-height:0;max-height:calc(100vh - 10rem)}
 .chat-menu-btn{display:none}
 .chat-backdrop{display:none}
@@ -239,6 +248,7 @@ __MODEL_MORE__
 <div class="card-inner">
 <div class="host-tabs">
 <button type="button" class="htab active" data-pane="last">Recent</button>
+<input id="recentSearch" class="htab-search" type="text" placeholder="filter…" autocomplete="off" spellcheck="false">
 <button type="button" class="htab" data-pane="good">Good</button>
 <button type="button" class="htab" data-pane="bad">Bad</button>
 <span id="clearBad" class="htab-clear" title="Forget all bad host+model pairs">clear bad</span>
@@ -384,7 +394,9 @@ __SD_MODELS__
 <script>
 var evtSource=new EventSource('api/activity');
 var paused=false;
-function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
+function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;applyRecentFilter();document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
+function applyRecentFilter(){var q=document.getElementById('recentSearch').value.toLowerCase();var rows=document.getElementById('lastList').children;for(var i=0;i<rows.length;i++){rows[i].style.display=(!q||rows[i].textContent.toLowerCase().indexOf(q)>=0)?'':'none'}}
+document.getElementById('recentSearch').addEventListener('input',applyRecentFilter);
 evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
@@ -531,7 +543,8 @@ function addMsg(role,text,index){
   var r=document.createElement('div');r.className='role';r.textContent=role==='user'?'You':'Assistant';
   var b=document.createElement('div');b.className='body';
   if(role==='assistant'){
-    b.innerHTML=mdRender(text);
+    var _mt=index!==undefined?currentChat.messages[index]:null;
+    b.innerHTML=thinkHtml(_mt&&_mt._meta&&_mt._meta.think,false)+mdRender(text);
     highlightBlocks(b);
     if(index!==undefined){
       var m=currentChat.messages[index];
@@ -561,6 +574,16 @@ function addMsg(role,text,index){
   return {roleEl:r,bodyEl:b};
 }
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function splitThink(raw){
+  var s=String(raw||'');
+  var m=s.match(/^\s*<think>([\s\S]*?)(<\/think>|$)/i);
+  if(!m)return{t:'',c:s};
+  return{t:m[1],c:s.slice(m[0].length)};
+}
+function thinkHtml(t,open){
+  if(!t)return '';
+  return '<details class="thinkbox"'+(open?' open':'')+'><summary>thinking</summary><div class="think-body">'+escHtml(t)+'</div></details>';
+}
 function renderFiles(b,files){
   var wrap=document.createElement('div');wrap.className='files';
   files.forEach(function(f){
@@ -591,6 +614,15 @@ function mdRender(text){
   return out;
 }
 var renderTimer=null;
+var streamState=null;
+function paintStream(){
+  if(!streamState)return;
+  var sp=splitThink(streamState.raw);
+  var th=streamState.think+sp.t;
+  streamState.el.innerHTML=thinkHtml(th,true)+mdRender(sp.c);
+  highlightBlocks(streamState.el);
+  chatLog.scrollTop=chatLog.scrollHeight;
+}
 function highlightBlocks(scope){
   if(!window.hljs)return;
   var blocks=(scope||document).querySelectorAll('pre code');
@@ -598,14 +630,7 @@ function highlightBlocks(scope){
 }
 function scheduleStreamRender(){
   if(renderTimer)return;
-  renderTimer=setTimeout(function(){
-    renderTimer=null;
-    document.querySelectorAll('.msg.assistant .body.streaming').forEach(function(el){
-      el.innerHTML=mdRender(el.getAttribute('data-stream')||'');
-      highlightBlocks(el);
-    });
-    chatLog.scrollTop=chatLog.scrollHeight;
-  },60);
+  renderTimer=setTimeout(function(){renderTimer=null;paintStream()},60);
 }
 function renderMessages(){
   chatLog.innerHTML='';
@@ -617,9 +642,10 @@ function findChatIndex(id){
   return -1;
 }
 function chatInView(chatId){return String(currentChat.id)===String(chatId)}
-function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render){
-  if(!content)return;
+function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render,think){
+  if(!content&&!think)return;
   var msg={role:'assistant',content:content,_meta:{server:host||'',model:fmodel||''},tps:tps};
+  if(think)msg._meta.think=think;
   var inView=chatInView(chatId);
   var chats=loadChats(),i=findChatIndex(chatId);
   if(inView&&i<0){
@@ -781,11 +807,7 @@ async function sendChat(){
   attachments=[];
   renderAttachments();
   setSendButton('streaming');
-  var ac=new AbortController();
-  currentAbort=ac;
-  function live(){return chatInView(chatId)&&bubble.bodyEl.isConnected}
-  try{
-    var msgs=currentChat.messages.map(function(m){
+  var msgs=currentChat.messages.map(function(m){
       var o={role:m.role,content:m.content};
       if(m.files&&m.files.length){
         var imgs=[];
@@ -797,10 +819,24 @@ async function sendChat(){
       }
       return o;
     });
+    try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
+  runStream(chatId,chatCreated,chatTitle,model,msgs,bubble);
+}
+async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble){
+  var ac=new AbortController();
+  currentAbort=ac;
+  function live(){return chatInView(chatId)&&bubble.bodyEl.isConnected}
+  function clearInflight(){try{localStorage.removeItem('dyva_inflight')}catch(e){}}
+  function keepInflight(){try{var m=JSON.parse(localStorage.getItem('dyva_inflight')||'null');if(!m)return;m.n=(m.n||0)+1;if(m.n<=2)localStorage.setItem('dyva_inflight',JSON.stringify(m));else localStorage.removeItem('dyva_inflight')}catch(e){try{localStorage.removeItem('dyva_inflight')}catch(e2){}}}
+  try{sessionStorage.setItem('dyva_own','1')}catch(e){}
+  var full='',think='',tps=null,acc='';
+  streamState={el:bubble.bodyEl,think:'',raw:''};
+  try{
     var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:model,messages:msgs,stream:true}),signal:ac.signal});
     var host=resp.headers.get('X-Dyva-Host')||'';
     var fmodel=resp.headers.get('X-Dyva-Model')||model;
     if(!resp.ok){
+      clearInflight();
       var msg='HTTP '+resp.status;
       try{var j=await resp.json();msg=(j.error&&(j.error.message||j.error))||msg}catch(e){}
       if(live()){
@@ -815,7 +851,6 @@ async function sendChat(){
     if(live())setAssistantLabel(bubble.roleEl,host,fmodel);
     var reader=resp.body.getReader();
     var dec=new TextDecoder();
-    var acc='',full='',tps=null;
     while(true){
       var step=await reader.read();
       if(step.done)break;
@@ -829,55 +864,41 @@ async function sendChat(){
         try{d=JSON.parse(line)}catch(e){continue}
         if(d.message&&d.message.content){
           full+=d.message.content;
-          if(live()){
-            bubble.bodyEl.setAttribute('data-stream',full);
-            scheduleStreamRender();
-          }
+          streamState.raw=full;
+          if(live())scheduleStreamRender();
+        }
+        if(d.message&&d.message.thinking){
+          think+=d.message.thinking;
+          streamState.think=think;
+          if(live())scheduleStreamRender();
         }
         if(d.done){
           if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
-          var wasLive=live();
-          if(wasLive){
-            setAssistantLabel(bubble.roleEl,host,fmodel,tps);
-            bubble.bodyEl.classList.remove('streaming');
-            bubble.bodyEl.removeAttribute('data-stream');
-            bubble.bodyEl.innerHTML=mdRender(full);
-            highlightBlocks(bubble.bodyEl);
-            chatLog.scrollTop=chatLog.scrollHeight;
-          }
-          pushAssistant(chatId,chatCreated,chatTitle,model,full,host,fmodel,tps,wasLive);
+          finishStream(bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
+          clearInflight();
           return;
         }
       }
     }
-    var wasLive=live();
-    if(wasLive){
-      bubble.bodyEl.classList.remove('streaming');
-      bubble.bodyEl.removeAttribute('data-stream');
-      bubble.bodyEl.innerHTML=mdRender(full);
-      highlightBlocks(bubble.bodyEl);
-      setAssistantLabel(bubble.roleEl,host,fmodel,tps);
-    }
-    pushAssistant(chatId,chatCreated,chatTitle,model,full,host,fmodel,tps,wasLive);
+    finishStream(bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
+    clearInflight();
   }catch(ex){
     var stopped=ac.signal.aborted;
+    if(stopped||!document.hidden)clearInflight();else keepInflight();
     if(live()){
       bubble.bodyEl.classList.remove('streaming');
       bubble.bodyEl.removeAttribute('data-stream');
       if(stopped){
         if(full){
-          bubble.bodyEl.innerHTML=mdRender(full);
-          highlightBlocks(bubble.bodyEl);
-          setAssistantLabel(bubble.roleEl,host,fmodel,tps);
-          chatLog.scrollTop=chatLog.scrollHeight;
-          pushAssistant(chatId,chatCreated,chatTitle,model,full,host,fmodel,tps,true);
+          finishStream(bubble,true,host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
         }else{
           bubble.bodyEl.textContent='Generation stopped.';
         }
         saveCurrentChat();
         renderSidebar();
       }else{
-        bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(ex.message)+'</span>';
+        var em=document.hidden?'Interrupted while in background - will resume when you return':'Error: '+escHtml(ex.message);
+        bubble.bodyEl.innerHTML='<span class="error">'+em+'</span>';
         saveCurrentChat();
         renderSidebar();
       }
@@ -885,9 +906,45 @@ async function sendChat(){
   }
   finally{
     currentAbort=null;
+    streamState=null;
+    try{sessionStorage.removeItem('dyva_own')}catch(e){}
     setSendButton('idle');
   }
 }
+function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full){
+  var sp=splitThink(full);
+  var thAll=think+sp.t;
+  if(isLive){
+    setAssistantLabel(bubble.roleEl,host,fmodel,tps);
+    bubble.bodyEl.classList.remove('streaming');
+    bubble.bodyEl.removeAttribute('data-stream');
+    bubble.bodyEl.innerHTML=thinkHtml(thAll,true)+mdRender(sp.c);
+    highlightBlocks(bubble.bodyEl);
+    chatLog.scrollTop=chatLog.scrollHeight;
+  }
+  pushAssistant(chatId,chatCreated,chatTitle,model,sp.c,host,fmodel,tps,isLive,thAll);
+}
+function tryResume(){
+  if(currentAbort)return;
+  try{if(sessionStorage.getItem('dyva_own'))return}catch(e){}
+  var r=null;try{r=localStorage.getItem('dyva_inflight')}catch(e){return}
+  if(!r)return;
+  var j=null;try{j=JSON.parse(r)}catch(e){}
+  try{localStorage.removeItem('dyva_inflight')}catch(e2){}
+  if(!j||!j.model||!j.msgs||!j.msgs.length)return;
+  if((j.n||0)>=2)return;
+  var i=findChatIndex(j.id);
+  if(i<0)return;
+  currentChat=loadChats()[i];
+  currentChat.messages=currentChat.messages.slice();
+  renderMessages();
+  renderSidebar();
+  var bubble=addMsg('assistant','');
+  bubble.bodyEl.classList.add('streaming');
+  setSendButton('streaming');
+  runStream(String(j.id),currentChat.createdAt,currentChat.title,j.model,j.msgs,bubble);
+}
+document.addEventListener('visibilitychange',function(){if(!document.hidden)setTimeout(tryResume,300)});
 document.getElementById('chatSend').addEventListener('click',function(e){
   e.preventDefault();
   if(currentAbort)stopChat();
@@ -1078,6 +1135,7 @@ document.querySelectorAll('.tab').forEach(function(t){
 });
 window.addEventListener('hashchange',function(){var h=tabFromHash();activateTab(h.tab,h.chatId);});
 var init=tabFromHash();activateTab(init.tab,init.chatId);
+tryResume();
 </script>
 </body>
 </html>
