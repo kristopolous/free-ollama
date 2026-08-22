@@ -57,6 +57,9 @@ GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 GRAFLEX_WORKING = os.path.join(CACHE_DIR, "a1111-working.json")
+IMG_DIR = os.path.join(CACHE_DIR, "images")
+IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
+IMG_HISTORY_MAX = 100
 CAP_REFRESH_TTL = 3600
 _last_cache = None
 _knowns_cache = None
@@ -2035,6 +2038,82 @@ async def handle_sd_models(request):
     })
 
 
+def _save_image_history(data, body):
+    """Persist generated images to the on-disk thumbnail history (last IMG_HISTORY_MAX)."""
+    import base64
+    import uuid
+    try:
+        os.makedirs(IMG_DIR, exist_ok=True)
+        try:
+            with open(IMG_HISTORY_FILE) as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+        for b64 in (data.get("images") or []):
+            try:
+                raw = base64.b64decode(b64)
+            except Exception:
+                continue
+            name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.png"
+            with open(os.path.join(IMG_DIR, name), "wb") as f:
+                f.write(raw)
+            history.insert(0, {
+                "file": name,
+                "prompt": (body.get("prompt") or "")[:200],
+                "negative_prompt": (body.get("negative_prompt") or "")[:200],
+                "model": body.get("model") or "",
+                "seed": body.get("seed"),
+                "steps": body.get("steps"),
+                "cfg_scale": body.get("cfg_scale"),
+                "sampler_name": body.get("sampler_name"),
+                "width": body.get("width"),
+                "height": body.get("height"),
+                "when": time.time(),
+            })
+        for entry in history[IMG_HISTORY_MAX:]:
+            try:
+                os.remove(os.path.join(IMG_DIR, entry["file"]))
+            except OSError:
+                pass
+        history = history[:IMG_HISTORY_MAX]
+        with open(IMG_HISTORY_FILE, "w") as f:
+            json.dump(history, f)
+    except Exception as e:
+        log.debug(f"image history: {e}")
+
+
+async def handle_image_history(request):
+    """
+    Recent generated images (JSON)
+    ---
+    tags: [Image]
+    summary: Metadata list of recently generated images, newest first
+    responses:
+      '200':
+        description: Image history entries
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+    """
+    try:
+        with open(IMG_HISTORY_FILE) as f:
+            history = json.load(f)
+    except Exception:
+        history = []
+    return web.json_response(history)
+
+
+async def handle_image_file(request):
+    name = os.path.basename(request.match_info["name"])
+    path = os.path.join(IMG_DIR, name)
+    if not name.endswith(".png") or not os.path.isfile(path):
+        return web.json_response({"error": "not found"}, status=404)
+    return web.FileResponse(path)
+
+
 async def handle_txt2img(request):
     """
     Text-to-image generation (A1111 format)
@@ -2130,6 +2209,7 @@ async def handle_txt2img(request):
                     data = await r.json()
                     await broadcast_activity(last_host, activity_label, "connected",
                         f"txt2img ✓", duration=0)
+                    _save_image_history(data, body)
                     return web.json_response(data)
                 add_bad(last_host, IMG_KEY)
             await broadcast_activity(last_host, activity_label, "failed",
@@ -2209,6 +2289,7 @@ async def handle_txt2img(request):
     live_hosts = [h for h in hosts if f"{h} {IMG_KEY}" not in load_bad()]
     data = await _race(live_hosts)
     if data:
+        _save_image_history(data, body)
         return web.json_response(data)
 
     # Phase 2: exhausted — try previously bad hosts
@@ -2216,6 +2297,7 @@ async def handle_txt2img(request):
     if bad_hosts:
         data = await _race(bad_hosts)
         if data:
+            _save_image_history(data, body)
             return web.json_response(data)
 
     # Phase 3: try comfyui hosts
@@ -2273,6 +2355,7 @@ async def handle_txt2img(request):
 
         data = await _race_comfy(comfy_hosts)
         if data:
+            _save_image_history(data, body)
             return web.json_response(data)
 
     return web.json_response({"error": "all image-gen hosts failed"}, status=502)
@@ -2552,6 +2635,8 @@ def make_app():
     swagger.add_post("/chat/completions", handle_openai_chat)
     swagger.add_get("/sdapi/v1/sd-models", handle_sd_models)
     swagger.add_post("/sdapi/v1/txt2img", handle_txt2img)
+    swagger.add_get("/sdapi/v1/images", handle_image_history)
+    swagger.add_get("/sdapi/v1/images/{name}", handle_image_file)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
 

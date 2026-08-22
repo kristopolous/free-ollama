@@ -69,7 +69,6 @@ body.chat{overflow:hidden}
 .card.collapsed h2::before{transform:rotate(-90deg)}
 .card.collapsed .card-inner{display:none}
 
-#image{max-width:900px}
 label{display:block;font-size:.8rem;color:#999;margin-bottom:6px}
 input[type=text],input[type=number],textarea,select{width:100%;padding:8px 10px;border:1px solid #444;border-radius:6px;background:#2a2a2a;color:#eee;font-size:.85rem;outline:none;font-family:ui-monospace,monospace}
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:#888}
@@ -176,6 +175,18 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 #imgResult img{max-width:100%;border-radius:8px;border:1px solid #333;margin-top:10px}
 #imgResult .status{color:#888;font-size:.85rem}
 #imgResult .error{color:#c33;font-size:.85rem}
+#image{max-width:none}
+.img-layout{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}
+.img-main{flex:1 1 460px;min-width:0;max-width:900px}
+.img-side{flex:0 1 340px;min-width:200px}
+.img-side-title{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
+#imgHistory{display:flex;flex-wrap:wrap;gap:8px}
+#imgHistory img{width:100px;height:100px;object-fit:cover;border-radius:6px;border:1px solid #333;cursor:zoom-in}
+#imgHistory img:hover{border-color:#77a}
+#lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:200;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:24px;cursor:zoom-out}
+#lightbox.open{display:flex}
+#lightbox img{max-width:90vw;max-height:78vh;border-radius:8px}
+#lightbox .cap{color:#ccc;font-size:.85rem;max-width:90vw;overflow-wrap:anywhere;text-align:center}
 </style>
 </head>
 <body>
@@ -278,6 +289,8 @@ __BAD_MORE__
 </div>
 
 <div id="image" class="panel">
+<div class="img-layout">
+<div class="img-main">
 <div class="img-params">
 <div class="field">
 <label for="sdModel">SD Model</label>
@@ -343,6 +356,12 @@ __SD_MODELS__
 </div>
 <button id="imgGenerate">Generate</button>
 <div id="imgResult"></div>
+</div>
+<div class="img-side">
+<div class="img-side-title">Recent</div>
+<div id="imgHistory"></div>
+</div>
+</div>
 </div>
 
 <script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
@@ -949,10 +968,55 @@ async function generateImage(){
       img.src='data:image/png;base64,'+b64;
       result.appendChild(img);
     });
+    loadImgHistory();
   }catch(ex){result.innerHTML='<div class="error">Error: '+ex.message+'</div>';}
   finally{btn.disabled=false;}
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
+
+function loadImgHistory(){
+  fetch('sdapi/v1/images',{cache:'no-store'}).then(function(r){return r.json()}).then(function(list){
+    var el=document.getElementById('imgHistory');
+    el.innerHTML='';
+    (list||[]).forEach(function(e){
+      var im=document.createElement('img');
+      im.src='sdapi/v1/images/'+encodeURIComponent(e.file);
+      im.loading='lazy';
+      var bits=[e.prompt];
+      if(e.model)bits.push(e.model);
+      if(e.seed!==undefined&&e.seed!==null)bits.push('seed '+e.seed);
+      im.title=bits.filter(Boolean).join(' · ');
+      im.addEventListener('click',function(){openLightbox(e)});
+      el.appendChild(im);
+    });
+  }).catch(function(){});
+}
+var lightbox=document.createElement('div');
+lightbox.id='lightbox';
+lightbox.innerHTML='<img alt=""><div class="cap"></div>';
+document.body.appendChild(lightbox);
+lightbox.addEventListener('click',function(){lightbox.classList.remove('open')});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')lightbox.classList.remove('open')});
+function openLightbox(e){
+  lightbox.querySelector('img').src='sdapi/v1/images/'+encodeURIComponent(e.file);
+  var bits=[];
+  if(e.prompt)bits.push(e.prompt);
+  if(e.negative_prompt)bits.push('neg: '+e.negative_prompt);
+  if(e.model)bits.push(e.model);
+  if(e.sampler_name)bits.push(e.sampler_name);
+  if(e.steps)bits.push(e.steps+' steps');
+  if(e.cfg_scale)bits.push('cfg '+e.cfg_scale);
+  if(e.width&&e.height)bits.push(e.width+'x'+e.height);
+  if(e.seed!==undefined&&e.seed!==null)bits.push('seed '+e.seed);
+  lightbox.querySelector('.cap').textContent=bits.join(' · ');
+  lightbox.classList.add('open');
+}
+loadImgHistory();
+['posPrompt','negPrompt'].forEach(function(id){
+  document.getElementById(id).addEventListener('keydown',function(e){
+    if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();generateImage();}
+  });
+});
 
 function activateTab(name,chatId){
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});

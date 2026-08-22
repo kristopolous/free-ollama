@@ -44,6 +44,8 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `GET` | `/v1/models` | OpenAI-compatible model listing |
 | `POST` | `/sdapi/v1/txt2img` | Text-to-image (A1111 + ComfyUI fallback) |
 | `GET` | `/sdapi/v1/sd-models` | List discovered SD models |
+| `GET` | `/sdapi/v1/images` | Metadata for recently generated images (last 100) |
+| `GET` | `/sdapi/v1/images/{name}` | Fetch a generated image file |
 | `*` | `/comfyui/{path}` | ComfyUI pass-through proxy |
 | `GET` | `/dashboard` | Dashboard UI (Server Room / Chat / Image tabs) |
 | `GET` | `/dashboard-data` | JSON snapshot of the last-successful/good/bad lists |
