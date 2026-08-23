@@ -56,6 +56,10 @@ CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
+# sentinel "model" for a host-wide unreachable mark (a host dead at the
+# connection level is dead for every model, so it must not be re-probed
+# per-model). \x00 can't occur in a real canon'd model name.
+UNREACHABLE_KEY = "\x00unreachable"
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 IMG_DIR = os.path.join(CACHE_DIR, "images")
@@ -291,7 +295,8 @@ def load_maybe():
 
 
 def add_good(host, model):
-    """Successful inference: host is good, stamp last_good, reset failure_streak."""
+    """Successful inference: host is good, stamp last_good, reset failure_streak.
+    Also clears any host-wide unreachable mark, since the host clearly answered."""
     model = canon_pattern(model)
     db = _get_db()
     db.execute(
@@ -300,6 +305,7 @@ def add_good(host, model):
         " ON CONFLICT(host,model) DO UPDATE SET"
         " state='good', last_good=excluded.last_good, failure_streak=0",
         (host, model, _now_iso()))
+    db.execute("DELETE FROM host_status WHERE host=? AND model=?", (host, UNREACHABLE_KEY))
     db.commit()
 
 
@@ -341,6 +347,25 @@ def clear_bad_state():
     db = _get_db()
     db.execute("DELETE FROM host_status WHERE state='bad'")
     db.commit()
+
+
+def mark_unreachable(host):
+    """Record a host as unreachable at the connection level (dead for all
+    models). Recorded once per host, not per model, so it isn't re-probed for
+    every distinct model query."""
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
+        " VALUES(?,?, 'bad', NULL, 1)"
+        " ON CONFLICT(host,model) DO UPDATE SET state='bad', failure_streak=failure_streak+1",
+        (host, UNREACHABLE_KEY))
+    db.commit()
+
+
+def load_unreachable():
+    return {h for (h,) in _get_db().execute(
+        "SELECT host FROM host_status WHERE model=? AND state='bad'",
+        (UNREACHABLE_KEY,)).fetchall()}
 
 
 def load_last():
@@ -594,6 +619,7 @@ def find_servers(sub, caps=None):
     bad = load_bad()
     good = load_good()
     maybe = load_maybe()
+    unreachable = load_unreachable()
     # For "any" (empty sub) queries, collapse each host's per-model marks into a
     # single best-first state so the host inherits everything dyva knows about it.
     host_state = None
@@ -647,7 +673,11 @@ def find_servers(sub, caps=None):
                  if v.get("host") == host),
                 None)
         is_last = _last is not None and host == _last[0]
-        if is_last:
+        if host in unreachable:
+            # dead at the connection level -> bad tier for every model, so it
+            # isn't re-probed as "unknown" for each new model query
+            prio = 1
+        elif is_last:
             prio = -3
         elif in_good:
             prio = -2
@@ -830,7 +860,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             # untested ones get probed first, caps refreshed only if needed
             trusted = prio < 0
             if not trusted and not await probe_host(session, host):
-                add_bad(host, model)
+                mark_unreachable(host)
                 await broadcast_activity(host, model, "failed",
                     f"unreachable: {host}")
                 continue
