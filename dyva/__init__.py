@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.parse
 import requests
+import sqlite3
 import importlib.metadata
 
 import aiohttp
@@ -54,6 +55,7 @@ CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
+STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 IMG_DIR = os.path.join(CACHE_DIR, "images")
@@ -73,8 +75,7 @@ VERSION = "0"
 TRIAL_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
 
-_bad_cache = None
-_good_cache = None
+_status_db = None
 _servers_cache = None
 
 _activity_queues = []
@@ -115,10 +116,8 @@ async def _remove_activity_listener(q):
 
 
 def refresh_cache():
-    global _servers_cache, _bad_cache, _good_cache
+    global _servers_cache
     _servers_cache = None
-    _bad_cache = None
-    _good_cache = None
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     log.debug("Refreshing server cache...")
@@ -147,10 +146,8 @@ def refresh_cache():
       with open(f'{_db}-graflex.tmp', 'r') as f:
         for row in json.loads(f.read()):
           ip = row.get('url').rstrip('/')
-          if ip not in host_map:
-              host_map[ip] = {'source': 'graflex', 'tps': 0, 'service': row.get('service'), 'models': [], 'server': ip, 'version': row.get('version') or ''}
-    
-          host_map[ip]['models'] += row.get('models')
+          row.update({'source': 'graflex', 'tps': 0, 'server': ip})
+          host_map[ip] = row
 
     if os.path.exists(f'{_db}-forrany.tmp'):
       with open(f'{_db}-forrany.tmp', 'r') as f:
@@ -214,68 +211,136 @@ def load_servers():
     return _servers_cache or []
 
 
+# Host reputation lives in a SQLite table (host, model) -> state + metadata.
+# SQLite gives real record UPDATEs (last_good, failure_streak) plus WAL-mode
+# crash-safety, which a rewritten JSON blob can't. Tiers, best-first:
+#   recent (last-success) -> good -> maybe_good -> unknown (absent) -> bad
+# A failure downgrades a good host to maybe_good; maybe_good currently stays put
+# (secondary downgrade strategy TBD once real-world data is collected).
+def _get_db():
+    global _status_db
+    if _status_db is None:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        need_migrate = not os.path.exists(STATUS_DB)
+        _status_db = sqlite3.connect(STATUS_DB, check_same_thread=False)
+        _status_db.execute("PRAGMA journal_mode=WAL")
+        _status_db.execute("PRAGMA synchronous=NORMAL")
+        _status_db.execute(
+            "CREATE TABLE IF NOT EXISTS host_status("
+            "host TEXT NOT NULL, model TEXT NOT NULL, state TEXT NOT NULL, "
+            "last_good TEXT, failure_streak INTEGER NOT NULL DEFAULT 0, "
+            "PRIMARY KEY(host, model))")
+        _status_db.commit()
+        if need_migrate:
+            _migrate_status_from_txt()
+    return _status_db
+
+
+def _migrate_status_from_txt():
+    """One-time import of the legacy good/bad .txt line files. The .txt files
+    are left untouched for the legacy free-ollama bash tool; dyva uses the DB."""
+    db = _status_db
+
+    def _lines(path, state):
+        if not os.path.exists(path):
+            return
+        with open(path) as f:
+            for line in f:
+                key = line.strip()
+                if not key:
+                    continue
+                host, _, model = key.partition(" ")
+                yield (host, model, state)
+
+    # good first so a host listed in both keeps good (good beats bad)
+    for row in _lines(GOOD_FILE, "good"):
+        db.execute("INSERT OR IGNORE INTO host_status(host,model,state,last_good,"
+                   "failure_streak) VALUES(?,?,?,NULL,0)", row)
+    for row in _lines(BAD_FILE, "bad"):
+        db.execute("INSERT OR IGNORE INTO host_status(host,model,state,last_good,"
+                   "failure_streak) VALUES(?,?,?,NULL,0)", row)
+    db.commit()
+
+
+def _now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _state_of(host, model):
+    row = _get_db().execute(
+        "SELECT state FROM host_status WHERE host=? AND model=?",
+        (host, model)).fetchone()
+    return row[0] if row else None
+
+
+def _keys_with_state(state):
+    return {f"{h} {m}" for h, m in _get_db().execute(
+        "SELECT host, model FROM host_status WHERE state=?", (state,)).fetchall()}
+
+
 def load_bad():
-    global _bad_cache
-    if _bad_cache is None:
-        _bad_cache = set()
-        if os.path.exists(BAD_FILE):
-            with open(BAD_FILE) as f:
-                for line in f:
-                    if line.strip():
-                        _bad_cache.add(line.strip())
-    return _bad_cache
-
-
-def add_bad(host, model):
-    global _bad_cache
-    model = canon_pattern(model)
-    key = f"{host} {model}"
-    bad = load_bad()
-    if key in bad:
-        return
-    with open(BAD_FILE, "a") as f:
-        f.write(f"{key}\n")
-    bad.add(key)
+    return _keys_with_state("bad")
 
 
 def load_good():
-    global _good_cache
-    if _good_cache is None:
-        _good_cache = set()
-        if os.path.exists(GOOD_FILE):
-            with open(GOOD_FILE) as f:
-                for line in f:
-                    if line.strip():
-                        _good_cache.add(line.strip())
-    return _good_cache
+    return _keys_with_state("good")
+
+
+def load_maybe():
+    return _keys_with_state("maybe_good")
 
 
 def add_good(host, model):
+    """Successful inference: host is good, stamp last_good, reset failure_streak."""
     model = canon_pattern(model)
-    key = f"{host} {model}"
-    good = load_good()
-    if key not in good:
-        with open(GOOD_FILE, "a") as f:
-            f.write(f"{key}\n")
-        if _good_cache is not None:
-            _good_cache.add(key)
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
+        " VALUES(?,?, 'good', ?, 0)"
+        " ON CONFLICT(host,model) DO UPDATE SET"
+        " state='good', last_good=excluded.last_good, failure_streak=0",
+        (host, model, _now_iso()))
+    db.commit()
 
 
-def remove_good(host, model):
-    global _good_cache
+def add_bad(host, model):
+    """Failure: good -> maybe_good, maybe_good stays, unknown -> bad, bad stays.
+    failure_streak is incremented in every case (recorded for later analysis;
+    no secondary downgrade action is taken yet)."""
     model = canon_pattern(model)
-    key = f"{host} {model}"
-    good = load_good()
-    if key not in good:
-        return
-    good.discard(key)
-    if os.path.exists(GOOD_FILE):
-        with open(GOOD_FILE) as f:
-            lines = f.readlines()
-        with open(GOOD_FILE, "w") as f:
-            for line in lines:
-                if line.strip() != key:
-                    f.write(line)
+    db = _get_db()
+    cur = _state_of(host, model)
+    if cur is None:
+        new_state = "bad"
+    elif cur == "good":
+        new_state = "maybe_good"
+    else:
+        new_state = cur
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
+        " VALUES(?,?,?,NULL,1)"
+        " ON CONFLICT(host,model) DO UPDATE SET"
+        " state=?, failure_streak=failure_streak+1",
+        (host, model, new_state, new_state))
+    db.commit()
+
+
+def force_bad(host, model):
+    """Explicit user skip: send straight to bad regardless of current tier."""
+    model = canon_pattern(model)
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
+        " VALUES(?,?, 'bad', NULL, 0)"
+        " ON CONFLICT(host,model) DO UPDATE SET state='bad'",
+        (host, model))
+    db.commit()
+
+
+def clear_bad_state():
+    db = _get_db()
+    db.execute("DELETE FROM host_status WHERE state='bad'")
+    db.commit()
 
 
 def load_last():
@@ -515,6 +580,18 @@ def find_servers(sub, caps=None):
     servers = load_servers()
     bad = load_bad()
     good = load_good()
+    maybe = load_maybe()
+    # For "any" (empty sub) queries, collapse each host's per-model marks into a
+    # single best-first state so the host inherits everything dyva knows about it.
+    host_state = None
+    if not sub:
+        rank = {"good": 3, "maybe_good": 2, "bad": 1}
+        host_state = {}
+        for src, st in ((good, "good"), (maybe, "maybe_good"), (bad, "bad")):
+            for k in src:
+                h = k.split(" ", 1)[0]
+                if rank[st] > rank.get(host_state.get(h, ""), 0):
+                    host_state[h] = st
     matched = []
     for s in servers:
         models = s.get("models", [])
@@ -535,27 +612,39 @@ def find_servers(sub, caps=None):
             if capable or unknown:
                 ms = capable + unknown + incapable
         key = f"{host} {sub}"
-        prefix = f"{host} "
         if sub:
-            in_bad = key in bad
             in_good = key in good
+            in_maybe = key in maybe
+            in_bad = key in bad
         else:
-            # "any" query: inherit everything known about this host
-            in_bad = any(k.startswith(prefix) for k in bad)
-            in_good = any(k.startswith(prefix) for k in good)
-        if in_bad:
-            matched.append((1, host, ms))
+            st = host_state.get(host)
+            in_good = st == "good"
+            in_maybe = st == "maybe_good"
+            in_bad = st == "bad"
+        # Priority tiers, best first:
+        #   recent (last success) -> good -> maybe_good -> unknown -> bad
+        # last/good/maybe win over a stale bad mark so a host that had one
+        # transient failure isn't buried behind the unreachable junk.
+        _last = get_last(sub)
+        if _last is None and not sub:
+            if _last_cache is None:
+                load_last()
+            _last = next(
+                ((v["host"], v.get("full", "")) for v in _last_cache.values()
+                 if v.get("host") == host),
+                None)
+        is_last = _last is not None and host == _last[0]
+        if is_last:
+            prio = -3
+        elif in_good:
+            prio = -2
+        elif in_maybe:
+            prio = -1
+        elif in_bad:
+            prio = 1
         else:
-            _last = get_last(sub)
-            if _last is None and not sub:
-                if _last_cache is None:
-                    load_last()
-                _last = next(
-                    ((v["host"], v.get("full", "")) for v in _last_cache.values()
-                     if v.get("host") == host),
-                    None)
-            is_last = _last is not None and host == _last[0]
-            matched.append((-2 if is_last else (-1 if in_good else 0), host, ms))
+            prio = 0
+        matched.append((prio, host, ms))
     matched.sort(key=lambda x: x[0])
     return matched
 
@@ -1345,31 +1434,6 @@ async def _proxy_generate(request, session):
     return web.json_response(err_obj(msg), status=502)
 
 
-def _last_rows_html():
-    if not _last_cache:
-        return '<div style="color:#999;font-size:.85rem">None</div>'
-    return "".join(
-        f'<div class="model-item"><span class="host-name">{entry["host"]}</span><a class="skip-link" href="next-host?model={urllib.parse.quote(model)}" data-skip-model="{urllib.parse.quote(model)}">skip</a><span class="host-model">{model or "(any)"}</span></div>'
-        for model, entry in list(_last_cache.items())[:20]
-    )
-
-
-def _good_rows_html(good):
-    good_valid = [h for h in good if " " in h]
-    return "".join(
-        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><a class="skip-link" href="skip-good?host={urllib.parse.quote(h.split(" ", 1)[0])}&model={urllib.parse.quote(h.split(" ", 1)[1])}">skip</a><span class="host-model">{h.split(" ", 1)[1] or "(any)"}</span></div>'
-        for h in sorted(good_valid, key=lambda x: (x.split(" ", 1)[1], x.split(" ", 1)[0]))[:30]
-    )
-
-
-def _bad_rows_html(bad):
-    bad_valid = [h for h in bad if " " in h]
-    return "".join(
-        f'<div class="model-item"><span class="host-name">{h.split(" ", 1)[0]}</span><span class="host-model">{h.split(" ", 1)[1] or "(any)"}</span></div>'
-        for h in sorted(bad_valid)[:30]
-    )
-
-
 async def handle_dashboard(request):
     """
     Dashboard (HTML)
@@ -1384,88 +1448,61 @@ async def handle_dashboard(request):
             schema:
               type: string
     """
-    bad = load_bad()
-    good = load_good()
     servers = load_servers()
-    load_last()
-    models = sorted(all_models(), key=lambda x: -x["count"])
+    models = all_models()
     tpl_dir = os.path.join(os.path.dirname(__file__), "static")
     with open(os.path.join(tpl_dir, "dashboard.html")) as f:
         html = f.read()
-    model_hosts = {}
-    host_checked = {}
-    for s in servers:
-        host = s.get("server", "")
-        ck = s.get("checked")
-        if host and ck:
-            host_checked[host] = ck
-        for m in s.get("models", []):
-            if re.search(r"[:-]cloud", m) or len(m) == 0:
-                continue
-            model_hosts.setdefault(m, []).append(host)
-    for m in model_hosts:
-        model_hosts[m].sort()
-    def _model_status(mid):
-        hosts = model_hosts.get(mid, [])
-        g = sum(1 for h in hosts if f"{h} {mid}" in good)
-        b = sum(1 for h in hosts if f"{h} {mid}" in bad)
-        u = len(hosts) - g - b
-        return f"{g}/{b}/{u}"
-    chat_models = sorted((m["id"] for m in all_models()), key=str.lower)
+    # Only small scalars and the two datalists are inlined; the Server Room's
+    # heavy data (per-model hosts, good/bad/last lists, checked timestamps) is
+    # fetched from /dashboard-models + /dashboard-data and rendered client-side,
+    # so the same host string isn't repeated dozens of times in the document.
+    chat_models = sorted((m["id"] for m in models), key=str.lower)
     sd_models = set()
-    # Merge a1111 hosts from the working file so SD models appear even if the
-    # main cache hasn't been refreshed yet.
-    _sd_sources = list(load_servers())
-    for s in _sd_sources:
+    for s in servers:
         if s.get("service") != "a1111":
             continue
         for m in s.get("models", []):
             title = m.split(" [")[0] if " [" in m else m
             sd_models.add(title)
     sd_options = "".join(f'<option value="{h}"></option>' for h in sorted(sd_models))
-    # Taxonomy: models served by a1111/comfyui hosts are "image",
-    # everything else (or no service) is "text".
-    image_raw = set()
-    for s in _sd_sources:
-        if s.get("service") not in ("a1111", "comfyui"):
-            continue
-        for m in s.get("models", []):
-            image_raw.add(m)
-            if " [" in m:
-                image_raw.add(m.split(" [")[0])
-    def _model_row(m):
-        return (f'<div class="model-item" data-name="{m["id"]}" title="{m["id"]}">'
-                f'<span class="model-name">{m["id"]}</span>'
-                f'<span class="model-count">{_model_status(m["id"])}</span></div>')
-    text_rows = "".join(_model_row(m) for m in models if m["id"] not in image_raw)
-    image_rows = "".join(_model_row(m) for m in models if m["id"] in image_raw)
-    model_more = ""
-    last_rows = _last_rows_html()
-    good_rows = _good_rows_html(good)
-    good_more = f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else ""
-    bad_rows = _bad_rows_html(bad)
-    bad_more = f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else ""
     html = html.replace("__PORT__", str(PORT))
     html = html.replace("__WORKER_COUNT__", str(WORKER_COUNT))
     html = html.replace("__TIMEOUT__", str(TIMEOUT))
     html = html.replace("__SERVER_COUNT__", str(len(servers)))
     html = html.replace("__MODEL_COUNT__", str(len(models)))
     html = html.replace("__DYVA_VERSION__", VERSION)
-    html = html.replace("__MODEL_ROWS_TEXT__", text_rows)
-    html = html.replace("__MODEL_ROWS_IMAGE__", image_rows)
-    html = html.replace("__MODEL_MORE__", model_more)
-    html = html.replace("__LAST_ROWS__", last_rows)
-    html = html.replace("__GOOD_ROWS__", good_rows)
-    html = html.replace("__GOOD_MORE__", good_more)
-    html = html.replace("__BAD_ROWS__", bad_rows)
-    html = html.replace("__BAD_MORE__", bad_more)
-    html = html.replace("__MODEL_HOSTS_DATA__", json.dumps(model_hosts))
-    html = html.replace("__HOST_CHECKED_DATA__", json.dumps(host_checked))
-    html = html.replace("__GOOD_HOSTS_DATA__", json.dumps(sorted(good)))
-    html = html.replace("__BAD_HOSTS_DATA__", json.dumps(sorted(bad)))
     html = html.replace("__CHAT_MODELS__", json.dumps(chat_models))
     html = html.replace("__SD_MODELS__", sd_options)
     return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def handle_dashboard_models(request):
+    """
+    Dashboard models (JSON)
+    ---
+    tags: [UI]
+    summary: Normalized server list (each host once) for client-side model/host rendering
+    responses:
+      '200':
+        description: Server list with per-host service, models, and checked time
+        content:
+          application/json:
+            schema:
+              type: object
+    """
+    servers = load_servers()
+    out = []
+    for s in servers:
+        host = s.get("server", "")
+        if not host:
+            continue
+        entry = {"host": host, "service": s.get("service"), "models": s.get("models", [])}
+        ck = s.get("checked")
+        if ck:
+            entry["checked"] = ck
+        out.append(entry)
+    return web.json_response({"servers": out})
 
 
 async def handle_dashboard_data(request):
@@ -1484,15 +1521,18 @@ async def handle_dashboard_data(request):
     """
     bad = load_bad()
     good = load_good()
+    maybe = load_maybe()
     load_last()
+    last = [{"host": entry["host"], "model": model}
+            for model, entry in list(_last_cache.items())[:20]]
     return web.json_response({
-        "last": _last_rows_html(),
-        "good": _good_rows_html(good),
-        "bad": _bad_rows_html(bad),
+        "last": last,
+        "good": sorted(good),
+        "maybe": sorted(maybe),
+        "bad": sorted(bad),
         "good_count": len(good),
+        "maybe_count": len(maybe),
         "bad_count": len(bad),
-        "good_more": f'<div class="more">... and {len(good) - 30} more</div>' if len(good) > 30 else "",
-        "bad_more": f'<div class="more">... and {len(bad) - 30} more</div>' if len(bad) > 30 else "",
     })
 
 
@@ -1569,10 +1609,7 @@ async def handle_clear_bad(request):
       '302':
         description: Redirect to dashboard
     """
-    global _bad_cache
-    _bad_cache = None
-    if os.path.exists(BAD_FILE):
-        os.remove(BAD_FILE)
+    clear_bad_state()
     raise web.HTTPFound("/")
 
 
@@ -1633,8 +1670,7 @@ async def handle_skip_good(request):
     if not host or not model:
         return web.json_response({"error": "missing host or model parameter"}, status=400)
 
-    add_bad(host, model)
-    remove_good(host, model)
+    force_bad(host, model)
 
     raise web.HTTPFound("/")
 
@@ -2923,6 +2959,7 @@ def make_app():
     swagger.add_get("/", handle_dashboard)
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
+    swagger.add_get("/dashboard-models", handle_dashboard_models)
     swagger.add_get("/dashboard/server-count", handle_server_count)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)

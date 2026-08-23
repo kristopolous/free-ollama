@@ -41,7 +41,9 @@ body.chat{overflow:hidden}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:12px}
 .card{background:transparent;border-radius:8px;padding:0;box-shadow:none;overflow:visible}
-.card-inner{background:#1e1e1e;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.4);max-height:70vh;overflow-y:auto}
+.card-inner{background:#1e1e1e;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.4);max-height:70vh;overflow:hidden;display:flex;flex-direction:column}
+/* tabs + filter stay pinned; only the list scrolls */
+#mpane-text,#mpane-image,#pane-last,#pane-good,#pane-maybe,#pane-bad,#hostList{flex:1;min-height:0;overflow-y:auto}
 .card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px;cursor:pointer;user-select:none}
 .status-line{padding:2px 0;font-size:.78rem}
 .status-searching{color:#888}
@@ -61,7 +63,7 @@ body.chat{overflow:hidden}
 .host-model{font-family:ui-monospace,monospace;font-size:.82rem;color:#777}
 .skip-link{opacity:0;color:#77a;font-size:.75rem;text-decoration:underline;margin:0 8px;flex-shrink:0;transition:opacity .1s}
 .model-item:hover .skip-link{opacity:1}
-.host-tabs{display:flex;gap:4px;border-bottom:1px solid #333;margin-bottom:12px}
+.host-tabs{display:flex;gap:4px;border-bottom:1px solid #333;margin-bottom:12px;flex-shrink:0}
 .htab{background:transparent;color:#999;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 14px;font-size:.8rem;cursor:pointer;display:inline-flex;align-items:center;gap:5px;border-radius:6px 6px 0 0}
 .htab:hover{color:#ccc;background:#26262e;border-bottom-color:#555}
 .htab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
@@ -74,7 +76,7 @@ body.chat{overflow:hidden}
 label{display:block;font-size:.8rem;color:#999;margin-bottom:6px}
 input[type=text],input[type=number],textarea,select{width:100%;padding:8px 10px;border:1px solid #444;border-radius:6px;background:#2a2a2a;color:#eee;font-size:.85rem;outline:none;font-family:ui-monospace,monospace}
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:#888}
-#modelFilter{margin-bottom:8px}
+#modelFilter{margin-bottom:8px;flex-shrink:0}
 textarea{resize:vertical;min-height:64px}
 button{background:#3a3a5a;color:#eee;border:none;border-radius:6px;padding:10px 20px;font-size:.9rem;cursor:pointer}
 button:hover{background:#4a4a7a}
@@ -250,16 +252,11 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 </div>
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter...">
 <div id="mpane-text">
-<div id="modelList" class="modellist">
-__MODEL_ROWS_TEXT__
-</div>
+<div id="modelList" class="modellist"></div>
 </div>
 <div id="mpane-image" style="display:none">
-<div class="modellist">
-__MODEL_ROWS_IMAGE__
+<div id="modelListImage" class="modellist"></div>
 </div>
-</div>
-__MODEL_MORE__
 </div>
 </div>
 <div class="card">
@@ -268,27 +265,24 @@ __MODEL_MORE__
 <div class="host-tabs">
 <button type="button" class="htab active" data-pane="last">Recent</button>
 <button type="button" class="htab" data-pane="good">Good</button>
+<button type="button" class="htab" data-pane="maybe">Maybe</button>
 <button type="button" class="htab" data-pane="bad">Bad</button>
 <span id="clearBad" class="htab-clear" title="Forget all bad host+model pairs">clear bad</span>
 </div>
 <div id="pane-last">
-<div id="lastList">__LAST_ROWS__</div>
+<div id="lastList"></div>
 </div>
 <div id="pane-good" style="display:none">
-<div id="goodList">
-__GOOD_ROWS__
+<div id="goodList"></div>
+<div id="goodMore"></div>
 </div>
-<div id="goodMore">
-__GOOD_MORE__
-</div>
+<div id="pane-maybe" style="display:none">
+<div id="maybeList"></div>
+<div id="maybeMore"></div>
 </div>
 <div id="pane-bad" style="display:none">
-<div id="badList">
-__BAD_ROWS__
-</div>
-<div id="badMore">
-__BAD_MORE__
-</div>
+<div id="badList"></div>
+<div id="badMore"></div>
 </div>
 </div>
 </div>
@@ -409,15 +403,11 @@ __SD_MODELS__
 </div>
 </div>
 
-<script id="modelHostsData" type="application/json">__MODEL_HOSTS_DATA__</script>
-<script id="hostCheckedData" type="application/json">__HOST_CHECKED_DATA__</script>
 <script id="chatModelsData" type="application/json">__CHAT_MODELS__</script>
-<script id="goodHostsData" type="application/json">__GOOD_HOSTS_DATA__</script>
-<script id="badHostsData" type="application/json">__BAD_HOSTS_DATA__</script>
 <script>
 var evtSource=new EventSource('api/activity');
 var paused=false;
-function refreshLists(){var x=new XMLHttpRequest();x.open('GET','dashboard-data');x.onload=function(){try{var d=JSON.parse(x.responseText);document.getElementById('lastList').innerHTML=d.last;document.getElementById('goodList').innerHTML=d.good;document.getElementById('badList').innerHTML=d.bad;document.getElementById('goodMore').innerHTML=d.good_more;document.getElementById('badMore').innerHTML=d.bad_more}catch(ex){}};x.send()}
+function refreshLists(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d)}).catch(function(){})}
 evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:#666>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:#aaa>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
@@ -434,7 +424,7 @@ document.querySelectorAll('.htab[data-pane]').forEach(function(t){
   t.addEventListener('click',function(){
     var pane=t.getAttribute('data-pane');
     document.querySelectorAll('.htab[data-pane]').forEach(function(x){x.classList.toggle('active',x===t)});
-    ['good','bad','last'].forEach(function(p){document.getElementById('pane-'+p).style.display=p===pane?'':'none'});
+    ['good','maybe','bad','last'].forEach(function(p){document.getElementById('pane-'+p).style.display=p===pane?'':'none'});
     localStorage.setItem('dyva_hostpane',pane);
   })
 });
@@ -463,13 +453,86 @@ document.querySelectorAll('.card').forEach(function(card){
 })
 
 var _currentModel=null;
-var modelHosts=JSON.parse(document.getElementById('modelHostsData').textContent);
-var hostChecked=JSON.parse(document.getElementById('hostCheckedData').textContent||'{}');
-var goodHosts=new Set(JSON.parse(document.getElementById('goodHostsData').textContent||'[]'));
-var badHosts=new Set(JSON.parse(document.getElementById('badHostsData').textContent||'[]'));
-function checkedAgo(iso){if(!iso)return'';var t=Date.parse(iso);if(isNaN(t))return'';var days=Math.floor((Date.now()-t)/86400000);if(days<=0)return'checked today';if(days===1)return'checked 1 day ago';return'checked '+days+' days ago'}
-document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.cursor='pointer';el.addEventListener('click',function(){document.querySelectorAll('.modellist .model-item').forEach(function(e){e.style.background=''});this.style.background='#2a2a4a';_currentModel=this.getAttribute('data-name');var hosts=modelHosts[_currentModel]||[];var card=document.getElementById('hostCard');card.style.display='';document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';var list=document.getElementById('hostList');list.innerHTML='';hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;d.appendChild(s);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)})})})
+// Server Room data is fetched (not inlined) and rendered here, so each host
+// string lives in the payload once instead of being repeated per model.
+var modelHosts={},hostChecked={},imageModels={};
+var _good=new Set(),_bad=new Set();
+function checkedAgo(iso){if(!iso)return'';var t=Date.parse(iso);if(isNaN(t))return'';var days=Math.floor((Date.now()-t)/86400000);if(days<=0)return'today';if(days===1)return'1 day';return days+' days'}
+function modelStatus(mid){var hs=modelHosts[mid]||[],g=0,b=0;hs.forEach(function(h){if(_good.has(h+' '+mid))g++;else if(_bad.has(h+' '+mid))b++});return g+'/'+b+'/'+(hs.length-g-b)}
+function makeModelRow(mid){var d=document.createElement('div');d.className='model-item';d.setAttribute('data-name',mid);d.title=mid;var n=document.createElement('span');n.className='model-name';n.textContent=mid;var c=document.createElement('span');c.className='model-count';c.textContent=modelStatus(mid);d.appendChild(n);d.appendChild(c);return d}
+function renderModels(servers){
+  modelHosts={};hostChecked={};imageModels={};
+  servers.forEach(function(s){
+    var host=s.host||'';if(s.checked)hostChecked[host]=s.checked;
+    var isImg=(s.service==='a1111'||s.service==='comfyui');
+    (s.models||[]).forEach(function(m){
+      if(isImg){imageModels[m]=1;var t=m.indexOf(' [');if(t>=0)imageModels[m.slice(0,t)]=1}
+      if(/[:-]cloud/.test(m)||!m.length)return;
+      (modelHosts[m]=modelHosts[m]||[]).push(host);
+    });
+  });
+  var mid;for(mid in modelHosts)modelHosts[mid].sort();
+  var ids=Object.keys(modelHosts);
+  ids.sort(function(a,b){return modelHosts[b].length-modelHosts[a].length||(a<b?-1:a>b?1:0)});
+  var fT=document.createDocumentFragment(),fI=document.createDocumentFragment();
+  ids.forEach(function(id){(imageModels[id]?fI:fT).appendChild(makeModelRow(id))});
+  var lt=document.getElementById('modelList');lt.innerHTML='';lt.appendChild(fT);
+  var li=document.getElementById('modelListImage');li.innerHTML='';li.appendChild(fI);
+  filterModels();
+}
+function hostRow(host,model,skipHref){
+  var d=document.createElement('div');d.className='model-item';
+  var h=document.createElement('span');h.className='host-name';h.textContent=host;d.appendChild(h);
+  if(skipHref){var a=document.createElement('a');a.className='skip-link';a.href=skipHref;a.textContent='skip';d.appendChild(a)}
+  var mm=document.createElement('span');mm.className='host-model';mm.textContent=model||'(any)';d.appendChild(mm);
+  return d;
+}
+function renderHostLists(d){
+  var last=document.getElementById('lastList');last.innerHTML='';
+  if(!d.last||!d.last.length){last.innerHTML='<div style="color:#999;font-size:.85rem">None</div>'}
+  else d.last.forEach(function(e){last.appendChild(hostRow(e.host,e.model,'next-host?model='+encodeURIComponent(e.model||'')))});
+  var gv=(d.good||[]).filter(function(x){return x.indexOf(' ')>=0});
+  gv.sort(function(a,b){var am=a.slice(a.indexOf(' ')+1),bm=b.slice(b.indexOf(' ')+1);return am<bm?-1:am>bm?1:(a<b?-1:a>b?1:0)});
+  var gl=document.getElementById('goodList');gl.innerHTML='';
+  gv.slice(0,30).forEach(function(x){var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);gl.appendChild(hostRow(h,mo,'skip-good?host='+encodeURIComponent(h)+'&model='+encodeURIComponent(mo)))});
+  document.getElementById('goodMore').innerHTML=(d.good_count>30)?'<div class="more">... and '+(d.good_count-30)+' more</div>':'';
+  var mv=(d.maybe||[]).filter(function(x){return x.indexOf(' ')>=0});
+  mv.sort(function(a,b){var am=a.slice(a.indexOf(' ')+1),bm=b.slice(b.indexOf(' ')+1);return am<bm?-1:am>bm?1:(a<b?-1:a>b?1:0)});
+  var ml=document.getElementById('maybeList');ml.innerHTML='';
+  mv.slice(0,30).forEach(function(x){var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);ml.appendChild(hostRow(h,mo,'skip-good?host='+encodeURIComponent(h)+'&model='+encodeURIComponent(mo)))});
+  document.getElementById('maybeMore').innerHTML=(d.maybe_count>30)?'<div class="more">... and '+(d.maybe_count-30)+' more</div>':'';
+  var bv=(d.bad||[]).filter(function(x){return x.indexOf(' ')>=0}).sort();
+  var bl=document.getElementById('badList');bl.innerHTML='';
+  bv.slice(0,30).forEach(function(x){var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);bl.appendChild(hostRow(h,mo,null))});
+  document.getElementById('badMore').innerHTML=(d.bad_count>30)?'<div class="more">... and '+(d.bad_count-30)+' more</div>':'';
+}
+function loadDashboard(){
+  Promise.all([
+    fetch('dashboard-models').then(function(r){return r.json()}),
+    fetch('dashboard-data').then(function(r){return r.json()})
+  ]).then(function(res){
+    var mv=res[0]||{},dv=res[1]||{};
+    _good=new Set(dv.good||[]);_bad=new Set(dv.bad||[]);
+    renderModels(mv.servers||[]);
+    renderHostLists(dv);
+  }).catch(function(){});
+}
+document.getElementById('serverroom').addEventListener('click',function(e){
+  var el=e.target.closest('.modellist .model-item[data-name]');if(!el)return;
+  document.querySelectorAll('.modellist .model-item').forEach(function(x){x.style.background=''});
+  el.style.background='#2a2a4a';_currentModel=el.getAttribute('data-name');
+  var hosts=(modelHosts[_currentModel]||[]).slice().sort(function(a,b){
+    var ta=hostChecked[a]?Date.parse(hostChecked[a]):NaN,tb=hostChecked[b]?Date.parse(hostChecked[b]):NaN;
+    if(isNaN(ta))ta=-Infinity;if(isNaN(tb))tb=-Infinity;
+    return tb-ta||(a<b?-1:a>b?1:0);
+  });
+  var card=document.getElementById('hostCard');card.style.display='';
+  document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';
+  var list=document.getElementById('hostList');list.innerHTML='';
+  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;d.appendChild(s);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)});
+});
 document.getElementById('nextHostBtn').addEventListener('click',function(e){e.preventDefault();if(!_currentModel)return;var x=new XMLHttpRequest();x.open('GET','next-host?model='+encodeURIComponent(_currentModel));x.onload=function(){location.reload()};x.send()})
+loadDashboard();
 </script>
 <script>
 var chatLog=document.getElementById('chatMessages');
