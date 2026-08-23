@@ -901,6 +901,9 @@ function paintStream(){
   var th=streamState.think+sp.t;
   streamState.el.innerHTML=thinkHtml(th,true)+mdRender(sp.c);
   highlightBlocks(streamState.el);
+  // keep the thinking window pinned to its latest line while it streams
+  var tb=streamState.el.querySelector('.think-body');
+  if(tb)tb.scrollTop=tb.scrollHeight;
   chatLog.scrollTop=chatLog.scrollHeight;
 }
 function highlightBlocks(scope){
