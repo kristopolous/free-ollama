@@ -42,7 +42,9 @@ body.chat{overflow:hidden}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:12px}
 .card{background:transparent;border-radius:8px;padding:0;box-shadow:none;overflow:visible}
-.card-inner{background:#1e1e1e;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.4);max-height:70vh;overflow:hidden;display:flex;flex-direction:column}
+.card-inner{background:#1e1e1e;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.4);height:70vh;overflow:hidden;display:flex;flex-direction:column}
+/* the click-to-view host card fits its content instead of a fixed height */
+#hostCard .card-inner{height:auto;max-height:70vh}
 /* tabs + filter stay pinned; only the list scrolls */
 #mpane-text,#mpane-image,#pane-last,#pane-good,#pane-maybe,#pane-bad,#hostList{flex:1;min-height:0;overflow-y:auto}
 .card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px;cursor:pointer;user-select:none}

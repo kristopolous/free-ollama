@@ -568,6 +568,19 @@ def _known_capable(host, model, caps):
     return _model_capable(known, caps)
 
 
+def _checked_rank(s):
+    """Sort key for the unknown tier: most-recently-checked first. Returns the
+    negated epoch of the entry's `checked` timestamp (so newer sorts earlier);
+    hosts with no/invalid timestamp fall to the back (inf)."""
+    ck = s.get("checked")
+    if not ck:
+        return float("inf")
+    try:
+        return -datetime.datetime.fromisoformat(ck).timestamp()
+    except Exception:
+        return float("inf")
+
+
 def find_servers(sub, caps=None):
     if '/' in sub:
         res = []
