@@ -657,9 +657,13 @@ def find_servers(sub, caps=None):
             prio = 1
         else:
             prio = 0
-        matched.append((prio, host, ms))
-    matched.sort(key=lambda x: x[0])
-    return matched
+        # Within the UNKNOWN tier only, try the most-recently-checked hosts
+        # first (recently reachable => likelier still up). Other tiers keep
+        # their existing order via a constant secondary key (stable sort).
+        crank = _checked_rank(s) if prio == 0 else 0
+        matched.append((prio, crank, host, ms))
+    matched.sort(key=lambda x: (x[0], x[1]))
+    return [(p, h, m) for p, c, h, m in matched]
 
 
 def all_models():
