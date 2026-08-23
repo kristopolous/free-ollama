@@ -748,15 +748,25 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
 
 
-async def _is_network_reachable(session, check_hosts, timeout=10):
-    """Quick check if network is reachable by pinging a known-good host."""
-    for entry in check_hosts[:3]:
+# Stable, highly-available endpoints used only to decide whether WE have
+# working internet/DNS — never the hosts being scanned.
+_REACHABILITY_URLS = [
+    "https://www.google.com/generate_204",
+    "https://cloudflare.com/cdn-cgi/trace",
+    "https://example.com/",
+]
+
+
+async def _is_network_reachable(session, check_hosts=None, timeout=10):
+    """Return True if WE can reach the internet, by hitting known-good public
+    endpoints — NOT the hosts being scanned. A per-host DNS/connect failure
+    (a dead target) must not be mistaken for us being offline, or we'd retry
+    dead hosts forever instead of moving on."""
+    for url in _REACHABILITY_URLS:
         try:
-            host_port = entry["host"].split(":")
-            h = host_port[0]
-            p = int(host_port[1]) if len(host_port) > 1 else 80
-            async with session.get(f"http://{h}:{p}/", timeout=aiohttp.ClientTimeout(total=timeout)):
-                return True
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                if r.status < 500:
+                    return True
         except Exception:
             continue
     return False
