@@ -100,7 +100,9 @@ button.stop:hover{background:#7a3a3a}
 .msg-time{margin-left:auto;color:#666;font-size:.68rem;letter-spacing:0;text-transform:none;font-weight:400;flex-shrink:0}
 .msg .body{background:#1e1e1e;border-radius:8px;padding:.7em;font-size:.9rem;overflow-wrap:anywhere;line-height:1.45}
 .msg .body .error{color:#c33}
-.msg.assistant .body.streaming:empty::before{content:'';display:inline-block;width:.75em;height:.75em;border:2px solid #444;border-top-color:#77a;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+.rummage-wrap{display:flex;align-items:center;gap:14px}
+.rummage{width:96px;height:96px;flex-shrink:0;display:block;border-radius:8px}
+.rummage-msg{color:#9a9aa8;font-size:.9rem;font-style:italic}
 @keyframes spin{to{transform:rotate(360deg)}}
 #snackbar{position:fixed;left:50%;bottom:20px;transform:translateX(-50%) translateY(8px);display:flex;align-items:center;gap:10px;background:#1e1e1e;border:1px solid #3a3a4a;color:#ddd;border-radius:8px;padding:10px 16px;font-size:.85rem;box-shadow:0 6px 24px rgba(0,0,0,.5);z-index:250;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s}
 #snackbar.show{opacity:1;transform:translateX(-50%) translateY(0)}
@@ -895,10 +897,30 @@ function paintGenStatus(el,d){
   if(d.status==='connected')el.textContent='generating\u2026';
   else if(d.status==='trying'||d.status==='failed')el.textContent=d.message;
 }
+// looping placeholder animation shown inside the bubble until the first tokens
+var _rummageMuted=false;
+try{_rummageMuted=localStorage.getItem('dyva_rummage_muted')==='1'}catch(e){}
+function showRummage(bodyEl){
+  bodyEl.innerHTML='<div class="rummage-wrap"><video class="rummage" src="rummage.mp4" autoplay loop playsinline></video><span class="rummage-msg">Connecting… Please stand by…</span></div>';
+  var v=bodyEl.querySelector('.rummage');
+  if(!v)return;
+  v.muted=_rummageMuted;v.volume=1;
+  v.style.cursor='pointer';
+  v.title=_rummageMuted?'click to unmute':'click to mute';
+  v.addEventListener('click',function(){
+    v.muted=!v.muted;
+    _rummageMuted=v.muted;
+    try{localStorage.setItem('dyva_rummage_muted',v.muted?'1':'0')}catch(e){}
+    v.title=v.muted?'click to unmute':'click to mute';
+  });
+  var p=v.play();if(p&&p.catch)p.catch(function(){});
+}
 function paintStream(){
   if(!streamState)return;
   var sp=splitThink(streamState.raw);
   var th=streamState.think+sp.t;
+  // nothing rendered yet — keep the rummage placeholder rather than blanking
+  if(!th && !sp.c.trim())return;
   streamState.el.innerHTML=thinkHtml(th,true)+mdRender(sp.c);
   highlightBlocks(streamState.el);
   // keep the thinking window pinned to its latest line while it streams
@@ -1015,6 +1037,10 @@ function setAssistantLabel(el,host,fmodel,tps){
 function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();location.hash='chat';}
 function loadChatById(id){
   closeChatDrawer();
+  // Already viewing this chat (e.g. the hashchange fired by saveCurrentChat
+  // when a brand-new chat is first persisted). Don't tear it down and
+  // re-render — that would wipe a live streaming bubble mid-response.
+  if(String(currentChat.id)===String(id))return;
   saveCurrentChat();
   var c=loadChats().find(function(x){return String(x.id)===String(id)});
   if(!c)return;
@@ -1095,6 +1121,7 @@ async function sendChat(){
   addMsg('user',text,currentChat.messages.length-1);
   var bubble=addMsg('assistant','');
   bubble.bodyEl.classList.add('streaming');
+  showRummage(bubble.bodyEl);
   input.value='';
   attachments=[];
   renderAttachments();
@@ -1178,6 +1205,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
       renderMessages();
       nb=addMsg('assistant','');
       nb.bodyEl.classList.add('streaming');
+      showRummage(nb.bodyEl);
     }
     setSendButton('streaming');
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
@@ -1303,6 +1331,7 @@ function tryResume(){
   renderSidebar();
   var bubble=addMsg('assistant','');
   bubble.bodyEl.classList.add('streaming');
+  showRummage(bubble.bodyEl);
   setSendButton('streaming');
   runStream(String(j.id),currentChat.createdAt,currentChat.title,j.model,j.msgs,bubble);
 }
