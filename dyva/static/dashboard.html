@@ -21,6 +21,7 @@
 ::-webkit-scrollbar-thumb:hover{background:#4a4a7a}
 *{scrollbar-width:thin;scrollbar-color:#444 #181818}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#111;color:#eee;padding:20px;display:flex;flex-direction:column;min-height:100vh}
+a {color: #999}
 .header{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-shrink:0;position:relative}
 .header img{flex-shrink:0}
 .activity-btn{margin-left:auto;background:#222;color:#999;border:none;border-radius:6px;padding:8px 16px;font-size:.85rem;cursor:pointer;flex-shrink:0}
@@ -99,6 +100,9 @@ button.stop:hover{background:#7a3a3a}
 .msg .body .error{color:#c33}
 .msg.assistant .body.streaming:empty::before{content:'';display:inline-block;width:.75em;height:.75em;border:2px solid #444;border-top-color:#77a;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
+#snackbar{position:fixed;left:50%;bottom:20px;transform:translateX(-50%) translateY(8px);display:flex;align-items:center;gap:10px;background:#1e1e1e;border:1px solid #3a3a4a;color:#ddd;border-radius:8px;padding:10px 16px;font-size:.85rem;box-shadow:0 6px 24px rgba(0,0,0,.5);z-index:250;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s}
+#snackbar.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#snackbar .snack-spin{width:14px;height:14px;border:2px solid #444;border-top-color:#77a;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
 .msg.user .body{background:#222a3a;white-space:pre-wrap}
 .msg.assistant .body pre{background:#111;border:1px solid #333;border-radius:6px;padding:.6em;overflow-x:auto;white-space:pre;margin:.6em 0}
 .msg.assistant .body code{font-family:ui-monospace,monospace;font-size:.82rem;background:#111;padding:.05em .3em;border-radius:4px}
@@ -126,6 +130,7 @@ button.stop:hover{background:#7a3a3a}
 .msg .files{display:flex;flex-wrap:wrap;gap:6px;margin-top:.5em}
 .msg .files img{max-width:160px;max-height:160px;border-radius:6px;border:1px solid #333}
 .msg .body p img{max-width:min(360px,100%);border-radius:8px;display:block;margin:6px 0}
+.msg .files img,.msg .body img{cursor:zoom-in}
 .msg .file-chip{display:inline-block;background:#222a3a;border:1px solid #333;border-radius:6px;padding:3px 8px;font-size:.75rem;color:#77a;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid #3a3a46;background:#17171d;border-radius:4px;padding:.25em .65em}
@@ -246,11 +251,12 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 </style>
 </head>
 <body>
+<div id="snackbar" class="show"><span class="snack-spin"></span><span class="snack-msg">Loading…</span></div>
 <div class="header">
 <img src="dyva.avif" alt="" width="56" height="56">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"> v__DYVA_VERSION__ </span>&middot; <a title="docs" href="/docs" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none">📚</a> &middot; <a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">🐞</a></p>
+<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">🐞  v__DYVA_VERSION__</a></span>&middot; <a title="docs" href="/docs" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none">📚</a></p>
 </div>
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾</button>
 <div id="activityPop" class="activity-pop">
@@ -558,6 +564,17 @@ function renderHostLists(d){
   _hostData.bad=(d.bad||[]).filter(function(x){return x.indexOf(' ')>=0}).sort();
   renderHostPanes();
 }
+// The snackbar is server-rendered visible (in the markup with class "show") so
+// it paints on first load without waiting for JS; here we only take it down.
+var snackbar=document.getElementById('snackbar');
+var _snackTimer=null;
+function showSnack(msg,spin){
+  if(_snackTimer){clearTimeout(_snackTimer);_snackTimer=null;}
+  snackbar.querySelector('.snack-msg').textContent=msg;
+  snackbar.querySelector('.snack-spin').style.display=(spin===false)?'none':'';
+  snackbar.classList.add('show');
+}
+function hideSnack(){snackbar.classList.remove('show')}
 function loadDashboard(){
   Promise.all([
     fetch('dashboard-models').then(function(r){return r.json()}),
@@ -567,7 +584,11 @@ function loadDashboard(){
     _good=new Set(dv.good||[]);_bad=new Set(dv.bad||[]);
     renderModels(mv.servers||[]);
     renderHostLists(dv);
-  }).catch(function(){});
+    hideSnack();
+  }).catch(function(){
+    showSnack('Couldn’t load dashboard data',false);
+    _snackTimer=setTimeout(hideSnack,4000);
+  });
 }
 document.getElementById('serverroom').addEventListener('click',function(e){
   var el=e.target.closest('.modellist .model-item[data-name]');if(!el)return;
@@ -1479,8 +1500,12 @@ lightbox.innerHTML='<img alt=""><div class="cap"></div>';
 document.body.appendChild(lightbox);
 lightbox.addEventListener('click',function(){lightbox.classList.remove('open')});
 document.addEventListener('keydown',function(e){if(e.key==='Escape')lightbox.classList.remove('open')});
+function openLightboxSrc(src,cap){
+  lightbox.querySelector('img').src=src;
+  lightbox.querySelector('.cap').textContent=cap||'';
+  lightbox.classList.add('open');
+}
 function openLightbox(e){
-  lightbox.querySelector('img').src='sdapi/v1/images/'+encodeURIComponent(e.file);
   var bits=[];
   if(e.prompt)bits.push(e.prompt);
   if(e.negative_prompt)bits.push('neg: '+e.negative_prompt);
@@ -1490,9 +1515,13 @@ function openLightbox(e){
   if(e.cfg_scale)bits.push('cfg '+e.cfg_scale);
   if(e.width&&e.height)bits.push(e.width+'x'+e.height);
   if(e.seed!==undefined&&e.seed!==null)bits.push('seed '+e.seed);
-  lightbox.querySelector('.cap').textContent=bits.join(' · ');
-  lightbox.classList.add('open');
+  openLightboxSrc('sdapi/v1/images/'+encodeURIComponent(e.file),bits.join(' · '));
 }
+// click any image inside a chat message to view it in the same lightbox
+chatLog.addEventListener('click',function(e){
+  var img=e.target.closest('img');
+  if(img&&img.src)openLightboxSrc(img.src,img.alt||'');
+});
 loadImgHistory();
 ['posPrompt','negPrompt'].forEach(function(id){
   document.getElementById(id).addEventListener('keydown',function(e){
