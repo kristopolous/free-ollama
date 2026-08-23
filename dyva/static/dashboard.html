@@ -69,6 +69,8 @@ body.chat{overflow:hidden}
 .htab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
 .htab-clear{margin-left:auto;align-self:center;color:#c33;font-size:.75rem;text-decoration:underline;cursor:pointer}
 .htab-clear:hover{color:#e55}
+.htab-count{background:#2a2a3a;color:#aaa;border-radius:8px;padding:1px 6px;font-size:.68rem;font-family:ui-monospace,monospace;min-width:1.4em;text-align:center;line-height:1.4}
+.htab.active .htab-count{background:#33334a;color:#ccd}
 .more{font-size:.8rem;color:#666;margin-top:6px}
 .card.collapsed h2::before{transform:rotate(-90deg)}
 .card.collapsed .card-inner{display:none}
@@ -263,10 +265,10 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <h2>Hosts</h2>
 <div class="card-inner">
 <div class="host-tabs">
-<button type="button" class="htab active" data-pane="last">Recent</button>
-<button type="button" class="htab" data-pane="good">Good</button>
-<button type="button" class="htab" data-pane="maybe">Maybe</button>
-<button type="button" class="htab" data-pane="bad">Bad</button>
+<button type="button" class="htab active" data-pane="last">Recent<span class="htab-count" id="cnt-last"></span></button>
+<button type="button" class="htab" data-pane="good">Good<span class="htab-count" id="cnt-good"></span></button>
+<button type="button" class="htab" data-pane="maybe">Maybe<span class="htab-count" id="cnt-maybe"></span></button>
+<button type="button" class="htab" data-pane="bad">Bad<span class="htab-count" id="cnt-bad"></span></button>
 <span id="clearBad" class="htab-clear" title="Forget all bad host+model pairs">clear bad</span>
 </div>
 <div id="pane-last">
@@ -415,7 +417,13 @@ document.getElementById('activityBtn').addEventListener('click',function(e){e.st
 document.addEventListener('keydown',function(e){if(e.key==='Escape')actPop.classList.remove('open')});
 </script>
 <script>
-function filterModels(){var q=document.getElementById('modelFilter').value.toLowerCase();document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'})}
+function filterModels(){
+  var q=document.getElementById('modelFilter').value.toLowerCase();
+  document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'});
+  // the same query re-renders the Hosts card panes from the full arrays, so it
+  // searches the whole list and the "... and N more" count matches the results
+  if(typeof renderHostPanes==='function')renderHostPanes();
+}
 document.getElementById('clearBad').addEventListener('click',function(e){e.preventDefault();e.stopPropagation();
   var x=new XMLHttpRequest();x.open('GET','clear-bad');
   x.onload=function(){location.reload()};x.send()})
@@ -487,24 +495,40 @@ function hostRow(host,model,skipHref){
   var mm=document.createElement('span');mm.className='host-model';mm.textContent=model||'(any)';d.appendChild(mm);
   return d;
 }
-function renderHostLists(d){
+// Full sorted key arrays are stored so the model filter can search the WHOLE
+// list (not just the 30 rendered rows) and the "... and N more" count reflects
+// the actual number of matches beyond what's shown.
+var _hostData={last:[],good:[],maybe:[],bad:[]};
+function _byModel(a,b){var am=a.slice(a.indexOf(' ')+1),bm=b.slice(b.indexOf(' ')+1);return am<bm?-1:am>bm?1:(a<b?-1:a>b?1:0)}
+function _setCount(id,n){var e=document.getElementById(id);if(e)e.textContent=n}
+function renderKeyPane(listId,moreId,countId,arr,q,skip){
+  var c=document.getElementById(listId);c.innerHTML='';
+  var matched=q?arr.filter(function(x){return x.toLowerCase().indexOf(q)>=0}):arr;
+  matched.slice(0,30).forEach(function(x){
+    var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);
+    c.appendChild(hostRow(h,mo,skip?'skip-good?host='+encodeURIComponent(h)+'&model='+encodeURIComponent(mo):null));
+  });
+  var more=matched.length-Math.min(matched.length,30);
+  document.getElementById(moreId).innerHTML=more>0?'<div class="more">... and '+more+' more</div>':'';
+  _setCount(countId,matched.length);
+}
+function renderHostPanes(){
+  var q=document.getElementById('modelFilter').value.toLowerCase();
   var last=document.getElementById('lastList');last.innerHTML='';
-  if(!d.last||!d.last.length){last.innerHTML='<div style="color:#999;font-size:.85rem">None</div>'}
-  else d.last.forEach(function(e){last.appendChild(hostRow(e.host,e.model,'next-host?model='+encodeURIComponent(e.model||'')))});
-  var gv=(d.good||[]).filter(function(x){return x.indexOf(' ')>=0});
-  gv.sort(function(a,b){var am=a.slice(a.indexOf(' ')+1),bm=b.slice(b.indexOf(' ')+1);return am<bm?-1:am>bm?1:(a<b?-1:a>b?1:0)});
-  var gl=document.getElementById('goodList');gl.innerHTML='';
-  gv.slice(0,30).forEach(function(x){var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);gl.appendChild(hostRow(h,mo,'skip-good?host='+encodeURIComponent(h)+'&model='+encodeURIComponent(mo)))});
-  document.getElementById('goodMore').innerHTML=(d.good_count>30)?'<div class="more">... and '+(d.good_count-30)+' more</div>':'';
-  var mv=(d.maybe||[]).filter(function(x){return x.indexOf(' ')>=0});
-  mv.sort(function(a,b){var am=a.slice(a.indexOf(' ')+1),bm=b.slice(b.indexOf(' ')+1);return am<bm?-1:am>bm?1:(a<b?-1:a>b?1:0)});
-  var ml=document.getElementById('maybeList');ml.innerHTML='';
-  mv.slice(0,30).forEach(function(x){var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);ml.appendChild(hostRow(h,mo,'skip-good?host='+encodeURIComponent(h)+'&model='+encodeURIComponent(mo)))});
-  document.getElementById('maybeMore').innerHTML=(d.maybe_count>30)?'<div class="more">... and '+(d.maybe_count-30)+' more</div>':'';
-  var bv=(d.bad||[]).filter(function(x){return x.indexOf(' ')>=0}).sort();
-  var bl=document.getElementById('badList');bl.innerHTML='';
-  bv.slice(0,30).forEach(function(x){var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);bl.appendChild(hostRow(h,mo,null))});
-  document.getElementById('badMore').innerHTML=(d.bad_count>30)?'<div class="more">... and '+(d.bad_count-30)+' more</div>':'';
+  var lm=q?_hostData.last.filter(function(e){return ((e.host||'')+' '+(e.model||'')).toLowerCase().indexOf(q)>=0}):_hostData.last;
+  if(!lm.length){last.innerHTML='<div style="color:#999;font-size:.85rem">None</div>'}
+  else lm.forEach(function(e){last.appendChild(hostRow(e.host,e.model,'next-host?model='+encodeURIComponent(e.model||'')))});
+  _setCount('cnt-last',lm.length);
+  renderKeyPane('goodList','goodMore','cnt-good',_hostData.good,q,true);
+  renderKeyPane('maybeList','maybeMore','cnt-maybe',_hostData.maybe,q,true);
+  renderKeyPane('badList','badMore','cnt-bad',_hostData.bad,q,false);
+}
+function renderHostLists(d){
+  _hostData.last=d.last||[];
+  _hostData.good=(d.good||[]).filter(function(x){return x.indexOf(' ')>=0}).sort(_byModel);
+  _hostData.maybe=(d.maybe||[]).filter(function(x){return x.indexOf(' ')>=0}).sort(_byModel);
+  _hostData.bad=(d.bad||[]).filter(function(x){return x.indexOf(' ')>=0}).sort();
+  renderHostPanes();
 }
 function loadDashboard(){
   Promise.all([
