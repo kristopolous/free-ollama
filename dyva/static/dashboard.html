@@ -57,13 +57,13 @@ body.chat{overflow:hidden}
 .done-line{color:#666;font-style:italic}
 .model-item{padding:6px 0;border-bottom:1px solid #333;font-size:.85rem;display:flex;justify-content:space-between}
 .model-item:last-child{border:none}
-.model-name{font-family:ui-monospace,monospace;font-size:.82rem;max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-name{font-family:ui-monospace,monospace;font-size:.82rem;max-width:33%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-count{color:#888;flex-shrink:0;padding-left:8px;white-space:nowrap}
 .modellist .model-item{cursor:pointer;transition:background .1s;overflow-wrap:anywhere}
 .modellist .model-item:hover{background:#2a2a3a}
-.host-name{font-family:ui-monospace,monospace;font-size:.82rem;overflow-wrap:break-word;flex:1;color:#eee}
+.host-name{font-family:ui-monospace,monospace;font-size:.82rem;flex:1;min-width:0;color:#eee;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .host-checked{color:#777;flex-shrink:0;padding-left:8px;white-space:nowrap;font-size:.78rem}
-.host-model{font-family:ui-monospace,monospace;font-size:.82rem;color:#777}
+.host-model{font-family:ui-monospace,monospace;font-size:.82rem;color:#777;max-width:50%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skip-link{opacity:0;color:#77a;font-size:.75rem;text-decoration:underline;margin:0 8px;flex-shrink:0;transition:opacity .1s}
 .model-item:hover .skip-link{opacity:1}
 .host-tabs{display:flex;gap:4px;border-bottom:1px solid #333;margin-bottom:12px;flex-shrink:0}
@@ -258,7 +258,7 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <img src="dyva.avif" alt="" width="56" height="56">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">🐞  v__DYVA_VERSION__</a></span>&middot; <a title="docs" href="/docs" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none">📚</a></p>
+<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none"> 🐞  v__DYVA_VERSION__</a> </span>&middot; <a title="docs" href="/docs" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none">📚</a></p>
 </div>
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾</button>
 <div id="activityPop" class="activity-pop">
@@ -321,7 +321,7 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 </div>
 <div class="card" id="hostCard" style="display:none">
 <h2 id="hostCardTitle">Hosts</h2>
-<div class="card-inner"><div id="hostList"></div><div style="margin-top:8px;text-align:right"><a id="nextHostBtn" href="#" style="font-size:.82rem;color:#77a;cursor:pointer;text-decoration:none">[ next ]</a></div></div>
+<div class="card-inner"><div id="hostList"></div></div>
 </div>
 </div>
 </div>
@@ -526,9 +526,9 @@ function renderModels(servers){
 }
 function hostRow(host,model,skipHref){
   var d=document.createElement('div');d.className='model-item';
-  var h=document.createElement('span');h.className='host-name';h.textContent=host;d.appendChild(h);
+  var h=document.createElement('span');h.className='host-name';h.textContent=host;h.title=host;d.appendChild(h);
   if(skipHref){var a=document.createElement('a');a.className='skip-link';a.href=skipHref;a.textContent='skip';d.appendChild(a)}
-  var mm=document.createElement('span');mm.className='host-model';mm.textContent=model||'(any)';d.appendChild(mm);
+  var mm=document.createElement('span');mm.className='host-model';mm.textContent=model||'(any)';mm.title=model||'(any)';d.appendChild(mm);
   return d;
 }
 // Full sorted key arrays are stored so the model filter can search the WHOLE
@@ -604,9 +604,8 @@ document.getElementById('serverroom').addEventListener('click',function(e){
   var card=document.getElementById('hostCard');card.style.display='';
   document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';
   var list=document.getElementById('hostList');list.innerHTML='';
-  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;d.appendChild(s);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)});
+  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;s.title=h;d.appendChild(s);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)});
 });
-document.getElementById('nextHostBtn').addEventListener('click',function(e){e.preventDefault();if(!_currentModel)return;var x=new XMLHttpRequest();x.open('GET','next-host?model='+encodeURIComponent(_currentModel));x.onload=function(){location.reload()};x.send()})
 loadDashboard();
 </script>
 <script>

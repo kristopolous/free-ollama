@@ -166,7 +166,7 @@ def refresh_cache():
     if os.path.exists(f"{_db}-happyshua.tmp"):
       with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
         for r in csv.reader(csvfile):
-          ip = r[0].rstrip('/')
+          ip = r[0].rstrip('/v1')
           models = [m.strip() for m in r[1].split(',')]
           if ip not in host_map:
             host_map[ip] = {'source': 'happyshua', 'tps': 0, 'models': [], 'server': ip, 'version': ''}
