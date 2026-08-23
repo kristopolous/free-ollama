@@ -94,6 +94,7 @@ button.stop:hover{background:#7a3a3a}
 .msg .actions .act:hover{background:#2a2a4a}
 .msg .editbox{width:100%;min-height:3em;background:#111;border:1px solid #444;border-radius:6px;color:#eee;padding:.5em;font-size:.85rem;font-family:ui-monospace,monospace;outline:none;resize:vertical}
 .msg.user .role{color:#77a}
+.msg-time{margin-left:auto;color:#666;font-size:.68rem;letter-spacing:0;text-transform:none;font-weight:400;flex-shrink:0}
 .msg .body{background:#1e1e1e;border-radius:8px;padding:.7em;font-size:.9rem;overflow-wrap:anywhere;line-height:1.45}
 .msg .body .error{color:#c33}
 .msg.assistant .body.streaming:empty::before{content:'';display:inline-block;width:.75em;height:.75em;border:2px solid #444;border-top-color:#77a;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
@@ -129,7 +130,7 @@ button.stop:hover{background:#7a3a3a}
 
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid #3a3a46;background:#17171d;border-radius:4px;padding:.25em .65em}
 details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;user-select:none}
-.think-body{white-space:pre-wrap;color:#7c7c88;font-size:.8rem;line-height:1.45;font-style:italic;margin-top:.3em;max-height:320px;overflow:auto}
+.think-body{white-space:pre-wrap;color:#9a9aa8;font-size:.8rem;line-height:1.45;font-style:italic;margin-top:.3em;max-height:320px;overflow:auto}
 
 .chat-status{display:flex;align-items:center;gap:.45em;color:#8a8a96;font-size:.75rem;font-style:italic;margin:.15em 0 .3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-status::before{content:'';flex-shrink:0;width:.6em;height:.6em;border:1.5px solid #444;border-top-color:#77a;border-radius:50%;animation:spin .8s linear infinite}
@@ -161,7 +162,7 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .chat-item{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:8px;border-radius:6px;cursor:pointer;font-size:.8rem;color:#ccc}
 .chat-item:hover{background:#2a2a3a}
 .chat-item.active{background:#2a2a4a}
-.chat-item .title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.chat-item .title{overflow:hidden;white-space:nowrap;flex:1}
 .chat-item .del{opacity:0;color:#c66;cursor:pointer;font-size:.85rem;padding:0 4px}
 .chat-item:hover .del{opacity:1}
 .chat-item .dl{opacity:0;color:#77a;cursor:pointer;font-size:.85rem;padding:0 4px}
@@ -176,9 +177,31 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .chat-main .field{margin-bottom:.5em}
 .model-picker{display:flex;gap:8px;align-items:center}
 .model-picker input{flex:1}
-.chat-next-btn{flex-shrink:0;background:#2a2a3a;color:#77a;border:none;border-radius:6px;width:2.2em;height:2.2em;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;line-height:1;padding:0}
-.chat-next-btn:hover{color:#fff;background:#3a3a5a}
-.model-count-badge{flex-shrink:0;background:#2a2a3a;color:#77a;border-radius:6px;padding:.5em .7em;font-size:.85rem;font-family:ui-monospace,monospace;min-width:2.4em;text-align:center}
+/* combined "N matching servers" count + advance-to-next-server control */
+.chat-advance{flex-shrink:0;background:#2a2a3a;color:#77a;border:none;border-radius:6px;height:2.2em;display:flex;align-items:center;gap:.4em;cursor:pointer;font-size:.85rem;font-family:ui-monospace,monospace;line-height:1;padding:0 .6em}
+.chat-advance:hover{color:#fff;background:#3a3a5a}
+.chat-advance:disabled{opacity:.5;cursor:default}
+.chat-advance #chatModelCount{min-width:1.6em;text-align:center}
+.chat-advance .adv-arrow{font-size:.8em;opacity:.75}
+/* tool toggle sharing the model-selector row */
+.mp-tool{flex-shrink:0;background:#2a2a3a;color:#77a;border:none;border-radius:6px;width:2.2em;height:2.2em;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.mp-tool:hover{color:#fff;background:#3a3a5a}
+.mp-tool.active{color:#9ab8ff;background:#2a2a4a}
+.mp-tool svg{width:18px;height:18px}
+/* wrench pull-down: opens upward with a caret pointing down at the wrench */
+.tool-menu{position:relative;flex-shrink:0}
+.tools-pop{display:none;position:absolute;bottom:calc(100% + 10px);right:0;width:250px;background:#1e1e1e;border:1px solid #3a3a4a;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.5);padding:10px;z-index:130}
+.tools-pop.open{display:block}
+.tools-pop::before,.tools-pop::after{content:'';position:absolute;top:100%;right:.75em;width:0;height:0;border:8px solid transparent}
+.tools-pop::before{border-top-color:#3a3a4a}
+.tools-pop::after{border-top-color:#1e1e1e;top:calc(100% - 1px)}
+.tools-pop-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:8px}
+.tool-opt{display:flex;align-items:flex-start;gap:9px;padding:7px 6px;border-radius:6px;cursor:pointer}
+.tool-opt:hover{background:#26262e}
+.tool-opt input[type=checkbox]{width:auto;margin:2px 0 0;accent-color:#77a;cursor:pointer}
+.tool-opt .tool-txt{display:flex;flex-direction:column}
+.tool-opt .tool-txt b{font-weight:500;font-size:.85rem;color:#eee}
+.tool-opt .tool-txt small{color:#888;font-size:.72rem;margin-top:1px}
 .field{margin-bottom:12px}
 .img-params{display:grid;grid-template-columns:2.2fr 1fr;gap:12px;margin-bottom:12px}
 .img-dims{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px}
@@ -308,8 +331,14 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <div class="model-picker">
 <button id="chatMenuBtn" class="chat-menu-btn" title="Chat history">☰</button>
 <input id="chatModel" type="text" value="*" placeholder="model (* = anything)" autocomplete="off" spellcheck="false">
-<span id="chatModelCount" class="model-count-badge" title="matching servers">-</span>
-<button id="chatNextBtn" class="chat-next-btn" title="Move on to the next server for this model">▶</button>
+<button id="chatNextBtn" class="chat-advance" title="matching servers — click to try the next server"><span id="chatModelCount">-</span><span class="adv-arrow">▶</span></button>
+<div class="tool-menu">
+<button id="chatTools" class="mp-tool" title="Tools" aria-haspopup="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></button>
+<div id="toolsPop" class="tools-pop">
+<div class="tools-pop-title">Tools</div>
+<label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Let the model create images on request</small></span></label>
+</div>
+</div>
 </div>
 </div>
 <div class="attach-row" id="chatAttachments" style="display:none"></div>
@@ -317,7 +346,6 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
 <input id="chatFiles" type="file" multiple accept="image/*,.pdf" style="display:none">
 <div class="input-tools">
-<button id="chatTools" title="Tools: let the model generate images on request"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></button>
 <button id="chatAttach" title="Attach files"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg></button>
 <button id="chatSend" title="Send"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg></button>
 </div>
@@ -564,14 +592,40 @@ var storeKey='dyva_playground_chats';
 var currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};
 var chatsCache=[];
 function loadChats(){return chatsCache}
+// Saves are ASYNC + debounced + serialized. A synchronous POST here froze the
+// UI on every chat switch (the main thread blocked on the server round-trip,
+// which is slow on mobile while the proxy is racing hosts). The in-memory
+// chatsCache updates immediately so reads never wait on the network.
+var _saveTimer=null,_savePending=false,_saveInFlight=false;
 function persistChats(chats){
   chatsCache=chats.slice();
+  _savePending=true;
+  if(!_saveTimer)_saveTimer=setTimeout(flushChats,250);
+}
+function flushChats(){
+  _saveTimer=null;
+  if(_saveInFlight){_saveTimer=setTimeout(flushChats,250);return}
+  if(!_savePending)return;
+  _savePending=false;_saveInFlight=true;
   try{
-    var x=new XMLHttpRequest();x.open('POST','api/chats',false);
+    var x=new XMLHttpRequest();x.open('POST','api/chats',true);
     x.setRequestHeader('Content-Type','application/json');
-    x.send(JSON.stringify({chats:chats}));
+    x.onloadend=function(){_saveInFlight=false;if(_savePending&&!_saveTimer)_saveTimer=setTimeout(flushChats,250)};
+    x.send(JSON.stringify({chats:chatsCache}));
+  }catch(e){_saveInFlight=false}
+}
+// flush any pending save when the page is backgrounded/closed, without blocking
+function _beaconSave(){
+  if(!_savePending)return;
+  try{
+    if(navigator.sendBeacon){
+      var ok=navigator.sendBeacon('api/chats',new Blob([JSON.stringify({chats:chatsCache})],{type:'application/json'}));
+      if(ok){_savePending=false;return}
+    }
   }catch(e){}
 }
+window.addEventListener('pagehide',_beaconSave);
+document.addEventListener('visibilitychange',function(){if(document.hidden)_beaconSave()});
 (function(){
   var x=new XMLHttpRequest();x.open('GET','api/chats',false);
   try{x.send()}catch(e){return}
@@ -607,6 +661,7 @@ function saveCurrentChat(){
     var c={role:m.role,content:m.content};
     if(m._meta)c._meta=m._meta;
     if(m.tps!==undefined)c.tps=m.tps;
+    if(m.ts)c.ts=m.ts;
     if(m.files&&m.files.length)c.files=m.files.slice();
     return c;
   })};
@@ -614,6 +669,13 @@ function saveCurrentChat(){
   persistChats(chats);
 }
 function fmtWhen(ts){var d=new Date(ts);return d.toLocaleDateString()+' '+d.toLocaleTimeString()}
+function fmtMsgTime(ts){
+  if(!ts)return '';
+  var d=new Date(ts),now=new Date();
+  var t=d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+  if(d.toDateString()!==now.toDateString())t=d.toLocaleDateString([],{month:'short',day:'numeric'})+' '+t;
+  return t;
+}
 function renderSidebar(){
   var list=document.getElementById('chatList');
   list.innerHTML='';
@@ -638,6 +700,21 @@ function deleteChat(id){
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
 }
+function cleanTitle(txt){
+  txt=splitThink(String(txt||'')).c;              // drop ollama/<think> reasoning
+  txt=txt.replace(/<think>[\s\S]*?<\/think>/gi,'');
+  // harmony/channel format: prefer the "final" channel's message text,
+  // else whatever follows the last <|message|>
+  var fin=txt.match(/<\|channel\|>\s*final\s*<\|message\|>([\s\S]*?)(?:<\||$)/i);
+  if(fin){txt=fin[1];}
+  else{var lm=txt.lastIndexOf('<|message|>');if(lm>=0)txt=txt.slice(lm+11);}
+  txt=txt.replace(/<\|[^>]*\|?>/g,' ');           // strip <|channel|>, <|start|>, malformed <|channel>
+  txt=txt.replace(/<\/?[a-z][^>]*>/gi,' ');        // strip stray xml-ish tags
+  txt=txt.replace(/\s+/g,' ').replace(/^["'\s]+|["'.\s]+$/g,'').split('\n')[0].trim().slice(0,60);
+  // a bare channel/role keyword means only reasoning leaked - reject it
+  if(/^(analysis|analyze|thought|thinking|final|assistant|commentary|channel|message)$/i.test(txt))return '';
+  return txt;
+}
 async function regenTitle(c,btn){
   var msgs=(c.messages||[]).filter(function(m){return m.role==='user'&&m.content})
     .map(function(m){return String(m.content)}).join('\n').slice(0,2000);
@@ -651,9 +728,7 @@ async function regenTitle(c,btn){
         {role:'user',content:msgs}]})});
     if(r.ok){
       var j=await r.json();
-      var txt=j&&j.message&&j.message.content?String(j.message.content):'';
-      txt=splitThink(txt).c.replace(/<think>[\s\S]*?<\/think>/gi,'');
-      txt=txt.replace(/^["'\s]+|["'.\s]+$/g,'').split('\n')[0].trim().slice(0,60);
+      var txt=cleanTitle(j&&j.message&&j.message.content?j.message.content:'');
       if(txt){
         var chats=loadChats(),i=findChatIndex(c.id);
         if(i>=0){
@@ -709,7 +784,9 @@ function downloadChatJson(c){
 }
 function addMsg(role,text,index){
   var d=document.createElement('div');d.className='msg '+role;
-  var r=document.createElement('div');r.className='role';r.textContent=role==='user'?'You':'Assistant';
+  var r=document.createElement('div');r.className='role';
+  var lbl=document.createElement('span');lbl.className='role-label';lbl.textContent=role==='user'?'You':'Assistant';
+  r.appendChild(lbl);
   var b=document.createElement('div');b.className='body';
   if(role==='assistant'){
     var _mt=index!==undefined?currentChat.messages[index]:null;
@@ -739,6 +816,10 @@ function addMsg(role,text,index){
     acts.appendChild(pen);acts.appendChild(rel);
     r.appendChild(acts);
   }
+  var _rec=index!==undefined?currentChat.messages[index]:null;
+  var _ts=_rec&&_rec.ts?_rec.ts:(index===undefined?Date.now():0);
+  var _tstr=fmtMsgTime(_ts);
+  if(_tstr){var when=document.createElement('span');when.className='msg-time';when.textContent=_tstr;when.title=fmtWhen(_ts);r.appendChild(when)}
   chatLog.appendChild(d);
   chatLog.scrollTop=chatLog.scrollHeight;
   return {roleEl:r,bodyEl:b};
@@ -821,7 +902,7 @@ function findChatIndex(id){
 function chatInView(chatId){return String(currentChat.id)===String(chatId)}
 function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render,think){
   if(!content&&!think)return;
-  var msg={role:'assistant',content:content,_meta:{server:host||'',model:fmodel||''},tps:tps};
+  var msg={role:'assistant',content:content,_meta:{server:host||'',model:fmodel||''},tps:tps,ts:Date.now()};
   if(think)msg._meta.think=think;
   var inView=chatInView(chatId);
   var chats=loadChats(),i=findChatIndex(chatId);
@@ -842,6 +923,7 @@ function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render
   }
 }
 function appendMsgRecord(chatId,msg){
+  if(msg&&!msg.ts)msg.ts=Date.now();
   var chats=loadChats(),i=findChatIndex(chatId);
   if(i>=0){
     chats[i].messages.push(msg);
@@ -902,7 +984,8 @@ function setAssistantLabel(el,host,fmodel,tps){
   if(host)s+=' '+host;
   if(fmodel)s+=' '+fmodel;
   if(tps!==undefined&&tps!==null&&!isNaN(tps))s+=' '+tps+' tps';
-  el.textContent=s;
+  var lbl=el.querySelector('.role-label')||el;
+  lbl.textContent=s;
 }
 function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();location.hash='chat';}
 function loadChatById(id){
@@ -921,13 +1004,14 @@ document.getElementById('chatNew').addEventListener('click',newChat);
 var modelCountTimer=null;
 function updateModelCount(){
   var el=document.getElementById('chatModelCount');
+  var btn=document.getElementById('chatNextBtn');
   var q=document.getElementById('chatModel').value.trim();
-  if(!q){el.textContent='-';el.title='matching servers';return;}
+  if(!q){el.textContent='-';if(btn)btn.title='matching servers — click to try the next server';return;}
   if(modelCountTimer)clearTimeout(modelCountTimer);
   modelCountTimer=setTimeout(function(){
     fetch('dashboard/server-count?q='+encodeURIComponent(q),{cache:'no-store'})
       .then(function(r){return r.json()})
-      .then(function(d){el.textContent=String(d.servers);el.title=d.servers+' matching server'+(d.servers===1?'':'s')})
+      .then(function(d){el.textContent=String(d.servers);if(btn)btn.title=d.servers+' matching server'+(d.servers===1?'':'s')+' — click to try the next server';})
       .catch(function(){el.textContent='?';});
   },200);
 }
@@ -979,7 +1063,7 @@ async function sendChat(){
   var chatCreated=currentChat.createdAt;
   currentChat.model=model;
   var userFiles=attachments.slice();
-  currentChat.messages.push({role:'user',content:text,files:userFiles.length?userFiles:undefined});
+  currentChat.messages.push({role:'user',content:text,ts:Date.now(),files:userFiles.length?userFiles:undefined});
   if(!currentChat.title)currentChat.title=text.replace(/\s+/g,' ').slice(0,40);
   saveCurrentChat();
   var chatTitle=currentChat.title;
@@ -1209,14 +1293,28 @@ document.getElementById('chatInput').addEventListener('keydown',function(e){
 
 var CHAT_TOOLS=[{type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}}];
 var chatToolsBtn=document.getElementById('chatTools');
+var toolsPop=document.getElementById('toolsPop');
+var toolImageChk=document.getElementById('toolImage');
 var toolsOn=false;
 try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
-function paintTools(){chatToolsBtn.classList.toggle('active',toolsOn)}
-chatToolsBtn.addEventListener('click',function(){
-  toolsOn=!toolsOn;
+// paintTools reflects whether ANY tool is enabled, so the wrench stays lit
+function paintTools(){
+  chatToolsBtn.classList.toggle('active',toolsOn);
+  toolImageChk.checked=toolsOn;
+  chatToolsBtn.title=toolsOn?'Tools: image generation on':'Tools';
+}
+chatToolsBtn.addEventListener('click',function(e){
+  e.stopPropagation();
+  toolsPop.classList.toggle('open');
+});
+toolsPop.addEventListener('click',function(e){e.stopPropagation()});
+toolImageChk.addEventListener('change',function(){
+  toolsOn=this.checked;
   try{localStorage.setItem('dyva_tools',toolsOn?'1':'0')}catch(e){}
   paintTools();
 });
+document.addEventListener('click',function(){toolsPop.classList.remove('open')});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')toolsPop.classList.remove('open')});
 paintTools();
 
 var attachments=[];
