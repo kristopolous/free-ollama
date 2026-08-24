@@ -5,6 +5,7 @@ import datetime
 import fnmatch
 import csv
 import json
+import hashlib
 import logging
 import os
 import re
@@ -74,7 +75,99 @@ _CURLIFY = False
 
 PORT = 11434
 TIMEOUT = 30
+WORKER_COUNT = 10
+MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
 VERSION = "0"
+SETTINGS_FILE = os.path.join(CACHE_DIR, "settings.json")
+
+
+def load_settings():
+    """Apply persisted runtime settings (workers/timeout/min_count) over the
+    CLI defaults, so changes made in the dashboard survive restarts."""
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE) as f:
+            s = json.load(f)
+    except Exception:
+        return
+    if isinstance(s.get("workers"), int) and s["workers"] > 0:
+        WORKER_COUNT = s["workers"]
+    if isinstance(s.get("timeout"), int) and s["timeout"] > 0:
+        TIMEOUT = s["timeout"]
+    if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
+        MIN_COUNT = s["min_count"]
+
+
+def save_settings(extra=None):
+    # merge into the existing file so unrelated keys survive
+    data = {}
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE) as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT, "min_count": MIN_COUNT})
+    if isinstance(extra, dict):
+        data.update(extra)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def _stored_sources():
+    """Raw sources list as stored (for the editor), before validation."""
+    if not os.path.exists(SETTINGS_FILE):
+        return []
+    try:
+        with open(SETTINGS_FILE) as f:
+            cfg = json.load(f)
+    except Exception:
+        return []
+    src = cfg.get("sources") if isinstance(cfg, dict) else None
+    return src if isinstance(src, list) else []
+
+
+def _config_sources():
+    """Additional user-configured fetch sources from settings.json.
+    Each entry: {"name", "url", "mapping"} where mapping maps a target field to
+    {"field": <source field>} (copy from the row) or {"value": <constant>}.
+    Only JSON-list sources are supported here; CSV / transform-heavy sources
+    stay built-in. Configured sources are fetched FIRST and take precedence."""
+    if not os.path.exists(SETTINGS_FILE):
+        return []
+    try:
+        with open(SETTINGS_FILE) as f:
+            cfg = json.load(f)
+    except Exception:
+        return []
+    src = cfg.get("sources") if isinstance(cfg, dict) else None
+    return [s for s in src if isinstance(s, dict) and s.get("url")] if isinstance(src, list) else []
+
+
+def _source_slug(s):
+    return re.sub(r'[^a-z0-9]+', '-', str(s or '').lower()).strip('-') or 'source'
+
+
+def _apply_source_mapping(row, mapping):
+    """Turn a raw source row into a host entry per the mapping."""
+    out = {}
+    if isinstance(mapping, dict):
+        for target, spec in mapping.items():
+            if not isinstance(spec, dict):
+                continue
+            if "value" in spec:
+                out[target] = spec["value"]
+            elif "field" in spec:
+                out[target] = row.get(spec["field"])
+    return out
 
 TRIAL_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
@@ -127,12 +220,16 @@ def refresh_cache():
     log.debug("Refreshing server cache...")
     _db = f'{CACHE_DIR}/free-ollama.json'
 
-    for url, loc in [
+    extra_sources = _config_sources()
+    downloads = [
+       (s.get("url"), f"{_db}-extra-{_source_slug(s.get('name'))}.tmp") for s in extra_sources
+    ] + [
        ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp" ),
        ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
        ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" ),
        ( 'https://9ol.es/graflex.json', f"{_db}-graflex.tmp" )
-    ]:
+    ]
+    for url, loc in downloads:
       try:
         response = requests.get(url)
         logging.info(f"Grabbing {url}")
@@ -145,11 +242,46 @@ def refresh_cache():
 
     host_map = {}
 
-    # graflex is the authoritative reference.
+    # Additional (user-configured) sources are parsed FIRST so they take
+    # precedence; every source below only fills hosts not already claimed.
+    for s in extra_sources:
+      loc = f"{_db}-extra-{_source_slug(s.get('name'))}.tmp"
+      if not os.path.exists(loc):
+        continue
+      try:
+        with open(loc) as f:
+          data = json.loads(f.read())
+      except Exception as ex:
+        logging.warning(f"Unable to parse {loc}: {ex}")
+        continue
+      if not isinstance(data, list):
+        continue
+      mapping = s.get('mapping', {})
+      name = s.get('name', 'source')
+      for row in data:
+        if not isinstance(row, dict):
+          continue
+        entry = _apply_source_mapping(row, mapping)
+        ip = str(entry.get('server') or entry.get('url') or '').rstrip('/')
+        if not ip:
+          continue
+        entry['server'] = ip
+        entry.setdefault('source', name)
+        entry.setdefault('tps', 0)
+        entry.setdefault('version', '')
+        entry.setdefault('service', 'ollama')
+        if not isinstance(entry.get('models'), list):
+          entry['models'] = []
+        if ip not in host_map:
+          host_map[ip] = entry
+
+    # graflex is the authoritative built-in reference (after configured sources).
     if os.path.exists(f'{_db}-graflex.tmp'):
       with open(f'{_db}-graflex.tmp', 'r') as f:
         for row in json.loads(f.read()):
           ip = row.get('url').rstrip('/')
+          if ip in host_map:
+            continue
           row.update({'source': 'graflex', 'tps': 0, 'server': ip})
           host_map[ip] = row
 
@@ -187,7 +319,10 @@ def refresh_cache():
     for k,v in host_map.items():
       if 'service' not in v:
         v['service'] = 'ollama'
-      v['models'] = list(set(v['models']))
+      try:
+        v['models'] = list(set(v.get('models') or []))
+      except TypeError:
+        v['models'] = list(v.get('models') or [])
 
     with open(_db, 'w') as f:
       json.dump(list(host_map.values()), f)
@@ -712,6 +847,16 @@ def all_models():
     else:
         sorty = sorted(seen.values(), key=lambda x: x.get('id').lower())
     return list(sorty)
+
+
+def listed_models():
+    """Models for third-party enumeration (/api/tags, /v1/models), with the
+    optional MIN_COUNT floor applied. The dashboard uses all_models() directly
+    and always shows everything."""
+    models = all_models()
+    if MIN_COUNT > 1:
+        models = [m for m in models if m.get('count', 0) >= MIN_COUNT]
+    return models
 
 
 def to_ollama(body):
@@ -1521,7 +1666,8 @@ async def handle_dashboard(request):
     html = html.replace("__DYVA_VERSION__", VERSION)
     html = html.replace("__CHAT_MODELS__", json.dumps(chat_models))
     html = html.replace("__SD_MODELS__", sd_options)
-    return web.Response(text=html, content_type="text/html", charset="utf-8")
+    return web.Response(text=html, content_type="text/html", charset="utf-8",
+                        headers={"Cache-Control": "no-cache"})
 
 
 async def handle_dashboard_models(request):
@@ -1549,7 +1695,14 @@ async def handle_dashboard_models(request):
         if ck:
             entry["checked"] = ck
         out.append(entry)
-    return web.json_response({"servers": out})
+    body = json.dumps({"servers": out})
+    # This payload is large but changes slowly; serve it with an ETag so the
+    # browser revalidates and gets a tiny 304 instead of re-downloading it.
+    etag = '"' + hashlib.md5(body.encode("utf-8")).hexdigest() + '"'
+    if request.headers.get("If-None-Match") == etag:
+        return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+    return web.Response(text=body, content_type="application/json",
+                        headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
 async def handle_dashboard_data(request):
@@ -1581,6 +1734,131 @@ async def handle_dashboard_data(request):
         "maybe_count": len(maybe),
         "bad_count": len(bad),
     })
+
+
+async def handle_settings_get(request):
+    """
+    Get runtime settings (JSON)
+    ---
+    tags: [UI]
+    summary: Current worker count, timeout, and minimum model count
+    responses:
+      '200':
+        description: Current settings
+    """
+    return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
+                              "min_count": MIN_COUNT, "sources": _stored_sources()})
+
+
+async def handle_settings_post(request):
+    """
+    Update runtime settings (JSON)
+    ---
+    tags: [UI]
+    summary: Set worker count, timeout, and/or minimum model count (persisted)
+    responses:
+      '200':
+        description: Updated settings
+    """
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    if isinstance(body.get("workers"), int) and body["workers"] > 0:
+        WORKER_COUNT = min(body["workers"], 200)
+    if isinstance(body.get("timeout"), int) and body["timeout"] > 0:
+        TIMEOUT = min(body["timeout"], 600)
+    if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
+        MIN_COUNT = body["min_count"]
+    extra = None
+    sources_changed = False
+    if "sources" in body:
+        if not isinstance(body["sources"], list):
+            return web.json_response({"error": '"sources" must be a list'}, status=400)
+        sources_changed = body["sources"] != _stored_sources()
+        extra = {"sources": body["sources"]}
+    save_settings(extra)
+    # if the source list changed, re-pull the cache so the new hosts are fetched
+    if sources_changed:
+        await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
+    return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
+                              "min_count": MIN_COUNT, "sources": _stored_sources(),
+                              "refreshed": sources_changed})
+
+
+async def handle_settings_test(request):
+    """
+    Test additional sources (JSON)
+    ---
+    tags: [UI]
+    summary: Fetch each configured source and report how many servers/models it yields
+    responses:
+      '200':
+        description: Per-source results
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    sources = body.get("sources")
+    if not isinstance(sources, list):
+        return web.json_response({"error": '"sources" must be a list'}, status=400)
+    loop = asyncio.get_event_loop()
+    results = []
+    for s in sources:
+        s = s if isinstance(s, dict) else {}
+        r = {"name": s.get("name") or "(unnamed)"}
+        url = s.get("url")
+        mapping = s.get("mapping", {})
+        if not url:
+            r["error"] = "no url"
+            results.append(r)
+            continue
+        try:
+            text = await loop.run_in_executor(None, lambda u=url: requests.get(u, timeout=20).text)
+            data = json.loads(text)
+        except Exception as ex:
+            r["error"] = f"fetch/parse failed: {ex}"
+            results.append(r)
+            continue
+        if not isinstance(data, list):
+            r["error"] = "source did not return a JSON list"
+            results.append(r)
+            continue
+        servers = 0
+        models_all = set()
+        first = None
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            entry = _apply_source_mapping(row, mapping)
+            ip = str(entry.get("server") or entry.get("url") or "").rstrip("/")
+            if not ip:
+                continue
+            ms = entry.get("models")
+            ms = ms if isinstance(ms, list) else []
+            servers += 1
+            for m in ms:
+                if isinstance(m, str):
+                    models_all.add(m)
+            if first is None:
+                first = {"host": ip, "models": len(ms)}
+        r["servers"] = servers
+        r["models"] = len(models_all)
+        if first:
+            r["first_host"] = first["host"]
+            r["first_models"] = first["models"]
+        elif not r.get("error"):
+            r["error"] = "no rows produced a server (check your mapping)"
+        results.append(r)
+    return web.json_response({"results": results})
 
 
 async def handle_server_count(request):
@@ -1639,7 +1917,7 @@ async def handle_v1_models(request):
     resp = _check_local(request)
     if resp:
         return resp
-    models = all_models()
+    models = listed_models()
     return web.json_response({
         "object": "list",
         "data": models,
@@ -1792,7 +2070,7 @@ async def handle_api_tags(request):
         " |.  1   |",  " |.  _   |",  " |:  |   |",  " |::.|:. |",
         " `--- ---'",  "          ",  "          ",  "  : :: :  ",
         "          ",  "          "]
-    models = all_models()
+    models = listed_models()
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.localtime(time.time() - (7 * 24 * 60 * 60)))
     return web.json_response({
         "models": [
@@ -3007,6 +3285,9 @@ def make_app():
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
     swagger.add_get("/dashboard-models", handle_dashboard_models)
+    swagger.add_get("/settings", handle_settings_get)
+    swagger.add_post("/settings", handle_settings_post)
+    swagger.add_post("/settings/test", handle_settings_test)
     swagger.add_get("/dashboard/server-count", handle_server_count)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)
@@ -3084,7 +3365,8 @@ def main():
     PORT = args.port
     _LOCAL = args.local
     _CURLIFY = args.curlify
-    log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, LOCAL={_LOCAL}")
+    load_settings()   # persisted dashboard settings override the CLI defaults
+    log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, MIN_COUNT={MIN_COUNT}, LOCAL={_LOCAL}")
 
     app = make_app()
 

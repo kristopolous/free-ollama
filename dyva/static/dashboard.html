@@ -47,7 +47,7 @@ body.chat{overflow-y:scroll}
 #hostCard .card-inner{height:auto;max-height:70vh}
 /* tabs + filter stay pinned; only the list scrolls */
 #mpane-text,#mpane-image,#pane-last,#pane-good,#pane-maybe,#pane-bad,#hostList{flex:1;min-height:0;overflow-y:auto}
-.card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px;cursor:pointer;user-select:none}
+.card h2{font-size:.95rem;text-transform:uppercase;letter-spacing:.05em;color:#999;margin-bottom:10px}
 .status-line{padding:2px 0;font-size:.78rem}
 .status-searching{color:#888}
 .status-trying{color:#77a}
@@ -75,8 +75,6 @@ body.chat{overflow-y:scroll}
 .htab-count{background:#2a2a3a;color:#aaa;border-radius:8px;padding:1px 6px;font-size:.68rem;font-family:ui-monospace,monospace;min-width:1.4em;text-align:center;line-height:1.4}
 .htab.active .htab-count{background:#33334a;color:#ccd}
 .more{font-size:.8rem;color:#666;margin-top:6px}
-.card.collapsed h2::before{transform:rotate(-90deg)}
-.card.collapsed .card-inner{display:none}
 
 label{display:block;font-size:.8rem;color:#999;margin-bottom:6px}
 input[type=text],input[type=number],textarea,select{width:100%;padding:8px 10px;border:1px solid #444;border-radius:6px;background:#2a2a2a;color:#eee;font-size:.85rem;outline:none;font-family:ui-monospace,monospace}
@@ -185,6 +183,39 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .doc-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #333;flex-shrink:0}
 .doc-select{flex:1;min-width:0}
 .doc-type{color:#888;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+.settings-wrap{max-width:none}
+.settings-inner{height:auto;display:block;gap:0;overflow:visible}
+.setting{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}
+.setting-text{display:flex;flex-direction:column;min-width:0}
+.setting-name{font-size:.9rem;color:#eee}
+.setting input[type=number]{width:120px;flex-shrink:0}
+.setting-help{color:#888;font-size:.75rem;margin-top:4px;line-height:1.4}
+.setting-help code{background:#111;padding:.05em .3em;border-radius:4px;font-size:.72rem}
+.setting-sources{margin-bottom:20px}
+.src-head{display:flex;align-items:center;gap:8px;position:relative}
+.src-head .setting-name{font-size:.9rem}
+.src-help-btn{width:18px;height:18px;border-radius:50%;border:1px solid #555;background:none;color:#999;font-size:.72rem;cursor:pointer;line-height:1;flex-shrink:0;padding:0}
+.src-help-btn:hover{color:#eee;border-color:#888}
+.src-help-pop{display:none;position:absolute;top:calc(100% + 8px);left:0;width:min(440px,82vw);background:#1e1e1e;border:1px solid #3a3a4a;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.5);padding:12px 14px;z-index:130;font-size:.78rem;line-height:1.5;color:#ccc}
+.src-help-pop.open{display:block}
+.src-help-title{font-weight:600;color:#eee;margin-bottom:6px}
+.src-help-pop p{margin:.5em 0}
+.src-help-pop ul{margin:.4em 0;padding-left:1.4em}
+.src-help-pop code{background:#111;padding:.05em .3em;border-radius:4px;font-size:.72rem}
+.src-help-pop pre{background:#111;border:1px solid #333;border-radius:6px;padding:.6em;overflow-x:auto;font-size:.72rem;margin:.4em 0;white-space:pre}
+.src-textarea{width:100%;min-height:240px;margin-top:8px;font-family:ui-monospace,monospace;font-size:.8rem;background:#111;border:1px solid #444;border-radius:6px;color:#eee;padding:8px;resize:vertical}
+.src-error{color:#c33;font-size:.75rem;margin-top:5px;min-height:1em}
+.src-add-btn,.src-test-btn{background:#26262e;color:#ccc;border:1px solid #444;border-radius:6px;padding:6px 14px;font-size:.8rem;cursor:pointer;flex-shrink:0}
+.src-add-btn{margin-left:auto}
+.src-test-btn{margin-left:8px}
+.src-add-btn:hover,.src-test-btn:hover{background:#2f2f3a}
+.src-test{margin-top:8px;font-size:.78rem;line-height:1.5}
+.src-test-ok{color:#9a9aa8}
+.src-test-err{color:#c33}
+.settings-actions{margin-top:8px;display:flex;justify-content:flex-end;align-items:center;gap:12px}
+.settings-save{background:#2a2a4a;color:#9ab8ff;border:none;border-radius:6px;padding:8px 20px;font-size:.85rem;cursor:pointer}
+.settings-save:hover{background:#33335a}
+.settings-status{color:#4a4;font-size:.8rem}
 .doc-btn,.doc-close{background:none;border:none;color:#888;cursor:pointer;font-size:1rem;flex-shrink:0;padding:0 2px;display:flex;align-items:center}
 .doc-btn:hover{color:#ccc}
 .doc-btn svg{width:16px;height:16px}
@@ -294,6 +325,7 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <button class="tab active" data-tab="serverroom">Server Room</button>
 <button class="tab" data-tab="chat">Chat</button>
 <button class="tab" data-tab="image">Image</button>
+<button class="tab" data-tab="settings">Settings</button>
 </div>
 
 <div id="serverroom" class="panel active">
@@ -377,7 +409,7 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <div class="attach-row" id="chatAttachments" style="display:none"></div>
 <div class="input-row">
 <textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
-<input id="chatFiles" type="file" multiple accept="image/*,.pdf" style="display:none">
+<input id="chatFiles" type="file" multiple style="display:none">
 <div class="input-tools">
 <button id="chatAttach" title="Attach files"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg></button>
 <button id="chatSend" title="Send"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg></button>
@@ -475,6 +507,46 @@ __SD_MODELS__
 </div>
 </div>
 
+<div id="settings" class="panel">
+<div class="settings-wrap">
+<div class="card"><div class="card-inner settings-inner">
+<label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
+<div class="setting-sources">
+<div class="src-head"><span class="setting-name">Additional sources</span><button type="button" id="srcHelpBtn" class="src-help-btn" title="Format &amp; examples">?</button>
+<div id="srcHelp" class="src-help-pop">
+<div class="src-help-title">Additional sources</div>
+<p>Each source fetches a JSON <b>list of host rows</b> from its <code>url</code> and maps fields onto host entries. Configured sources are tried <b>before</b> the built-ins, so they win on duplicate hosts.</p>
+<p><b>mapping</b> — each target field is one of:</p>
+<ul><li><code>{"field": "x"}</code> — copy <code>row["x"]</code> from the source row</li><li><code>{"value": 0}</code> — a constant</li></ul>
+<p>Map a <code>server</code> (or <code>url</code>) so the host can be keyed; <code>models</code> should resolve to a list of strings. CSV / transform-heavy sources aren't supported here.</p>
+<p><b>Example</b></p>
+<pre>[
+  {
+    "name": "my-list",
+    "url": "https://example.com/hosts.json",
+    "mapping": {
+      "server": {"field": "url"},
+      "models": {"field": "models"},
+      "tps":    {"value": 0}
+    }
+  }
+]</pre>
+</div>
+<button type="button" id="srcAddBtn" class="src-add-btn">Add source</button>
+<button type="button" id="srcTestBtn" class="src-test-btn">Test sources</button>
+</div>
+<small class="setting-help">Extra JSON host sources, fetched before the built-ins (highest priority). A JSON array of <code>{name, url, mapping}</code>.</small>
+<textarea id="setSources" class="src-textarea" spellcheck="false" placeholder="[]"></textarea>
+<div id="srcError" class="src-error"></div>
+<div id="srcTest" class="src-test"></div>
+</div>
+<div class="settings-actions"><span id="settingsStatus" class="settings-status"></span><button id="settingsSave" class="settings-save">Save</button></div>
+</div></div>
+</div>
+</div>
+
 <script id="chatModelsData" type="application/json">__CHAT_MODELS__</script>
 <script>
 var evtSource=new EventSource('api/activity');
@@ -518,17 +590,6 @@ document.querySelectorAll('[data-mpane]').forEach(function(t){
   })
 });
 try{var savedMpane=localStorage.getItem('dyva_modelpane');if(savedMpane&&savedMpane!=='text'){var mb=document.querySelector('[data-mpane="'+savedMpane+'"]');if(mb)mb.click()}}catch(e){}
-
-document.querySelectorAll('.card').forEach(function(card){
-  var h2=card.querySelector('h2');
-  if(!h2)return;
-  var key='dyva_collapsed_'+h2.textContent.replace(/[^a-z0-9]+/gi,'_').toLowerCase();
-  if(localStorage.getItem(key)==='1')card.classList.add('collapsed');
-  h2.addEventListener('click',function(){
-    card.classList.toggle('collapsed');
-    localStorage.setItem(key,card.classList.contains('collapsed')?'1':'0')
-  })
-})
 
 var _currentModel=null;
 // Server Room data is fetched (not inlined) and rendered here, so each host
@@ -808,6 +869,17 @@ function b64toText(b64){
     for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
     return new TextDecoder('utf-8').decode(bytes);
   }catch(e){return ''}
+}
+function fileIsText(f){
+  var mt=(f.type||'').toLowerCase();
+  if(mt.indexOf('text/')===0)return true;
+  if(/(json|xml|csv|javascript|ecmascript|typescript|x-sh|shell|yaml|x-python|x-c|x-java|html|markdown|sql|toml|x-perl|x-ruby|x-php|x-yaml)/.test(mt))return true;
+  if(mt===''||mt==='application/octet-stream'){
+    var n=(f.name||'').toLowerCase();
+    if(/(^|\/)(dockerfile|makefile)$/.test(n))return true;
+    return /\.(txt|text|log|md|markdown|rst|json|jsonl|ndjson|xml|csv|tsv|ya?ml|toml|ini|cfg|conf|env|properties|gradle|js|mjs|cjs|jsx|ts|tsx|py|pyw|rb|pl|pm|php|go|rs|java|kt|kts|c|h|cpp|cc|cxx|hpp|cs|swift|scala|sh|bash|zsh|fish|sql|html|htm|css|scss|sass|less|vue|svelte|r|lua|dart|ex|exs|erl|hs|clj|cljs|el|vim|tf|proto|graphql|gql)$/.test(n);
+  }
+  return false;
 }
 function chatPayload(c){
   return {model:c.model||'',messages:(c.messages||[]).map(function(m){
@@ -1198,12 +1270,19 @@ async function sendChat(){
       var o={role:m.role,content:m.content};
       if(m.tool_calls)o.tool_calls=m.tool_calls;
       if(m.files&&m.files.length){
-        var imgs=[];
+        var imgs=[],extra='';
         m.files.forEach(function(f){
-          var d=f.dataUrl||'';var i=d.indexOf('base64,');
-          if(i>=0)imgs.push(d.slice(i+7));
+          var d=f.dataUrl||'';
+          if((f.type||'').toLowerCase().indexOf('image/')===0){
+            var i=d.indexOf('base64,');if(i>=0)imgs.push(d.slice(i+7));   // vision image
+          }else if(fileIsText(f)){
+            extra+='\n\n--- File: '+(f.name||'file')+' ---\n'+b64toText(d);  // inline text/source
+          }else{
+            extra+='\n\n[Attached file: '+(f.name||'file')+' ('+(f.type||'unknown type')+') — contents not extractable as text]';
+          }
         });
         if(imgs.length)o.images=imgs;
+        if(extra)o.content=(o.content||'')+extra;
       }
       return o;
     });
@@ -1781,11 +1860,99 @@ function activateTab(name,chatId){
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
   document.body.classList.toggle('chat',name==='chat');
   if(name==='chat'&&chatId)loadChatById(chatId);
+  if(name==='settings')loadSettings();
 }
+function loadSettings(){
+  fetch('settings',{cache:'no-store'}).then(function(r){return r.json()}).then(function(s){
+    document.getElementById('setWorkers').value=s.workers;
+    document.getElementById('setTimeout').value=s.timeout;
+    document.getElementById('setMinCount').value=s.min_count;
+    document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
+    document.getElementById('srcError').textContent='';
+    document.getElementById('settingsStatus').textContent='';
+  }).catch(function(){});
+}
+function saveSettings(){
+  var body={
+    workers:parseInt(document.getElementById('setWorkers').value,10),
+    timeout:parseInt(document.getElementById('setTimeout').value,10),
+    min_count:parseInt(document.getElementById('setMinCount').value,10)
+  };
+  if(isNaN(body.workers)||body.workers<1)delete body.workers;
+  if(isNaN(body.timeout)||body.timeout<1)delete body.timeout;
+  if(isNaN(body.min_count)||body.min_count<0)delete body.min_count;
+  var srcErr=document.getElementById('srcError');srcErr.textContent='';
+  var raw=document.getElementById('setSources').value.trim();
+  var sources;
+  try{sources=raw?JSON.parse(raw):[]}catch(e){srcErr.textContent='Invalid JSON: '+e.message;return;}
+  if(!Array.isArray(sources)){srcErr.textContent='Sources must be a JSON array.';return;}
+  body.sources=sources;
+  var st=document.getElementById('settingsStatus');st.style.color='#4a4';st.textContent='saving…';
+  fetch('settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){return r.json().then(function(s){return {ok:r.ok,s:s}})})
+    .then(function(res){
+      if(!res.ok){st.style.color='#c33';st.textContent=(res.s&&res.s.error)||'save failed';return;}
+      var s=res.s;
+      document.getElementById('setWorkers').value=s.workers;
+      document.getElementById('setTimeout').value=s.timeout;
+      document.getElementById('setMinCount').value=s.min_count;
+      document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
+      st.style.color='#4a4';st.textContent=s.refreshed?'saved · sources re-pulled':'saved';setTimeout(function(){st.textContent=''},3000);
+    })
+    .catch(function(){st.style.color='#c33';st.textContent='save failed';});
+}
+function testSources(){
+  var srcErr=document.getElementById('srcError');srcErr.textContent='';
+  var out=document.getElementById('srcTest');out.textContent='';
+  var raw=document.getElementById('setSources').value.trim();
+  var sources;
+  try{sources=raw?JSON.parse(raw):[]}catch(e){srcErr.textContent='Invalid JSON: '+e.message;return;}
+  if(!Array.isArray(sources)){srcErr.textContent='Sources must be a JSON array.';return;}
+  if(!sources.length){out.textContent='No sources to test.';return;}
+  out.textContent='testing…';
+  fetch('settings/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sources:sources})})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.error){out.innerHTML='<div class="src-test-err">'+escHtml(d.error)+'</div>';return;}
+      out.innerHTML=(d.results||[]).map(function(r){
+        if(r.error)return '<div class="src-test-err">'+escHtml(r.name)+': '+escHtml(r.error)+'</div>';
+        var line=escHtml(r.name)+': found '+r.servers+' servers and '+r.models+' models.';
+        if(r.first_host)line+=' First is '+escHtml(r.first_host)+' with '+r.first_models+' models.';
+        return '<div class="src-test-ok">'+line+'</div>';
+      }).join('')||'<div class="src-test-ok">No sources.</div>';
+    })
+    .catch(function(){out.innerHTML='<div class="src-test-err">test request failed</div>';});
+}
+function addSource(){
+  var srcErr=document.getElementById('srcError');srcErr.textContent='';
+  var el=document.getElementById('setSources');
+  var raw=el.value.trim();
+  var sources;
+  try{sources=raw?JSON.parse(raw):[]}catch(e){srcErr.textContent='Fix the JSON before adding a source: '+e.message;return;}
+  if(!Array.isArray(sources)){srcErr.textContent='Sources must be a JSON array.';return;}
+  // official host-entry keys with their defaults; "source" is auto-set to name
+  sources.push({name:'unique-string',url:'https://some-site/file.json',mapping:{
+    server:{value:''},
+    models:{field:'models'},
+    tps:{value:0},
+    version:{value:''},
+    service:{value:'ollama'}
+  }});
+  el.value=JSON.stringify(sources,null,2);
+  el.scrollTop=el.scrollHeight;
+}
+document.getElementById('settingsSave').addEventListener('click',saveSettings);
+document.getElementById('srcAddBtn').addEventListener('click',addSource);
+document.getElementById('srcTestBtn').addEventListener('click',testSources);
+var srcHelpBtn=document.getElementById('srcHelpBtn'),srcHelpPop=document.getElementById('srcHelp');
+srcHelpBtn.addEventListener('click',function(e){e.stopPropagation();srcHelpPop.classList.toggle('open')});
+srcHelpPop.addEventListener('click',function(e){e.stopPropagation()});
+document.addEventListener('click',function(){srcHelpPop.classList.remove('open')});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')srcHelpPop.classList.remove('open')});
 function tabFromHash(){
   var h=location.hash.replace(/^#/,'');
   if(h.indexOf('chat/')===0)return{tab:'chat',chatId:h.slice(5)};
-  if(h==='serverroom'||h==='chat'||h==='image')return{tab:h};
+  if(h==='serverroom'||h==='chat'||h==='image'||h==='settings')return{tab:h};
   return{tab:'serverroom'};
 }
 document.querySelectorAll('.tab').forEach(function(t){
