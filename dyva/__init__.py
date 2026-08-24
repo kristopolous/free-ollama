@@ -227,7 +227,6 @@ def refresh_cache():
        ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp" ),
        ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
        ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" ),
-       ( 'https://9ol.es/graflex.json', f"{_db}-graflex.tmp" )
     ]
     for url, loc in downloads:
       try:
@@ -274,16 +273,6 @@ def refresh_cache():
           entry['models'] = []
         if ip not in host_map:
           host_map[ip] = entry
-
-    # graflex is the authoritative built-in reference (after configured sources).
-    if os.path.exists(f'{_db}-graflex.tmp'):
-      with open(f'{_db}-graflex.tmp', 'r') as f:
-        for row in json.loads(f.read()):
-          ip = row.get('url').rstrip('/')
-          if ip in host_map:
-            continue
-          row.update({'source': 'graflex', 'tps': 0, 'server': ip})
-          host_map[ip] = row
 
     if os.path.exists(f'{_db}-forrany.tmp'):
       with open(f'{_db}-forrany.tmp', 'r') as f:
@@ -1861,6 +1850,37 @@ async def handle_settings_test(request):
     return web.json_response({"results": results})
 
 
+async def handle_settings_import(request):
+    """
+    Import source definitions from a URL (JSON)
+    ---
+    tags: [UI]
+    summary: Fetch a URL that returns a JSON list of source dicts (server-side, avoids CORS)
+    responses:
+      '200':
+        description: The fetched list of sources
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    url = body.get("url")
+    if not url or not isinstance(url, str):
+        return web.json_response({"error": "url required"}, status=400)
+    try:
+        text = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: requests.get(url, timeout=20).text)
+        data = json.loads(text)
+    except Exception as ex:
+        return web.json_response({"error": f"fetch/parse failed: {ex}"}, status=400)
+    if not isinstance(data, list):
+        return web.json_response({"error": "url did not return a JSON list of sources"}, status=400)
+    return web.json_response({"sources": data})
+
+
 async def handle_server_count(request):
     """
     Matching server count (JSON)
@@ -3288,6 +3308,7 @@ def make_app():
     swagger.add_get("/settings", handle_settings_get)
     swagger.add_post("/settings", handle_settings_post)
     swagger.add_post("/settings/test", handle_settings_test)
+    swagger.add_post("/settings/import", handle_settings_import)
     swagger.add_get("/dashboard/server-count", handle_server_count)
     swagger.add_get("/v1/models", handle_v1_models)
     swagger.add_get("/clear-bad", handle_clear_bad)

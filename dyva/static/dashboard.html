@@ -70,8 +70,6 @@ body.chat{overflow-y:scroll}
 .htab{background:transparent;color:#999;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 14px;font-size:.8rem;cursor:pointer;display:inline-flex;align-items:center;gap:5px;border-radius:6px 6px 0 0}
 .htab:hover{color:#ccc;background:#26262e;border-bottom-color:#555}
 .htab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
-.htab-clear{margin-left:auto;align-self:center;color:#c33;font-size:.75rem;text-decoration:underline;cursor:pointer}
-.htab-clear:hover{color:#e55}
 .htab-count{background:#2a2a3a;color:#aaa;border-radius:8px;padding:1px 6px;font-size:.68rem;font-family:ui-monospace,monospace;min-width:1.4em;text-align:center;line-height:1.4}
 .htab.active .htab-count{background:#33334a;color:#ccd}
 .more{font-size:.8rem;color:#666;margin-top:6px}
@@ -203,7 +201,7 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .src-help-pop ul{margin:.4em 0;padding-left:1.4em}
 .src-help-pop code{background:#111;padding:.05em .3em;border-radius:4px;font-size:.72rem}
 .src-help-pop pre{background:#111;border:1px solid #333;border-radius:6px;padding:.6em;overflow-x:auto;font-size:.72rem;margin:.4em 0;white-space:pre}
-.src-textarea{width:100%;min-height:240px;margin-top:8px;font-family:ui-monospace,monospace;font-size:.8rem;background:#111;border:1px solid #444;border-radius:6px;color:#eee;padding:8px;resize:vertical}
+.src-textarea{width:100%;min-height:360px;margin-top:8px;font-family:ui-monospace,monospace;font-size:.8rem;background:#111;border:1px solid #444;border-radius:6px;color:#eee;padding:8px;resize:vertical}
 .src-error{color:#c33;font-size:.75rem;margin-top:5px;min-height:1em}
 .src-add-btn,.src-test-btn{background:#26262e;color:#ccc;border:1px solid #444;border-radius:6px;padding:6px 14px;font-size:.8rem;cursor:pointer;flex-shrink:0}
 .src-add-btn{margin-left:auto}
@@ -355,7 +353,6 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <button type="button" class="htab" data-pane="good">Good<span class="htab-count" id="cnt-good"></span></button>
 <button type="button" class="htab" data-pane="maybe">Maybe<span class="htab-count" id="cnt-maybe"></span></button>
 <button type="button" class="htab" data-pane="bad">Bad<span class="htab-count" id="cnt-bad"></span></button>
-<span id="clearBad" class="htab-clear" title="Forget all bad host+model pairs">clear bad</span>
 </div>
 <div id="pane-last">
 <div id="lastList"></div>
@@ -535,6 +532,7 @@ __SD_MODELS__
 ]</pre>
 </div>
 <button type="button" id="srcAddBtn" class="src-add-btn">Add source</button>
+<button type="button" id="srcUrlBtn" class="src-test-btn">Add from url</button>
 <button type="button" id="srcTestBtn" class="src-test-btn">Test sources</button>
 </div>
 <small class="setting-help">Extra JSON host sources, fetched before the built-ins (highest priority). A JSON array of <code>{name, url, mapping}</code>.</small>
@@ -549,6 +547,15 @@ __SD_MODELS__
 
 <script id="chatModelsData" type="application/json">__CHAT_MODELS__</script>
 <script>
+// Activate the tab from the URL hash IMMEDIATELY, before any blocking load
+// (a synchronous XHR later on would otherwise delay navigation until it returns).
+(function(){
+  var h=(location.hash||'').replace(/^#/,'');
+  var tab=h.indexOf('chat/')===0?'chat':(['serverroom','chat','image','settings'].indexOf(h)>=0?h:'serverroom');
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===tab)});
+  document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===tab)});
+  if(tab==='chat')document.body.classList.add('chat');
+})();
 var evtSource=new EventSource('api/activity');
 var paused=false;
 function refreshLists(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d)}).catch(function(){})}
@@ -566,9 +573,6 @@ function filterModels(){
   // searches the whole list and the "... and N more" count matches the results
   if(typeof renderHostPanes==='function')renderHostPanes();
 }
-document.getElementById('clearBad').addEventListener('click',function(e){e.preventDefault();e.stopPropagation();
-  var x=new XMLHttpRequest();x.open('GET','clear-bad');
-  x.onload=function(){location.reload()};x.send()})
 
 document.querySelectorAll('.htab[data-pane]').forEach(function(t){
   t.addEventListener('click',function(){
@@ -1941,8 +1945,31 @@ function addSource(){
   el.value=JSON.stringify(sources,null,2);
   el.scrollTop=el.scrollHeight;
 }
+function addFromUrl(){
+  var srcErr=document.getElementById('srcError');srcErr.textContent='';
+  var el=document.getElementById('setSources');
+  var existing;
+  try{var raw=el.value.trim();existing=raw?JSON.parse(raw):[]}catch(e){srcErr.textContent='Fix the JSON before importing: '+e.message;return;}
+  if(!Array.isArray(existing)){srcErr.textContent='Sources must be a JSON array.';return;}
+  var url=prompt('URL to a JSON list of source definitions:');
+  if(!url)return;
+  srcErr.style.color='#888';srcErr.textContent='fetching…';
+  fetch('settings/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url})})
+    .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
+    .then(function(res){
+      srcErr.style.color='#c33';
+      if(!res.ok){srcErr.textContent=(res.j&&res.j.error)||'import failed';return;}
+      var added=res.j.sources||[];
+      el.value=JSON.stringify(existing.concat(added),null,2);
+      el.scrollTop=el.scrollHeight;
+      srcErr.style.color='#4a4';srcErr.textContent='added '+added.length+' source'+(added.length===1?'':'s');
+      setTimeout(function(){if(srcErr.textContent.indexOf('added')===0){srcErr.style.color='#c33';srcErr.textContent=''}},3000);
+    })
+    .catch(function(){srcErr.style.color='#c33';srcErr.textContent='import failed';});
+}
 document.getElementById('settingsSave').addEventListener('click',saveSettings);
 document.getElementById('srcAddBtn').addEventListener('click',addSource);
+document.getElementById('srcUrlBtn').addEventListener('click',addFromUrl);
 document.getElementById('srcTestBtn').addEventListener('click',testSources);
 var srcHelpBtn=document.getElementById('srcHelpBtn'),srcHelpPop=document.getElementById('srcHelp');
 srcHelpBtn.addEventListener('click',function(e){e.stopPropagation();srcHelpPop.classList.toggle('open')});
