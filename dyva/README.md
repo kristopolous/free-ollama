@@ -5,7 +5,7 @@ OpenAI and Ollama-compatible proxy that routes inference to insecure Ollama, vll
 Compatible enough that the real Ollama CLI thinks it's talking to a real Ollama server — see [below](#use-it-like-ollama).
 
 Complete with even a little chat thingy. Look at the thingy!
-<img width="930" alt="dumpster" src="https://github.com/user-attachments/assets/162b7938-1284-446a-b99e-f56acb895706" />
+<img alt="towers" src="https://github.com/user-attachments/assets/a169c629-71fd-44f3-9815-8047a43109d9" />
 
 The chat thingy features these jazzy little videos instead of a spinner. Here's all 10 of them together. There's audio. Maybe there shouldn't be.
 
