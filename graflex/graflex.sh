@@ -108,6 +108,19 @@ ENDL
     SITE=fofa
     PORTS="80,443,8080,7860"
     COUNTRIES="US,CN,DE,IN,JP,KR,BR,GB,FR,HK,TW,CA,AU,RU,NL,SG,ID,VN,IT,ES"
+    FID=$({ 
+cat << ENDL 
+CfOOPt6Nd3WtpgTJF1CZMQ==
+SKGUqQuUlkehGS8jB/cz3w==
+bkoVAuNuNwTuBfCjZ+d4xw==
+sGe21936bIKF2zWmLyb7fQ==
+t5OB7B8z43gJDAyGFPredQ==
+zO99w44qU6me2LeJntB/xw==
+N/Vkkdevw+ddMZQvyu4UHw==
+ENDL
+} | tr '\n' ',' | tr -d ' '
+)
+
     ;;
 
   *)
