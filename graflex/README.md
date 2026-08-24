@@ -1,8 +1,8 @@
 # graflex
 
-Discover public internet hosts via search-engine scraping (FOFA or Shodan) without paying for an API. Because let's be real, it wouldn't be free ollama if you had to pay Shodan/FOFA.
+Discover public internet hosts via search-engine scraping (FOFA or Shodan) without paying for an API. Because let's be real, it wouldn't be Free Ollama if you had to pay Shodan/FOFA.
 
-This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json)
+This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json) but there is no output included by default.
 
 Fair warning, running all the probes takes about 10 days. Days with a d. 
 
@@ -17,7 +17,7 @@ pip install -e .
 Create a `.env` file:
 
 ```env
-# Required for -t fofa (default) — FOFA API key
+# Required for -t fofa (default)
 FOFA_KEY=your_fofa_api_key
 
 # Required — FOFA Authorization header token

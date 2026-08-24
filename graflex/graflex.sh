@@ -8,14 +8,14 @@ EXTRA_ARGS=("$@")
 FID=
 SITE=fofa
 SERVERS=
-
+source .env
 
 case "$SERVICE" in
   combine)
     set -x
     cd ~/.cache/free-ollama
-    jq -s 'add' *-working.json | ssh 9ol.es "cat > www/graflex.json"
-    curl -s 9ol.es/graflex.json > ~/.cache/free-ollama/free-ollama.json-graflex.tmp
+    jq -s 'add' *-working.json | ssh $_SERVER "cat > $_SERVER_PATH"
+    ./dyva.py --refresh $_SOURCE
     exit
     ;;
 

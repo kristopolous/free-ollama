@@ -220,7 +220,7 @@ async def _remove_activity_listener(q):
             _activity_queues.remove(q)
 
 
-def refresh_cache():
+def refresh_cache(source=None):
     global _servers_cache
     _servers_cache = None
 
@@ -230,13 +230,21 @@ def refresh_cache():
 
     extra_sources = _config_sources()
     downloads = [
-       (_normalize_url(s.get("url")), f"{_db}-extra-{_source_slug(s.get('name'))}.tmp") for s in extra_sources
+       (_normalize_url(s.get("url")), f"{_db}-extra-{_source_slug(s.get('name'))}.tmp", str(s.get('name') or '')) for s in extra_sources
     ] + [
-       ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp" ),
-       ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
-       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp" ),
+       ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp", 'forrany' ),
+       ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp", 'spider' ),
+       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp", 'happyshua' ),
     ]
-    for url, loc in downloads:
+    if source:
+        want = _source_slug(source)
+        matched = [d for d in downloads if _source_slug(d[2]) == want]
+        if not matched:
+            log.error(f"unknown source '{source}' (available: {', '.join(d[2] for d in downloads)})")
+            return False
+        downloads = matched
+        log.info(f"Refreshing only source '{matched[0][2]}'")
+    for url, loc, _ in downloads:
       try:
         response = requests.get(url)
         logging.info(f"Grabbing {url}")
@@ -323,6 +331,8 @@ def refresh_cache():
 
     with open(_db, 'w') as f:
       json.dump(list(host_map.values()), f)
+
+    return True
 
 
 def ensure_cache():
@@ -3379,7 +3389,7 @@ def main():
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
-    parser.add_argument("-r", "--refresh",  action="store_true", help="refresh cache")
+    parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache, optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
     parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
@@ -3387,9 +3397,9 @@ def main():
     args = parser.parse_args()
 
     if args.refresh:
-        refresh_cache()
-        log.info("Refreshed cache")
-        sys.exit(0)
+        ok = refresh_cache(args.refresh if isinstance(args.refresh, str) else None)
+        log.info("Refreshed cache" if ok else "Refresh failed")
+        sys.exit(0 if ok else 1)
 
     banner()
     if args.version:
