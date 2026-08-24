@@ -7,7 +7,7 @@ Compatible enough that the real Ollama CLI thinks it's talking to a real Ollama 
 Complete with even a little chat thingy. Look at the thingy!
 <img width="930" alt="dumpster" src="https://github.com/user-attachments/assets/162b7938-1284-446a-b99e-f56acb895706" />
 
-The chat thingy features these jazzy little videos instead of a spinner. Here's all 10 of them together:
+The chat thingy features these jazzy little videos instead of a spinner. Here's all 10 of them together. There's audio. Maybe there shouldn't be.
 
 
 https://github.com/user-attachments/assets/c9874c72-52ea-4060-a078-d2945add22d6
