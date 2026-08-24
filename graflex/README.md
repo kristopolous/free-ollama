@@ -1,6 +1,6 @@
 # graflex
 
-Discover public internet hosts via FOFA search engine without paying FOFA. Because let's be real, it wouldn't be free ollama if you had to pay Shodan/FOFA.
+Discover public internet hosts via search-engine scraping (FOFA or Shodan) without paying for an API. Because let's be real, it wouldn't be free ollama if you had to pay Shodan/FOFA.
 
 This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json)
 
@@ -17,7 +17,7 @@ pip install -e .
 Create a `.env` file:
 
 ```env
-# Required — FOFA API key
+# Required for -t fofa (default) — FOFA API key
 FOFA_KEY=your_fofa_api_key
 
 # Required — FOFA Authorization header token
@@ -25,6 +25,11 @@ FOFA_AUTHORIZATION=your_fofa_authorization_token
 
 # Optional — Cookie header from browser (required for web method)
 FOFA_COOKIE="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
+
+# Required for -t shodan — shodan.io session cookie.
+# Copy the polito cookie from your browser (or from a curl -b invocation).
+# The \u0021 shell escape curl prints is handled automatically.
+SHODAN_KEY='polito="3edd633c..."'
 ```
 
 ## Usage
@@ -74,7 +79,31 @@ gralex -q 'body="ollama"' -a fetch -n ollama --curlify
 graflex -s ollama -a fetch \
   -c "TH,MX,MY,NZ,..." -p "11434,..." --servers "nginx,..." \
   --id 20260718120000
+
+# Shodan site — scrapes shodan.io web results instead of FOFA
+graflex -t shodan -s ollama -a fetch -n ollama-shodan
+
+# Shodan with a custom query (note: shodan syntax — country:"US", port:8080)
+graflex -t shodan -q '"ollama is running"' -n ollama-shodan \
+  -c 'US,DE' -p '11434,8080'
 ```
+
+## Shodan site
+
+`-t shodan` scrapes the shodan.io web search the same way the `web`
+method scrapes FOFA. Differences from the FOFA flow:
+
+- Query syntax is shodan's: `country:"US"` (quoted code), `port:8080` (bare
+  int), terms joined by spaces instead of `&&`. `--fid` and `--servers` are
+  ignored.
+- Up to 2 pages of results are fetched per query (page N is `&page=N` on the
+  URL).
+- Results are the hrefs of the `<a rel="noopener noreferrer nofollow">` links
+  on the results page.
+- Requires `SHODAN_KEY` in `.env` — your shodan session cookie (`polito="..."`).
+- `-l/--limit` does not apply (page size is whatever shodan serves).
+- Only some services have built-in shodan queries (`ollama`, `comfyui`);
+  others require an explicit `--query` in shodan syntax.
 
 ## Shell script
 
@@ -179,6 +208,7 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
 | `-z`, `--sleep` | Seconds to sleep between requests (default: 4) |
 | `-r`, `--random` | Shuffle the combination list (countries × ports × servers plus the FID follow-ups) so the fetch cycles in random order |
+| `-t`, `--site` | Site to scrape: `fofa` (default) or `shodan`; recorded as `site` on each host entry |
 
 ## Common errors
 

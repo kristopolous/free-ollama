@@ -6,6 +6,7 @@ SERVICE="${1:-ollama}"
 shift 2>/dev/null || true
 EXTRA_ARGS=("$@")
 FID=
+SITE=fofa
 SERVERS=
 
 
@@ -16,6 +17,13 @@ case "$SERVICE" in
     jq -s 'add' *-working.json | ssh 9ol.es "cat > www/graflex.json"
     curl -s 9ol.es/graflex.json > ~/.cache/free-ollama/free-ollama.json-graflex.tmp
     exit
+    ;;
+
+  ollama-shodan)
+    SERVICE=ollama
+    SITE=shodan
+    PORTS="11434,9306,5172,5984,8500,50000"
+    COUNTRIES="US,AU,JP,IN,CA,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
     ;;
 
   ollama)
@@ -116,6 +124,7 @@ exec ./graflex.py \
       --countries "$COUNTRIES" \
       "${EXTRA_ARGS[@]}" "${fid[@]}" \
       --ports "$PORTS" \
+      --site  "$SITE" \
       "${query[@]}" --random \
       --name    "$SERVICE" "${servers[@]}" \
       --service "$SERVICE" \

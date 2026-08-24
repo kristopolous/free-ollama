@@ -33,11 +33,20 @@ MAX_BACKOFF = 300
 SLEEP_DEFAULT = 4
 STATS_EVERY = 250
 
+
+def _clean_cookie(value):
+    return value.replace("\\u0021", "!").strip()
+
+
 FOFA_KEY = os.getenv("FOFA_KEY", "")
 FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
 FOFA_AUTHORIZATION = os.getenv("FOFA_AUTHORIZATION", "")
 FOFA_API = "https://fofa.info/api/v1/search/all"
 FOFA_WEB = "https://en.fofa.info/result"
+
+SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
+SHODAN_WEB = "https://www.shodan.io/search"
+SHODAN_PAGES = 2
 
 SERVICE_CONFIG = {
     "a1111": {
@@ -48,12 +57,14 @@ SERVICE_CONFIG = {
     "comfyui": {
         "port": 8188,
         "fofa_query": 'title="ComfyUI"',
+        "shodan_query": 'http.title:"ComfyUI"',
         "check_path": "/models/checkpoints",
         "stats_path": "/api/system_stats",
     },
     "ollama": {
         "port": 11434,
         "fofa_query": 'body="ollama"',
+        "shodan_query": '"ollama is running"',
         "check_path": "/api/tags",
     },
     "llama.cpp": {
@@ -99,6 +110,19 @@ def _entry_host(entry):
     if url:
         return url.split("://", 1)[1].rstrip("/")
     return ""
+
+
+def _value_to_host_port(v):
+    from urllib.parse import urlparse
+
+    v = v.strip()
+    if v.startswith("http://") or v.startswith("https://"):
+        parsed = urlparse(v)
+        return parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+    if ":" in v:
+        parts = v.split(":")
+        return parts[0], int(parts[1])
+    return v, 80
 
 
 def _fmt_duration(seconds):
@@ -454,6 +478,7 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False):
         hosts.append({
             "service": service,
             "host": f"{ip_addr}:{port_num}",
+            "site": "fofa",
         })
     return hosts
 
@@ -581,7 +606,6 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
 
 def _parse_fofa_html(html_path, service):
     import re
-    from urllib.parse import urlparse
 
     with open(html_path) as f:
         content = f.read()
@@ -594,36 +618,235 @@ def _parse_fofa_html(html_path, service):
     seen = set()
     hosts = []
     for v in values:
-        v = v.strip()
-        if not v or v in seen:
+        host, port = _value_to_host_port(v)
+        key = f"{host}:{port}"
+        if not host or not v.strip() or key in seen:
             continue
-        seen.add(v)
-
-        if v.startswith("http://") or v.startswith("https://"):
-            parsed = urlparse(v)
-            host = parsed.hostname
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        elif ":" in v:
-            parts = v.split(":")
-            host = parts[0]
-            port = int(parts[1])
-        else:
-            host = v
-            port = 80
-
+        seen.add(key)
         hosts.append({
             "service": service,
-            "host": f"{host}:{port}",
+            "host": key,
+            "site": "fofa",
         })
 
     log.info(f"  {len(hosts)} hosts from {html_path}")
     return hosts
 
 
-def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False):
+def _parse_shodan_html(html_path, service):
+    import re
+
+    with open(html_path) as f:
+        content = f.read()
+
+    hrefs = []
+    for tag in re.findall(r"<a\b[^>]*>", content):
+        if 'rel="noopener noreferrer nofollow"' not in tag:
+            continue
+        m = re.search(r'href="([^"]+)"', tag)
+        if m:
+            hrefs.append(m.group(1))
+
+    if not hrefs:
+        log.warning(f"! NO RESULTS from {html_path}")
+        return []
+
+    seen = set()
+    hosts = []
+    for href in hrefs:
+        if not (href.startswith("http://") or href.startswith("https://")):
+            continue
+        host, port = _value_to_host_port(href)
+        key = f"{host}:{port}"
+        if not host or key in seen:
+            continue
+        seen.add(key)
+        hosts.append({
+            "service": service,
+            "host": key,
+            "site": "shodan",
+        })
+
+    log.info(f"  {len(hosts)} hosts from {html_path}")
+    return hosts
+
+
+def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=""):
+    import requests
+    import curlify as curlify_mod
+    from urllib.parse import quote
+
+    url = f"{SHODAN_WEB}?query={quote(combined)}"
+    if page > 1:
+        url += f"&page={page}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    if SHODAN_KEY:
+        headers["Cookie"] = SHODAN_KEY
+
+    if curlify:
+        req = requests.Request("GET", url, headers=headers)
+        prepared = req.prepare()
+        log.info(curlify_mod.to_curl(prepared))
+        return []
+
+    if dry:
+        log.info(f"# query: {combined} (page {page})")
+        log.info(f"# url: GET {url}")
+        log.info(f"# cookie: {SHODAN_KEY[:80]}...")
+        return []
+
+    backoff = BACKOFF
+    attempt = 0
+    while True:
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            body = resp.text.lower()
+            if "rate limit" in body or "too many requests" in body:
+                raise RuntimeError("rate limited")
+            break
+        except RuntimeError as e:
+            msg = str(e)
+            if attempt < 2:
+                log.warning(f"{msg}, retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = int(backoff * 1.2)
+                attempt += 1
+            else:
+                log.warning(msg)
+                return None
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else "?"
+            if code in (429, 403) and attempt < 2:
+                log.warning(f"rate limited ({code}), retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = int(backoff * 1.2)
+                attempt += 1
+            else:
+                if code in (429, 403):
+                    log.warning(f"rate limited ({code})")
+                else:
+                    log.error(f"Shodan request failed: {e}")
+                return None
+        except requests.exceptions.ConnectionError as e:
+            if _is_offline_error(e):
+                log.warning(f"offline ({e}); retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff = min(int(backoff * 1.2), MAX_BACKOFF)
+                continue
+            if attempt < 2:
+                log.warning(f"connection error, retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff = int(backoff * 1.2)
+                attempt += 1
+            else:
+                log.error(f"Shodan request failed: {e}")
+                return None
+        except Exception as e:
+            log.error(f"Shodan request failed: {e}")
+            return None
+
+    tmp_dir = "/tmp/graflex"
+    os.makedirs(tmp_dir, exist_ok=True)
+    out_path = os.path.join(tmp_dir, f"shodan-results-{label}-{run_ts}.txt")
+    with open(out_path, "w") as f:
+        f.write(resp.text)
+
+    return _parse_shodan_html(out_path, svc)
+
+
+def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa"):
     hosts_file = _cache_file(name, "hosts")
 
-    if method == "web":
+    if site == "shodan":
+        if not SHODAN_KEY:
+            log.error("SHODAN_KEY must be set in .env for --site shodan. See README for instructions.")
+            return []
+        if servers or fids:
+            log.warning("--servers/--fid are ignored with --site shodan")
+        from datetime import datetime
+        run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
+        if session:
+            log.info(f"resuming session {run_ts}")
+
+        base_query = query
+        if not base_query and service:
+            base_query = SERVICE_CONFIG[service].get("shodan_query")
+        if not base_query:
+            log.error(f"no shodan query for service '{service}' — pass --query (shodan syntax differs from fofa)")
+            return []
+
+        if isinstance(countries, str):
+            country_list = [None] + [s.strip() for s in countries.split(",")]
+        else:
+            country_list = [None] + ["US", "DE", "CN", "JP"]
+        if isinstance(ports, str):
+            port_list = [None] + [s.strip() for s in ports.split(",")]
+        else:
+            port_list = [None]
+            if service:
+                port_list.append(str(SERVICE_CONFIG[service]["port"]))
+
+        if shuffle:
+            random.shuffle(country_list)
+            random.shuffle(port_list)
+
+        pool = _load_json(hosts_file)
+        seen = {f"{h['service']}@{h['host']}" for h in pool}
+        combos = [(c, p) for p in port_list for c in country_list]
+        total_reqs = len(combos) * SHODAN_PAGES
+
+        start = time.time()
+        done_reqs = 0
+        for country, port in combos:
+            qparts = [base_query]
+            if port:
+                qparts.append(f"port:{port}")
+            if country:
+                qparts.append(f'country:"{country}"')
+            combined = " ".join(qparts)
+            print(combined)
+            if not dry:
+                log.info(f"[{done_reqs+1}/{total_reqs}] country={country} port={port}")
+
+            svc = service or name or "unknown"
+            for page in range(1, SHODAN_PAGES + 1):
+                label = f"{country or 'any'}-{port or 'any'}-p{page}"
+                if session:
+                    out_path = os.path.join("/tmp/graflex", f"shodan-results-{label}-{run_ts}.txt")
+                    if os.path.exists(out_path):
+                        if not dry:
+                            log.info(f"  skip page {page} (already fetched)")
+                        done_reqs += 1
+                        continue
+
+                hosts = _fetch_shodan(dry, svc, combined, page=page, run_ts=run_ts, curlify=curlify, label=label)
+                done_reqs += 1
+                if hosts is None:
+                    continue
+
+                for h in hosts:
+                    key = f"{h['service']}@{h['host']}"
+                    if key not in seen:
+                        pool.append(h)
+                        seen.add(key)
+
+                if not dry:
+                    _save_json(hosts_file, pool)
+                    elapsed = time.time() - start
+                    eta = elapsed * (total_reqs / done_reqs) - elapsed
+                    log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}")
+
+                if not dry and not curlify and done_reqs < total_reqs:
+                    time.sleep(sleep)
+
+        hosts = pool
+    elif method == "web":
         if not FOFA_COOKIE:
             log.error("FOFA_COOKIE must be set in .env for the web method. See README for instructions on how to obtain it from your browser.")
             return []
@@ -893,10 +1116,11 @@ def check(service, name=None, check_timeout=60, check_new=False, check_all=False
 def main():
     load_dotenv()
 
-    global FOFA_KEY, FOFA_COOKIE, FOFA_AUTHORIZATION
+    global FOFA_KEY, FOFA_COOKIE, FOFA_AUTHORIZATION, SHODAN_KEY
     FOFA_KEY = os.getenv("FOFA_KEY", "")
     FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
     FOFA_AUTHORIZATION = os.getenv("FOFA_AUTHORIZATION", "")
+    SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
 
     logging.basicConfig(
         level=getattr(logging, os.getenv("LOGLEVEL", "INFO").upper(), logging.INFO),
@@ -919,6 +1143,7 @@ def main():
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
     parser.add_argument("-r", "--random", dest="shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
+    parser.add_argument("-t", "--site", choices=["fofa", "shodan"], default="fofa", help="site to scrape (default: fofa)")
     parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG), help="service to search for")
     parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")
     parser.add_argument("-z", "--sleep", type=int, default=SLEEP_DEFAULT, help=f"seconds to sleep between requests (default: {SLEEP_DEFAULT})")
@@ -928,6 +1153,11 @@ def main():
         parser.error("--query requires --name")
     if not args.service and not args.query and not args.name:
         parser.error("either --service, --query, or --name is required")
+    if args.site == "shodan":
+        if args.method != "web":
+            log.warning("-m/--method is ignored with --site shodan")
+        if args.fids:
+            log.warning("-f/--fid is ignored with --site shodan")
 
     parts = args.action.split("-")
     check_new = args.action == "check-new"
@@ -937,7 +1167,7 @@ def main():
         for step in parts:
             log.info(f"--- {step} ---")
             if step == "fetch":
-                fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle)
+                fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
             elif step == "check":
                 check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers)
     except SystemExit as e:
