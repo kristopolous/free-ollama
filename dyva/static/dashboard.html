@@ -663,7 +663,8 @@ document.addEventListener('visibilitychange',function(){if(document.hidden)_beac
   }
 })();
 document.addEventListener('visibilitychange',function(){
-  if(document.hidden||currentAbort)return;
+  if(document.hidden)return;
+  for(var k in gens)return;   // don't clobber chat list while a generation is running
   try{if(localStorage.getItem('dyva_inflight'))return}catch(e){}
   var x=new XMLHttpRequest();
   x.open('GET','api/chats');
@@ -720,7 +721,7 @@ function renderSidebar(){
   });
 }
 function deleteChat(id){
-  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();location.hash='chat';}
+  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();activeStatus=null;refreshSendButton();location.hash='chat';}
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
 }
@@ -889,8 +890,14 @@ function mdRender(text){
   return out;
 }
 var renderTimer=null;
-var streamState=null;
-var activeStatus=null;
+// Each in-flight generation is tracked per conversation so you can switch
+// chats (and start new generations) while others keep running in the
+// background. gens: chatId(string) -> {ac, raw, think, bubble, statusEl,
+// host, fmodel, tps, stopped}. Only the in-view generation renders live.
+var gens={};
+function genOf(id){return gens[String(id)]}
+var _paintGen=null;      // the in-view generation currently scheduled to paint
+var activeStatus=null;   // in-view generation's status line (the SSE feed writes here)
 var activeImgStatus=null;
 function paintGenStatus(el,d){
   if(!el)return;
@@ -900,8 +907,12 @@ function paintGenStatus(el,d){
 // looping placeholder animation shown inside the bubble until the first tokens
 var _rummageMuted=false;
 try{_rummageMuted=localStorage.getItem('dyva_rummage_muted')==='1'}catch(e){}
+// cycle rummage1..rummage4 on each insert, starting at a random one
+var _rummageN=Math.floor(Math.random()*4)+1;
+function _nextRummage(){var n=_rummageN;_rummageN=_rummageN%4+1;return n;}
 function showRummage(bodyEl){
-  bodyEl.innerHTML='<div class="rummage-wrap"><video class="rummage" src="rummage.mp4" autoplay loop playsinline></video><span class="rummage-msg">Connecting… Please stand by…</span></div>';
+  var src='rummage'+_nextRummage()+'.mp4';
+  bodyEl.innerHTML='<div class="rummage-wrap"><video class="rummage" src="'+src+'" autoplay loop playsinline></video><span class="rummage-msg">Connecting… Please stand by…</span></div>';
   var v=bodyEl.querySelector('.rummage');
   if(!v)return;
   v.muted=_rummageMuted;v.volume=1;
@@ -915,16 +926,16 @@ function showRummage(bodyEl){
   });
   var p=v.play();if(p&&p.catch)p.catch(function(){});
 }
-function paintStream(){
-  if(!streamState)return;
-  var sp=splitThink(streamState.raw);
-  var th=streamState.think+sp.t;
+function paintGen(gen){
+  if(!gen||!gen.bubble||!gen.bubble.bodyEl.isConnected)return;
+  var sp=splitThink(gen.raw);
+  var th=gen.think+sp.t;
   // nothing rendered yet — keep the rummage placeholder rather than blanking
   if(!th && !sp.c.trim())return;
-  streamState.el.innerHTML=thinkHtml(th,true)+mdRender(sp.c);
-  highlightBlocks(streamState.el);
+  gen.bubble.bodyEl.innerHTML=thinkHtml(th,true)+mdRender(sp.c);
+  highlightBlocks(gen.bubble.bodyEl);
   // keep the thinking window pinned to its latest line while it streams
-  var tb=streamState.el.querySelector('.think-body');
+  var tb=gen.bubble.bodyEl.querySelector('.think-body');
   if(tb)tb.scrollTop=tb.scrollHeight;
   chatLog.scrollTop=chatLog.scrollHeight;
 }
@@ -933,9 +944,10 @@ function highlightBlocks(scope){
   var blocks=(scope||document).querySelectorAll('pre code');
   for(var i=0;i<blocks.length;i++){try{window.hljs.highlightElement(blocks[i])}catch(e){}}
 }
-function scheduleStreamRender(){
+function scheduleRender(gen){
+  _paintGen=gen;
   if(renderTimer)return;
-  renderTimer=setTimeout(function(){renderTimer=null;paintStream()},60);
+  renderTimer=setTimeout(function(){renderTimer=null;paintGen(_paintGen)},60);
 }
 function renderMessages(){
   chatLog.innerHTML='';
@@ -1034,7 +1046,7 @@ function setAssistantLabel(el,host,fmodel,tps){
   var lbl=el.querySelector('.role-label')||el;
   lbl.textContent=s;
 }
-function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();location.hash='chat';}
+function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();location.hash='chat';}
 function loadChatById(id){
   closeChatDrawer();
   // Already viewing this chat (e.g. the hashchange fired by saveCurrentChat
@@ -1049,6 +1061,9 @@ function loadChatById(id){
   updateModelCount();
   renderMessages();
   renderSidebar();
+  activeStatus=null;
+  reattachGen(String(id));   // if this chat is still generating, show it live again
+  refreshSendButton();
   if(location.hash!=='#chat/'+id)location.hash='chat/'+id;
 }
 document.getElementById('chatNew').addEventListener('click',newChat);
@@ -1081,7 +1096,6 @@ document.getElementById('chatNextBtn').addEventListener('click',function(e){
 updateModelCount();
 renderSidebar();
 
-var currentAbort=null;
 var SEND_ICON='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
 var STOP_ICON='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>';
 function setSendButton(state){
@@ -1096,12 +1110,14 @@ function setSendButton(state){
     btn.classList.remove('stop');
   }
 }
+// the send/stop button reflects only the conversation currently in view
+function refreshSendButton(){setSendButton(genOf(currentChat.id)?'streaming':'idle')}
 function stopChat(){
-  var ac=currentAbort;
-  if(ac){currentAbort=null;ac.abort();}
+  var g=genOf(currentChat.id);
+  if(g&&g.ac){g.stopped=true;g.ac.abort();}
 }
 async function sendChat(){
-  if(currentAbort)return;
+  if(genOf(currentChat.id))return;   // this conversation is already generating
   var model=document.getElementById('chatModel').value.trim();
   var input=document.getElementById('chatInput');
   var text=input.value.trim();
@@ -1143,25 +1159,31 @@ async function sendChat(){
   runStream(chatId,chatCreated,chatTitle,model,msgs,bubble);
 }
 async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
+  chatId=String(chatId);
   depth=depth||0;
   var useTools=(typeof toolsOn!=='undefined'&&toolsOn)||depth>0;
   var ac=new AbortController();
-  currentAbort=ac;
-  function live(){return chatInView(chatId)&&bubble.bodyEl.isConnected}
+  // one generation record per conversation, reused across tool rounds
+  var gen=gens[chatId]||(gens[chatId]={raw:'',think:'',host:'',fmodel:'',tps:null,stopped:false});
+  gen.ac=ac;gen.bubble=bubble;gen.model=model;gen.chatCreated=chatCreated;gen.chatTitle=chatTitle;
+  var handedOff=false;
+  function inView(){return chatInView(chatId)}
+  function live(){return inView()&&gen.bubble&&gen.bubble.bodyEl.isConnected}
+  function setStatus(t){if(gen.statusEl&&gen.statusEl.parentNode)gen.statusEl.textContent=t}
   function clearInflight(){try{localStorage.removeItem('dyva_inflight')}catch(e){}}
   function keepInflight(){try{var m=JSON.parse(localStorage.getItem('dyva_inflight')||'null');if(!m)return;m.n=(m.n||0)+1;if(m.n<=2)localStorage.setItem('dyva_inflight',JSON.stringify(m));else localStorage.removeItem('dyva_inflight')}catch(e){try{localStorage.removeItem('dyva_inflight')}catch(e2){}}}
   try{sessionStorage.setItem('dyva_own','1')}catch(e){}
-  var full='',think='',tps=null,acc='',toolCalls=[];
+  var full='',think='',tps=null,acc='',toolCalls=[],host='',fmodel=model;
   async function complete(){
     clearInflight();
     if(useTools&&toolCalls.length&&depth<3){
       await runToolRound();
       return;
     }
-    finishStream(bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
+    finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
   }
   async function runToolRound(){
-    if(statusEl&&statusEl.parentNode)statusEl.textContent='calling tool\u2026';
+    setStatus('calling tool\u2026');
     var results=[],urls=[];
     for(var i=0;i<toolCalls.length;i++){
       if(ac.signal.aborted)return;
@@ -1169,7 +1191,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
       var args={};
       try{args=typeof fn.arguments==='string'?JSON.parse(fn.arguments||'{}'):(fn.arguments||{})}catch(e){}
       if(fn.name==='generate_image'){
-        if(activeStatus===statusEl)statusEl.textContent='generating image\u2026';
+        setStatus('generating image\u2026');
         try{
           var ib={prompt:String(args.prompt||'').trim().slice(0,2000)};
           if(args.negative_prompt)ib.negative_prompt=String(args.negative_prompt).trim().slice(0,1000);
@@ -1194,47 +1216,48 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
     }
     msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
     results.forEach(function(res){msgs.push({role:'tool',content:res.text,_meta:{hidden:true}})});
-    saveCurrentChat();
+    if(inView())saveCurrentChat();
     if(full.trim())appendMsgRecord(chatId,{role:'assistant',content:full});
     results.forEach(function(res){
       if(!res.md)return;
       appendMsgRecord(chatId,{role:'assistant',content:res.md});
     });
     var nb=null;
-    if(chatInView(chatId)){
+    if(inView()){
       renderMessages();
       nb=addMsg('assistant','');
       nb.bodyEl.classList.add('streaming');
       showRummage(nb.bodyEl);
     }
-    setSendButton('streaming');
+    handedOff=true;   // keep the gen alive for the next leg
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
     setTimeout(function(){runStream(chatId,chatCreated,chatTitle,model,msgs,nb,depth+1)},0);
   }
-  streamState={el:bubble.bodyEl,think:'',raw:''};
+  gen.raw=full;gen.think=think;
   var statusEl=document.createElement('div');
   statusEl.className='chat-status';
   statusEl.textContent='finding a server\u2026';
-  bubble.bodyEl.parentNode.insertBefore(statusEl,bubble.bodyEl);
-  activeStatus=statusEl;
+  if(bubble&&bubble.bodyEl.parentNode)bubble.bodyEl.parentNode.insertBefore(statusEl,bubble.bodyEl);
+  gen.statusEl=statusEl;
+  if(inView())activeStatus=statusEl;
   try{
     var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(useTools?{model:model,messages:msgs,stream:true,tools:CHAT_TOOLS}:{model:model,messages:msgs,stream:true}),signal:ac.signal});
-    var host=resp.headers.get('X-Dyva-Host')||'';
-    var fmodel=resp.headers.get('X-Dyva-Model')||model;
+    host=resp.headers.get('X-Dyva-Host')||'';gen.host=host;
+    fmodel=resp.headers.get('X-Dyva-Model')||model;gen.fmodel=fmodel;
     if(!resp.ok){
       clearInflight();
       var msg='HTTP '+resp.status;
       try{var j=await resp.json();msg=(j.error&&(j.error.message||j.error))||msg}catch(e){}
       if(live()){
-        bubble.bodyEl.classList.remove('streaming');
-        bubble.bodyEl.removeAttribute('data-stream');
-        bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(msg)+'</span>';
-        saveCurrentChat();
-        renderSidebar();
+        gen.bubble.bodyEl.classList.remove('streaming');
+        gen.bubble.bodyEl.removeAttribute('data-stream');
+        gen.bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(msg)+'</span>';
       }
+      if(inView())saveCurrentChat();
+      renderSidebar();
       return;
     }
-    if(live())setAssistantLabel(bubble.roleEl,host,fmodel);
+    if(live())setAssistantLabel(gen.bubble.roleEl,host,fmodel);
     var reader=resp.body.getReader();
     var dec=new TextDecoder();
     while(true){
@@ -1250,20 +1273,21 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
         try{d=JSON.parse(line)}catch(e){continue}
         if(d.message&&d.message.content){
           full+=d.message.content;
-          streamState.raw=full;
-          if(live())scheduleStreamRender();
+          gen.raw=full;
+          if(live())scheduleRender(gen);
         }
         if(d.message&&d.message.thinking){
           think+=d.message.thinking;
-          streamState.think=think;
-          if(live())scheduleStreamRender();
+          gen.think=think;
+          if(live())scheduleRender(gen);
         }
         if(d.message&&d.message.tool_calls){
           d.message.tool_calls.forEach(function(t){toolCalls.push(t)});
-          if(activeStatus===statusEl)statusEl.textContent='tool: '+(((d.message.tool_calls[0]||{}).function||{}).name||'')+'\u2026';
+          setStatus('tool: '+(((d.message.tool_calls[0]||{}).function||{}).name||'')+'\u2026');
         }
         if(d.done){
           if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
+          gen.tps=tps;
           await complete();
           return;
         }
@@ -1273,33 +1297,51 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   }catch(ex){
     var stopped=ac.signal.aborted;
     if(stopped||!document.hidden)clearInflight();else keepInflight();
-    if(live()){
-      bubble.bodyEl.classList.remove('streaming');
-      bubble.bodyEl.removeAttribute('data-stream');
-      if(stopped){
-        if(full){
-          finishStream(bubble,true,host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
-        }else{
-          bubble.bodyEl.textContent='Generation stopped.';
-        }
-        saveCurrentChat();
-        renderSidebar();
-      }else{
-        var em=document.hidden?'Interrupted while in background - will resume when you return':'Error: '+escHtml(ex.message);
-        bubble.bodyEl.innerHTML='<span class="error">'+em+'</span>';
-        saveCurrentChat();
-        renderSidebar();
+    if(stopped){
+      if(full){
+        if(live()){gen.bubble.bodyEl.classList.remove('streaming');gen.bubble.bodyEl.removeAttribute('data-stream');}
+        finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
+      }else if(live()){
+        gen.bubble.bodyEl.classList.remove('streaming');
+        gen.bubble.bodyEl.textContent='Generation stopped.';
       }
+      if(inView())saveCurrentChat();
+      renderSidebar();
+    }else if(live()){
+      gen.bubble.bodyEl.classList.remove('streaming');
+      gen.bubble.bodyEl.removeAttribute('data-stream');
+      var em=document.hidden?'Interrupted while in background - will resume when you return':'Error: '+escHtml(ex.message);
+      gen.bubble.bodyEl.innerHTML='<span class="error">'+em+'</span>';
+      if(inView())saveCurrentChat();
+      renderSidebar();
     }
   }
   finally{
-    currentAbort=null;
-    streamState=null;
     if(activeStatus===statusEl)activeStatus=null;
     if(statusEl&&statusEl.parentNode)statusEl.parentNode.removeChild(statusEl);
-    try{sessionStorage.removeItem('dyva_own')}catch(e){}
-    setSendButton('idle');
+    if(!handedOff){
+      if(gens[chatId]===gen)delete gens[chatId];
+      try{sessionStorage.removeItem('dyva_own')}catch(e){}
+      if(inView())refreshSendButton();
+    }
   }
+}
+// re-attach a still-running generation to a freshly-rendered bubble when its
+// conversation is brought back into view
+function reattachGen(id){
+  var g=genOf(id);
+  if(!g)return;
+  var b=addMsg('assistant','');
+  b.bodyEl.classList.add('streaming');
+  g.bubble=b;
+  var st=document.createElement('div');
+  st.className='chat-status';
+  st.textContent='generating\u2026';
+  b.bodyEl.parentNode.insertBefore(st,b.bodyEl);
+  g.statusEl=st;
+  activeStatus=st;
+  if(g.host)setAssistantLabel(b.roleEl,g.host,g.fmodel);
+  if(g.raw||g.think)paintGen(g);else showRummage(b.bodyEl);
 }
 function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full){
   var sp=splitThink(full);
@@ -1315,7 +1357,7 @@ function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle
   pushAssistant(chatId,chatCreated,chatTitle,model,sp.c,host,fmodel,tps,isLive,thAll);
 }
 function tryResume(){
-  if(currentAbort)return;
+  for(var k in gens)return;
   try{if(sessionStorage.getItem('dyva_own'))return}catch(e){}
   var r=null;try{r=localStorage.getItem('dyva_inflight')}catch(e){return}
   if(!r)return;
@@ -1338,7 +1380,7 @@ function tryResume(){
 document.addEventListener('visibilitychange',function(){if(!document.hidden)setTimeout(tryResume,300)});
 document.getElementById('chatSend').addEventListener('click',function(e){
   e.preventDefault();
-  if(currentAbort)stopChat();
+  if(genOf(currentChat.id))stopChat();
   else sendChat();
 });
 document.getElementById('chatInput').addEventListener('keydown',function(e){
