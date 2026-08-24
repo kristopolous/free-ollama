@@ -57,6 +57,11 @@ graflex -q "body='ollama is running'" -a fetch -n ollama \
 # Filter by specific FIDs (comma-separated; each runs as QUERY+fid on its own)
 graflex -s comfyui -a fetch -f "xxx,yyy"
 
+# Named queries — fetch-only searches that aren't services (no check step).
+# Results land in <name>-hosts.json with service set to the name.
+# Built-in: gradio (icon_hash=="55115683")
+graflex -n gradio -a fetch
+
 # Check hosts from a named cache file
 graflex -s ollama -a check -n ollama
 
@@ -110,7 +115,7 @@ method scrapes FOFA. Differences from the FOFA flow:
 `graflex.sh` wraps the fetch command with curated defaults per service:
 
 ```bash
-# Fetch hosts for ollama (or comfyui / a1111)
+# Fetch hosts for ollama (or comfyui / a1111 / vllm / llama.cpp / gradio)
 ./graflex.sh ollama
 ```
 
@@ -127,6 +132,21 @@ Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 1
 | `llama.cpp` | 8080 | `/v1/models` |
 | `vllm` | 8000 | `/v1/models` |
 
+## Named queries
+
+Named queries are fetch-only searches that don't fit the service model (no
+probe/check step). They live in `NAMED_QUERIES` in `graflex/__init__.py` and
+are selected with `-n <name>`:
+
+```bash
+graflex -n gradio -a fetch   # icon_hash=="55115683", site fofa
+```
+
+Entries are saved to `~/.cache/free-ollama/gradio-hosts.json` with
+`service: "gradio"` and no check action applies to them. To categorize hosts
+found by other searches as gradio, run FID follow-ups for those searches —
+the `fid` recorded on each entry tells you which fingerprint surfaced it.
+
 ## How it works
 
 ### Fetch
@@ -141,6 +161,12 @@ message showing the session timestamp. Resume later with `--id <run_ts>` to
 skip all previously-fetched combinations and pick up where you left off.
 
 Results saved to `~/.cache/free-ollama/{name}-hosts.json` (default: `image-gen-hosts.json`).
+
+Hosts discovered via an `--fid` search are tagged with that fingerprint:
+`{"service": ..., "host": ..., "site": ..., "fid": "..."}`. If a host was
+already known from a non-FID query, the `fid` is backfilled onto the existing
+entry the next time an FID query surfaces it. This is what lets hosts be
+categorized by the fingerprint they were found under (e.g. gradio).
 
 ### Check
 
@@ -198,10 +224,10 @@ Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notw
 | `-l`, `--limit` | Max results per query (default: 2) |
 | `-m`, `--method` | Fetch method: `api` or `web` (default: web) |
 | `-q`, `--query` | Custom FOFA query (requires `--name`) |
-| `-n`, `--name` | Cache file name prefix (default: `image-gen`) |
+| `-n`, `--name` | Cache file name prefix (default: `image-gen`); for fetch, a named query (`gradio`) also selects its built-in FOFA query |
 | `-c`, `--countries` | Comma-separated country codes to cycle |
 | `-p`, `--ports` | Comma-separated port values to cycle |
-| `-f`, `--fid` | Comma-separated FID values; each is fetched as `QUERY + fid="..."` on its own (not crossed with countries/ports/servers) |
+| `-f`, `--fid` | Comma-separated FID values; each is fetched as `QUERY + fid="..."` on its own (not crossed with countries/ports/servers); hosts found this way record the `fid` |
 | `--servers` | Comma-separated server values to cycle |
 | `-i`, `--id` | Resume a previous session by providing its run timestamp (the `run_ts` from the log) |
 | `-w`, `--workers` | Max parallel check workers (default: 10) |

@@ -103,8 +103,15 @@ ENDL
     COUNTRIES="US,CN,DE,RU,IN,FR,NL,SG,HK,JP,FI,BR,IE,VN,CA,AU,SE,ID,TW,IT,DE,KZ,TH,ES,PL,UA,TR,KR,FI,GB"
     ;;
 
+  gradio)
+    QUERY='icon_hash=="55115683"'
+    SITE=fofa
+    PORTS="80,443,8080,7860"
+    COUNTRIES="US,CN,DE,IN,JP,KR,BR,GB,FR,HK,TW,CA,AU,RU,NL,SG,ID,VN,IT,ES"
+    ;;
+
   *)
-    echo "Usage: $0 [ollama|comfyui|a1111|vllm|llama.cpp|combine]" >&2
+    echo "Usage: $0 [ollama|comfyui|a1111|vllm|llama.cpp|gradio|combine]" >&2
     exit 1
     ;;
 esac
@@ -115,7 +122,11 @@ query=()
 
 [[ -n "$FID" ]] && fid=( "--fid" $FID )
 [[ -n "$SERVERS" ]] && servers=( "--servers" $SERVERS )
-[[ -n "$QUERY" ]] && query=( "--servers" "$QUERY" )
+[[ -n "$QUERY" ]] && query=( "--query" "$QUERY" )
+
+# gradio has no --service entry; -n gradio alone selects the named query
+svc_args=( --service "$SERVICE" )
+[[ "$SERVICE" == "gradio" ]] && svc_args=()
 
 set -x
 
@@ -127,5 +138,5 @@ exec ./graflex.py \
       --site  "$SITE" \
       "${query[@]}" --random \
       --name    "$SERVICE" "${servers[@]}" \
-      --service "$SERVICE" \
+      "${svc_args[@]}" \
       --sleep   "$SLEEP" \

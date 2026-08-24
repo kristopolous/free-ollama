@@ -79,6 +79,13 @@ SERVICE_CONFIG = {
     },
 }
 
+# Named searches aren't services: they have a FOFA query but no probe/check
+# step. Fetch by name alone (-n <name>); entries land in <name>-hosts.json
+# with service set to the name.
+NAMED_QUERIES = {
+    "gradio": 'icon_hash=="55115683"',
+}
+
 
 def _load_json(path, silent=False):
     if not silent:
@@ -421,13 +428,13 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
     return last_error
 
 
-def _fetch_api(dry, limit, service, fid=None, curlify=False):
+def _fetch_api(dry, limit, service, fid=None, curlify=False, query=None):
     import base64
     import requests
     import curlify as curlify_mod
 
-    cfg = SERVICE_CONFIG[service]
-    query = cfg["fofa_query"]
+    if query is None:
+        query = SERVICE_CONFIG[service]["fofa_query"]
     if fid:
         query += f' && fid="{fid}"'
     qb64 = base64.b64encode(query.encode()).decode()
@@ -475,11 +482,14 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False):
     hosts = []
     for row in data.get("results", []):
         ip_addr, port_num = row[0], row[1]
-        hosts.append({
+        entry = {
             "service": service,
             "host": f"{ip_addr}:{port_num}",
             "site": "fofa",
-        })
+        }
+        if fid:
+            entry["fid"] = fid
+        hosts.append(entry)
     return hosts
 
 
@@ -765,6 +775,10 @@ def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=
 def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa"):
     hosts_file = _cache_file(name, "hosts")
 
+    if not query and not service and name not in NAMED_QUERIES:
+        log.error(f"no query for name '{name}' — pass --query or --service, or use a named query ({', '.join(sorted(NAMED_QUERIES))})")
+        return []
+
     if site == "shodan":
         if not SHODAN_KEY:
             log.error("SHODAN_KEY must be set in .env for --site shodan. See README for instructions.")
@@ -780,7 +794,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         if not base_query and service:
             base_query = SERVICE_CONFIG[service].get("shodan_query")
         if not base_query:
-            log.error(f"no shodan query for service '{service}' — pass --query (shodan syntax differs from fofa)")
+            log.error(f"no shodan query for '{service or name}' — pass --query (shodan syntax differs from fofa)")
             return []
 
         if isinstance(countries, str):
@@ -882,7 +896,8 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             random.shuffle(server_list)
 
         pool = _load_json(hosts_file)
-        seen = {f"{h['service']}@{h['host']}" for h in pool}
+        index = {f"{h['service']}@{h['host']}": h for h in pool}
+        seen = set(index)
         # FIDs are targeted follow-ups: each is fetched as QUERY+fid on its
         # own, never crossed with country/port/server (those intersections
         # are almost always empty). They run FIRST, before the combinatorics,
@@ -897,8 +912,10 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         for i, (country, port, server, fid) in enumerate(combos):
             if query:
                 qparts = [query]
-            else:
+            elif service:
                 qparts = [SERVICE_CONFIG[service]["fofa_query"]]
+            else:
+                qparts = [NAMED_QUERIES[name]]
             if port:
                 qparts.append(f'port="{port}"')
             if country:
@@ -926,10 +943,15 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                 continue
 
             for h in hosts:
+                if fid:
+                    h["fid"] = fid
                 key = f"{h['service']}@{h['host']}"
                 if key not in seen:
                     pool.append(h)
                     seen.add(key)
+                    index[key] = h
+                elif fid and not index[key].get("fid"):
+                    index[key]["fid"] = fid
 
             if not dry:
                 _save_json(hosts_file, pool)
@@ -947,27 +969,32 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         if not FOFA_KEY:
             log.error("FOFA_KEY must be set in .env")
             return
-        if not service:
+        if not service and not query and name not in NAMED_QUERIES:
             log.error("--service is required for API method")
             return
+        named_query = query or NAMED_QUERIES.get(name)
         if fids:
             hosts = []
             for fid in [s.strip() for s in fids.split(",")]:
-                hosts.extend(_fetch_api(dry, limit, service, fid=fid, curlify=curlify))
+                hosts.extend(_fetch_api(dry, limit, service, fid=fid, curlify=curlify, query=named_query))
         else:
-            hosts = _fetch_api(dry, limit, service, curlify=curlify)
+            hosts = _fetch_api(dry, limit, service, curlify=curlify, query=named_query)
 
     if dry:
         return
 
     # print(f"Loading {hosts_file}")
     existing = _load_json(hosts_file)
-    seen = {f"{h['service']}@{h['host']}" for h in existing}
+    index = {f"{h['service']}@{h['host']}": h for h in existing}
+    seen = set(index)
     for h in hosts:
         key = f"{h['service']}@{h['host']}"
         if key not in seen:
             existing.append(h)
             seen.add(key)
+            index[key] = h
+        elif h.get("fid") and not index[key].get("fid"):
+            index[key]["fid"] = h["fid"]
 
     _save_json(hosts_file, existing)
     log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
@@ -1141,7 +1168,7 @@ def main():
     parser.add_argument("-i", "--id", dest="session", help="resume a previous session by providing its run timestamp (the run_ts from the log)")
     parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
     parser.add_argument("-m", "--method", choices=["api", "web"], default="web", help="fetch method (default: web)")
-    parser.add_argument("-n", "--name", help="cache file name prefix (default: image-gen)")
+    parser.add_argument("-n", "--name", help="cache file name prefix (default: image-gen); a named query (e.g. gradio) also selects its built-in FOFA query for fetch")
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
     parser.add_argument("-r", "--random", dest="shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
