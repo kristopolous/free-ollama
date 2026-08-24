@@ -1392,29 +1392,61 @@ def chat_fmt(data, model, openai_format):
 DYVA_INFO_TAG = "__dyva_info__"
 
 
-def _has_info_tag(payload):
-    if DYVA_INFO_TAG in str(payload.get("prompt") or ""):
+def _content_contains(payload, needle):
+    """True if `needle` appears anywhere in the prompt or message contents."""
+    if needle in str(payload.get("prompt") or ""):
         return True
     for m in payload.get("messages") or []:
         c = m.get("content")
-        if isinstance(c, str) and DYVA_INFO_TAG in c:
+        if isinstance(c, str) and needle in c:
             return True
         if isinstance(c, list):
             for part in c:
-                if isinstance(part, dict) and DYVA_INFO_TAG in str(part.get("text") or ""):
+                if isinstance(part, dict) and needle in str(part.get("text") or ""):
                     return True
     return False
 
 
-def _would_use(model_in, req_caps):
-    """Resolve which host/model a request would be routed to, without sending it."""
+def _has_info_tag(payload):
+    return _content_contains(payload, DYVA_INFO_TAG)
+
+
+def _info_wants_next(payload):
+    """`__dyva_info__:next` — same diagnostic, but first skip the model's sticky
+    last-successful host (like the /next-host endpoint) so the reported host is
+    the *next* one a real request would land on."""
+    return _content_contains(payload, DYVA_INFO_TAG + ":next")
+
+
+def _norm_host(h):
+    return re.sub(r"^https?://", "", h or "")
+
+
+def _drop_last_host(model):
+    """Remove a model's sticky last-successful host so another host is tried.
+    Shared by the /next-host endpoint and the `__dyva_info__:next` directive."""
+    key = canon_pattern(model)
+    if _last_cache is None:
+        load_last()
+    if key in _last_cache:
+        del _last_cache[key]
+        save_last()
+
+
+def _would_use(model_in, req_caps, exclude=None):
+    """Resolve which host/model a request would be routed to, without sending it.
+    When `exclude` (a host, with or without scheme) is given, that host is passed
+    over so the caller sees the next candidate instead."""
+    ex = _norm_host(exclude) if exclude else None
     last = get_last(model_in)
-    if last and _known_capable(last[0], last[1], req_caps) and (
+    if last and (ex is None or _norm_host(last[0]) != ex) and _known_capable(last[0], last[1], req_caps) and (
             "vision" not in req_caps or _known_has(last[0], last[1], "vision")):
-        return {"host": re.sub(r"^https?://", "", last[0]), "model": last[1]}
+        return {"host": _norm_host(last[0]), "model": last[1]}
     for _prio, host, ms in find_servers(model_in, req_caps):
+        if ex is not None and _norm_host(host) == ex:
+            continue
         if ms:
-            return {"host": re.sub(r"^https?://", "", host), "model": ms[0]}
+            return {"host": _norm_host(host), "model": ms[0]}
     return None
 
 
@@ -1457,7 +1489,12 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
         req_caps = sorted(set(req_caps) | {"tools"})
 
     if _has_info_tag(opayload):
-        info = _would_use(model_list[0], req_caps)
+        exclude = None
+        if _info_wants_next(opayload):
+            prev = get_last(model_list[0])
+            exclude = prev[0] if prev else None
+            _drop_last_host(model_list[0])
+        info = _would_use(model_list[0], req_caps, exclude=exclude)
         if info is None:
             return web.json_response(err_obj(f"no available servers for '{model_in}'", "model_not_found"), status=404)
         return _info_response(model_list[0], info, do_stream=do_stream, openai_format=openai_format)
@@ -1541,7 +1578,12 @@ async def _proxy_generate(request, session):
         req_caps = sorted(set(req_caps) | {"tools"})
 
     if _has_info_tag(body):
-        info = _would_use(model, req_caps)
+        exclude = None
+        if _info_wants_next(body):
+            prev = get_last(model)
+            exclude = prev[0] if prev else None
+            _drop_last_host(model)
+        info = _would_use(model, req_caps, exclude=exclude)
         if info is None:
             return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
         return _info_response(model, info, do_stream=do_stream)
@@ -2020,10 +2062,7 @@ async def handle_next_host(request):
     if not model:
         return web.json_response({"error": "missing model parameter"}, status=400)
 
-    load_last()
-    if model in _last_cache:
-        del _last_cache[model]
-        save_last()
+    _drop_last_host(model)
 
     raise web.HTTPFound("/")
 
