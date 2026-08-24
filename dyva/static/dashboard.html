@@ -907,13 +907,25 @@ function paintGenStatus(el,d){
 // looping placeholder animation shown inside the bubble until the first tokens
 var _rummageMuted=false;
 try{_rummageMuted=localStorage.getItem('dyva_rummage_muted')==='1'}catch(e){}
-// cycle rummage1..rummage5 on each insert, starting at a random one
-var RUMMAGE_COUNT=5;
+// cycle rummage1..rummage6 on each insert, starting at a random one
+var RUMMAGE_COUNT=6;
 var _rummageN=Math.floor(Math.random()*RUMMAGE_COUNT)+1;
 function _nextRummage(){var n=_rummageN;_rummageN=_rummageN%RUMMAGE_COUNT+1;return n;}
+var RUMMAGE_MSGS=[
+  "Aligning the stars ... One moment please",
+  "stuck in traffic. Be there in a bit",
+  "Your call is very important to us and will be answered in the order received",
+  "Someone's gotta be home ... let's find out!",
+  "It's gotta be around here somewhere.",
+  "[ music playing in background ]",
+  "First a word from our sponsors...",
+  "It's probably nice outside right now..."
+];
 function showRummage(bodyEl){
-  var src='rummage'+_nextRummage()+'.mp4';
-  bodyEl.innerHTML='<div class="rummage-wrap"><video class="rummage" src="'+src+'" autoplay loop playsinline></video><span class="rummage-msg">Connecting… Please stand by…</span></div>';
+  var src='https://9ol.es/dyva/rummage'+_nextRummage()+'.mp4';
+  bodyEl.innerHTML='<div class="rummage-wrap"><video class="rummage" src="'+src+'" autoplay loop playsinline></video><span class="rummage-msg"></span></div>';
+  var msg=bodyEl.querySelector('.rummage-msg');
+  if(msg)msg.textContent=RUMMAGE_MSGS[Math.floor(Math.random()*RUMMAGE_MSGS.length)];
   var v=bodyEl.querySelector('.rummage');
   if(!v)return;
   v.muted=_rummageMuted;v.volume=1;
