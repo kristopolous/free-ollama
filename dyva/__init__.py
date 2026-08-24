@@ -156,6 +156,14 @@ def _source_slug(s):
     return re.sub(r'[^a-z0-9]+', '-', str(s or '').lower()).strip('-') or 'source'
 
 
+def _normalize_url(u):
+    """Imply https:// when no scheme is given (e.g. '9ol.es/x.json')."""
+    u = str(u or "").strip()
+    if u and not re.match(r'^[a-z][a-z0-9+.-]*://', u, re.I):
+        u = "https://" + u
+    return u
+
+
 def _apply_source_mapping(row, mapping):
     """Turn a raw source row into a host entry per the mapping."""
     out = {}
@@ -222,7 +230,7 @@ def refresh_cache():
 
     extra_sources = _config_sources()
     downloads = [
-       (s.get("url"), f"{_db}-extra-{_source_slug(s.get('name'))}.tmp") for s in extra_sources
+       (_normalize_url(s.get("url")), f"{_db}-extra-{_source_slug(s.get('name'))}.tmp") for s in extra_sources
     ] + [
        ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp" ),
        ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp" ),
@@ -1804,23 +1812,25 @@ async def handle_settings_test(request):
     for s in sources:
         s = s if isinstance(s, dict) else {}
         r = {"name": s.get("name") or "(unnamed)"}
-        url = s.get("url")
+        url = _normalize_url(s.get("url"))
+        r["url"] = url
         mapping = s.get("mapping", {})
         if not url:
-            r["error"] = "no url"
+            r["error"] = "no url given"
             results.append(r)
             continue
         try:
             text = await loop.run_in_executor(None, lambda u=url: requests.get(u, timeout=20).text)
             data = json.loads(text)
         except Exception as ex:
-            r["error"] = f"fetch/parse failed: {ex}"
+            r["error"] = f"couldn't fetch/parse: {ex}"
             results.append(r)
             continue
         if not isinstance(data, list):
-            r["error"] = "source did not return a JSON list"
+            r["error"] = "the URL returned JSON, but not a list of rows"
             results.append(r)
             continue
+        r["rows"] = len(data)
         servers = 0
         models_all = set()
         first = None
@@ -1844,8 +1854,12 @@ async def handle_settings_test(request):
         if first:
             r["first_host"] = first["host"]
             r["first_models"] = first["models"]
-        elif not r.get("error"):
-            r["error"] = "no rows produced a server (check your mapping)"
+        elif r["rows"] > 0:
+            keys = next((list(row.keys()) for row in data if isinstance(row, dict)), [])
+            r["sample_keys"] = keys
+            r["hint"] = ("0 hosts. The first entry has these keys: "
+                         + (", ".join(keys) if keys else "(none)")
+                         + " — point your 'server' (or 'url') mapping at one of them.")
         results.append(r)
     return web.json_response({"results": results})
 
@@ -1867,8 +1881,8 @@ async def handle_settings_import(request):
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    url = body.get("url")
-    if not url or not isinstance(url, str):
+    url = _normalize_url(body.get("url"))
+    if not url:
         return web.json_response({"error": "url required"}, status=400)
     try:
         text = await asyncio.get_event_loop().run_in_executor(

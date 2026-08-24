@@ -208,8 +208,10 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .src-test-btn{margin-left:8px}
 .src-add-btn:hover,.src-test-btn:hover{background:#2f2f3a}
 .src-test{margin-top:8px;font-size:.78rem;line-height:1.5}
+.src-test-item{margin-bottom:8px}
 .src-test-ok{color:#9a9aa8}
 .src-test-err{color:#c33}
+.src-test-warn{color:#d0a24a}
 .settings-actions{margin-top:8px;display:flex;justify-content:flex-end;align-items:center;gap:12px}
 .settings-save{background:#2a2a4a;color:#9ab8ff;border:none;border-radius:6px;padding:8px 20px;font-size:.85rem;cursor:pointer}
 .settings-save:hover{background:#33335a}
@@ -1919,10 +1921,15 @@ function testSources(){
     .then(function(d){
       if(d.error){out.innerHTML='<div class="src-test-err">'+escHtml(d.error)+'</div>';return;}
       out.innerHTML=(d.results||[]).map(function(r){
-        if(r.error)return '<div class="src-test-err">'+escHtml(r.name)+': '+escHtml(r.error)+'</div>';
-        var line=escHtml(r.name)+': found '+r.servers+' servers and '+r.models+' models.';
-        if(r.first_host)line+=' First is '+escHtml(r.first_host)+' with '+r.first_models+' models.';
-        return '<div class="src-test-ok">'+line+'</div>';
+        if(r.error){
+          var head=escHtml(r.name)+(r.url?' — '+escHtml(r.url):'');
+          return '<div class="src-test-item src-test-err">'+head+'<br>'+escHtml(r.error)+'</div>';
+        }
+        var L=['<b>'+escHtml(r.name)+'</b> — fetched '+escHtml(r.url||'')];
+        L.push('found JSON with '+r.rows+' rows → '+r.servers+' servers, '+r.models+' models');
+        if(r.first_host)L.push('first: '+escHtml(r.first_host)+' ('+r.first_models+' models)');
+        if(r.hint)L.push('<span class="src-test-warn">'+escHtml(r.hint)+'</span>');
+        return '<div class="src-test-item src-test-ok">'+L.join('<br>')+'</div>';
       }).join('')||'<div class="src-test-ok">No sources.</div>';
     })
     .catch(function(){out.innerHTML='<div class="src-test-err">test request failed</div>';});
