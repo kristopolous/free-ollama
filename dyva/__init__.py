@@ -77,6 +77,8 @@ PORT = 11434
 TIMEOUT = 30
 WORKER_COUNT = 10
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
+ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
+                # settings & sources requires it (localhost always exempt).
 VERSION = "0"
 SETTINGS_FILE = os.path.join(CACHE_DIR, "settings.json")
 
@@ -84,7 +86,7 @@ SETTINGS_FILE = os.path.join(CACHE_DIR, "settings.json")
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count) over the
     CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -98,6 +100,8 @@ def load_settings():
         TIMEOUT = s["timeout"]
     if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
         MIN_COUNT = s["min_count"]
+    if isinstance(s.get("admin_pw"), str):
+        ADMIN_PW = s["admin_pw"]
 
 
 def save_settings(extra=None):
@@ -111,7 +115,8 @@ def save_settings(extra=None):
             data = {}
     if not isinstance(data, dict):
         data = {}
-    data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT, "min_count": MIN_COUNT})
+    data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
+                 "min_count": MIN_COUNT, "admin_pw": ADMIN_PW})
     if isinstance(extra, dict):
         data.update(extra)
     try:
@@ -1753,8 +1758,13 @@ async def handle_settings_get(request):
       '200':
         description: Current settings
     """
+    if not _is_admin(request):
+        # Non-admins get no settings and no sources — just enough for the UI to
+        # show a password prompt instead of the controls.
+        return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "min_count": MIN_COUNT, "sources": _stored_sources()})
+                              "min_count": MIN_COUNT, "admin_pw_set": bool(ADMIN_PW),
+                              "admin": True, "sources": _stored_sources()})
 
 
 async def handle_settings_post(request):
@@ -1767,8 +1777,8 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT
-    resp = _check_local(request)
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW
+    resp = _check_local(request) or _check_admin(request)
     if resp:
         return resp
     try:
@@ -1781,6 +1791,12 @@ async def handle_settings_post(request):
         TIMEOUT = min(body["timeout"], 600)
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
         MIN_COUNT = body["min_count"]
+    # admin_pw: only when the key is present. A non-empty value sets/changes the
+    # password (stored hashed); an explicit empty string clears protection. The
+    # plaintext is never stored or echoed back.
+    if "admin_pw" in body and isinstance(body["admin_pw"], str):
+        pw = body["admin_pw"]
+        ADMIN_PW = _hash_pw(pw) if pw else ""
     extra = None
     sources_changed = False
     if "sources" in body:
@@ -1793,7 +1809,8 @@ async def handle_settings_post(request):
     if sources_changed:
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "min_count": MIN_COUNT, "sources": _stored_sources(),
+                              "min_count": MIN_COUNT, "admin_pw_set": bool(ADMIN_PW),
+                              "admin": True, "sources": _stored_sources(),
                               "refreshed": sources_changed})
 
 
@@ -1807,7 +1824,7 @@ async def handle_settings_test(request):
       '200':
         description: Per-source results
     """
-    resp = _check_local(request)
+    resp = _check_local(request) or _check_admin(request)
     if resp:
         return resp
     try:
@@ -1884,7 +1901,7 @@ async def handle_settings_import(request):
       '200':
         description: The fetched list of sources
     """
-    resp = _check_local(request)
+    resp = _check_local(request) or _check_admin(request)
     if resp:
         return resp
     try:
@@ -2388,6 +2405,29 @@ def _check_local(request):
     if remote in ("127.0.0.1", "::1", "localhost"):
         return None
     return web.json_response({"error": f"{GITHUB_URL} — Or execute 'uvx dyva' to run your own"}, status=403)
+
+
+def _hash_pw(pw):
+    return hashlib.sha256((pw or "").encode("utf-8")).hexdigest()
+
+
+def _is_admin(request):
+    """True if this request may view/change settings & sources. When no admin
+    password is set everyone is an admin (the default, open behavior). When one
+    is set, the request MUST carry it in the X-Admin-Key header — no localhost
+    exemption, since behind a reverse proxy every request's peer is 127.0.0.1
+    and that exemption would hand admin to everyone (the whole reason we use a
+    password instead of an IP allowlist). If the password is ever forgotten,
+    recover by clearing "admin_pw" in settings.json and restarting."""
+    if not ADMIN_PW:
+        return True
+    return _hash_pw(request.headers.get("X-Admin-Key", "")) == ADMIN_PW
+
+
+def _check_admin(request):
+    if _is_admin(request):
+        return None
+    return web.json_response({"error": "admin password required"}, status=403)
 
 
 async def handle_ollama_chat(request):
