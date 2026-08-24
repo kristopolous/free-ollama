@@ -907,9 +907,10 @@ function paintGenStatus(el,d){
 // looping placeholder animation shown inside the bubble until the first tokens
 var _rummageMuted=false;
 try{_rummageMuted=localStorage.getItem('dyva_rummage_muted')==='1'}catch(e){}
-// cycle rummage1..rummage4 on each insert, starting at a random one
-var _rummageN=Math.floor(Math.random()*4)+1;
-function _nextRummage(){var n=_rummageN;_rummageN=_rummageN%4+1;return n;}
+// cycle rummage1..rummage5 on each insert, starting at a random one
+var RUMMAGE_COUNT=5;
+var _rummageN=Math.floor(Math.random()*RUMMAGE_COUNT)+1;
+function _nextRummage(){var n=_rummageN;_rummageN=_rummageN%RUMMAGE_COUNT+1;return n;}
 function showRummage(bodyEl){
   var src='rummage'+_nextRummage()+'.mp4';
   bodyEl.innerHTML='<div class="rummage-wrap"><video class="rummage" src="'+src+'" autoplay loop playsinline></video><span class="rummage-msg">Connecting… Please stand by…</span></div>';
