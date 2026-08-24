@@ -37,7 +37,7 @@ a {color: #999}
 .tab.active{color:#eee;background:#1e1e1e;border-bottom-color:#77a}
 .panel{display:none}
 .panel.active{display:block}
-body.chat{overflow:hidden}
+body.chat{overflow-y:scroll}
 #chat.panel.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:12px}
@@ -181,6 +181,27 @@ details.thinkbox>summary{cursor:pointer;color:#888894;font-size:.7rem;text-trans
 .chat-item:hover .re{opacity:1}
 .chat-item .re:hover{color:#9c9}
 .chat-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.doc-panel{flex:1;min-width:0;display:flex;flex-direction:column;border:1px solid #333;border-radius:8px;background:#181818;overflow:hidden}
+.doc-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #333;flex-shrink:0}
+.doc-select{flex:1;min-width:0}
+.doc-type{color:#888;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+.doc-btn,.doc-close{background:none;border:none;color:#888;cursor:pointer;font-size:1rem;flex-shrink:0;padding:0 2px;display:flex;align-items:center}
+.doc-btn:hover{color:#ccc}
+.doc-btn svg{width:16px;height:16px}
+.doc-close:hover{color:#e55}
+.doc-body{flex:1;min-height:0;overflow:auto;padding:14px;font-size:.9rem;line-height:1.5}
+.doc-body pre{background:#111;border:1px solid #333;border-radius:6px;padding:.7em;overflow-x:auto;white-space:pre;margin:0}
+.doc-body code{font-family:ui-monospace,monospace;font-size:.82rem}
+.doc-body ul,.doc-body ol{margin:.5em 0;padding-left:1.6em}
+.doc-body li{margin:.2em 0}
+.doc-body p{margin:.5em 0}
+.doc-body h1,.doc-body h2,.doc-body h3,.doc-body h4{margin:.8em 0 .3em;line-height:1.25}
+.doc-body blockquote{border-left:3px solid #444;margin:.6em 0;padding:.2em .7em;color:#aaa}
+.doc-body a{color:#77a}
+.doc-body table{border-collapse:collapse;margin:.6em 0}
+.doc-body th,.doc-body td{border:1px solid #444;padding:.3em .5em}
+#docToggle{width:auto;padding:0 .55em;font-size:.8rem}
+@media(max-width:760px){.doc-panel{position:fixed;inset:0;z-index:150;border-radius:0}}
 .chat-main .messages{height:auto;flex:1;min-height:0;overflow-y:auto}
 .chat-main .field,.chat-main .input-row{flex-shrink:0}
 .chat-main .field{margin-bottom:.5em}
@@ -347,8 +368,10 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <div id="toolsPop" class="tools-pop">
 <div class="tools-pop-title">Tools</div>
 <label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Let the model create images on request</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Let the model write &amp; edit documents in a side panel</small></span></label>
 </div>
 </div>
+<button id="docToggle" class="mp-tool" title="Documents" style="display:none">📄</button>
 </div>
 </div>
 <div class="attach-row" id="chatAttachments" style="display:none"></div>
@@ -360,6 +383,15 @@ input[type=range]{width:100%;accent-color:#77a;cursor:pointer}
 <button id="chatSend" title="Send"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg></button>
 </div>
 </div>
+</div>
+<div class="doc-panel" id="docPanel" style="display:none">
+<div class="doc-head">
+<select id="docSelect" class="doc-select"></select>
+<span id="docType" class="doc-type"></span>
+<button id="docDownload" class="doc-btn" title="Download"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></button>
+<button id="docClose" class="doc-close" title="Close">✕</button>
+</div>
+<div class="doc-body" id="docBody"></div>
 </div>
 </div>
 </div>
@@ -690,6 +722,7 @@ function saveCurrentChat(){
     if(m.files&&m.files.length)c.files=m.files.slice();
     return c;
   })};
+  if(currentChat.documents&&currentChat.documents.length)copy.documents=currentChat.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}});
   if(i>=0)chats[i]=copy;else{chats.unshift(copy);if(location.hash!=='#chat/'+currentChat.id)location.hash='chat/'+currentChat.id;}
   persistChats(chats);
 }
@@ -721,7 +754,7 @@ function renderSidebar(){
   });
 }
 function deleteChat(id){
-  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};renderMessages();activeStatus=null;refreshSendButton();location.hash='chat';}
+  if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[],documents:[]};renderMessages();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
   persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
   renderSidebar();
 }
@@ -907,10 +940,10 @@ function paintGenStatus(el,d){
 // looping placeholder animation shown inside the bubble until the first tokens
 var _rummageMuted=false;
 try{_rummageMuted=localStorage.getItem('dyva_rummage_muted')==='1'}catch(e){}
-// cycle rummage1..rummage6 on each insert, starting at a random one
-var RUMMAGE_COUNT=6;
-var _rummageN=Math.floor(Math.random()*RUMMAGE_COUNT)+1;
-function _nextRummage(){var n=_rummageN;_rummageN=_rummageN%RUMMAGE_COUNT+1;return n;}
+// cycle rummage0..rummage8 (0-based) on each insert, starting at a random one
+var RUMMAGE_COUNT=9;
+var _rummageN=Math.floor(Math.random()*RUMMAGE_COUNT);
+function _nextRummage(){var n=_rummageN;_rummageN=(_rummageN+1)%RUMMAGE_COUNT;return n;}
 var RUMMAGE_MSGS=[
   "Aligning the stars ... One moment please",
   "stuck in traffic. Be there in a bit",
@@ -919,7 +952,9 @@ var RUMMAGE_MSGS=[
   "It's gotta be around here somewhere.",
   "[ music playing in background ]",
   "First a word from our sponsors...",
-  "It's probably nice outside right now..."
+  "It's probably nice outside right now...",
+  "Checking the card catalog.",
+  "Browsing the phone book, brb"
 ];
 function showRummage(bodyEl){
   var src='https://9ol.es/dyva/rummage'+_nextRummage()+'.mp4';
@@ -1059,7 +1094,7 @@ function setAssistantLabel(el,host,fmodel,tps){
   var lbl=el.querySelector('.role-label')||el;
   lbl.textContent=s;
 }
-function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();location.hash='chat';}
+function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[],documents:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
 function loadChatById(id){
   closeChatDrawer();
   // Already viewing this chat (e.g. the hashchange fired by saveCurrentChat
@@ -1069,7 +1104,7 @@ function loadChatById(id){
   saveCurrentChat();
   var c=loadChats().find(function(x){return String(x.id)===String(id)});
   if(!c)return;
-  currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:c.messages.slice()};
+  currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:c.messages.slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
   document.getElementById('chatModel').value=currentChat.model;
   updateModelCount();
   renderMessages();
@@ -1077,6 +1112,10 @@ function loadChatById(id){
   activeStatus=null;
   reattachGen(String(id));   // if this chat is still generating, show it live again
   refreshSendButton();
+  activeDocId=null;
+  if(currentDocs().length&&_docPanelWanted)openDoc(currentDocs()[currentDocs().length-1].id);
+  else hideDocPanel();
+  refreshDocUI();
   if(location.hash!=='#chat/'+id)location.hash='chat/'+id;
 }
 document.getElementById('chatNew').addEventListener('click',newChat);
@@ -1174,7 +1213,8 @@ async function sendChat(){
 async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   chatId=String(chatId);
   depth=depth||0;
-  var useTools=(typeof toolsOn!=='undefined'&&toolsOn)||depth>0;
+  var toolList=(typeof buildTools==='function')?buildTools():[];
+  var useTools=toolList.length>0||depth>0;
   var ac=new AbortController();
   // one generation record per conversation, reused across tool rounds
   var gen=gens[chatId]||(gens[chatId]={raw:'',think:'',host:'',fmodel:'',tps:null,stopped:false});
@@ -1225,6 +1265,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           if(ac.signal.aborted)return;
           results.push({text:'Error generating image: '+ex.message});
         }
+      }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'){
+        var dr=applyDocOp(chatId,fn.name,args);
+        results.push({text:dr.text});
       }else results.push({text:'Error: unknown tool '+fn.name});
     }
     msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
@@ -1254,7 +1297,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   gen.statusEl=statusEl;
   if(inView())activeStatus=statusEl;
   try{
-    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(useTools?{model:model,messages:msgs,stream:true,tools:CHAT_TOOLS}:{model:model,messages:msgs,stream:true}),signal:ac.signal});
+    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify((useTools&&toolList.length)?{model:model,messages:msgs,stream:true,tools:toolList}:{model:model,messages:msgs,stream:true}),signal:ac.signal});
     host=resp.headers.get('X-Dyva-Host')||'';gen.host=host;
     fmodel=resp.headers.get('X-Dyva-Model')||model;gen.fmodel=fmodel;
     if(!resp.ok){
@@ -1400,17 +1443,27 @@ document.getElementById('chatInput').addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
 });
 
-var CHAT_TOOLS=[{type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}}];
+var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}};
+var DOC_TOOLS=[
+  {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
+  {type:'function',function:{name:'edit_document',description:'Replace the full contents of an existing document. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
+  {type:'function',function:{name:'rename_document',description:'Rename an existing document. Identify it by id (preferred) or current title.',parameters:{type:'object',properties:{id:{type:'string'},title:{type:'string',description:'current title if id unknown'},new_title:{type:'string',description:'the new title'}},required:['new_title']}}}
+];
 var chatToolsBtn=document.getElementById('chatTools');
 var toolsPop=document.getElementById('toolsPop');
 var toolImageChk=document.getElementById('toolImage');
-var toolsOn=false;
+var toolDocsChk=document.getElementById('toolDocs');
+var toolsOn=false,docsOn=false;
 try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
-// paintTools reflects whether ANY tool is enabled, so the wrench stays lit
+try{docsOn=localStorage.getItem('dyva_tools_docs')==='1'}catch(e){}
+function anyToolsOn(){return toolsOn||docsOn}
+function buildTools(){var t=[];if(toolsOn)t.push(IMG_TOOL);if(docsOn)t=t.concat(DOC_TOOLS);return t}
+// wrench stays lit whenever any tool is enabled
 function paintTools(){
-  chatToolsBtn.classList.toggle('active',toolsOn);
+  chatToolsBtn.classList.toggle('active',anyToolsOn());
   toolImageChk.checked=toolsOn;
-  chatToolsBtn.title=toolsOn?'Tools: image generation on':'Tools';
+  if(toolDocsChk)toolDocsChk.checked=docsOn;
+  chatToolsBtn.title=anyToolsOn()?'Tools on':'Tools';
 }
 chatToolsBtn.addEventListener('click',function(e){
   e.stopPropagation();
@@ -1422,9 +1475,115 @@ toolImageChk.addEventListener('change',function(){
   try{localStorage.setItem('dyva_tools',toolsOn?'1':'0')}catch(e){}
   paintTools();
 });
+if(toolDocsChk)toolDocsChk.addEventListener('change',function(){
+  docsOn=this.checked;
+  try{localStorage.setItem('dyva_tools_docs',docsOn?'1':'0')}catch(e){}
+  paintTools();
+});
 document.addEventListener('click',function(){toolsPop.classList.remove('open')});
 document.addEventListener('keydown',function(e){if(e.key==='Escape')toolsPop.classList.remove('open')});
 paintTools();
+
+// ---- documents (artifacts-style side panel, one set per conversation) ----
+var activeDocId=null;
+var _docPanelWanted=true;   // remembers whether the panel should be shown across chat switches
+function _docId(){return 'doc'+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36)}
+function currentDocs(){return currentChat.documents||[]}
+function findDoc(docs,ref){
+  if(!ref||!docs)return null;
+  for(var i=0;i<docs.length;i++)if(docs[i].id===ref)return docs[i];
+  var t=String(ref).toLowerCase();
+  for(var j=0;j<docs.length;j++)if((docs[j].title||'').toLowerCase()===t)return docs[j];
+  return null;
+}
+// returns the documents array for a chat plus a commit fn (in-view or stored)
+function docCtx(chatId){
+  if(chatInView(chatId)){currentChat.documents=currentChat.documents||[];return {docs:currentChat.documents,inView:true,commit:saveCurrentChat};}
+  var chats=loadChats(),i=findChatIndex(chatId);
+  if(i<0)return null;
+  chats[i].documents=chats[i].documents||[];
+  return {docs:chats[i].documents,inView:false,commit:function(){persistChats(chats)}};
+}
+function applyDocOp(chatId,name,args){
+  var ctx=docCtx(chatId);
+  if(!ctx)return {text:'Error: conversation not found'};
+  var docs=ctx.docs,doc,out;
+  if(name==='create_document'){
+    doc={id:_docId(),title:String(args.title||'Untitled').slice(0,120),type:(args.type==='code'?'code':'markdown'),language:args.language?String(args.language):'',content:String(args.content||''),updated:Date.now()};
+    docs.push(doc);
+    out={text:'Created '+doc.type+' document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id};
+  }else if(name==='edit_document'){
+    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
+    if(!doc)return {text:'Error: document not found'};
+    doc.content=String(args.content||'');doc.updated=Date.now();
+    out={text:'Updated document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id};
+  }else if(name==='rename_document'){
+    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
+    if(!doc)return {text:'Error: document not found'};
+    doc.title=String(args.new_title||args.title||doc.title).slice(0,120);doc.updated=Date.now();
+    out={text:'Renamed document to "'+doc.title+'" (id: '+doc.id+')',docId:doc.id};
+  }else return {text:'Error: unknown document tool '+name};
+  ctx.commit();
+  if(ctx.inView){refreshDocUI();if(out.docId)openDoc(out.docId);}
+  return out;
+}
+function refreshDocUI(){
+  var docs=currentDocs();
+  var btn=document.getElementById('docToggle');
+  if(btn){btn.style.display=docs.length?'':'none';btn.title=docs.length+' document'+(docs.length===1?'':'s');}
+  if(document.getElementById('docPanel').style.display!=='none')renderDocPanel();
+}
+function openDoc(id){
+  activeDocId=id;
+  _docPanelWanted=true;
+  document.getElementById('docPanel').style.display='';
+  renderDocPanel();
+}
+function hideDocPanel(){document.getElementById('docPanel').style.display='none';}   // hide without changing intent
+function closeDoc(){_docPanelWanted=false;hideDocPanel();}                            // user dismissed it
+function docFilename(doc){
+  // the model names documents with their extension (e.g. hanoi.pl); use the
+  // title verbatim, only supplying a fallback extension if it left one off
+  var base=(doc.title||'document').replace(/[^\w.\- ]+/g,'').trim()||'document';
+  if(/\.\w+$/.test(base))return base;
+  return base+(doc.type==='code'?'.txt':'.md');
+}
+function downloadDoc(){
+  var doc=findDoc(currentDocs(),activeDocId);if(!doc)return;
+  var blob=new Blob([doc.content],{type:'text/plain;charset=utf-8'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=url;a.download=docFilename(doc);
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(function(){URL.revokeObjectURL(url)},1000);
+}
+function renderDocPanel(){
+  var docs=currentDocs();
+  if(!docs.length){closeDoc();return;}
+  if(!findDoc(docs,activeDocId))activeDocId=docs[docs.length-1].id;
+  var sel=document.getElementById('docSelect');sel.innerHTML='';
+  docs.forEach(function(d){var o=document.createElement('option');o.value=d.id;o.textContent=d.title;if(d.id===activeDocId)o.selected=true;sel.appendChild(o)});
+  var doc=findDoc(docs,activeDocId);
+  document.getElementById('docType').textContent=doc.type==='code'?(doc.language||'code'):'markdown';
+  var body=document.getElementById('docBody');
+  if(doc.type==='code'){
+    body.innerHTML='<pre><code></code></pre>';
+    var code=body.querySelector('code');
+    if(doc.language)code.className='language-'+doc.language;
+    code.textContent=doc.content;
+    highlightBlocks(body);
+  }else{
+    body.innerHTML=mdRender(doc.content);
+    highlightBlocks(body);
+  }
+}
+document.getElementById('docSelect').addEventListener('change',function(){activeDocId=this.value;renderDocPanel()});
+document.getElementById('docDownload').addEventListener('click',downloadDoc);
+document.getElementById('docClose').addEventListener('click',closeDoc);
+document.getElementById('docToggle').addEventListener('click',function(){
+  if(document.getElementById('docPanel').style.display==='none'){
+    var d=currentDocs();if(d.length)openDoc((findDoc(d,activeDocId)||d[d.length-1]).id);
+  }else closeDoc();
+});
 
 var attachments=[];
 var chatFilesInput=document.getElementById('chatFiles');
