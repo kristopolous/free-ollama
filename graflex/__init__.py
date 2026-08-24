@@ -657,8 +657,10 @@ def _parse_shodan_html(html_path, service):
         if not (href.startswith("http://") or href.startswith("https://")):
             continue
         host, port = _value_to_host_port(href)
+        if not host or host == "shodan.io" or host.endswith(".shodan.io"):
+            continue
         key = f"{host}:{port}"
-        if not host or key in seen:
+        if key in seen:
             continue
         seen.add(key)
         hosts.append({
