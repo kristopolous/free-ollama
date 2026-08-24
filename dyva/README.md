@@ -30,7 +30,7 @@ Here it is. Running ON MY ACTUAL FUCKING PHONE! (*gasp*)
 | `-t`, `--timeout` | Request timeout seconds (default: 30) |
 | `-w`, `--workers` | Concurrent workers (default: 3) |
 | `-l`, `--local` | Restrict inference endpoints to localhost only |
-| `-r`, `--refresh` | Refresh server cache from all sources and exit |
+| `-r`, `--refresh` | Refresh server cache and exit; optionally name a single source (e.g. `--refresh graflex`) — other sources keep their last-fetched data |
 | `--curlify` | Print `curl` commands of upstream requests to stderr |
 | `-v`, `--version` | Show version |
 
