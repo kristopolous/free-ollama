@@ -18,7 +18,8 @@ https://github.com/user-attachments/assets/c9874c72-52ea-4060-a078-d2945add22d6
 
 Here it is. Running ON MY ACTUAL FUCKING PHONE! (*gasp*)
 
-<img width="384" alt="Screenshot_20260812-005403" src="https://github.com/user-attachments/assets/4dcc41f7-caab-40d1-a00c-23614f396302" />
+<img alt="66311" src="https://github.com/user-attachments/assets/d309c8f1-0634-48eb-96e4-18a7a7123d6e" />
+
 
 ## CLI Options
 
