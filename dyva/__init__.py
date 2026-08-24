@@ -166,7 +166,7 @@ def refresh_cache():
     if os.path.exists(f"{_db}-happyshua.tmp"):
       with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
         for r in csv.reader(csvfile):
-          ip = r[0].rstrip('/v1')
+          ip = re.sub(r'/?v1', '', r[0])
           models = [m.strip() for m in r[1].split(',')]
           if ip not in host_map:
             host_map[ip] = {'source': 'happyshua', 'tps': 0, 'models': [], 'server': ip, 'version': ''}
@@ -176,7 +176,7 @@ def refresh_cache():
     if os.path.exists(f"{_db}-spider.tmp"):
       with open(f'{_db}-spider.tmp', 'r') as f:
         for row in json.loads(f.read()):
-          ip = row.get('url').rstrip('/')
+          ip = re.sub(r'/?v1', '', row.get('url'))
           models = [ n.get('name') for n in row.get('models') ]
           if ip not in host_map:
             host_map[ip] = {'source': 'spider', 'tps': 0, 'models': [], 'server': ip, 'version': ''}
