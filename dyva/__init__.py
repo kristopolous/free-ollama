@@ -65,7 +65,9 @@ LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 IMG_DIR = os.path.join(CACHE_DIR, "images")
 IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
-CHATS_FILE = os.path.join(CACHE_DIR, "chats.json")
+THUMB_DIR = os.path.join(IMG_DIR, "thumbs")
+CHATS_FILE = os.path.join(CACHE_DIR, "chats.json")   # legacy blob, migrated into CHATS_DB
+CHATS_DB = os.path.join(CACHE_DIR, "chats.db")
 IMG_HISTORY_MAX = 100
 CAP_REFRESH_TTL = 3600
 _last_cache = None
@@ -287,7 +289,6 @@ def refresh_cache(source=None):
           continue
         entry['server'] = ip
         entry.setdefault('source', name)
-        entry.setdefault('tps', 0)
         entry.setdefault('version', '')
         entry.setdefault('service', 'ollama')
         if not isinstance(entry.get('models'), list):
@@ -311,7 +312,7 @@ def refresh_cache(source=None):
           ip = re.sub(r'/?v1', '', r[0])
           models = [m.strip() for m in r[1].split(',')]
           if ip not in host_map:
-            host_map[ip] = {'source': 'happyshua', 'tps': 0, 'models': [], 'server': ip, 'version': ''}
+            host_map[ip] = {'source': 'happyshua', 'models': [], 'server': ip, 'version': ''}
     
           host_map[ip]['models'] += models
 
@@ -321,7 +322,7 @@ def refresh_cache(source=None):
           ip = re.sub(r'/?v1', '', row.get('url'))
           models = [ n.get('name') for n in row.get('models') ]
           if ip not in host_map:
-            host_map[ip] = {'source': 'spider', 'tps': 0, 'models': [], 'server': ip, 'version': ''}
+            host_map[ip] = {'source': 'spider', 'models': [], 'server': ip, 'version': ''}
 
           host_map[ip]['models'] += models
 
@@ -1699,11 +1700,10 @@ async def handle_dashboard(request):
     tpl_dir = os.path.join(os.path.dirname(__file__), "static")
     with open(os.path.join(tpl_dir, "dashboard.html")) as f:
         html = f.read()
-    # Only small scalars and the two datalists are inlined; the Server Room's
-    # heavy data (per-model hosts, good/bad/last lists, checked timestamps) is
-    # fetched from /dashboard-models + /dashboard-data and rendered client-side,
-    # so the same host string isn't repeated dozens of times in the document.
-    chat_models = sorted((m["id"] for m in models), key=str.lower)
+    # Only small scalars and the SD-model datalist are inlined; the Server Room's
+    # heavy data (per-model hosts, good/bad/last lists, checked timestamps) AND
+    # the chat model list are fetched from /dashboard-models + /dashboard-data and
+    # rendered client-side, so nothing large is duplicated in the document.
     sd_models = set()
     for s in servers:
         if s.get("service") != "a1111":
@@ -1718,7 +1718,6 @@ async def handle_dashboard(request):
     html = html.replace("__SERVER_COUNT__", str(len(servers)))
     html = html.replace("__MODEL_COUNT__", str(len(models)))
     html = html.replace("__DYVA_VERSION__", VERSION)
-    html = html.replace("__CHAT_MODELS__", json.dumps(chat_models))
     html = html.replace("__SD_MODELS__", sd_options)
     return web.Response(text=html, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-cache"})
@@ -2732,12 +2731,56 @@ async def handle_image_history(request):
     return web.json_response(history)
 
 
+THUMB_SIZE = 72   # the only size the gallery renders (object-fit: cover, square)
+
+
+def _thumb_path(name):
+    return os.path.join(THUMB_DIR, name + ".webp")
+
+
+def _make_thumb(name):
+    """Lazily produce a 72x72 lossy WebP thumbnail (center cover-crop, matching
+    the gallery's CSS) for a stored PNG and cache it on disk, so the gallery
+    loads ~1-2 KB webps instead of full PNGs. Returns the thumbnail path, or None
+    if it can't be made. Blocking (PIL); run in an executor."""
+    src = os.path.join(IMG_DIR, name)
+    if not os.path.isfile(src):
+        return None
+    dst = _thumb_path(name)
+    try:
+        if os.path.isfile(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+            return dst
+        from PIL import Image, ImageOps
+        os.makedirs(THUMB_DIR, exist_ok=True)
+        with Image.open(src) as im:
+            im = ImageOps.fit(im.convert("RGB"), (THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
+            im.save(dst, "WEBP", quality=72, method=6)
+        return dst
+    except Exception as ex:
+        logging.warning(f"thumbnail failed for {name}: {ex}")
+        return None
+
+
 async def handle_image_file(request):
     name = os.path.basename(request.match_info["name"])
     path = os.path.join(IMG_DIR, name)
     if not name.endswith(".png") or not os.path.isfile(path):
         return web.json_response({"error": "not found"}, status=404)
     return web.FileResponse(path)
+
+
+async def handle_image_thumb(request):
+    # /sdapi/v1/images/thumb/{name}.webp  ->  72x72 webp of {name}.png
+    thumb = os.path.basename(request.match_info["name"])
+    base = re.sub(r"\.webp$", "", thumb)
+    name = base + ".png"
+    dst = await asyncio.get_event_loop().run_in_executor(None, _make_thumb, name)
+    if dst:
+        return web.FileResponse(dst)
+    full = os.path.join(IMG_DIR, name)
+    if os.path.isfile(full):
+        return web.FileResponse(full)   # fall back to the full image
+    return web.json_response({"error": "not found"}, status=404)
 
 
 async def handle_image_delete(request):
@@ -2764,6 +2807,10 @@ async def handle_image_delete(request):
         os.remove(os.path.join(IMG_DIR, name))
     except OSError:
         pass
+    try:
+        os.remove(_thumb_path(name))
+    except OSError:
+        pass
     removed = False
     try:
         with open(IMG_HISTORY_FILE) as f:
@@ -2782,71 +2829,96 @@ async def handle_image_delete(request):
 CHATS_KEEP = 200
 
 
-def _load_chats_disk():
+_chats_db = None
+
+
+def _get_chats_db():
+    """Chats live in SQLite, one row per chat, so the sidebar can load a cheap
+    list of (id, title) without pulling every chat's messages, and each chat is
+    saved/loaded individually. A whole-file JSON rewrite could tear and lose
+    everything on a crash; a per-row upsert can't. WAL for crash-safety."""
+    global _chats_db
+    if _chats_db is None:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        _chats_db = sqlite3.connect(CHATS_DB, check_same_thread=False)
+        _chats_db.execute("PRAGMA journal_mode=WAL")
+        _chats_db.execute("PRAGMA synchronous=NORMAL")
+        cols = [r[1] for r in _chats_db.execute("PRAGMA table_info(chats)").fetchall()]
+        if cols and ("created" not in cols or "title" not in cols):
+            # A prior build used a different, disposable schema — drop it. Chat
+            # content up to this transition is explicitly throwaway test data.
+            _chats_db.execute("DROP TABLE chats")
+        _chats_db.execute(
+            "CREATE TABLE IF NOT EXISTS chats("
+            "id TEXT PRIMARY KEY, title TEXT, created REAL, data TEXT NOT NULL)")
+        _chats_db.commit()
+    return _chats_db
+
+
+def _chats_list():
+    """Lightweight sidebar list: id, title, createdAt only — no message bodies."""
+    return [{"id": r[0], "title": r[1] or "", "createdAt": r[2]}
+            for r in _get_chats_db().execute(
+                "SELECT id, title, created FROM chats ORDER BY created DESC").fetchall()]
+
+
+def _chat_get(cid):
+    row = _get_chats_db().execute(
+        "SELECT data FROM chats WHERE id=?", (str(cid),)).fetchone()
+    if not row:
+        return None
     try:
-        with open(CHATS_FILE) as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
+        return json.loads(row[0])
     except Exception:
-        return []
+        return None
 
 
-def _save_chats_disk(chats):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    tmp = CHATS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(chats[:CHATS_KEEP], f, ensure_ascii=False)
-    os.replace(tmp, CHATS_FILE)
+def _chat_upsert(cid, obj):
+    db = _get_chats_db()
+    title = (obj.get("title") or "") if isinstance(obj, dict) else ""
+    try:
+        created = float(obj.get("createdAt"))
+    except (TypeError, ValueError, AttributeError):
+        created = time.time() * 1000.0
+    # created is preserved on update (only title/data change), keeping the
+    # newest-first ordering stable across edits.
+    db.execute(
+        "INSERT INTO chats(id,title,created,data) VALUES(?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET title=excluded.title, data=excluded.data",
+        (str(cid), title, created, json.dumps(obj, ensure_ascii=False)))
+    db.execute(
+        "DELETE FROM chats WHERE id NOT IN "
+        "(SELECT id FROM chats ORDER BY created DESC LIMIT ?)", (CHATS_KEEP,))
+    db.commit()
+
+
+def _chat_delete(cid):
+    db = _get_chats_db()
+    db.execute("DELETE FROM chats WHERE id=?", (str(cid),))
+    db.commit()
 
 
 async def handle_chats_get(request):
-    """
-    Stored chat sessions
-    ---
-    tags: [UI]
-    summary: Global chat history stored on the server disk
-    responses:
-      '200':
-        description: Full list of saved chats (newest first)
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                chats:
-                  type: array
-                  items:
-                    type: object
-    """
+    """List saved chats (id, title, createdAt) — no message bodies, for the sidebar."""
     resp = _check_local(request)
     if resp:
         return resp
-    return web.json_response({"chats": _load_chats_disk()})
+    return web.json_response({"chats": _chats_list()})
 
 
-async def handle_chats_post(request):
-    """
-    Replace all stored chat sessions
-    ---
-    tags: [UI]
-    summary: Overwrite global chat history with the posted list
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            type: object
-            properties:
-              chats:
-                type: array
-                items:
-                  type: object
-    responses:
-      '200':
-        description: Saved
-      '400':
-        description: Invalid payload
-    """
+async def handle_chat_get(request):
+    """One chat's full content by id."""
+    resp = _check_local(request)
+    if resp:
+        return resp
+    chat = _chat_get(request.match_info["cid"])
+    if chat is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(chat)
+
+
+async def handle_chat_post(request):
+    """Upsert one chat by id."""
     resp = _check_local(request)
     if resp:
         return resp
@@ -2854,10 +2926,18 @@ async def handle_chats_post(request):
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    chats = body.get("chats") if isinstance(body, dict) else None
-    if not isinstance(chats, list):
-        return web.json_response({"error": 'expected {"chats": [...]}'}, status=400)
-    _save_chats_disk(chats)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected a chat object"}, status=400)
+    _chat_upsert(request.match_info["cid"], body)
+    return web.json_response({"ok": True})
+
+
+async def handle_chat_delete(request):
+    """Delete one chat by id."""
+    resp = _check_local(request)
+    if resp:
+        return resp
+    _chat_delete(request.match_info["cid"])
     return web.json_response({"ok": True})
 
 
@@ -3435,9 +3515,14 @@ def make_app():
     swagger.add_post("/sdapi/v1/txt2img", handle_txt2img)
     swagger.add_get("/sdapi/v1/images", handle_image_history)
     swagger.add_get("/sdapi/v1/images/delete", handle_image_delete)
+    swagger.add_get("/sdapi/v1/images/thumb/{name}", handle_image_thumb)
     swagger.add_get("/sdapi/v1/images/{name}", handle_image_file)
-    swagger.add_get("/api/chats", handle_chats_get)
-    swagger.add_post("/api/chats", handle_chats_post)
+    # Registered on the plain router (not swagger) so path params and the
+    # sendBeacon POST body aren't subject to swagger request validation.
+    app.router.add_get("/api/chats", handle_chats_get)
+    app.router.add_get("/api/chats/{cid}", handle_chat_get)
+    app.router.add_post("/api/chats/{cid}", handle_chat_post)
+    app.router.add_post("/api/chats/{cid}/delete", handle_chat_delete)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
 

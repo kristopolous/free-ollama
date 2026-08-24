@@ -469,7 +469,7 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <button type="button" class="htab active" data-mpane="text">Text</button>
 <button type="button" class="htab" data-mpane="image">Image</button>
 </div>
-<input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter...">
+<input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
 <div id="mpane-text">
 <div id="modelList" class="modellist"></div>
 </div>
@@ -642,14 +642,19 @@ __SD_MODELS__
 <div class="card"><div class="card-inner settings-inner">
 <div id="settingsLogin" class="settings-login" style="display:none">
 <p class="setting-help">These settings are password-protected.</p>
-<div class="login-row"><input type="password" id="loginPw" placeholder="Admin password" spellcheck="false" autocomplete="current-password"><button type="button" id="loginBtn" class="settings-save">Unlock</button></div>
+<div class="login-row"><button type="button" id="loginBtn" class="settings-save">Unlock</button></div>
+<!-- Password inputs are held in <template> (inert, invisible to Chrome's autofill)
+     and injected only when the Settings tab is first opened. A live <input
+     type=password> on page load makes Chrome treat the whole page as a login form
+     and hijack #modelFilter as the "username" field. -->
+<template id="loginPwTpl"><input type="password" id="loginPw" placeholder="Admin password" spellcheck="false" autocomplete="current-password"></template>
 <div id="loginErr" class="src-error"></div>
 </div>
 <div id="settingsBody">
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
-<label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"><button type="button" id="setAdminPwClear" class="src-test-btn" style="display:none">Remove</button></span></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><button type="button" id="setAdminPwClear" class="src-test-btn" style="display:none">Remove</button></span><template id="setAdminPwTpl"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></label>
 <div class="setting-sources">
 <div class="src-head"><span class="setting-name">Additional sources</span><button type="button" id="srcHelpBtn" class="src-help-btn" title="Format &amp; examples">?</button>
 <div id="srcHelp" class="src-help-pop">
@@ -664,9 +669,9 @@ __SD_MODELS__
     "name": "my-list",
     "url": "https://example.com/hosts.json",
     "mapping": {
-      "server": {"field": "url"},
-      "models": {"field": "models"},
-      "tps":    {"value": 0}
+      "server":  {"field": "url"},
+      "models":  {"field": "models"},
+      "service": {"value": "ollama"}
     }
   }
 ]</pre>
@@ -686,7 +691,6 @@ __SD_MODELS__
 </div>
 </div>
 
-<script id="chatModelsData" type="application/json">__CHAT_MODELS__</script>
 <script>
 // Activate the tab from the URL hash IMMEDIATELY, before any blocking load
 // (a synchronous XHR later on would otherwise delay navigation until it returns).
@@ -699,8 +703,18 @@ __SD_MODELS__
 })();
 var evtSource=new EventSource('api/activity');
 var paused=false;
-function refreshLists(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d)}).catch(function(){})}
-evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;if(d.status==='connected'||d.status==='failed')refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
+function refreshListsNow(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d)}).catch(function(){})}
+// Debounced: the activity stream replays its whole backlog on connect, and each
+// connected/failed event would otherwise trigger its own /dashboard-data fetch
+// (~20-25 on load). Collapse any burst into a single trailing fetch.
+var _refreshListsTimer=null;
+function refreshLists(){if(_refreshListsTimer)clearTimeout(_refreshListsTimer);_refreshListsTimer=setTimeout(function(){_refreshListsTimer=null;refreshListsNow()},400)}
+evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;
+  // Only refetch the host lists for genuinely-live events. On connect the stream
+  // replays its whole backlog; those are historical and already reflected in the
+  // fresh data loadDashboard() just fetched, so refetching for them is redundant
+  // (that was the 2nd dashboard-data hit on load). Live events have a ~now time.
+  if((d.status==='connected'||d.status==='failed')&&d.time&&(Date.now()/1e3-d.time)<5)refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
 document.getElementById('activityBtn').addEventListener('click',function(e){e.stopPropagation();actPop.classList.toggle('open')});
@@ -850,87 +864,100 @@ loadDashboard();
 </script>
 <script>
 var chatLog=document.getElementById('chatMessages');
-var storeKey='dyva_playground_chats';
-var currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[]};
-var chatsCache=[];
-function loadChats(){return chatsCache}
-// Saves are ASYNC + debounced + serialized. A synchronous POST here froze the
-// UI on every chat switch (the main thread blocked on the server round-trip,
-// which is slow on mobile while the proxy is racing hosts). The in-memory
-// chatsCache updates immediately so reads never wait on the network.
-var _saveTimer=null,_savePending=false,_saveInFlight=false;
-function persistChats(chats){
-  chatsCache=chats.slice();
-  _savePending=true;
-  if(!_saveTimer)_saveTimer=setTimeout(flushChats,250);
+var currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[],documents:[]};
+// Lazy chat storage. The sidebar holds only a lightweight index of
+// {id,title,createdAt}; a chat's messages are fetched on open and saved
+// per-chat. (The old design POSTed the entire chat list on every change and
+// pulled it all on page load, which got slow as history grew.) The single live
+// object for a chat is currentChat if it's in view, else gens[id].chat if it's
+// generating in the background — so message appends never need the full cache.
+var chatIndex=[];          // [{id,title,createdAt}], newest-first
+var _chatIndexLoaded=false;
+function idxOf(id){for(var i=0;i<chatIndex.length;i++){if(String(chatIndex[i].id)===String(id))return i}return -1}
+function touchIndex(chat){
+  var e={id:chat.id,title:chat.title||'',createdAt:chat.createdAt};
+  var i=idxOf(chat.id);
+  if(i>=0)chatIndex[i]=e;             // keep position on edit
+  else chatIndex.unshift(e);          // a new chat goes to the top
 }
-function flushChats(){
+function liveChat(id){
+  if(String(currentChat.id)===String(id))return currentChat;
+  var g=gens[String(id)];return (g&&g.chat)||null;
+}
+function serializeChat(c){
+  var o={id:c.id,createdAt:c.createdAt,title:c.title||'',model:c.model||'',messages:(c.messages||[]).map(function(m){
+    var x={role:m.role,content:m.content};
+    if(m._meta)x._meta=m._meta;
+    if(m.tps!==undefined)x.tps=m.tps;
+    if(m.ts)x.ts=m.ts;
+    if(m.files&&m.files.length)x.files=m.files.slice();
+    return x;
+  })};
+  if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}});
+  return o;
+}
+// Per-chat saves: async, debounced, coalesced by id (latest wins), non-blocking.
+var _pendingSaves={},_saveTimer=null,_saveInFlight=false;
+function saveChat(chat){
+  if(!chat||chat.id===undefined||chat.id===null)return;
+  _pendingSaves[String(chat.id)]=serializeChat(chat);
+  if(!_saveTimer)_saveTimer=setTimeout(flushSaves,250);
+}
+function flushSaves(){
   _saveTimer=null;
-  if(_saveInFlight){_saveTimer=setTimeout(flushChats,250);return}
-  if(!_savePending)return;
-  _savePending=false;_saveInFlight=true;
-  try{
-    var x=new XMLHttpRequest();x.open('POST','api/chats',true);
-    x.setRequestHeader('Content-Type','application/json');
-    x.onloadend=function(){_saveInFlight=false;if(_savePending&&!_saveTimer)_saveTimer=setTimeout(flushChats,250)};
-    x.send(JSON.stringify({chats:chatsCache}));
-  }catch(e){_saveInFlight=false}
+  if(_saveInFlight){_saveTimer=setTimeout(flushSaves,250);return}
+  var ids=Object.keys(_pendingSaves);
+  if(!ids.length)return;
+  _saveInFlight=true;var remaining=ids.length;
+  function done(){if(--remaining<=0){_saveInFlight=false;if(Object.keys(_pendingSaves).length&&!_saveTimer)_saveTimer=setTimeout(flushSaves,50)}}
+  ids.forEach(function(id){
+    var body=_pendingSaves[id];delete _pendingSaves[id];
+    try{
+      var x=new XMLHttpRequest();x.open('POST','api/chats/'+encodeURIComponent(id),true);
+      x.setRequestHeader('Content-Type','application/json');
+      x.onloadend=done;x.send(JSON.stringify(body));
+    }catch(e){done()}
+  });
 }
-// flush any pending save when the page is backgrounded/closed, without blocking
 function _beaconSave(){
-  if(!_savePending)return;
-  try{
-    if(navigator.sendBeacon){
-      var ok=navigator.sendBeacon('api/chats',new Blob([JSON.stringify({chats:chatsCache})],{type:'application/json'}));
-      if(ok){_savePending=false;return}
-    }
-  }catch(e){}
+  Object.keys(_pendingSaves).forEach(function(id){
+    try{if(navigator.sendBeacon)navigator.sendBeacon('api/chats/'+encodeURIComponent(id),new Blob([JSON.stringify(_pendingSaves[id])],{type:'application/json'}))}catch(e){}
+    delete _pendingSaves[id];
+  });
 }
 window.addEventListener('pagehide',_beaconSave);
 document.addEventListener('visibilitychange',function(){if(document.hidden)_beaconSave()});
-(function(){
-  var x=new XMLHttpRequest();x.open('GET','api/chats',false);
-  try{x.send()}catch(e){return}
-  if(x.status===200){
-    try{chatsCache=JSON.parse(x.responseText).chats||[]}catch(e){chatsCache=[]}
-  }
-  if(!chatsCache.length){
-    var ls=null;
-    try{ls=JSON.parse(localStorage.getItem(storeKey)||'null')}catch(e){}
-    if(ls&&ls.length){persistChats(ls);if(window.console)console.info('dyva: migrated '+ls.length+' local chat(s) to server storage')}
-  }
-})();
+function fetchChat(id,cb){
+  try{
+    var x=new XMLHttpRequest();x.open('GET','api/chats/'+encodeURIComponent(id),true);
+    x.onload=function(){var c=null;if(x.status===200){try{c=JSON.parse(x.responseText)}catch(e){}}cb(c)};
+    x.onerror=function(){cb(null)};
+    x.send();
+  }catch(e){cb(null)}
+}
+function fetchChatP(id){return new Promise(function(res){fetchChat(id,res)})}
+function loadChatIndex(cb){
+  try{
+    var x=new XMLHttpRequest();x.open('GET','api/chats',true);
+    x.onload=function(){_chatIndexLoaded=true;if(x.status===200){try{chatIndex=JSON.parse(x.responseText).chats||[]}catch(e){chatIndex=[]}}renderSidebar();if(cb)cb()};
+    x.onerror=function(){_chatIndexLoaded=true;if(cb)cb()};
+    x.send();
+  }catch(e){_chatIndexLoaded=true;if(cb)cb()}
+}
+// Re-sync the lightweight index when returning to the foreground (cheap now).
 document.addEventListener('visibilitychange',function(){
   if(document.hidden)return;
-  for(var k in gens)return;   // don't clobber chat list while a generation is running
+  for(var k in gens)return;   // don't reorder the list while a generation is running
   try{if(localStorage.getItem('dyva_inflight'))return}catch(e){}
-  var x=new XMLHttpRequest();
-  x.open('GET','api/chats');
-  x.onload=function(){
-    if(x.status!==200)return;
-    try{
-      var nc=JSON.parse(x.responseText).chats||[];
-      if(JSON.stringify(nc)!==JSON.stringify(chatsCache)){chatsCache=nc;renderSidebar()}
-    }catch(e){}
-  };
-  x.send();
+  if(_chatIndexLoaded)loadChatIndex();
 });
 function saveCurrentChat(){
-  var chats=loadChats();
   if(!currentChat.messages.length)return;
-  var i=-1;
-  for(var k=0;k<chats.length;k++){if(chats[k].id===currentChat.id){i=k;break}}
-  var copy={id:currentChat.id,createdAt:currentChat.createdAt,title:currentChat.title,model:currentChat.model||'',messages:currentChat.messages.map(function(m){
-    var c={role:m.role,content:m.content};
-    if(m._meta)c._meta=m._meta;
-    if(m.tps!==undefined)c.tps=m.tps;
-    if(m.ts)c.ts=m.ts;
-    if(m.files&&m.files.length)c.files=m.files.slice();
-    return c;
-  })};
-  if(currentChat.documents&&currentChat.documents.length)copy.documents=currentChat.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}});
-  if(i>=0)chats[i]=copy;else{chats.unshift(copy);if(location.hash!=='#chat/'+currentChat.id)location.hash='chat/'+currentChat.id;}
-  persistChats(chats);
+  var isNew=idxOf(currentChat.id)<0;
+  saveChat(currentChat);
+  touchIndex(currentChat);
+  if(isNew&&location.hash!=='#chat/'+currentChat.id)location.hash='chat/'+currentChat.id;
+  renderSidebar();
 }
 function fmtWhen(ts){var d=new Date(ts);return d.toLocaleDateString()+' '+d.toLocaleTimeString()}
 function fmtMsgTime(ts){
@@ -943,7 +970,7 @@ function fmtMsgTime(ts){
 function renderSidebar(){
   var list=document.getElementById('chatList');
   list.innerHTML='';
-  loadChats().forEach(function(c){
+  chatIndex.forEach(function(c){
     var item=document.createElement('div');
     item.className='chat-item'+(String(c.id)===String(currentChat.id)?' active':'');
     item.title=fmtWhen(c.createdAt);
@@ -961,7 +988,9 @@ function renderSidebar(){
 }
 function deleteChat(id){
   if(String(currentChat.id)===String(id)){currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[],documents:[]};renderMessages();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
-  persistChats(loadChats().filter(function(c){return String(c.id)!==String(id)}));
+  var i=idxOf(id);if(i>=0)chatIndex.splice(i,1);
+  delete _pendingSaves[String(id)];   // don't let a queued save resurrect it
+  try{var x=new XMLHttpRequest();x.open('POST','api/chats/'+encodeURIComponent(id)+'/delete',true);x.send();}catch(e){}
   renderSidebar();
 }
 function cleanTitle(txt){
@@ -979,13 +1008,15 @@ function cleanTitle(txt){
   if(/^(analysis|analyze|thought|thinking|final|assistant|commentary|channel|message)$/i.test(txt))return '';
   return txt;
 }
-async function regenTitle(c,btn){
-  var msgs=(c.messages||[]).filter(function(m){return m.role==='user'&&m.content})
-    .map(function(m){return String(m.content)}).join('\n').slice(0,2000);
-  if(!msgs)return;
+async function regenTitle(entry,btn){
   if(btn)btn.textContent='\u2026';
   try{
-    var model=c.model||document.getElementById('chatModel').value.trim()||'*';
+    var chat=liveChat(entry.id)||await fetchChatP(entry.id);
+    if(!chat)return;
+    var msgs=(chat.messages||[]).filter(function(m){return m.role==='user'&&m.content})
+      .map(function(m){return String(m.content)}).join('\n').slice(0,2000);
+    if(!msgs)return;
+    var model=chat.model||document.getElementById('chatModel').value.trim()||'*';
     var r=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({model:model,stream:false,messages:[
         {role:'system',content:'You generate chat titles. Reply with ONLY a short title (max 5 words) summarizing the user message(s). No quotes, no trailing punctuation.'},
@@ -994,13 +1025,9 @@ async function regenTitle(c,btn){
       var j=await r.json();
       var txt=cleanTitle(j&&j.message&&j.message.content?j.message.content:'');
       if(txt){
-        var chats=loadChats(),i=findChatIndex(c.id);
-        if(i>=0){
-          chats[i].title=txt;
-          persistChats(chats);
-          if(String(currentChat.id)===String(c.id))currentChat.title=txt;
-        }
-        renderSidebar();
+        chat.title=txt;
+        if(String(currentChat.id)===String(chat.id))currentChat.title=txt;
+        saveChat(chat);touchIndex(chat);renderSidebar();
       }
     }
   }catch(e){}
@@ -1048,7 +1075,12 @@ function chatPayload(c){
     return {role:m.role,content:m.content};
   })};
 }
-function downloadChatJson(c){
+function downloadChatJson(entry){
+  var live=liveChat(entry.id);
+  if(live){_doDownloadChat(live);return}
+  fetchChat(entry.id,function(c){if(c)_doDownloadChat(c)});
+}
+function _doDownloadChat(c){
   var name=String(c.title||'chat').replace(/[\\/:*?"<>|]+/g,'_').replace(/\s+/g,' ').trim().slice(0,80)||'chat';
   var blob=new Blob([JSON.stringify(chatPayload(c),null,2)],{type:'application/json'});
   var a=document.createElement('a');
@@ -1218,42 +1250,28 @@ function renderMessages(){
   chatLog.innerHTML='';
   currentChat.messages.forEach(function(m,i){if(m&&m._meta&&m._meta.hidden)return;addMsg(m.role,m.content,i)});
 }
-function findChatIndex(id){
-  var chats=loadChats();
-  for(var k=0;k<chats.length;k++){if(String(chats[k].id)===String(id))return k}
-  return -1;
-}
 function chatInView(chatId){return String(currentChat.id)===String(chatId)}
+// The chat being appended to is the one live object for that id: currentChat if
+// in view, else gens[id].chat for a background generation. Both point at the
+// same object the gen was started with, so no full-cache lookup is needed.
 function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render,think){
   if(!content&&!think)return;
   var msg={role:'assistant',content:content,_meta:{server:host||'',model:fmodel||''},tps:tps,ts:Date.now()};
   if(think)msg._meta.think=think;
-  var inView=chatInView(chatId);
-  var chats=loadChats(),i=findChatIndex(chatId);
-  if(inView&&i<0){
-    currentChat.messages.push(msg);
-    saveCurrentChat();
-    renderSidebar();
-    return;
-  }
-  if(i>=0){
-    chats[i].messages.push(msg);
-    persistChats(chats);
-    if(inView){
-      currentChat.messages=chats[i].messages.slice();
-      renderSidebar();
-      if(render)renderMessages();
-    }
-  }
+  var chat=liveChat(chatId);
+  if(!chat)return;
+  var wasIndexed=idxOf(chatId)>=0;
+  chat.messages.push(msg);
+  saveChat(chat);touchIndex(chat);
+  renderSidebar();
+  if(chatInView(chatId)&&wasIndexed&&render)renderMessages();
 }
 function appendMsgRecord(chatId,msg){
   if(msg&&!msg.ts)msg.ts=Date.now();
-  var chats=loadChats(),i=findChatIndex(chatId);
-  if(i>=0){
-    chats[i].messages.push(msg);
-    persistChats(chats);
-    if(chatInView(chatId))currentChat.messages=chats[i].messages.slice();
-  }
+  var chat=liveChat(chatId);
+  if(!chat)return;
+  chat.messages.push(msg);
+  saveChat(chat);
 }
 function editUserMsg(index){
   if(index<0||index>=currentChat.messages.length)return;
@@ -1319,10 +1337,18 @@ function loadChatById(id){
   // re-render — that would wipe a live streaming bubble mid-response.
   if(String(currentChat.id)===String(id))return;
   saveCurrentChat();
-  var c=loadChats().find(function(x){return String(x.id)===String(id)});
-  if(!c)return;
-  currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:c.messages.slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
-  document.getElementById('chatModel').value=currentChat.model;
+  // If this chat is generating in the background, reuse its live object (so
+  // appends stay unified); otherwise fetch its full content from the server.
+  var g=gens[String(id)];
+  if(g&&g.chat){currentChat=g.chat;afterLoadChat(String(id));return;}
+  fetchChat(id,function(c){
+    if(!c)return;
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    afterLoadChat(String(id));
+  });
+}
+function afterLoadChat(id){
+  document.getElementById('chatModel').value=currentChat.model||'*';
   updateModelCount();
   renderMessages();
   renderSidebar();
@@ -1443,6 +1469,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   // one generation record per conversation, reused across tool rounds
   var gen=gens[chatId]||(gens[chatId]={raw:'',think:'',host:'',fmodel:'',tps:null,stopped:false});
   gen.ac=ac;gen.bubble=bubble;gen.model=model;gen.chatCreated=chatCreated;gen.chatTitle=chatTitle;
+  // Hold the chat's live object so background appends target it without a cache.
+  if(!gen.chat)gen.chat=currentChat;
   var handedOff=false;
   function inView(){return chatInView(chatId)}
   function live(){return inView()&&gen.bubble&&gen.bubble.bodyEl.isConnected}
@@ -1645,17 +1673,18 @@ function tryResume(){
   try{localStorage.removeItem('dyva_inflight')}catch(e2){}
   if(!j||!j.model||!j.msgs||!j.msgs.length)return;
   if((j.n||0)>=2)return;
-  var i=findChatIndex(j.id);
-  if(i<0)return;
-  currentChat=loadChats()[i];
-  currentChat.messages=currentChat.messages.slice();
-  renderMessages();
-  renderSidebar();
-  var bubble=addMsg('assistant','');
-  bubble.bodyEl.classList.add('streaming');
-  showRummage(bubble.bodyEl);
-  setSendButton('streaming');
-  runStream(String(j.id),currentChat.createdAt,currentChat.title,j.model,j.msgs,bubble);
+  fetchChat(j.id,function(c){
+    if(!c)return;
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    touchIndex(currentChat);
+    renderMessages();
+    renderSidebar();
+    var bubble=addMsg('assistant','');
+    bubble.bodyEl.classList.add('streaming');
+    showRummage(bubble.bodyEl);
+    setSendButton('streaming');
+    runStream(String(j.id),currentChat.createdAt,currentChat.title,j.model,j.msgs,bubble);
+  });
 }
 document.addEventListener('visibilitychange',function(){if(!document.hidden)setTimeout(tryResume,300)});
 document.getElementById('chatSend').addEventListener('click',function(e){
@@ -1723,10 +1752,10 @@ function findDoc(docs,ref){
 // returns the documents array for a chat plus a commit fn (in-view or stored)
 function docCtx(chatId){
   if(chatInView(chatId)){currentChat.documents=currentChat.documents||[];return {docs:currentChat.documents,inView:true,commit:saveCurrentChat};}
-  var chats=loadChats(),i=findChatIndex(chatId);
-  if(i<0)return null;
-  chats[i].documents=chats[i].documents||[];
-  return {docs:chats[i].documents,inView:false,commit:function(){persistChats(chats)}};
+  var chat=liveChat(chatId);   // background generation's live object
+  if(!chat)return null;
+  chat.documents=chat.documents||[];
+  return {docs:chat.documents,inView:false,commit:function(){saveChat(chat);touchIndex(chat);}};
 }
 function applyDocOp(chatId,name,args){
   var ctx=docCtx(chatId);
@@ -1912,7 +1941,9 @@ async function generateImage(){
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
 
+var _imgHistoryLoaded=false;
 function loadImgHistory(){
+  _imgHistoryLoaded=true;
   fetch('sdapi/v1/images',{cache:'no-store'}).then(function(r){return r.json()}).then(function(list){
     var el=document.getElementById('imgHistory');
     el.innerHTML='';
@@ -1920,7 +1951,7 @@ function loadImgHistory(){
       var item=document.createElement('div');
       item.className='hist-item';
       var im=document.createElement('img');
-      im.src='sdapi/v1/images/'+encodeURIComponent(e.file);
+      im.src='sdapi/v1/images/thumb/'+encodeURIComponent(e.file.replace(/\.png$/i,''))+'.webp';
       im.loading='lazy';
       var bits=[e.prompt];
       if(e.model)bits.push(e.model);
@@ -1993,7 +2024,6 @@ chatLog.addEventListener('click',function(e){
   var img=e.target.closest('img');
   if(img&&img.src)openLightboxSrc(img.src,img.alt||'');
 });
-loadImgHistory();
 ['posPrompt','negPrompt'].forEach(function(id){
   document.getElementById(id).addEventListener('keydown',function(e){
     if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();generateImage();}
@@ -2004,8 +2034,16 @@ function activateTab(name,chatId){
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
   document.body.classList.toggle('chat',name==='chat');
-  if(name==='chat'&&chatId)loadChatById(chatId);
-  if(name==='settings')loadSettings();
+  // Lazy-load the chat index only when the Chat tab is first opened, then open
+  // the requested chat (if a #chat/<id> hash was given).
+  if(name==='chat'){
+    if(!_chatIndexLoaded)loadChatIndex(chatId?function(){loadChatById(chatId)}:null);
+    else if(chatId)loadChatById(chatId);
+  }
+  if(name==='settings'){injectSettingsPwFields();loadSettings();}
+  // Lazy-load the image gallery only when its tab is first opened — building a
+  // node per image on every page load (even in the Server Room) is wasteful.
+  if(name==='image'&&!_imgHistoryLoaded){_imgHistoryLoaded=true;loadImgHistory();}
 }
 // Admin password: when set on the server, the settings endpoints 403 unless the
 // browser sends X-Admin-Key. We keep the unlocked password in localStorage and
@@ -2014,6 +2052,21 @@ var ADMIN_KEY_LS='dyva_admin_key';
 function adminKey(){try{return localStorage.getItem(ADMIN_KEY_LS)||''}catch(e){return''}}
 function setAdminKeyStored(v){try{v?localStorage.setItem(ADMIN_KEY_LS,v):localStorage.removeItem(ADMIN_KEY_LS)}catch(e){}}
 function adminHeaders(extra){var h=Object.assign({},extra||{});var k=adminKey();if(k)h['X-Admin-Key']=k;return h}
+// Inject the password inputs from their <template>s on first Settings open, so
+// there is no live <input type=password> in the DOM on page load (which would
+// make Chrome hijack #modelFilter as a username field). Each input is placed as
+// a real child of its flex row so the CSS applies, and the loginPw Enter handler
+// is wired here since the element doesn't exist until now.
+var _pwFieldsInjected=false;
+function injectSettingsPwFields(){
+  if(_pwFieldsInjected)return;_pwFieldsInjected=true;
+  var lr=document.querySelector('#settingsLogin .login-row');
+  if(lr)lr.insertBefore(document.getElementById('loginPwTpl').content.cloneNode(true),document.getElementById('loginBtn'));
+  var apf=document.querySelector('.admin-pw-field');
+  if(apf)apf.insertBefore(document.getElementById('setAdminPwTpl').content.cloneNode(true),document.getElementById('setAdminPwClear'));
+  var lp=document.getElementById('loginPw');
+  if(lp)lp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();unlockSettings();}});
+}
 function showSettingsLocked(locked){
   document.getElementById('settingsLogin').style.display=locked?'':'none';
   document.getElementById('settingsBody').style.display=locked?'none':'';
@@ -2133,7 +2186,6 @@ function addSource(){
   sources.push({name:'unique-string',url:'https://some-site/file.json',mapping:{
     server:{value:''},
     models:{field:'models'},
-    tps:{value:0},
     version:{value:''},
     service:{value:'ollama'}
   }});
@@ -2165,7 +2217,6 @@ function addFromUrl(){
 document.getElementById('settingsSave').addEventListener('click',saveSettings);
 document.getElementById('setAdminPwClear').addEventListener('click',removeAdminPw);
 document.getElementById('loginBtn').addEventListener('click',unlockSettings);
-document.getElementById('loginPw').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();unlockSettings();}});
 document.getElementById('srcAddBtn').addEventListener('click',addSource);
 document.getElementById('srcUrlBtn').addEventListener('click',addFromUrl);
 document.getElementById('srcTestBtn').addEventListener('click',testSources);
