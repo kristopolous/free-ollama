@@ -13,8 +13,8 @@ source .env
 case "$SERVICE" in
   combine)
     set -x
-    cd ~/.cache/free-ollama
-    jq -s 'add' *-working.json | ssh $_SERVER "cat > $_SERVER_PATH"
+    jq -s 'add' ~/.cache/free-ollama/*-working.json | ssh $_SERVER "cat > $_SERVER_PATH"
+    source .venv/bin/activate
     ./dyva.py --refresh $_SOURCE
     exit
     ;;
