@@ -50,6 +50,10 @@ SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
 SHODAN_WEB = "https://www.shodan.io/search"
 SHODAN_PAGES = 2
 
+# run_ts of the most recent fetch session, so ctrl+c in main() can suggest
+# the exact -i value to resume with
+_RUN_TS = None
+
 SERVICE_CONFIG = {
     "a1111": {
         "port": 7860,
@@ -841,6 +845,7 @@ def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=
 
 
 def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa"):
+    global _RUN_TS
     hosts_file = _cache_file(name, "hosts")
 
     if not query and not service and name not in NAMED_QUERIES:
@@ -855,6 +860,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             log.warning("--servers/--fid are ignored with --site shodan")
         from datetime import datetime
         run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
+        _RUN_TS = run_ts
         if session:
             log.info(f"resuming session {run_ts}")
 
@@ -894,7 +900,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             if country:
                 qparts.append(f'country:"{country}"')
             combined = " ".join(qparts)
-            print(combined)
+            log.debug(combined)
             if not dry:
                 log.info(f"[{done_reqs+1}/{total_reqs}] country={country} port={port}")
 
@@ -936,6 +942,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             return []
         from datetime import datetime
         run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
+        _RUN_TS = run_ts
         if session:
             log.info(f"resuming session {run_ts}")
 
@@ -993,7 +1000,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             if fid:
                 qparts.append(f'fid="{fid}"')
             combined = " && ".join(qparts)
-            print(combined)
+            log.debug(combined)
             if not dry:
                 log.info(f"[{i+1}/{len(combos)}] country={country} port={port} server={server} fid={fid}")
 
@@ -1353,3 +1360,14 @@ def main():
                 classify(name=args.name)
     except SystemExit as e:
         sys.exit(e.code)
+    except KeyboardInterrupt:
+        base = f"graflex -s {args.service}" if args.service else f"graflex -n {args.name or 'image-gen'}"
+        if step == "fetch":
+            ts = _RUN_TS or args.session
+            hint = f"{base} -a fetch{f' -i {ts}' if ts else ''}"
+            log.warning(f"\ninterrupted — already-fetched pages are saved; resume with: {hint}")
+        elif step == "check":
+            log.warning(f"\ninterrupted — checked hosts are saved; rerun {base} -a check (or -a check-all) to continue")
+        else:
+            log.warning("\ninterrupted")
+        sys.exit(130)

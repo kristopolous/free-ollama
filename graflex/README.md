@@ -274,7 +274,7 @@ warning.
 | `-p`, `--ports` | Comma-separated port values to cycle |
 | `-f`, `--fid` | Comma-separated FID values; each is fetched as `QUERY + fid="..."` on its own (not crossed with countries/ports/servers); hosts found this way record the `fid` |
 | `--servers` | Comma-separated server values to cycle |
-| `-i`, `--id` | Resume a previous session by providing its run timestamp (the `run_ts` from the log) |
+| `-i`, `--id` | Resume a previous session by providing its run timestamp (the `run_ts` from the log); ctrl+c during fetch suggests this automatically |
 | `-w`, `--workers` | Max parallel check workers (default: 10) |
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
 | `-z`, `--sleep` | Seconds to sleep between requests (default: 4) |

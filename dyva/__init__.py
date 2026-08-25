@@ -3463,6 +3463,353 @@ async def handle_comfyui_proxy(request):
     return web.json_response({"error": f"all ComfyUI hosts failed: {last_err}"}, status=502)
 
 
+TTS_KEY = "__tts__"
+
+TTS_NODES = [
+    {"class": "MegaTTS3", "text": "input_text", "voice": "reference_voice", "lang": "language"},
+    {"class": "AILab_VoxCPMTTS", "text": "text", "voice": None},
+    {"class": "AILab_VoxCPMTTS_Advanced", "text": "text", "voice": None},
+    {"class": "QwenTTS", "text": "content", "voice": "voice"},
+    {"class": "Qwen3TTS", "text": "content", "voice": "voice"},
+]
+
+_TTS_NODE_CACHE = {}
+_TTS_NODE_CACHE_TTL = 300
+
+_TTS_MIME = {
+    ".flac": "audio/flac",
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/opus",
+    ".m4a": "audio/mp4",
+}
+
+
+class _TtsError(Exception):
+    pass
+
+
+async def _tts_node_for(session, host):
+    hit = _TTS_NODE_CACHE.get(host)
+    if hit and time.time() - hit[1] < _TTS_NODE_CACHE_TTL:
+        cls = hit[0]
+        return next((s for s in TTS_NODES if s["class"] == cls), None)
+    for spec in TTS_NODES:
+        try:
+            r = await session.get(
+                _host_url(host, f"/object_info/{spec['class']}"),
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+            if r.status != 200:
+                await r.release()
+                continue
+            data = await r.json(content_type=None)
+            await r.release()
+        except Exception:
+            continue
+        if isinstance(data, dict) and data.get(spec["class"]):
+            required = ((data[spec["class"]].get("input") or {}).get("required")) or {}
+            voice_field = spec.get("voice")
+            if voice_field:
+                entry = required.get(voice_field)
+                opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else None
+                if isinstance(opts, list) and not opts:
+                    continue
+            _TTS_NODE_CACHE[host] = (spec["class"], time.time())
+            return spec
+    return None
+
+
+def _tts_workflow(spec, schema, input_text, voice):
+    cls = spec["class"]
+    inputs = {spec["text"]: input_text}
+    required = ((schema.get(cls) or {}).get("input") or {}).get("required") or {}
+
+    voice_field = spec.get("voice")
+    lang_field = spec.get("lang")
+    if voice and voice_field:
+        entry = required.get(voice_field)
+        opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else []
+        if isinstance(opts, list) and (not opts or voice in opts):
+            inputs[voice_field] = voice
+
+    if lang_field:
+        entry = required.get(lang_field)
+        opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else []
+        lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in input_text) else "en"
+        if opts and lang not in opts:
+            lang = opts[0]
+        inputs[lang_field] = lang
+
+    for name, entry in required.items():
+        if name in inputs or not isinstance(entry, list) or len(entry) < 2:
+            continue
+        attrs = entry[1] if isinstance(entry[1], dict) else {}
+        if "default" in attrs:
+            inputs[name] = attrs["default"]
+        elif isinstance(entry[0], list) and entry[0]:
+            inputs[name] = entry[0][0]
+
+    return {
+        "1": {"class_type": cls, "inputs": inputs},
+        "2": {"class_type": "SaveAudio", "inputs": {"audio": ["1", 0], "filename_prefix": "dyva/tts"}},
+    }
+
+
+async def _tts_comfyui(session, host, input_text, voice=None):
+    import uuid as uuid_mod
+
+    spec = await _tts_node_for(session, host)
+    if not spec:
+        raise _TtsError("no known TTS node")
+
+    try:
+        info_resp = await session.get(
+            _host_url(host, f"/object_info/{spec['class']}"),
+            timeout=aiohttp.ClientTimeout(total=15),
+        )
+        if info_resp.status != 200:
+            await info_resp.release()
+            raise _TtsError(f"object_info HTTP {info_resp.status}")
+        schema = await info_resp.json(content_type=None)
+        await info_resp.release()
+    except _TtsError:
+        raise
+    except Exception as e:
+        raise _TtsError(str(e))
+
+    workflow = _tts_workflow(spec, schema, input_text, voice)
+    client_id = str(uuid_mod.uuid4())
+    try:
+        prompt_resp = await session.post(
+            _host_url(host, "/prompt"),
+            json={"prompt": workflow, "client_id": client_id},
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        if prompt_resp.status != 200:
+            body = await prompt_resp.text()
+            await prompt_resp.release()
+            raise _TtsError(f"prompt rejected: {body[:200]}")
+        prompt_data = await prompt_resp.json(content_type=None)
+        await prompt_resp.release()
+    except _TtsError:
+        raise
+    except Exception as e:
+        raise _TtsError(str(e))
+    prompt_id = prompt_data.get("prompt_id")
+    if not prompt_id:
+        raise _TtsError("no prompt_id")
+
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        await asyncio.sleep(2)
+        try:
+            hist_resp = await session.get(
+                _host_url(host, f"/history/{prompt_id}"),
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if hist_resp.status != 200:
+                await hist_resp.release()
+                continue
+            hist = await hist_resp.json(content_type=None)
+            await hist_resp.release()
+        except Exception:
+            continue
+        entry = hist.get(prompt_id)
+        if not entry:
+            continue
+        audio_files = []
+        for out in (entry.get("outputs") or {}).values():
+            audio_files.extend(out.get("audio") or [])
+        if audio_files:
+            af = audio_files[0]
+            try:
+                view_resp = await session.get(
+                    _host_url(host, "/view"),
+                    params={
+                        "filename": af.get("filename"),
+                        "subfolder": af.get("subfolder", ""),
+                        "type": af.get("type", "output"),
+                    },
+                    timeout=aiohttp.ClientTimeout(total=60),
+                )
+                if view_resp.status != 200:
+                    await view_resp.release()
+                    raise _TtsError(f"view HTTP {view_resp.status}")
+                raw = await view_resp.read()
+                await view_resp.release()
+            except _TtsError:
+                raise
+            except Exception as e:
+                raise _TtsError(str(e))
+            return raw, af.get("filename") or "tts.flac"
+        status = entry.get("status") or {}
+        if status.get("status_str") == "error":
+            msgs = [str(m) for m in (status.get("messages") or [])]
+            detail = "; ".join(msgs)[:200]
+            raise _TtsError(f"execution error{': ' + detail if detail else ''}")
+        if status.get("completed"):
+            break
+    raise _TtsError("timeout waiting for audio")
+
+
+def _find_tts_hosts(target_host=None):
+    if target_host:
+        return [target_host]
+    servers = load_servers()
+    hosts = [s.get("server") for s in servers if s.get("service") == "comfyui" and s.get("server")]
+    bad, good = load_bad(), load_good()
+    hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
+    last = get_last(TTS_KEY)
+    if last and last[0]:
+        hosts = [last[0]] + [h for h in hosts if h != last[0]]
+    return hosts
+
+
+async def handle_tts_speech(request):
+    """
+    OpenAI-compatible text-to-speech
+    ---
+    tags: [Audio]
+    summary: POST /v1/audio/speech — generate speech from text on a discovered ComfyUI host
+    description: |
+      Accepts the OpenAI `/v1/audio/speech` shape (`model`, `input`, `voice`,
+      `response_format`, `speed`) and returns binary audio. Backed by ComfyUI
+      hosts with known TTS custom nodes (MegaTTS3, VoxCPM, QwenTTS, ...).
+      `response_format` and `speed` are accepted but ignored — you get the
+      host-native format (usually flac).
+    parameters:
+      - in: query
+        name: host
+        schema:
+          type: string
+        description: Target a specific ComfyUI host (ip:port)
+    responses:
+      '200':
+        description: Audio bytes
+      '400':
+        description: Missing/invalid input
+      '502':
+        description: All hosts failed
+      '503':
+        description: No available hosts
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    input_text = str(body.get("input") or "").strip()
+    if not input_text:
+        return web.json_response({"error": "'input' is required"}, status=400)
+    voice = body.get("voice")
+    if not isinstance(voice, str) or not voice.strip():
+        voice = None
+    else:
+        voice = voice.strip()
+
+    hosts = _find_tts_hosts(request.query.get("host"))
+    if not hosts:
+        return web.json_response({"error": "no ComfyUI hosts available for tts"}, status=503)
+
+    session = request.app["session"]
+    snippet = input_text[:60] + ("..." if len(input_text) > 60 else "")
+    last_err = None
+    for host in hosts:
+        label = f"tts: {snippet}"
+        t0 = time.time()
+        await broadcast_activity(host, label, "trying", label)
+        try:
+            raw, filename = await _tts_comfyui(session, host, input_text, voice)
+        except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            last_err = str(e) or type(e).__name__
+            add_bad(host, TTS_KEY)
+            await broadcast_activity(host, label, "failed", f"{label}: {last_err}", duration=time.time() - t0)
+            continue
+        add_good(host, TTS_KEY)
+        set_last(TTS_KEY, host, "")
+        await broadcast_activity(host, label, "done", label, duration=time.time() - t0)
+        ext = os.path.splitext(filename)[1].lower()
+        return web.Response(body=raw, content_type=_TTS_MIME.get(ext, "application/octet-stream"))
+
+    return web.json_response({"error": f"tts failed: {last_err}"}, status=502)
+
+
+async def handle_audio_voices(request):
+    """
+    List available TTS voices/nodes across hosts
+    ---
+    tags: [Audio]
+    summary: GET /v1/audio/voices — probe discovered ComfyUI hosts for TTS nodes and their voices
+    parameters:
+      - in: query
+        name: host
+        schema:
+          type: string
+        description: Target a specific ComfyUI host (ip:port)
+    responses:
+      '200':
+        description: Voice catalogue
+      '503':
+        description: No available hosts
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+
+    session = request.app["session"]
+    hosts = _find_tts_hosts(request.query.get("host"))
+    if not hosts:
+        return web.json_response({"error": "no ComfyUI hosts available"}, status=503)
+
+    async def probe(host):
+        found = []
+        for spec in TTS_NODES:
+            try:
+                r = await session.get(
+                    _host_url(host, f"/object_info/{spec['class']}"),
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
+                if r.status != 200:
+                    await r.release()
+                    continue
+                data = await r.json(content_type=None)
+                await r.release()
+            except Exception:
+                continue
+            if not (isinstance(data, dict) and data.get(spec["class"])):
+                continue
+            required = ((data[spec["class"]].get("input") or {}).get("required")) or {}
+            voices = []
+            voice_field = spec.get("voice")
+            entry = required.get(voice_field) if voice_field else None
+            if isinstance(entry, list) and isinstance(entry[0], list):
+                voices = [v for v in entry[0] if isinstance(v, str)]
+            found.append({"node": spec["class"], "voices": voices})
+        return host, found
+
+    results = await asyncio.gather(*(probe(h) for h in hosts), return_exceptions=True)
+    voices, details = [], []
+    seen = set()
+    for res in results:
+        if not isinstance(res, tuple):
+            continue
+        host, nodes = res
+        if not nodes:
+            continue
+        details.append({"host": host, "nodes": nodes})
+        for n in nodes:
+            for v in n["voices"]:
+                if v not in seen:
+                    seen.add(v)
+                    voices.append(v)
+    return web.json_response({"voices": voices, "hosts": details})
+
+
 def make_app():
     app = web.Application(client_max_size=128 * 1024 * 1024)
 
@@ -3530,6 +3877,8 @@ def make_app():
     app.router.add_post("/api/chats/{cid}/delete", handle_chat_delete)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
+    app.router.add_post("/v1/audio/speech", handle_tts_speech)
+    app.router.add_get("/v1/audio/voices", handle_audio_voices)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)

@@ -73,6 +73,8 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `GET` | `/v1/models` | OpenAI-compatible model listing |
 | `POST` | `/sdapi/v1/txt2img` | Text-to-image (A1111 + ComfyUI fallback) |
 | `GET` | `/sdapi/v1/sd-models` | List discovered SD models |
+| `POST` | `/v1/audio/speech` | OpenAI-compatible text-to-speech (ComfyUI TTS nodes) |
+| `GET` | `/v1/audio/voices` | List TTS voices/nodes across discovered hosts |
 | `GET` | `/sdapi/v1/images` | Metadata for recently generated images (last 100) |
 | `GET` | `/sdapi/v1/images/{name}` | Fetch a generated image file |
 | `*` | `/comfyui/{path}` | ComfyUI pass-through proxy |
@@ -183,6 +185,28 @@ Target a specific host with `?host=ip:port`:
 ```bash
 curl "http://localhost:11434/comfyui/queue?host=1.2.3.4:8188"
 ```
+
+### Text-to-Speech
+
+`POST /v1/audio/speech` speaks the OpenAI TTS shape and races it across
+discovered ComfyUI hosts that run a known TTS custom node (MegaTTS3, VoxCPM,
+QwenTTS, ...). dyva probes each host's `/object_info/{node}` (single-class —
+tiny responses), fills every required input from the schema defaults, appends
+`SaveAudio`, polls history and streams the audio back in the host-native
+format (usually flac). `response_format` and `speed` are accepted but ignored.
+
+```bash
+curl -X POST http://localhost:11434/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "tts-1", "input": "Hello world", "voice": "alloy"}' \
+  --output speech.flac
+```
+
+`GET /v1/audio/voices` returns what TTS nodes exist per host and their voice
+options (`{"voices": [...], "hosts": [{"host": ..., "nodes": [...]}]}`).
+
+Note: some nodes need reference voices uploaded to the host; hosts whose
+voice list is empty are skipped automatically until they have one.
 
 ## Settings
 
