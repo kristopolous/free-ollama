@@ -557,8 +557,12 @@ def _fetch_api(dry, limit, service, fid=None, curlify=False, query=None):
     return hosts
 
 
-def _fid_tag(fid):
-    return hashlib.md5((fid or "").encode()).hexdigest()[:8]
+def _tag(value):
+    """Short filesystem-safe label component (md5 prefix). Used for FID and
+    server values whose raw text can contain spaces/slashes/etc."""
+    if not value:
+        return "any"
+    return hashlib.md5(str(value).encode()).hexdigest()[:8]
 
 
 def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, label=""):
@@ -993,7 +997,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             if not dry:
                 log.info(f"[{i+1}/{len(combos)}] country={country} port={port} server={server} fid={fid}")
 
-            label = f"{country or 'any'}-{port or 'any'}-{server or 'any'}-{_fid_tag(fid)}"
+            label = f"{country or 'any'}-{port or 'any'}-{_tag(server)}-{_tag(fid)}"
             if session:
                 out_path = os.path.join("/tmp/graflex", f"fofa-results-{label}-{run_ts}.txt")
                 if os.path.exists(out_path):
