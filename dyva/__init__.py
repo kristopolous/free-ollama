@@ -181,7 +181,12 @@ def _apply_source_mapping(row, mapping):
             if "value" in spec:
                 out[target] = spec["value"]
             elif "field" in spec:
-                out[target] = row.get(spec["field"])
+                val = row.get(spec["field"])
+                # Leave a missing field unset (not None) so downstream
+                # setdefault()s apply — e.g. service falls back to 'ollama'
+                # instead of becoming None and never classifying as a1111/comfyui.
+                if val is not None:
+                    out[target] = val
     return out
 
 TRIAL_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
