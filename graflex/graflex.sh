@@ -134,7 +134,7 @@ servers=()
 query=()
 
 [[ -n "$FID" ]] && fid=( "--fid" $FID )
-[[ -n "$SERVERS" ]] && servers=( "--servers" $SERVERS )
+[[ -n "$SERVERS" ]] && servers=( "--servers" "$SERVERS" )
 [[ -n "$QUERY" ]] && query=( "--query" "$QUERY" )
 
 # gradio has no --service entry; -n gradio alone selects the named query
