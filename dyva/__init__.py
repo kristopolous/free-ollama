@@ -805,9 +805,15 @@ def find_servers(sub, caps=None):
                 ms = capable + unknown + incapable
         key = f"{host} {sub}"
         if sub:
-            in_good = key in good
-            in_maybe = key in maybe
-            in_bad = key in bad
+            # Reputation is keyed by the exact model that succeeded (e.g.
+            # "qwen3-vl:8b"), not the broad query ("qwen"). So a pattern query
+            # must also honor marks on the concrete models it resolves to (ms) —
+            # otherwise a host proven good at "qwen2.5:7b" looks "unknown" to a
+            # "qwen" query and gets probed cold alongside the dead ones.
+            keys = [key] + [f"{host} {canon_pattern(m)}" for m in ms]
+            in_good = any(k in good for k in keys)
+            in_maybe = any(k in maybe for k in keys)
+            in_bad = any(k in bad for k in keys)
         else:
             st = host_state.get(host)
             in_good = st == "good"
@@ -1783,11 +1789,15 @@ async def handle_dashboard_data(request):
     load_last()
     last = [{"host": entry["host"], "model": model}
             for model, entry in list(_last_cache.items())[:20]]
+    # The host-wide unreachable mark is stored under a \x00-prefixed sentinel
+    # "model" so it can't collide with a real model name; strip that for display
+    # (the raw null byte otherwise renders as a tofu box in the dashboard).
+    bad_display = sorted(k.replace(UNREACHABLE_KEY, "(unreachable)") for k in bad)
     return web.json_response({
         "last": last,
         "good": sorted(good),
         "maybe": sorted(maybe),
-        "bad": sorted(bad),
+        "bad": bad_display,
         "good_count": len(good),
         "maybe_count": len(maybe),
         "bad_count": len(bad),
@@ -3154,15 +3164,23 @@ async def handle_txt2img(request):
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Phase 1: try good + untested hosts (skip known-bad)
-    live_hosts = [h for h in hosts if f"{h} {IMG_KEY}" not in load_bad()]
+    # A host-wide unreachable mark (dead at the connection level) must exclude a
+    # host from image routing too — it's stored under a sentinel "model", so the
+    # per-model IMG_KEY check alone would miss it and keep trying dead hosts.
+    _bad = load_bad()
+    _un = load_unreachable()
+    def _img_bad(h):
+        return h in _un or f"{h} {IMG_KEY}" in _bad
+
+    # Phase 1: try good + untested hosts (skip known-bad and unreachable)
+    live_hosts = [h for h in hosts if not _img_bad(h)]
     data = await _race(live_hosts)
     if data:
         _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
         return web.json_response(data)
 
-    # Phase 2: exhausted — try previously bad hosts
-    bad_hosts = [h for h in hosts if f"{h} {IMG_KEY}" in load_bad()]
+    # Phase 2: exhausted — try previously bad / unreachable hosts (recovery path)
+    bad_hosts = [h for h in hosts if _img_bad(h)]
     if bad_hosts:
         data = await _race(bad_hosts)
         if data:
@@ -3177,7 +3195,7 @@ async def handle_txt2img(request):
             if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
                    for m in s.get("models", []))
         ]
-    comfy_hosts = [s.get("server") for s in comfy_candidates if f"{s.get('server')} {IMG_KEY}" not in load_bad()]
+    comfy_hosts = [s.get("server") for s in comfy_candidates if not _img_bad(s.get("server"))]
     if comfy_hosts:
         async def _race_comfy(host_list):
             done = asyncio.Event()
