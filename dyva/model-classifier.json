@@ -1,10 +1,13 @@
 {
+  "vision": [
+    "clip_"
+  ],
   "edit": [
-    "(FLUX|flux|Qwen-Rapid)"
+    "(FLUX|flux|Qwen-Rapid|edit)"
   ],
   "video": [
     "(_i2v_|wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
-    "^(diffusion_models|unet_gguf|clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/"
+    "^(clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/"
   ],
   "music": [
     "ace_step"
