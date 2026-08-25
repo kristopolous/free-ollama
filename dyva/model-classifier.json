@@ -1,0 +1,19 @@
+{
+  "edit": [
+    "(FLUX|flux|Qwen-Rapid)"
+  ],
+  "video": [
+    "(_i2v_|wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
+    "^(diffusion_models|unet_gguf|clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/"
+  ],
+  "music": [
+    "ace_step"
+  ],
+  "image": [
+    "\\.safetensors$"
+  ],
+  "audio": [
+    "^(TTS|qwen-tts|fishaudioS2|mmaudio|voxcpm|voxcpm_lora|SenseVoice|sonic|foley|audiodit|audio_encoders|wav2vec2)/",
+    "\\.(wav|mp3|flac|ogg|mka)$"
+  ]
+}

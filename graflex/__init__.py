@@ -22,7 +22,7 @@ CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
-CLASSIFIER_FILE = os.path.join(CACHE_DIR, "model-classifier.json")
+CLASSIFIER_FILE = os.path.join(os.path.dirname(__file__), os.pardir, "dyva", "model-classifier.json")
 
 
 def _cache_file(name, suffix):
@@ -1224,29 +1224,7 @@ def check(service, name=None, check_timeout=60, check_new=False, check_all=False
     asyncio.run(_check_all(service, name, check_timeout, check_new, check_all, workers))
 
 
-# Seed regexes for -a classify; edit ~/.cache/free-ollama/model-classifier.json
-# to tune. Categories are evaluated in file order, first matching regex wins,
-# and anything unmatched lands in "other".
-DEFAULT_CLASSIFIER = {
-    "video": [
-        r"(wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
-        r"^(diffusion_models|unet_gguf|clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/",
-    ],
-    "image": [
-        r"\.safetensors$",
-        r"^(sd_1\.5|sdxl_1\.0|pony|flux\.1_d|flux\.1_s|lora_sd_1\.5|lora_sdxl_1\.0|lora_pony|lora_flux\.1_d|aura-sr)/",
-    ],
-    "audio": [
-        r"^(TTS|qwen-tts|fishaudioS2|mmaudio|voxcpm|voxcpm_lora|SenseVoice|sonic|foley|audiodit|audio_encoders|wav2vec2)/",
-        r"\.(wav|mp3|flac|ogg|mka)$",
-    ],
-}
-
-
 def _load_classifier():
-    if not os.path.exists(CLASSIFIER_FILE):
-        _save_json(CLASSIFIER_FILE, DEFAULT_CLASSIFIER)
-        log.info(f"classify: created {CLASSIFIER_FILE} (edit it to tune)")
     with open(CLASSIFIER_FILE) as f:
         raw = json.load(f)
     compiled = {}

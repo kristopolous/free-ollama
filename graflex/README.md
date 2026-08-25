@@ -227,7 +227,7 @@ graflex -s comfyui -a classify
 ```
 
 Reads `~/.cache/free-ollama/{name}-working.json`, matches every model string
-against the regexes in `~/.cache/free-ollama/model-classifier.json`, prints one
+against the regexes in `dyva/model-classifier.json`, prints one
 `[type] model` line per unique model to stdout, and writes each host back with
 an added `classified` map to `{name}-working-classified.json`:
 
