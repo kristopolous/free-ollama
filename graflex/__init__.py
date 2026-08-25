@@ -1276,7 +1276,7 @@ def classify(name=None):
             key = (ctype, m)
             if key not in printed:
                 printed.add(key)
-                print(f"{ctype:10s} {m}")
+                print(f"{ctype:13s} {m}")
         e["classified"] = classified
         out.append(e)
 

@@ -1,4 +1,7 @@
 {
+  "lora": [
+    "lora"
+  ],
   "vision": [
     "clip_"
   ],
@@ -6,17 +9,20 @@
     "(FLUX|flux|Qwen-Rapid|edit)"
   ],
   "video": [
-    "(_i2v_|wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
+    "(_i2v_|Ref2VA|FL2VA|wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
     "^(clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/"
   ],
   "music": [
     "ace_step"
   ],
+  "audio": [
+    "^(qwen-tts|fishaudioS2|mmaudio|voxcpm|voxcpm_lora|SenseVoice|sonic|foley|audiodit|audio_encoders|wav2vec2)/",
+    "(TTS|audio)"
+  ],
+  "other": [
+    "(controlnet)"
+  ],
   "image": [
     "\\.safetensors$"
-  ],
-  "audio": [
-    "^(TTS|qwen-tts|fishaudioS2|mmaudio|voxcpm|voxcpm_lora|SenseVoice|sonic|foley|audiodit|audio_encoders|wav2vec2)/",
-    "\\.(wav|mp3|flac|ogg|mka)$"
   ]
 }
