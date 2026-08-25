@@ -221,7 +221,12 @@ async def _comfyui_model_tree(session, base_url, timeout=TIMEOUT, workers=8):
                 return []
             if not isinstance(files, list):
                 return []
-            return [f"{cat}/{f}".replace("\\", "/") for f in files if isinstance(f, str) and f]
+            model_exts = (".safetensors", ".pth", ".gguf")
+            return [
+                f"{cat}/{f}".replace("\\", "/")
+                for f in files
+                if isinstance(f, str) and f.lower().endswith(model_exts)
+            ]
 
     folders = await asyncio.gather(*(list_folder(c) for c in cats))
     seen = set()
@@ -384,7 +389,9 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 elif service == "comfyui":
                     data = await resp.json()
                     await resp.release()
-                    models = _filter_models(data if isinstance(data, list) else [])
+                    model_exts = (".safetensors", ".pth", ".gguf")
+                    raw = data if isinstance(data, list) else []
+                    models = _filter_models([m for m in raw if isinstance(m, str) and m.lower().endswith(model_exts)])
                     tree = await _comfyui_model_tree(session, base_url, timeout=timeout)
                     if tree:
                         models = _filter_models(tree)
@@ -1221,13 +1228,13 @@ def check(service, name=None, check_timeout=60, check_new=False, check_all=False
 # to tune. Categories are evaluated in file order, first matching regex wins,
 # and anything unmatched lands in "other".
 DEFAULT_CLASSIFIER = {
-    "image": [
-        r"^(checkpoints|loras|vae|embeddings|hypernetworks|controlnet|ipadapter|upscale_models|photomaker|facerestore_models)/[^/]*\.(safetensors|ckpt|pt|pth|bin|gguf)$",
-        r"^(sd_1\.5|sdxl_1\.0|pony|flux\.1_d|flux\.1_s|lora_sd_1\.5|lora_sdxl_1\.0|lora_pony|lora_flux\.1_d|aura-sr)/",
-    ],
     "video": [
-        r"(wan|hunyuan_video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
+        r"(wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
         r"^(diffusion_models|unet_gguf|clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/",
+    ],
+    "image": [
+        r"\.safetensors$",
+        r"^(sd_1\.5|sdxl_1\.0|pony|flux\.1_d|flux\.1_s|lora_sd_1\.5|lora_sdxl_1\.0|lora_pony|lora_flux\.1_d|aura-sr)/",
     ],
     "audio": [
         r"^(TTS|qwen-tts|fishaudioS2|mmaudio|voxcpm|voxcpm_lora|SenseVoice|sonic|foley|audiodit|audio_encoders|wav2vec2)/",
@@ -1256,19 +1263,22 @@ def _load_classifier():
 
 
 def _classify_model(model, compiled):
+    i = 0
     for ctype, regs in compiled.items():
+        i += 1
         if any(r.search(model) for r in regs):
-            return ctype
-    return "other"
+            return ' ' * i + ctype
+    return "....."
 
 
 def classify(name=None):
     from datetime import datetime, timezone
 
-    name = name or "image-gen"
+    name = name or "comfyui"
     input_file = _cache_file(name, "working")
     entries = _load_json(input_file)
     entries = [e for e in entries if isinstance(e, dict)]
+    log.info(f"using {CLASSIFIER_FILE}")
     if not entries:
         log.error(f"classify: no hosts in {input_file}")
         return
@@ -1280,7 +1290,7 @@ def classify(name=None):
     counts = {}
     for entry in entries:
         e = dict(entry)
-        classified = {ctype: [] for ctype in list(compiled) + ["other"]}
+        classified = {ctype: [] for ctype in list(compiled) + ["....."]}
         for m in entry.get("models") or []:
             ctype = _classify_model(m, compiled)
             classified.setdefault(ctype, []).append(m)
@@ -1288,7 +1298,7 @@ def classify(name=None):
             key = (ctype, m)
             if key not in printed:
                 printed.add(key)
-                print(f"[{ctype}] {m}")
+                print(f"{ctype:10s} {m}")
         e["classified"] = classified
         out.append(e)
 
