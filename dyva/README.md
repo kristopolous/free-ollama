@@ -184,6 +184,46 @@ Target a specific host with `?host=ip:port`:
 curl "http://localhost:11434/comfyui/queue?host=1.2.3.4:8188"
 ```
 
+## Settings
+
+The dashboard's **Settings** tab is backed by `~/.cache/free-ollama/settings.json`. These persist across restarts and override the CLI defaults:
+
+| Setting | Meaning |
+|---------|---------|
+| **Workers** | Parallel hosts raced per request (fan-out). |
+| **Timeout** | Per-host request timeout, in seconds. |
+| **Minimum model count** | Hide models served by fewer than this many hosts from `/api/tags` and `/v1/models` — the listings third-party apps read. `0` = show everything. (The dashboard always shows everything.) |
+| **Admin password** | When set, viewing or changing the Settings tab and its sources requires it (sent as an `X-Admin-Key` header). Everything else — chat, models, the dashboard — stays public, so you can host a demo without letting visitors edit your config. Stored hashed; if you forget it, clear `admin_pw` in `settings.json` and restart. |
+| **Additional sources** | Extra host lists to pull from — see below. |
+
+Saving after you change the source list re-pulls the cache.
+
 ## Server Discovery
 
-dyva aggregates servers from multiple sources. The tool [graflex](../graflex) is a from scratch general purpose aggregator that constitutes one of these sources.
+dyva aggregates servers from several built-in sources plus any you add. The tool [graflex](../graflex) is a from-scratch general-purpose aggregator, and **its output is dyva's native host format** — so a graflex-produced JSON list imports with a straight one-to-one field mapping.
+
+### Additional sources (third-party formats)
+
+Under **Settings → Additional sources** you add your own JSON host lists. They're fetched *before* the built-ins, so they win on duplicate hosts. Each source is:
+
+```json
+{
+  "name": "my-list",
+  "url": "https://example.com/hosts.json",
+  "mapping": {
+    "server":  {"field": "url"},
+    "models":  {"field": "models"},
+    "service": {"field": "service"},
+    "version": {"value": ""}
+  }
+}
+```
+
+- **`url`** points at a JSON *array* of host rows. A bare `host/path.json` implies `https://`. (JSON-list sources only — CSV / transform-heavy lists stay built-in.)
+- **`mapping`** turns each raw row into a dyva host entry. Each target field is either:
+  - `{"field": "x"}` — copy `row["x"]`, or
+  - `{"value": c}` — a constant for every row.
+- Map at least **`server`** (the host — e.g. from a `url` field) and **`models`** (a list of model-name strings).
+- **`service`** defaults to `ollama` when you don't map it (or when a row lacks the mapped field). Set it to `a1111` or `comfyui` for image hosts so they classify under the dashboard's Image tab and feed txt2img. A missing field falls back to its default rather than becoming null.
+
+Because graflex already emits rows with `service`, `url`, `models`, and `checked`, importing a graflex list is just `server ← url`, `models ← models`, `service ← service` — no transforms needed. The **Add source**, **Add from url**, and **Test sources** buttons on the Settings tab help build and sanity-check a mapping (Test reports how many hosts/models each source yields, and prints a row's keys when a mapping matches nothing).
