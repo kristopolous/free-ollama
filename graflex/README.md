@@ -127,7 +127,7 @@ Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 1
 | Service | Default Port | Check Endpoint |
 |---------|-------------|----------------|
 | `a1111` | 7860 | `/sdapi/v1/sd-models` |
-| `comfyui` | 8188 | `/models/checkpoints` + `/api/system_stats` |
+| `comfyui` | 8188 | `/models/checkpoints` + `/models` traversal + `/api/system_stats` |
 | `ollama` | 11434 | `/api/tags` |
 | `llama.cpp` | 8080 | `/v1/models` |
 | `vllm` | 8000 | `/v1/models` |
@@ -197,7 +197,13 @@ reveal their loaded models in the same OpenAI-compatible format as `llama.cpp`.
 For `llama.cpp`, hosts are also probed at `/props`; a `401` means the instance
 is locked down with an API key and is rejected (`auth required`).
 
-For `comfyui`, after listing checkpoints the host is also probed at
+For `comfyui`, after listing checkpoints the host's `/models` index is
+traversed: each category folder (`checkpoints`, `loras`, `vae`, ...) is listed
+and every model is recorded with its category prefix, e.g.
+`checkpoints/majic_v7_sd15.safetensors` or `loras/x.safetensors`. Nested
+backslash paths are normalized to forward slashes. Hosts that return a usable
+index get `model_tree: true`; older ComfyUI builds without it fall back to the
+flat `/models/checkpoints` list. The host is also probed at
 `/api/system_stats` to survey its hardware. When available, the result records
 `version` (`system.comfyui_version`) and, from the first entry in `devices[]`,
 `vram_device` (`name`), `vram_type` (`type`), and `vram_total` (bytes). A
@@ -209,16 +215,55 @@ recorded.
 | `check` | Skips hosts already in the working file (including empty-model ollama hosts) and hosts with `result: "error"` in the not-working file. Rechecks `unreachable` hosts. |
 | `check-new` | Skips all hosts with any previous record (working or not-working). Only checks hosts never tested before. |
 | `check-all` | Rechecks every host regardless of previous status. |
+| `classify` | Bucket every model of every host in `{name}-working.json` by type. See below. |
 
 Working: `~/.cache/free-ollama/{name}-working.json` (default: `image-gen-working.json`)
 Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notworking.json`)
+
+## Classify
+
+```bash
+graflex -s comfyui -a classify
+```
+
+Reads `~/.cache/free-ollama/{name}-working.json`, matches every model string
+against the regexes in `~/.cache/free-ollama/model-classifier.json`, prints one
+`[type] model` line per unique model to stdout, and writes each host back with
+an added `classified` map to `{name}-working-classified.json`:
+
+```json
+{
+  "...": "the regular host definition",
+  "classified": {
+    "image": ["checkpoints/majic_v7_sd15.safetensors", "..."],
+    "video": ["diffusion_models/ltx-2.3-22b-dev-fp8.safetensors"],
+    "audio": ["TTS/fish-speech-1.5.pt"],
+    "other": ["sam3/sam3.pt"]
+  }
+}
+```
+
+The classifier file maps a type to a list of regexes (created from built-in
+defaults on first run — edit it and rerun until the buckets look right):
+
+```json
+{
+  "image": ["regex", "..."],
+  "video": ["..."],
+  "audio": ["..."]
+}
+```
+
+Categories are evaluated top to bottom, first matching regex wins, and
+anything unmatched lands in `other`. Invalid regexes are skipped with a
+warning.
 
 ## Options
 
 | Flag | Description |
 |------|-------------|
 | `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`) |
-| `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, or `fetch-check` |
+| `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `fetch-check`, or `classify` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging API requests) |
 | `-l`, `--limit` | Max results per query (default: 2) |

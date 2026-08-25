@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 
@@ -21,6 +22,7 @@ CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
+CLASSIFIER_FILE = os.path.join(CACHE_DIR, "model-classifier.json")
 
 
 def _cache_file(name, suffix):
@@ -177,6 +179,57 @@ def _is_offline_error(exc):
     return type(exc).__name__ == "NameResolutionError" or _is_offline_msg(str(exc))
 
 
+async def _comfyui_model_tree(session, base_url, timeout=TIMEOUT, workers=8):
+    """Traverse /models -> /models/<category> and return entries prefixed with
+    their category, e.g. 'checkpoints/majic_v7_sd15.safetensors'. Nested
+    backslash paths are normalized to forward slashes. Returns None if the
+    host doesn't expose a usable /models index (older ComfyUI)."""
+    import urllib.parse
+
+    try:
+        resp = await asyncio.wait_for(
+            session.get(f"{base_url}models", allow_redirects=False), timeout=timeout
+        )
+        if resp.status != 200:
+            await resp.release()
+            return None
+        cats = await resp.json()
+        await resp.release()
+    except Exception:
+        return None
+    if not isinstance(cats, list) or not cats:
+        return None
+    cats = [c for c in cats if isinstance(c, str) and c]
+
+    sem = asyncio.Semaphore(workers)
+
+    async def list_folder(cat):
+        async with sem:
+            try:
+                url = f"{base_url}models/{urllib.parse.quote(cat)}"
+                r = await asyncio.wait_for(session.get(url, allow_redirects=False), timeout=timeout)
+                if r.status != 200:
+                    await r.release()
+                    return []
+                files = await r.json()
+                await r.release()
+            except Exception:
+                return []
+            if not isinstance(files, list):
+                return []
+            return [f"{cat}/{f}".replace("\\", "/") for f in files if isinstance(f, str) and f]
+
+    folders = await asyncio.gather(*(list_folder(c) for c in cats))
+    seen = set()
+    models = []
+    for folder in folders:
+        for m in folder:
+            if m not in seen:
+                seen.add(m)
+                models.append(m)
+    return models or None
+
+
 async def _check_host(session, host, port, service, timeout=TIMEOUT):
     from datetime import datetime, timezone
     import urllib.parse
@@ -328,12 +381,23 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     data = await resp.json()
                     await resp.release()
                     models = _filter_models(data if isinstance(data, list) else [])
-                    result = {
-                        "service": service,
-                        "url": base_url,
-                        "models": models,
-                        "checked": datetime.now(timezone.utc).isoformat(),
-                    }
+                    tree = await _comfyui_model_tree(session, base_url, timeout=timeout)
+                    if tree:
+                        models = _filter_models(tree)
+                        result = {
+                            "service": service,
+                            "url": base_url,
+                            "models": models,
+                            "model_tree": True,
+                            "checked": datetime.now(timezone.utc).isoformat(),
+                        }
+                    else:
+                        result = {
+                            "service": service,
+                            "url": base_url,
+                            "models": models,
+                            "checked": datetime.now(timezone.utc).isoformat(),
+                        }
                     try:
                         stats_resp = await asyncio.wait_for(
                             session.get(f"{base_url}{cfg['stats_path'].lstrip('/')}", allow_redirects=False), timeout=timeout
@@ -1142,6 +1206,88 @@ def check(service, name=None, check_timeout=60, check_new=False, check_all=False
     asyncio.run(_check_all(service, name, check_timeout, check_new, check_all, workers))
 
 
+# Seed regexes for -a classify; edit ~/.cache/free-ollama/model-classifier.json
+# to tune. Categories are evaluated in file order, first matching regex wins,
+# and anything unmatched lands in "other".
+DEFAULT_CLASSIFIER = {
+    "image": [
+        r"^(checkpoints|loras|vae|embeddings|hypernetworks|controlnet|ipadapter|upscale_models|photomaker|facerestore_models)/[^/]*\.(safetensors|ckpt|pt|pth|bin|gguf)$",
+        r"^(sd_1\.5|sdxl_1\.0|pony|flux\.1_d|flux\.1_s|lora_sd_1\.5|lora_sdxl_1\.0|lora_pony|lora_flux\.1_d|aura-sr)/",
+    ],
+    "video": [
+        r"(wan|hunyuan_video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
+        r"^(diffusion_models|unet_gguf|clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/",
+    ],
+    "audio": [
+        r"^(TTS|qwen-tts|fishaudioS2|mmaudio|voxcpm|voxcpm_lora|SenseVoice|sonic|foley|audiodit|audio_encoders|wav2vec2)/",
+        r"\.(wav|mp3|flac|ogg|mka)$",
+    ],
+}
+
+
+def _load_classifier():
+    if not os.path.exists(CLASSIFIER_FILE):
+        _save_json(CLASSIFIER_FILE, DEFAULT_CLASSIFIER)
+        log.info(f"classify: created {CLASSIFIER_FILE} (edit it to tune)")
+    with open(CLASSIFIER_FILE) as f:
+        raw = json.load(f)
+    compiled = {}
+    for ctype, patterns in raw.items():
+        regs = []
+        for p in patterns or []:
+            try:
+                regs.append(re.compile(p, re.IGNORECASE))
+            except re.error as e:
+                log.warning(f"classify: bad regex {p!r} in '{ctype}': {e}")
+        if regs:
+            compiled[ctype] = regs
+    return compiled
+
+
+def _classify_model(model, compiled):
+    for ctype, regs in compiled.items():
+        if any(r.search(model) for r in regs):
+            return ctype
+    return "other"
+
+
+def classify(name=None):
+    from datetime import datetime, timezone
+
+    name = name or "image-gen"
+    input_file = _cache_file(name, "working")
+    entries = _load_json(input_file)
+    entries = [e for e in entries if isinstance(e, dict)]
+    if not entries:
+        log.error(f"classify: no hosts in {input_file}")
+        return
+
+    compiled = _load_classifier()
+
+    out = []
+    printed = set()
+    counts = {}
+    for entry in entries:
+        e = dict(entry)
+        classified = {ctype: [] for ctype in list(compiled) + ["other"]}
+        for m in entry.get("models") or []:
+            ctype = _classify_model(m, compiled)
+            classified.setdefault(ctype, []).append(m)
+            counts[ctype] = counts.get(ctype, 0) + 1
+            key = (ctype, m)
+            if key not in printed:
+                printed.add(key)
+                print(f"[{ctype}] {m}")
+        e["classified"] = classified
+        out.append(e)
+
+    root, ext = os.path.splitext(input_file)
+    out_file = f"{root}-classified{ext}"
+    _save_json(out_file, out)
+    summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+    log.info(f"classify: {len(entries)} hosts -> {out_file} ({summary}) [{datetime.now(timezone.utc).isoformat()}]")
+
+
 def main():
     load_dotenv()
 
@@ -1160,7 +1306,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "fetch-check"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "fetch-check", "classify"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -1199,5 +1345,7 @@ def main():
                 fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
             elif step == "check":
                 check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers)
+            elif step == "classify":
+                classify(name=args.name)
     except SystemExit as e:
         sys.exit(e.code)

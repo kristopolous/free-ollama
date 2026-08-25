@@ -78,9 +78,9 @@ ENDL
     
   comfyui)
     QUERY='title="ComfyUI"'
-    PORTS="8188,8080,80,443"
-    SERVERS="nginx,cloudflare"
-    COUNTRIES="US,AU,IN,JP,DE,CA,BR,CN"
+    PORTS="9200,8983,9200,5060,8089,5601,28017,8188,8080,80,443"
+    SERVERS="nginx,cloudflare,Python/3.12 aiohttp/3.11.16,Python/3.12 aiohttp/3.14.1,Python/3.12 aiohttp/3.13.3,Python/3.10 aiohttp/3.12.15,Python/3.13 aiohttp/3.13.3"
+    COUNTRIES="US,AU,IN,JP,DE,IE,ID,IT,BH,IL,CA,BR,CN,KR,GB,FR,SG,CH,ZA,BR,HK,SE,ES"
     FID="2zn7oqmRiwaUu3+PzyTjvw==,7aBY0X9WxdeghtrJGx1MEQ==,MJ7K0wma6lKOVne5ksgrSw==,yhjkkd4AnCsogP9Ms1QgVA=="
     ;;
 
