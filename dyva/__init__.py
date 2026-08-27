@@ -84,6 +84,85 @@ ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
 VERSION = "0"
 SETTINGS_FILE = os.path.join(CACHE_DIR, "settings.json")
 
+# The ComfyUI model classifier (shared with graflex) lives in this package so
+# it can be version-controlled: each regex category -> class of model. Used to
+# derive OpenAI-style modalities for /v1/models and to route /v1/videos jobs.
+CLASSIFIER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model-classifier.json")
+_classifier_cache = None
+
+# class -> output modalities (OpenRouter style) surfaced on /v1/models. Models
+# that classify into image/video/audio/etc. advertise the corresponding output
+# modality so clients can filter with ?output_modalities=.
+_CLASS_MODALITIES = {
+    "image": ["image"],
+    "video": ["video"],
+    "audio": ["audio"],
+    "music": ["audio"],
+    "vision": ["image", "text"],
+    "edit": ["image"],
+    "lora": ["image"],
+    "t2v": ["video"],
+    "i2v": ["video"],
+    "t2a": ["audio"],
+}
+_VIDEO_CLASSES = {"video", "t2v", "i2v"}
+_AUDIO_CLASSES = {"audio", "music", "t2a"}
+
+# Async ComfyUI video-generation jobs (OpenRouter /v1/videos compatible).
+VIDEO_KEY = "__video__"
+VIDEO_JOBS_FILE = os.path.join(CACHE_DIR, "video-jobs.json")
+VIDEO_JOBS_DIR = os.path.join(CACHE_DIR, "video-jobs")
+_VIDEO_JOBS = {}
+_VIDEO_JOB_ID_CTR = 0
+VIDEO_JOB_MAX = 200
+VIDEO_JOB_TTL = 3600
+
+
+def load_classifier():
+    """Compile the ComfyUI model-classifier regexes (category -> [regex])."""
+    global _classifier_cache
+    if _classifier_cache is not None:
+        return _classifier_cache
+    compiled = {}
+    if os.path.exists(CLASSIFIER_FILE):
+        try:
+            with open(CLASSIFIER_FILE) as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                for ctype, patterns in raw.items():
+                    regs = []
+                    for p in patterns or []:
+                        try:
+                            regs.append(re.compile(p, re.IGNORECASE))
+                        except re.error as e:
+                            log.warning(f"classifier: bad regex {p!r} in '{ctype}': {e}")
+                    if regs:
+                        compiled.setdefault(ctype, []).extend(regs)
+        except Exception as e:
+            log.warning(f"classifier: failed to load {CLASSIFIER_FILE}: {e}")
+    _classifier_cache = compiled
+    return compiled
+
+
+def classify_model(model):
+    """Return the classifier category for a model path (first matching regex)."""
+    compiled = load_classifier()
+    for ctype, regs in compiled.items():
+        if any(r.search(model) for r in regs):
+            return ctype
+    return None
+
+
+def model_modalities(model):
+    """Derive OpenRouter-style output modalities for a model path."""
+    ctype = classify_model(model)
+    if ctype and ctype in _CLASS_MODALITIES:
+        return list(_CLASS_MODALITIES[ctype])
+    if ctype == "other" or ctype is None:
+        return []
+    # any recognized-but-unmapped category defaults to text
+    return ["text"]
+
 
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count) over the
@@ -866,6 +945,8 @@ def all_models():
                 seen[m] = {'id': m, 'count': 1}
             else:
                 seen[m]['count'] += 1
+    for m in seen.values():
+        m["modalities"] = model_modalities(m["id"])
     if True: #int(time.time() % 2) == 0:
         sorty = sorted(seen.values(), key=lambda x: x.get('count'))
     else:
@@ -2011,6 +2092,18 @@ async def handle_v1_models(request):
     ---
     tags: [Models]
     summary: List available models (OpenAI /v1/models format)
+    description: |
+      Returns the catalog in the OpenAI shape. Each model additionally carries
+      `output_modalities` and `input_modalities` (OpenRouter-style) derived from
+      the ComfyUI model classifier, so clients can discover what each model can
+      produce. Filter the returned models with `?output_modalities=image,video`.
+    parameters:
+      - in: query
+        name: output_modalities
+        schema:
+          type: string
+        required: false
+        description: Comma-separated output modalities to keep (image, video, audio, text)
     responses:
       '200':
         description: List of models
@@ -2028,16 +2121,50 @@ async def handle_v1_models(request):
                     properties:
                       id:
                         type: string
+                      object:
+                        type: string
+                      created:
+                        type: integer
+                      owned_by:
+                        type: string
                       count:
                         type: integer
+                      input_modalities:
+                        type: array
+                        items:
+                          type: string
+                      output_modalities:
+                        type: array
+                        items:
+                          type: string
     """
     resp = _check_local(request)
     if resp:
         return resp
     models = listed_models()
+    filter_mods = None
+    fm = request.query.get("output_modalities")
+    if fm:
+        filter_mods = {m.strip().lower() for m in fm.split(",") if m.strip()}
+    now = int(time.time())
+    out = []
+    for m in models:
+        mods = m.get("modalities") or ["text"]
+        id_ = m["id"]
+        if filter_mods and not (set(mods) & filter_mods):
+            continue
+        out.append({
+            "id": id_,
+            "object": "model",
+            "created": now,
+            "owned_by": "dyva",
+            "count": m.get("count", 1),
+            "input_modalities": mods,
+            "output_modalities": mods,
+        })
     return web.json_response({
         "object": "list",
-        "data": models,
+        "data": out,
     })
 
 
@@ -3702,6 +3829,495 @@ def _find_tts_hosts(target_host=None):
     return hosts
 
 
+def _host_has_class(host, classes):
+    """True if any of a ComfyUI host's cached models classify into `classes`."""
+    for s in load_servers():
+        if s.get("server") != host:
+            continue
+        for m in s.get("models") or []:
+            if classify_model(m) in classes:
+                return True
+    return False
+
+
+def _find_video_hosts(target_host=None):
+    """ComfyUI hosts that expose a model classified as a video generator."""
+    if target_host:
+        if _host_has_class(target_host, _VIDEO_CLASSES):
+            return [target_host]
+        return []
+    servers = load_servers()
+    hosts = [s.get("server") for s in servers
+             if s.get("service") == "comfyui" and s.get("server")
+             and _host_has_class(s.get("server"), _VIDEO_CLASSES)]
+    bad, good = load_bad(), load_good()
+    hosts.sort(key=lambda h: 0 if f"{h} {VIDEO_KEY}" in good else (1 if f"{h} {VIDEO_KEY}" not in bad else 2))
+    last = get_last(VIDEO_KEY)
+    if last and last[0]:
+        hosts = [last[0]] + [h for h in hosts if h != last[0]]
+    return hosts
+
+
+# ---- Async ComfyUI video-generation jobs (OpenRouter /v1/videos shape) ----
+# Job lifecycle: pending -> in_progress -> completed | failed. `unsigned_urls`
+# points at /v1/videos/{id}/content so clients can stream the mp4. Jobs run as
+# background asyncio tasks because diffusion video is slow.
+
+
+def _video_job_save():
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        # bytes (raw video) are stored on disk, not in the JSON index
+        serializable = {}
+        for k, v in _VIDEO_JOBS.items():
+            if isinstance(v, dict):
+                serializable[k] = {kk: vv for kk, vv in v.items() if not isinstance(vv, (bytes, bytearray))}
+            else:
+                serializable[k] = v
+        with open(VIDEO_JOBS_FILE, "w") as f:
+            json.dump(serializable, f, indent=2)
+    except Exception as e:
+        log.warning(f"video jobs: failed to persist: {e}")
+
+
+def _load_video_jobs():
+    global _VIDEO_JOBS, _VIDEO_JOB_ID_CTR
+    if _VIDEO_JOBS:
+        return
+    if os.path.exists(VIDEO_JOBS_FILE):
+        try:
+            with open(VIDEO_JOBS_FILE) as f:
+                _VIDEO_JOBS = json.load(f)
+            for k, v in _VIDEO_JOBS.items():
+                m = re.match(r"^v(\d+)$", k)
+                if m:
+                    _VIDEO_JOB_ID_CTR = max(_VIDEO_JOB_ID_CTR, int(m.group(1)))
+        except Exception:
+            _VIDEO_JOBS = {}
+    # cull expired/failed-and-old jobs
+    now = time.time()
+    drop = [k for k, v in _VIDEO_JOBS.items()
+            if now - (v.get("created") or 0) > VIDEO_JOB_TTL]
+    for k in drop:
+        cp = (_VIDEO_JOBS[k] or {}).get("content_path")
+        if cp and os.path.exists(cp):
+            try:
+                os.remove(cp)
+            except Exception:
+                pass
+        del _VIDEO_JOBS[k]
+
+
+def _video_job_new(job):
+    global _VIDEO_JOB_ID_CTR
+    _load_video_jobs()
+    _VIDEO_JOB_ID_CTR += 1
+    jid = f"v{_VIDEO_JOB_ID_CTR}"
+    _VIDEO_JOBS[jid] = job
+    # keep the store bounded
+    if len(_VIDEO_JOBS) > VIDEO_JOB_MAX:
+        oldest = sorted(_VIDEO_JOBS, key=lambda k: _VIDEO_JOBS[k].get("created") or 0)[:len(_VIDEO_JOBS) - VIDEO_JOB_MAX]
+        for k in oldest:
+            del _VIDEO_JOBS[k]
+    _video_job_save()
+    return jid
+
+
+async def _run_video_job(session, jid):
+    job = _VIDEO_JOBS.get(jid)
+    if not job:
+        return
+    job["status"] = "in_progress"
+    _video_job_save()
+    host = job["host"]
+    model_path = job["model"]
+    label = f"video: {job.get('prompt', '')[:40]}"
+    t0 = time.time()
+    await broadcast_activity(host, label, "trying", label)
+    try:
+        prompt_id = await _submit_video_workflow(session, host, model_path, job)
+        if not prompt_id:
+            raise _VideoError("failed to submit workflow to host")
+        job["comfyui_prompt_id"] = prompt_id
+        job["status"] = "in_progress"
+        _video_job_save()
+        content, filename = await _poll_video_result(session, host, prompt_id, job)
+        content_path = os.path.join(VIDEO_JOBS_DIR, f"{jid}.bin")
+        os.makedirs(VIDEO_JOBS_DIR, exist_ok=True)
+        with open(content_path, "wb") as f:
+            f.write(content)
+        job["content_path"] = content_path
+        job["filename"] = filename
+        job["status"] = "completed"
+        job["unsigned_urls"] = [f"/v1/videos/{jid}/content"]
+    except (_VideoError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        job["status"] = "failed"
+        job["error"] = str(e) or type(e).__name__
+        add_bad(host, VIDEO_KEY)
+        await broadcast_activity(host, label, "failed", f"{label}: {job['error']}", duration=time.time() - t0)
+        _video_job_save()
+        return
+    add_good(host, VIDEO_KEY)
+    set_last(VIDEO_KEY, host, model_path)
+    await broadcast_activity(host, label, "done", label, duration=time.time() - t0)
+    _video_job_save()
+
+
+class _VideoError(Exception):
+    pass
+
+
+def _pick_video_model(host, model_filter=None):
+    """Pick a concrete video-class model filename for a host, honoring `model_filter`."""
+    for s in load_servers():
+        if s.get("server") != host:
+            continue
+        for m in s.get("models") or []:
+            if classify_model(m) not in _VIDEO_CLASSES:
+                continue
+            if model_filter and not match_model(m, model_filter):
+                continue
+            return m
+    return None
+
+
+async def _submit_video_workflow(session, host, model_path, job):
+    """Build and submit a text-to-video ComfyUI workflow for the model. Returns
+    the ComfyUI prompt_id, or None on submission failure. Uses a Wan-style
+    diffusion-model graph, probing object_info to keep node names resilient."""
+    import uuid as uuid_mod
+
+    params = job.get("params") or {}
+    prompt_text = params.get("prompt", "")
+    steps = int(params.get("steps", 20))
+    cfg = float(params.get("cfg", 6.0))
+    width = int(params.get("width", 832))
+    height = int(params.get("height", 480))
+    length = int(params.get("length", 25))
+    seed = int(params.get("seed", -1))
+    if seed == -1:
+        import random
+        seed = random.randint(0, 2**31 - 1)
+
+    base = f"{model_path}"
+    prefix = base.split("/")[0]
+    name = base.split("/")[-1]
+
+    # adapter node choices, probed lazily against the live host
+    loader = "DiffusionModelLoader"
+    vae = "VAELoader"
+    clip = "CLIPLoader"
+    sampler = "KSampler"
+    encodeA = "CLIPTextEncode"
+    encodeB = "CLIPTextEncode"
+    decode = "VideoVAEDecode"
+    save = "SaveVideo"
+    latent = "EmptySD3LatentImage"
+    cfg_guide = "VideoLinearCFGGuidance"
+    guidance_key = "min_cfg"
+
+    def node(nid, cls, inputs):
+        return {str(nid): {"class_type": cls, "inputs": inputs}}
+
+    workflow = {}
+    def add(nid, cls, inputs):
+        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
+
+    # Adaptive probing: resolve the exact node class names a host has so the
+    # graph matches its installed set of custom nodes.
+    try:
+        oi = await session.get(
+            _host_url(host, "/object_info"),
+            timeout=aiohttp.ClientTimeout(total=15),
+        )
+        if oi.status == 200:
+            info = await oi.json(content_type=None)
+            await oi.release()
+            known = set((info or {}).keys())
+            def pick(choices):
+                for c in choices:
+                    if c in known:
+                        return c
+                return choices[0]
+            loader = pick(["DiffusionModelLoader", "UnetLoader", "UNETLoader"])
+            vae = pick(["VAELoader"])
+            clip = pick(["CLIPLoader", "DualCLIPLoader"])
+            encodeA = pick(["CLIPTextEncode"])
+            encodeB = pick(["CLIPTextEncode"])
+            decode = pick(["VideoVAEDecode", "VAEDecode"])
+            latent = pick(["EmptySD3LatentImage", "EmptyLatentImage", "WanImageToVideo"])
+            cfg_guide = pick(["VideoLinearCFGGuidance"])
+            sampler = pick(["KSampler", "SamplerCustom"])
+        else:
+            await oi.release()
+    except Exception:
+        info = None
+
+    # node ids
+    N = {}
+    N["loader"] = 1
+    N["clip"] = 2
+    N["pos"] = 3
+    N["neg"] = 4
+    N["latent"] = 5
+    N["guide"] = 6
+    N["sampler"] = 7
+    N["decode"] = 8
+    N["save"] = 9
+
+    add(N["loader"], loader, {"ckpt_name": prefix})
+    add(N["clip"], clip, {"clip_name": "None", "type": "wan"})
+    add(N["pos"], encodeA, {"clip": [N["clip"], 0], "text": prompt_text})
+    add(N["neg"], encodeB, {"clip": [N["clip"], 0], "text": ""})
+    add(N["latent"], latent, {"width": width, "height": height, "batch_size": 1})
+    add(N["guide"], cfg_guide, {"model": [N["loader"], 0], "min_cfg": cfg})
+    add(N["sampler"], sampler, {
+        "model": [N["guide"], 0],
+        "positive": [N["pos"], 0],
+        "negative": [N["neg"], 0],
+        "latent_image": [N["latent"], 0],
+        "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
+    })
+    add(N["decode"], decode, {"samples": [N["sampler"], 0], "vae": [N["loader"], 2]})
+    add(N["save"], save, {"filename_prefix": "dyva_video", "images": [N["decode"], 0]})
+
+    client_id = str(uuid_mod.uuid4())
+    try:
+        p = await session.post(
+            _host_url(host, "/prompt"),
+            json={"prompt": workflow, "client_id": client_id},
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        if p.status != 200:
+            await p.release()
+            return None
+        data = await p.json()
+        await p.release()
+        return data.get("prompt_id")
+    except Exception:
+        return None
+
+
+async def _poll_video_result(session, host, prompt_id, job):
+    """Poll ComfyUI /history/{prompt_id} until the video is saved; return
+    (bytes, filename)."""
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        await asyncio.sleep(3)
+        try:
+            r = await session.get(
+                _host_url(host, f"/history/{prompt_id}"),
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if r.status != 200:
+                await r.release()
+                continue
+            hist = await r.json()
+            await r.release()
+        except Exception:
+            continue
+        entry = hist.get(prompt_id)
+        if not entry:
+            continue
+        status = entry.get("status", {})
+        if status.get("status_str") == "error":
+            msgs = [str(m) for m in (status.get("messages") or [])]
+            raise _VideoError("execution error" + (": " + "; ".join(msgs)[:200] if msgs else ""))
+        if status.get("completed"):
+            outputs = entry.get("outputs", {})
+            for node_id, out in outputs.items():
+                vids = out.get("gifs") or out.get("videos") or []
+                for vid in vids:
+                    try:
+                        vr = await session.get(
+                            _host_url(host, "/view"),
+                            params={"filename": vid["filename"], "subfolder": vid.get("subfolder", ""), "type": vid.get("type", "output")},
+                            timeout=aiohttp.ClientTimeout(total=60),
+                        )
+                        if vr.status == 200:
+                            raw = await vr.read()
+                            await vr.release()
+                            return raw, vid["filename"]
+                        await vr.release()
+                    except Exception:
+                        pass
+            raise _VideoError("saved video not found in outputs")
+    raise _VideoError("timeout waiting for video")
+
+
+async def handle_videos_post(request):
+    """
+    Submit a video generation job (OpenRouter-compatible)
+    ---
+    tags: [Video]
+    summary: POST /v1/videos — start an async text-to-video job on a ComfyUI host
+    description: |
+      Mirrors the OpenRouter `/v1/videos` contract. You get an id and polling_url
+      immediately; poll GET /v1/videos/{id} until status is `completed`, then
+      download from unsigned_urls[0] (also GET /v1/videos/{id}/content).
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              model:
+                type: string
+                description: Video model name (optional, defaults to first video-class model)
+              prompt:
+                type: string
+                required: true
+              duration:
+                type: integer
+              resolution:
+                type: string
+              size:
+                type: string
+              seed:
+                type: integer
+    responses:
+      '202':
+        description: Job submitted
+      '400':
+        description: Missing prompt
+      '503':
+        description: No video-capable hosts
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    prompt_text = str(body.get("prompt") or "").strip()
+    if not prompt_text:
+        return web.json_response({"error": "'prompt' is required"}, status=400)
+
+    hosts = _find_video_hosts(request.query.get("host"))
+    if not hosts:
+        return web.json_response(
+            {"error": "no ComfyUI hosts with a video-capable model available"}, status=503)
+
+    model_filter = body.get("model") or ""
+    # pick the best host that actually has a matching video model
+    chosen_host = None
+    chosen_model = None
+    for h in hosts:
+        m = _pick_video_model(h, model_filter)
+        if m:
+            chosen_host = h
+            chosen_model = m
+            break
+    if not chosen_host:
+        return web.json_response(
+            {"error": "no host has a video model matching requested model"}, status=404)
+
+    params = dict(body)
+    params["prompt"] = prompt_text
+    job = {
+        "id": None,
+        "status": "pending",
+        "host": chosen_host,
+        "model": chosen_model,
+        "prompt": prompt_text,
+        "params": params,
+        "created": time.time(),
+        "unsigned_urls": [],
+    }
+    jid = _video_job_new(job)
+    job["id"] = jid
+    job["polling_url"] = f"/v1/videos/{jid}"
+    _video_job_save()
+    asyncio.get_event_loop().create_task(_run_video_job(request.app["session"], jid))
+    return web.json_response({"id": jid, "polling_url": job["polling_url"], "status": "pending"}, status=202)
+
+
+async def handle_videos_get(request):
+    """
+    Poll a video generation job (OpenRouter-compatible)
+    ---
+    tags: [Video]
+    summary: GET /v1/videos/{id} — poll a video job until completed
+    parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+    responses:
+      '200':
+        description: Job status
+      '404':
+        description: Unknown job id
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jid = request.match_info.get("id")
+    _load_video_jobs()
+    job = _VIDEO_JOBS.get(jid)
+    if not job:
+        return web.json_response({"error": "unknown job"}, status=404)
+    out = {
+        "id": jid,
+        "status": job["status"],
+        "model": job["model"],
+        "polling_url": f"/v1/videos/{jid}",
+    }
+    if job["status"] == "completed":
+        out["unsigned_urls"] = job.get("unsigned_urls") or []
+    if job["status"] == "failed":
+        out["error"] = job.get("error")
+    return web.json_response(out)
+
+
+async def handle_videos_content(request):
+    """
+    Download a finished video (OpenRouter-compatible)
+    ---
+    tags: [Video]
+    summary: GET /v1/videos/{id}/content — stream the generated mp4
+    parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+      - in: query
+        name: index
+        schema:
+          type: integer
+        required: false
+    responses:
+      '200':
+        description: Video bytes
+      '404':
+        description: Job missing or not complete
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jid = request.match_info.get("id")
+    _load_video_jobs()
+    job = _VIDEO_JOBS.get(jid)
+    if not job or job["status"] != "completed" or not job.get("content_path"):
+        return web.json_response({"error": "no completed video for this job"}, status=404)
+    content_path = job["content_path"]
+    if not os.path.exists(content_path):
+        return web.json_response({"error": "no completed video for this job"}, status=404)
+    content_type = "video/mp4"
+    fn = job.get("filename") or "output.mp4"
+    ext = os.path.splitext(fn)[1].lower()
+    if ext == ".webm":
+        content_type = "video/webm"
+    with open(content_path, "rb") as f:
+        body = f.read()
+    return web.Response(body=body, content_type=content_type)
+
+
 async def handle_tts_speech(request):
     """
     OpenAI-compatible text-to-speech
@@ -3914,6 +4530,9 @@ def make_app():
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
     app.router.add_post("/v1/audio/speech", handle_tts_speech)
     app.router.add_get("/v1/audio/voices", handle_audio_voices)
+    app.router.add_post("/v1/videos", handle_videos_post)
+    app.router.add_get("/v1/videos/{id}", handle_videos_get)
+    app.router.add_get("/v1/videos/{id}/content", handle_videos_content)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)
@@ -3932,7 +4551,7 @@ def banner():
  ll       DD  dD   yY     VvvV   aA  Aa   ll
  llama~  DDDDd"   yY       VV   aA    Aa  llama~
  || ||               v{VERSION}               || ||
- '' ''               𝐂𝐇𝐀𝐌𝐎𝐈𝐒              '' ''
+ '' ''               dibatag              '' ''
 """)
 
 def main():
