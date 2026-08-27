@@ -2076,9 +2076,26 @@ async def handle_next_host(request):
     if not model:
         return web.json_response({"error": "missing model parameter"}, status=400)
 
+    prev = get_last(model)
+    from_host = prev[0] if prev else None
+    from_model = prev[1] if prev else None
     _drop_last_host(model)
 
-    raise web.HTTPFound("/")
+    accept = request.headers.get("Accept", "")
+    if "application/json" not in accept:
+        raise web.HTTPFound("/")
+
+    to_host = to_model = None
+    for _prio, host, ms in find_servers(model):
+        if ms:
+            to_host = host
+            to_model = ms[0]
+            break
+
+    return web.json_response({
+        "from": {"host": from_host, "model": from_model} if from_host else None,
+        "to": {"host": to_host, "model": to_model} if to_host else None,
+    })
 
 
 async def handle_skip_good(request):

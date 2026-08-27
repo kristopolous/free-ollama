@@ -20,7 +20,7 @@
     "(TTS|audio)"
   ],
   "other": [
-    "(controlnet)"
+    "(controlnet|vae_approx|text_encoder|sa2va)"
   ],
   "image": [
     "\\.safetensors$"
