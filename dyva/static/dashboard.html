@@ -1383,11 +1383,19 @@ document.getElementById('chatNextBtn').addEventListener('click',function(e){
   var model=document.getElementById('chatModel').value.trim();
   if(!model)return;
   this.disabled=true;
-  var x=new XMLHttpRequest();
-  x.open('GET','next-host?model='+encodeURIComponent(model));
-  x.onload=function(){location.reload()};
-  x.onerror=function(){location.reload()};
-  x.send();
+  fetch('next-host?model='+encodeURIComponent(model),{cache:'no-store',headers:{'Accept':'application/json'}})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      var from=d.from||{};
+      var to=d.to||{};
+      var txt='moving from '+(from.host||'?')+' '+(from.model||'')+' to '+(to.host||'?')+' '+(to.model||'');
+      var wrap=document.createElement('div');wrap.className='msg system';
+      wrap.style.cssText='padding:.4em .8em;font-size:.85em;opacity:.7;text-align:center;font-style:italic';
+      var body=document.createElement('div');body.className='body';body.textContent=txt;
+      wrap.appendChild(body);chatLog.appendChild(wrap);chatLog.scrollTop=chatLog.scrollHeight;
+      setTimeout(function(){location.reload()},600);
+    })
+    .catch(function(){location.reload()});
 });
 updateModelCount();
 renderSidebar();
