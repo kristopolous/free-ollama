@@ -69,7 +69,7 @@ SERVICE_CONFIG = {
     },
     "ollama": {
         "port": 11434,
-        "fofa_query": 'body="ollama"',
+        "fofa_query": ['app="ollama"', 'body="ollama is running"'],
         "shodan_query": '"ollama is running"',
         "check_path": "/api/tags",
     },
@@ -503,71 +503,6 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
     return last_error
 
 
-def _fetch_api(dry, limit, service, fid=None, curlify=False, query=None):
-    import base64
-    import requests
-    import curlify as curlify_mod
-
-    if query is None:
-        query = SERVICE_CONFIG[service]["fofa_query"]
-    if fid:
-        query += f' && fid="{fid}"'
-    qb64 = base64.b64encode(query.encode()).decode()
-    params = {"key": FOFA_KEY, "qbase64": qb64, "size": limit}
-    headers = {}
-    if FOFA_AUTHORIZATION:
-        headers["Authorization"] = FOFA_AUTHORIZATION
-    req = requests.Request("GET", FOFA_API, params=params, headers=headers)
-    prepared = req.prepare()
-    if curlify:
-        log.info(curlify_mod.to_curl(prepared))
-        return []
-    if dry:
-        log.info(curlify_mod.to_curl(prepared))
-        return []
-
-    backoff = BACKOFF
-    while True:
-        try:
-            with requests.Session() as s:
-                resp = s.send(prepared, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("error"):
-                if "network unstable" in data.get("error", "").lower():
-                    log.warning(f"network unstable, retrying in {backoff}s")
-                    time.sleep(backoff)
-                    backoff = min(int(backoff * 1.2), MAX_BACKOFF)
-                    continue
-                log.error(f"FOFA error: {data.get('error')}")
-                return []
-            break
-        except requests.exceptions.ConnectionError as e:
-            if _is_offline_error(e):
-                log.warning(f"offline ({e}); retrying in {backoff}s...")
-                time.sleep(backoff)
-                backoff = min(int(backoff * 1.2), MAX_BACKOFF)
-                continue
-            log.error(f"FOFA API request failed: {e}")
-            return []
-        except Exception as e:
-            log.error(f"FOFA API request failed: {e}")
-            return []
-
-    hosts = []
-    for row in data.get("results", []):
-        ip_addr, port_num = row[0], row[1]
-        entry = {
-            "service": service,
-            "host": f"{ip_addr}:{port_num}",
-            "site": "fofa",
-        }
-        if fid:
-            entry["fid"] = fid
-        hosts.append(entry)
-    return hosts
-
-
 def _tag(value):
     """Short filesystem-safe label component (md5 prefix). Used for FID and
     server values whose raw text can contain spaces/slashes/etc."""
@@ -585,7 +520,7 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
     qb64 = base64.b64encode(combined.encode()).decode()
     url = f"{FOFA_WEB}?qbase64={qb64}"
 
-    cookie_header = re.sub(r'fofa_result_page_size=\d+', f'fofa_result_page_size={limit}', FOFA_COOKIE) if FOFA_COOKIE else ""
+    cookie_header = FOFA_COOKIE
 
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
@@ -980,24 +915,35 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         pool = _load_json(hosts_file)
         index = {f"{h['service']}@{h['host']}": h for h in pool}
         seen = set(index)
+        # Resolve the base FOFA query/queries. A service may define several
+        # (e.g. ollama: app="ollama" then body="ollama is running"); each is
+        # cycled across the full country/port/server combinatorics, just like
+        # country/port cycling — several independent passes over the same space.
+        if query:
+            base_queries = [query]
+        elif service:
+            q = SERVICE_CONFIG[service]["fofa_query"]
+            base_queries = q if isinstance(q, list) else [q]
+        else:
+            base_queries = [NAMED_QUERIES[name]]
+
         # FIDs are targeted follow-ups: each is fetched as QUERY+fid on its
         # own, never crossed with country/port/server (those intersections
         # are almost always empty). They run FIRST, before the combinatorics,
         # since they're the high-value targeted queries.
-        combo_grid = [(c, p, s, None) for s in server_list for p in port_list for c in country_list]
+        combo_grid = [(bq, c, p, s, None)
+                      for s in server_list for p in port_list for c in country_list
+                      for bq in base_queries]
         if shuffle:
             random.shuffle(combo_grid)
 
-        combos = [(None, None, None, fid) for fid in fid_specs] + combo_grid
+        combos = [(None, None, None, None, fid) for fid in fid_specs] + combo_grid
 
         start = time.time()
-        for i, (country, port, server, fid) in enumerate(combos):
-            if query:
-                qparts = [query]
-            elif service:
-                qparts = [SERVICE_CONFIG[service]["fofa_query"]]
-            else:
-                qparts = [NAMED_QUERIES[name]]
+        for i, (base_query, country, port, server, fid) in enumerate(combos):
+            qparts = [base_query] if base_query else []
+            if not qparts:
+                continue
             if port:
                 qparts.append(f'port="{port}"')
             if country:
@@ -1009,9 +955,9 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
             combined = " && ".join(qparts)
             log.debug(combined)
             if not dry:
-                log.info(f"[{i+1}/{len(combos)}] country={country} port={port} server={server} fid={fid}")
+                log.info(f"[{i+1}/{len(combos)}] query={base_query} country={country} port={port} server={server} fid={fid}")
 
-            label = f"{country or 'any'}-{port or 'any'}-{_tag(server)}-{_tag(fid)}"
+            label = f"{_tag(base_query)}-{country or 'any'}-{port or 'any'}-{_tag(server)}-{_tag(fid)}"
             if session:
                 out_path = os.path.join("/tmp/graflex", f"fofa-results-{label}-{run_ts}.txt")
                 if os.path.exists(out_path):
@@ -1054,13 +1000,20 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         if not service and not query and name not in NAMED_QUERIES:
             log.error("--service is required for API method")
             return
-        named_query = query or NAMED_QUERIES.get(name)
-        if fids:
-            hosts = []
-            for fid in [s.strip() for s in fids.split(",")]:
-                hosts.extend(_fetch_api(dry, limit, service, fid=fid, curlify=curlify, query=named_query))
+        if query:
+            base_queries = [query]
+        elif service:
+            q = SERVICE_CONFIG[service]["fofa_query"]
+            base_queries = q if isinstance(q, list) else [q]
         else:
-            hosts = _fetch_api(dry, limit, service, curlify=curlify, query=named_query)
+            base_queries = [NAMED_QUERIES.get(name) or ""]
+        hosts = []
+        for bq in base_queries:
+            if fids:
+                for fid in [s.strip() for s in fids.split(",")]:
+                    hosts.extend(_fetch_api(dry, limit, service, fid=fid, curlify=curlify, query=bq))
+            else:
+                hosts.extend(_fetch_api(dry, limit, service, curlify=curlify, query=bq))
 
     if dry:
         return
