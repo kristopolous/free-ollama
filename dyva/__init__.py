@@ -253,6 +253,94 @@ def _normalize_url(u):
     return u
 
 
+def fetch_source_defs(url):
+    """Fetch a URL that returns a JSON list of source definitions, the same way
+    the dashboard's "add from URL" button does. A bare dict is treated as a
+    one-element list. Raises ValueError on anything else."""
+    url = _normalize_url(url)
+    if not url:
+        raise ValueError("url required")
+    data = json.loads(requests.get(url, timeout=20).text)
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise ValueError("url did not return a JSON list of sources")
+    defs = [s for s in data if isinstance(s, dict) and s.get("url")]
+    if not defs:
+        raise ValueError("no usable source definitions (each needs a 'url')")
+    return defs
+
+
+def add_sources_from_url(url):
+    """Append the source definitions found at `url` to settings.json.
+    Definitions whose url is already configured are skipped.
+    Returns (added, skipped)."""
+    defs = fetch_source_defs(url)
+    existing = _stored_sources()
+    have = {_normalize_url(s.get("url")) for s in existing if isinstance(s, dict)}
+    added, skipped = [], []
+    for d in defs:
+        u = _normalize_url(d.get("url"))
+        if u in have:
+            skipped.append(d)
+            continue
+        have.add(u)
+        added.append(d)
+    if added:
+        save_settings({"sources": existing + added})
+    return added, skipped
+
+
+def _source_line(s):
+    name = s.get("name") or "(unnamed)"
+    mapped = ", ".join(sorted(s.get("mapping").keys())) if isinstance(s.get("mapping"), dict) else ""
+    line = f"  {name}\n      url:     {_normalize_url(s.get('url'))}"
+    if mapped:
+        line += f"\n      mapping: {mapped}"
+    return line
+
+
+def source_cli(argv):
+    """Handle `--source list` / `--source add <url>`. Returns an exit code."""
+    load_settings()   # so save_settings() doesn't clobber persisted values
+    cmd = str(argv[0]).lower()
+    if cmd == "list":
+        srcs = _stored_sources()
+        if not srcs:
+            print("No additional sources configured.")
+            return 0
+        print(f"{len(srcs)} additional source{'' if len(srcs) == 1 else 's'} "
+              f"(from {SETTINGS_FILE}):")
+        for s in srcs:
+            print(_source_line(s) if isinstance(s, dict) else f"  {s!r}  (not a source object)")
+        return 0
+
+    if cmd == "add":
+        urls = argv[1:]
+        if not urls:
+            print("usage: dyva --source add <url>", file=sys.stderr)
+            return 1
+        rc, total = 0, 0
+        for url in urls:
+            try:
+                added, skipped = add_sources_from_url(url)
+            except Exception as ex:
+                print(f"{url}: {ex}", file=sys.stderr)
+                rc = 1
+                continue
+            total += len(added)
+            print(f"{url}: added {len(added)}, skipped {len(skipped)} (already configured)")
+            for s in added:
+                print(_source_line(s))
+        if total:
+            print("Refreshing cache...")
+            refresh_cache()
+        return rc
+
+    print(f"unknown --source command '{cmd}' (expected 'list' or 'add')", file=sys.stderr)
+    return 1
+
+
 def _apply_source_mapping(row, mapping):
     """Turn a raw source row into a host entry per the mapping."""
     out = {}
@@ -4707,9 +4795,15 @@ def main():
     parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache, optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
     parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
+    parser.add_argument("--source", nargs="+", metavar=("CMD"),
+                        help="manage additional host sources: '--source list' or '--source add <url>' "
+                             "(the url returns a JSON list of source definitions, same as the dashboard's add-by-URL)")
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
+
+    if args.source:
+        sys.exit(source_cli(args.source))
 
     if args.refresh:
         ok = refresh_cache(args.refresh if isinstance(args.refresh, str) else None)
