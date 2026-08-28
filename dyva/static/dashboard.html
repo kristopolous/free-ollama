@@ -462,6 +462,10 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .check-row input{accent-color:var(--accent)}
 .media-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:var(--sp-5);flex-wrap:wrap}
 .media-form{max-width:820px}
+.media-row{display:grid;gap:var(--sp-4);margin-bottom:var(--sp-4)}
+.media-row-3{grid-template-columns:2fr 1fr 1fr}
+.media-row-4{grid-template-columns:2fr 1.2fr 1fr 1fr}
+@media(max-width:640px){.media-row-3,.media-row-4{grid-template-columns:1fr 1fr}}
 .media-result{margin-top:14px}
 .media-result audio{width:100%;margin-top:10px}
 .media-result video{max-width:100%;border-radius:var(--r-lg);border:1px solid var(--border);margin-top:10px;background:#000}
@@ -670,8 +674,8 @@ __SD_MODELS__
 <input id="imgHeight" type="number" value="512" min="256" max="2048" step="64">
 </div>
 <div class="field">
-<label for="imgSeed">Seed (-1 = random)</label>
-<input id="imgSeed" type="number" value="-1">
+<label for="imgSeed">Seed</label>
+<input id="imgSeed" type="number" value="-1" title="-1 = random">
 </div>
 </div>
 <div class="field">
@@ -712,20 +716,18 @@ __SD_MODELS__
 
 <div class="media-pane" id="mediapane-music" style="display:none">
 <div class="media-form">
-<div class="img-params">
+<div class="media-row media-row-3">
 <div class="field">
 <label for="musModel">Model <small class="setting-help">optional</small></label>
 <input id="musModel" type="text" placeholder="any music-capable host" autocomplete="off">
 </div>
-<div class="img-dims" style="margin:0">
 <div class="field">
 <label for="musDuration">Length (s)</label>
 <input id="musDuration" type="number" min="5" max="300" value="120">
 </div>
 <div class="field">
-<label for="musSeed">Seed (-1 = random)</label>
-<input id="musSeed" type="number" value="-1">
-</div>
+<label for="musSeed">Seed</label>
+<input id="musSeed" type="number" value="-1" title="-1 = random">
 </div>
 </div>
 <div class="field">
@@ -745,7 +747,7 @@ __SD_MODELS__
 
 <div class="media-pane" id="mediapane-speech" style="display:none">
 <div class="media-form">
-<div class="img-params">
+<div class="media-row media-row-3" style="grid-template-columns:1fr 1fr">
 <div class="field">
 <label for="ttsVoice">Voice</label>
 <input id="ttsVoice" type="text" list="ttsVoices" placeholder="host default" autocomplete="off">
@@ -767,24 +769,22 @@ __SD_MODELS__
 
 <div class="media-pane" id="mediapane-video" style="display:none">
 <div class="media-form">
-<div class="img-params">
+<div class="media-row media-row-4">
 <div class="field">
 <label for="vidModel">Model <small class="setting-help">optional</small></label>
 <input id="vidModel" type="text" placeholder="first video-class model" autocomplete="off">
 </div>
 <div class="field">
 <label for="vidResolution">Resolution</label>
-<input id="vidResolution" type="text" placeholder="e.g. 832x480" autocomplete="off">
+<input id="vidResolution" type="text" placeholder="832x480" autocomplete="off">
 </div>
-</div>
-<div class="img-dims">
 <div class="field">
 <label for="vidDuration">Duration (s)</label>
-<input id="vidDuration" type="number" min="1" max="60" placeholder="host default">
+<input id="vidDuration" type="number" min="1" max="60" placeholder="default">
 </div>
 <div class="field">
-<label for="vidSeed">Seed (-1 = random)</label>
-<input id="vidSeed" type="number" value="-1">
+<label for="vidSeed">Seed</label>
+<input id="vidSeed" type="number" value="-1" title="-1 = random">
 </div>
 </div>
 <div class="field">
