@@ -21,7 +21,7 @@ Your path to victory is **free-ollama**!
 - **Testing**: Probe to see if the server picks up your calls.  
 - **Zero-Config**: With caching! Works until it doesn’t.
 
-Let’s not ask too many questions.  **DO NOT talk about this on the web. I'm seriously.**
+Let’s not ask too many questions.  **DO NOT talk about this on the web. I'm serious.**
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
