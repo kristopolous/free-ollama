@@ -1,0 +1,74 @@
+{
+  "tts": [
+    {
+      "name": "QwenTTS",
+      "patterns": ["^Qwen(3)?TTS"],
+      "text": "content",
+      "voice": "voice",
+      "lang": null
+    },
+    {
+      "name": "AILab_VoxCPM",
+      "patterns": ["^AILab_VoxCPMTTS"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "MegaTTS3",
+      "patterns": ["^MegaTTS3"],
+      "text": "input_text",
+      "voice": "reference_voice",
+      "lang": "language"
+    },
+    {
+      "name": "CosyVoice",
+      "patterns": ["(?i)cosyvoice|^cosy"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "IndexTTS",
+      "patterns": ["(?i)indextts"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "F5TTS",
+      "patterns": ["(?i)f5[-_]?tts|^f5tts"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "ChatTTS",
+      "patterns": ["(?i)chattts"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "OuteTTS",
+      "patterns": ["(?i)outetts|oute"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "StepAudio",
+      "patterns": ["(?i)step[-_]?audio"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "Generic",
+      "patterns": ["(?i)tts"],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    }
+  ]
+}
