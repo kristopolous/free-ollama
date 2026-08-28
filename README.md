@@ -11,7 +11,7 @@
 
 Run **135m smollm2** or **270m gemma3** on someone else's RTX 2070.
 
-Interested? 
+Interested?
 
 Your path to victory is **free-ollama**!
 
@@ -21,7 +21,7 @@ Your path to victory is **free-ollama**!
 - **Testing**: Probe to see if the server picks up your calls.  
 - **Zero-Config**: With caching! Works until it doesn’t.
 
-Let’s not ask too many questions.
+Let’s not ask too many questions.  **DO NOT talk about this on the web. I'm seriously.**
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
