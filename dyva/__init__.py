@@ -87,7 +87,7 @@ SETTINGS_FILE = os.path.join(CACHE_DIR, "settings.json")
 # The ComfyUI model classifier (shared with graflex) lives in this package so
 # it can be version-controlled: each regex category -> class of model. Used to
 # derive OpenAI-style modalities for /v1/models and to route /v1/videos jobs.
-CLASSIFIER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model-classifier.json")
+CLASSIFIER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "graflex", "model-classifier.json")
 _classifier_cache = None
 
 # class -> output modalities (OpenRouter style) surfaced on /v1/models. Models
@@ -3627,13 +3627,53 @@ async def handle_comfyui_proxy(request):
 
 TTS_KEY = "__tts__"
 
-TTS_NODES = [
-    {"class": "MegaTTS3", "text": "input_text", "voice": "reference_voice", "lang": "language"},
-    {"class": "AILab_VoxCPMTTS", "text": "text", "voice": None},
-    {"class": "AILab_VoxCPMTTS_Advanced", "text": "text", "voice": None},
-    {"class": "QwenTTS", "text": "content", "voice": "voice"},
-    {"class": "Qwen3TTS", "text": "content", "voice": "voice"},
-]
+NODE_CLASSIFIER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "node-classifier.json")
+_node_classifier_cache = None
+
+
+def load_node_classifier():
+    """Compile the ComfyUI node-classifier (family -> regex list + field hints).
+    Mirrors model-classifier.json: surveyable, popularity-seeded data — not a
+    boutique hardcoded list. Only the predictably-named, high-cardinality node
+    families matter for building an available server pool."""
+    global _node_classifier_cache
+    if _node_classifier_cache is not None:
+        return _node_classifier_cache
+    compiled = []
+    if os.path.exists(NODE_CLASSIFIER_FILE):
+        try:
+            with open(NODE_CLASSIFIER_FILE) as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                for spec in raw.get("tts") or []:
+                    regs = []
+                    for p in spec.get("patterns") or []:
+                        try:
+                            regs.append(re.compile(p))
+                        except re.error as e:
+                            log.warning(f"node-classifier: bad regex {p!r}: {e}")
+                    if regs:
+                        compiled.append({
+                            "name": spec.get("name", "Generic"),
+                            "regs": regs,
+                            "text": spec.get("text", "text"),
+                            "voice": spec.get("voice"),
+                            "lang": spec.get("lang"),
+                        })
+        except Exception as e:
+            log.warning(f"node-classifier: failed to load {NODE_CLASSIFIER_FILE}: {e}")
+    _node_classifier_cache = compiled
+    return compiled
+
+
+def _tts_node_family(node_class):
+    """Return the surveyed TTS-family spec whose name-pattern matches a node
+    class name, or None if the node isn't a recognized (popular) TTS node."""
+    for spec in load_node_classifier():
+        if any(r.search(node_class) for r in spec["regs"]):
+            return spec
+    return None
+
 
 _TTS_NODE_CACHE = {}
 _TTS_NODE_CACHE_TTL = 300
@@ -3653,32 +3693,46 @@ class _TtsError(Exception):
 
 
 async def _tts_node_for(session, host):
+    """Find a host's TTS node by classifying its installed node-class names
+    against the node-classifier (data-driven, popularity-seeded) — never a
+    hardcoded boutique list and never structural model probing."""
     hit = _TTS_NODE_CACHE.get(host)
     if hit and time.time() - hit[1] < _TTS_NODE_CACHE_TTL:
-        cls = hit[0]
-        return next((s for s in TTS_NODES if s["class"] == cls), None)
-    for spec in TTS_NODES:
-        try:
-            r = await session.get(
-                _host_url(host, f"/object_info/{spec['class']}"),
-                timeout=aiohttp.ClientTimeout(total=15),
-            )
-            if r.status != 200:
-                await r.release()
-                continue
-            data = await r.json(content_type=None)
+        return hit[0]
+    try:
+        r = await session.get(
+            _host_url(host, "/object_info"),
+            timeout=aiohttp.ClientTimeout(total=20),
+        )
+        if r.status != 200:
             await r.release()
-        except Exception:
-            continue
-        if isinstance(data, dict) and data.get(spec["class"]):
-            required = ((data[spec["class"]].get("input") or {}).get("required")) or {}
-            voice_field = spec.get("voice")
+            return None
+        info = await r.json(content_type=None)
+        await r.release()
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+
+    # family priority wins over host node order (QwenTTS before Generic TTS)
+    for fam in load_node_classifier():
+        for node_class in info:
+            if not any(r.search(node_class) for r in fam["regs"]):
+                continue
+            required = ((info[node_class].get("input") or {}).get("required")) or {}
+            spec = {
+                "class": node_class,
+                "text": fam["text"],
+                "voice": fam["voice"],
+                "lang": fam["lang"],
+            }
+            voice_field = fam["voice"]
             if voice_field:
                 entry = required.get(voice_field)
                 opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else None
                 if isinstance(opts, list) and not opts:
                     continue
-            _TTS_NODE_CACHE[host] = (spec["class"], time.time())
+            _TTS_NODE_CACHE[host] = (spec, time.time())
             return spec
     return None
 
@@ -3817,10 +3871,18 @@ async def _tts_comfyui(session, host, input_text, voice=None):
 
 
 def _find_tts_hosts(target_host=None):
+    """ComfyUI hosts that expose a model classified as a speech/audio generator,
+    matching the classifier-driven routing used for video. A host must actually
+    survey an `audio`-class model (e.g. a qwen-tts/voxcpm checkpoint) to be a
+    TTS candidate — we never assume capability from a node-name list."""
     if target_host:
-        return [target_host]
+        if _host_has_class(target_host, _AUDIO_CLASSES):
+            return [target_host]
+        return []
     servers = load_servers()
-    hosts = [s.get("server") for s in servers if s.get("service") == "comfyui" and s.get("server")]
+    hosts = [s.get("server") for s in servers
+             if s.get("service") == "comfyui" and s.get("server")
+             and _host_has_class(s.get("server"), _AUDIO_CLASSES)]
     bad, good = load_bad(), load_good()
     hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
     last = get_last(TTS_KEY)
@@ -3981,106 +4043,155 @@ def _pick_video_model(host, model_filter=None):
     return None
 
 
+def _detect_video_family(model_path):
+    """Best-effort family detection from the model path/filename. Used to pick
+    a workflow builder. Returns one of 'wan', 'ltx', 'mochi', or None."""
+    p = str(model_path or "").lower().split("/")[-1]
+    if "wan" in p:
+        return "wan"
+    if "ltx" in p or "lightning" in p:
+        return "ltx"
+    if "mochi" in p or "mochi" in str(model_path or "").lower():
+        return "mochi"
+    return None
+
+
+async def _get_object_info(session, host):
+    """Return the live host's /object_info dict, or None."""
+    try:
+        oi = await session.get(
+            _host_url(host, "/object_info"),
+            timeout=aiohttp.ClientTimeout(total=20),
+        )
+        if oi.status == 200:
+            info = await oi.json(content_type=None)
+            await oi.release()
+            return info or {}
+        await oi.release()
+    except Exception:
+        return None
+    return None
+
+
+def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed):
+    """Text-to-video graph for LTX-2.x diffusion models. Wiring:
+    DiffusionModelLoader -> MODEL/CLIP/VAE, CLIPLoader -> CLIP, CLIPTextEncode,
+    LTXVConditioning -> pos/neg conditioning + latent, EmptyLTXVLatentVideo,
+    LTXVScheduler -> SIGMAS, KSamplerSelect -> SAMPLER, CFGGuider -> GUIDER,
+    RandomNoise -> NOISE, SamplerCustomAdvanced -> latent, VAEDecode -> images,
+    SaveVideo."""
+    prompt = params.get("prompt", "")
+    workflow = {}
+    def add(nid, cls, inputs):
+        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
+
+    add(1, "DiffusionModelLoader", {"unet_name": model_path})
+    add(2, "CLIPLoader", {"clip_name": "gemma-2-9b-gguf.safetensors", "type": "gemma"})
+    add(3, "CLIPTextEncode", {"clip": [2, 0], "text": prompt})
+    add(4, "CLIPTextEncode", {"clip": [2, 0], "text": ""})
+    add(5, "LTXVConditioning", {
+        "positive": [3, 0], "negative": [4, 0],
+        "width": 768, "height": 512, "frame_rate": 25,
+    })
+    add(6, "EmptyLTXVLatentVideo", {
+        "width": width, "height": height, "length": length, "batch_size": 1,
+    })
+    add(7, "LTXVScheduler", {"sigma_max": 1.0, "sigma_min": 0.03, "rho": 7.0})
+    add(8, "KSamplerSelect", {"sampler_name": "euler"})
+    add(9, "CFGGuider", {
+        "model": [1, 0], "positive": [5, 0], "negative": [5, 1], "cfg": cfg,
+    })
+    add(10, "RandomNoise", {"noise_seed": seed})
+    add(11, "SamplerCustomAdvanced", {
+        "noise": [10, 0], "guider": [9, 0], "sampler": [8, 0],
+        "sigmas": [7, 0], "latent_image": [6, 0],
+    })
+    add(12, "VAEDecode", {"samples": [11, 0], "vae": [1, 2]})
+    add(13, "SaveVideo", {"filename_prefix": "dyva_video", "images": [12, 0]})
+    return workflow
+
+
+def _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed):
+    """Text-to-video graph for Wan 2.x diffusion models. Wiring:
+    UNETLoader -> MODEL, CLIPLoader(umt5) -> CLIP, CLIPTextEncode,
+    EmptyHunyuanLatentVideo -> latent, ModelSamplingSD3 optional,
+    VideoLinearCFGGuidance -> model, KSampler -> latent, VAEDecode -> images,
+    SaveVideo."""
+    prompt = params.get("prompt", "")
+    workflow = {}
+    def add(nid, cls, inputs):
+        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
+
+    add(1, "UNETLoader", {"unet_name": model_path, "weight_dtype": "default"})
+    add(2, "CLIPLoader", {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"})
+    add(3, "CLIPTextEncode", {"clip": [2, 0], "text": prompt})
+    add(4, "CLIPTextEncode", {"clip": [2, 0], "text": ""})
+    add(5, "EmptyHunyuanLatentVideo", {
+        "width": width, "height": height, "length": length, "batch_size": 1,
+    })
+    add(6, "VideoLinearCFGGuidance", {
+        "model": [1, 0], "min_cfg": 1.0,
+    })
+    add(7, "KSampler", {
+        "model": [6, 0], "positive": [3, 0], "negative": [4, 0],
+        "latent_image": [5, 0], "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+    })
+    add(8, "VAEDecode", {"samples": [7, 0], "vae": [1, 2]})
+    add(9, "SaveVideo", {"filename_prefix": "dyva_video", "images": [8, 0]})
+    return workflow
+
+
+def _build_mochi_workflow(params, model_path, steps, cfg, width, height, length, seed):
+    """Text-to-video graph for Mochi-1 (MochiAsync) diffusion models."""
+    prompt = params.get("prompt", "")
+    workflow = {}
+    def add(nid, cls, inputs):
+        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
+
+    add(1, "MochiModelLoader", {"model": model_path})
+    add(2, "CLIPLoader", {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "sd3"})
+    add(3, "CLIPTextEncode", {"clip": [2, 0], "text": prompt})
+    add(4, "CLIPTextEncode", {"clip": [2, 0], "text": ""})
+    add(5, "EmptyMochiLatentVideo", {
+        "width": width, "height": height, "length": length, "batch_size": 1,
+    })
+    add(6, "MochiSamplingSettings", {
+        "model": [1, 0], "positive": [3, 0], "negative": [4, 0],
+        "latent_image": [5, 0], "seed": seed, "steps": steps, "cfg": cfg,
+    })
+    add(7, "VAEDecode", {"samples": [6, 0], "vae": [1, 2]})
+    add(8, "SaveVideo", {"filename_prefix": "dyva_video", "images": [7, 0]})
+    return workflow
+
+
 async def _submit_video_workflow(session, host, model_path, job):
     """Build and submit a text-to-video ComfyUI workflow for the model. Returns
-    the ComfyUI prompt_id, or None on submission failure. Uses a Wan-style
-    diffusion-model graph, probing object_info to keep node names resilient."""
+    the ComfyUI prompt_id, or None on submission failure. The builder is chosen
+    by the model's family (wan/ltx/mochi); unrecognized families fail cleanly
+    rather than sending a garbage graph."""
     import uuid as uuid_mod
 
     params = job.get("params") or {}
-    prompt_text = params.get("prompt", "")
     steps = int(params.get("steps", 20))
     cfg = float(params.get("cfg", 6.0))
-    width = int(params.get("width", 832))
-    height = int(params.get("height", 480))
+    width = int(params.get("width", 768))
+    height = int(params.get("height", 512))
     length = int(params.get("length", 25))
     seed = int(params.get("seed", -1))
     if seed == -1:
         import random
         seed = random.randint(0, 2**31 - 1)
 
-    base = f"{model_path}"
-    prefix = base.split("/")[0]
-    name = base.split("/")[-1]
-
-    # adapter node choices, probed lazily against the live host
-    loader = "DiffusionModelLoader"
-    vae = "VAELoader"
-    clip = "CLIPLoader"
-    sampler = "KSampler"
-    encodeA = "CLIPTextEncode"
-    encodeB = "CLIPTextEncode"
-    decode = "VideoVAEDecode"
-    save = "SaveVideo"
-    latent = "EmptySD3LatentImage"
-    cfg_guide = "VideoLinearCFGGuidance"
-    guidance_key = "min_cfg"
-
-    def node(nid, cls, inputs):
-        return {str(nid): {"class_type": cls, "inputs": inputs}}
-
-    workflow = {}
-    def add(nid, cls, inputs):
-        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
-
-    # Adaptive probing: resolve the exact node class names a host has so the
-    # graph matches its installed set of custom nodes.
-    try:
-        oi = await session.get(
-            _host_url(host, "/object_info"),
-            timeout=aiohttp.ClientTimeout(total=15),
-        )
-        if oi.status == 200:
-            info = await oi.json(content_type=None)
-            await oi.release()
-            known = set((info or {}).keys())
-            def pick(choices):
-                for c in choices:
-                    if c in known:
-                        return c
-                return choices[0]
-            loader = pick(["DiffusionModelLoader", "UnetLoader", "UNETLoader"])
-            vae = pick(["VAELoader"])
-            clip = pick(["CLIPLoader", "DualCLIPLoader"])
-            encodeA = pick(["CLIPTextEncode"])
-            encodeB = pick(["CLIPTextEncode"])
-            decode = pick(["VideoVAEDecode", "VAEDecode"])
-            latent = pick(["EmptySD3LatentImage", "EmptyLatentImage", "WanImageToVideo"])
-            cfg_guide = pick(["VideoLinearCFGGuidance"])
-            sampler = pick(["KSampler", "SamplerCustom"])
-        else:
-            await oi.release()
-    except Exception:
-        info = None
-
-    # node ids
-    N = {}
-    N["loader"] = 1
-    N["clip"] = 2
-    N["pos"] = 3
-    N["neg"] = 4
-    N["latent"] = 5
-    N["guide"] = 6
-    N["sampler"] = 7
-    N["decode"] = 8
-    N["save"] = 9
-
-    add(N["loader"], loader, {"ckpt_name": prefix})
-    add(N["clip"], clip, {"clip_name": "None", "type": "wan"})
-    add(N["pos"], encodeA, {"clip": [N["clip"], 0], "text": prompt_text})
-    add(N["neg"], encodeB, {"clip": [N["clip"], 0], "text": ""})
-    add(N["latent"], latent, {"width": width, "height": height, "batch_size": 1})
-    add(N["guide"], cfg_guide, {"model": [N["loader"], 0], "min_cfg": cfg})
-    add(N["sampler"], sampler, {
-        "model": [N["guide"], 0],
-        "positive": [N["pos"], 0],
-        "negative": [N["neg"], 0],
-        "latent_image": [N["latent"], 0],
-        "seed": seed, "steps": steps, "cfg": cfg,
-        "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
-    })
-    add(N["decode"], decode, {"samples": [N["sampler"], 0], "vae": [N["loader"], 2]})
-    add(N["save"], save, {"filename_prefix": "dyva_video", "images": [N["decode"], 0]})
+    family = _detect_video_family(model_path)
+    if family == "wan":
+        workflow = _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed)
+    elif family == "ltx":
+        workflow = _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed)
+    elif family == "mochi":
+        workflow = _build_mochi_workflow(params, model_path, steps, cfg, width, height, length, seed)
+    else:
+        raise _VideoError(f"unsupported video model family for {model_path!r}")
 
     client_id = str(uuid_mod.uuid4())
     try:
@@ -4419,28 +4530,35 @@ async def handle_audio_voices(request):
 
     async def probe(host):
         found = []
-        for spec in TTS_NODES:
-            try:
-                r = await session.get(
-                    _host_url(host, f"/object_info/{spec['class']}"),
-                    timeout=aiohttp.ClientTimeout(total=15),
-                )
-                if r.status != 200:
-                    await r.release()
-                    continue
-                data = await r.json(content_type=None)
+        try:
+            r = await session.get(
+                _host_url(host, "/object_info"),
+                timeout=aiohttp.ClientTimeout(total=20),
+            )
+            if r.status != 200:
                 await r.release()
-            except Exception:
-                continue
-            if not (isinstance(data, dict) and data.get(spec["class"])):
-                continue
-            required = ((data[spec["class"]].get("input") or {}).get("required")) or {}
-            voices = []
-            voice_field = spec.get("voice")
-            entry = required.get(voice_field) if voice_field else None
-            if isinstance(entry, list) and isinstance(entry[0], list):
-                voices = [v for v in entry[0] if isinstance(v, str)]
-            found.append({"node": spec["class"], "voices": voices})
+                return host, found
+            info = await r.json(content_type=None)
+            await r.release()
+        except Exception:
+            return host, found
+        if not isinstance(info, dict):
+            return host, found
+        seen = set()
+        for fam in load_node_classifier():
+            for node_class in info:
+                if node_class in seen:
+                    continue
+                if not any(r.search(node_class) for r in fam["regs"]):
+                    continue
+                seen.add(node_class)
+                required = ((info[node_class].get("input") or {}).get("required")) or {}
+                voices = []
+                voice_field = fam["voice"]
+                entry = required.get(voice_field) if voice_field else None
+                if isinstance(entry, list) and isinstance(entry[0], list):
+                    voices = [v for v in entry[0] if isinstance(v, str)]
+                found.append({"node": node_class, "voices": voices})
         return host, found
 
     results = await asyncio.gather(*(probe(h) for h in hosts), return_exceptions=True)
