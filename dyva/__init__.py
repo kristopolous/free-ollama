@@ -4802,6 +4802,611 @@ async def handle_audio_voices(request):
     return web.json_response({"voices": voices, "hosts": details})
 
 
+# ---- Music generation (ACE-Step, MiniMax Music 3, and anything shaped like
+# them) ---------------------------------------------------------------------
+# Every text-to-music model takes the same three things: a style/caption, some
+# optional lyrics, and a length. What differs between families is only the
+# ComfyUI node class names and which input field carries each of those, so the
+# graph is built once and the family table in node-classifier.json supplies the
+# names. Field names are resolved against the host's live /object_info, and
+# everything else is wired by declared TYPE, so a family we've never seen still
+# works as long as its nodes are shaped like a diffusion audio pipeline.
+MUSIC_KEY = "__music__"
+MUSIC_JOBS_FILE = os.path.join(CACHE_DIR, "music-jobs.json")
+MUSIC_JOBS_DIR = os.path.join(CACHE_DIR, "music-jobs")
+_MUSIC_JOBS = {}
+_MUSIC_JOB_ID_CTR = 0
+MUSIC_JOB_MAX = 200
+_music_families_cache = None
+
+# candidate input names per slot, tried when the family table's name isn't on
+# the node (or the family is the generic catch-all)
+_MUSIC_SLOTS = {
+    "style": ["tags", "caption", "prompt", "style", "description", "text"],
+    "lyrics": ["lyrics", "lyric", "lyrics_text", "text"],
+    "seconds": ["seconds", "max_duration", "duration", "length", "seconds_total"],
+}
+
+
+class _MusicError(Exception):
+    pass
+
+
+def load_music_families():
+    """Compile the music section of node-classifier.json: node-name patterns
+    plus which field carries style / lyrics / length for that family."""
+    global _music_families_cache
+    if _music_families_cache is not None:
+        return _music_families_cache
+    fams = []
+    if os.path.exists(NODE_CLASSIFIER_FILE):
+        try:
+            with open(NODE_CLASSIFIER_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            log.warning(f"node-classifier: unreadable ({e})")
+            raw = {}
+        for spec in (raw.get("music") or []) if isinstance(raw, dict) else []:
+            def _compile(key):
+                out = []
+                for p in spec.get(key) or []:
+                    try:
+                        out.append(re.compile(p))
+                    except re.error as e:
+                        log.warning(f"node-classifier: bad music regex {p!r}: {e}")
+                return out
+            enc, lat = _compile("encode"), _compile("latent")
+            if not enc or not lat:
+                continue
+            try:
+                ckpt = re.compile(spec.get("ckpt") or ".")
+            except re.error:
+                ckpt = re.compile(".")
+            fams.append({"name": spec.get("name", "Generic"), "encode": enc, "latent": lat,
+                         "ckpt": ckpt, "style": spec.get("style"),
+                         "lyrics": spec.get("lyrics"), "seconds": spec.get("seconds")})
+    _music_families_cache = fams
+    return fams
+
+
+def _first_class(info, regs):
+    for cls in sorted(info or {}):
+        if any(r.search(cls) for r in regs):
+            return cls
+    return None
+
+
+def _music_family_on_host(info):
+    """First family whose encode AND latent nodes are both installed."""
+    for fam in load_music_families():
+        enc = _first_class(info, fam["encode"])
+        lat = _first_class(info, fam["latent"])
+        if enc and lat:
+            return fam, enc, lat
+    return None, None, None
+
+
+def _oi_required(info, cls):
+    return (((info.get(cls) or {}).get("input") or {}).get("required")) or {}
+
+
+def _oi_outputs(info, cls):
+    return (info.get(cls) or {}).get("output") or []
+
+
+def _pick_field(required, declared, slot, taken=()):
+    if declared and declared in required and declared not in taken:
+        return declared
+    for name in _MUSIC_SLOTS[slot]:
+        if name in required and name not in taken:
+            return name
+    return None
+
+
+_LINK_TYPES = {"MODEL", "CLIP", "VAE", "CONDITIONING", "LATENT", "AUDIO", "CONTROL_NET"}
+
+
+def _wire_node(info, cls, node_id, graph, links, overrides=None):
+    """Add one node, filling connection inputs from `links` by declared type and
+    everything else from the host's own declared defaults."""
+    inputs = {}
+    for name, entry in _oi_required(info, cls).items():
+        if overrides and name in overrides:
+            inputs[name] = overrides[name]
+            continue
+        typ = entry[0] if isinstance(entry, list) and entry else None
+        if isinstance(typ, str) and typ in _LINK_TYPES:
+            key = typ
+            # the only ambiguity type-wiring can't resolve on its own
+            if typ == "CONDITIONING" and re.search(r"neg", name, re.I):
+                key = "CONDITIONING_NEG"
+            if key in links:
+                inputs[name] = links[key]
+            continue
+        attrs = entry[1] if isinstance(entry, list) and len(entry) > 1 and isinstance(entry[1], dict) else {}
+        if "default" in attrs:
+            inputs[name] = attrs["default"]
+        elif isinstance(typ, list) and typ:
+            inputs[name] = typ[0]
+    graph[node_id] = {"class_type": cls, "inputs": inputs}
+    return graph[node_id]
+
+
+def _music_loader(info, fam, graph, links):
+    """Wire whatever loads the model. Prefer a plain checkpoint whose filename
+    matches the family (ACE-Step ships as one .safetensors); otherwise take a
+    family-specific loader node, which is how the multi-file families load."""
+    req = _oi_required(info, "CheckpointLoaderSimple")
+    entry = req.get("ckpt_name")
+    names = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else []
+    for n in names:
+        if fam["ckpt"].search(str(n)):
+            graph["1"] = {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": n}}
+            for i, t in enumerate(_oi_outputs(info, "CheckpointLoaderSimple")):
+                if t in _LINK_TYPES and t not in links:
+                    links[t] = ["1", i]
+            return n
+    for cls in sorted(info or {}):
+        outs = _oi_outputs(info, cls)
+        if "MODEL" not in outs or not fam["ckpt"].search(cls):
+            continue
+        _wire_node(info, cls, "1", graph, links)
+        for i, t in enumerate(outs):
+            if t in _LINK_TYPES and t not in links:
+                links[t] = ["1", i]
+        return cls
+    raise _MusicError(f"host has {fam['name']} nodes but no matching model to load")
+
+
+def _build_music_workflow(info, fam, enc_cls, lat_cls, style, lyrics, seconds, seed, steps, cfg):
+    graph, links = {}, {}
+    model_ref = _music_loader(info, fam, graph, links)
+
+    enc_req = _oi_required(info, enc_cls)
+    f_style = _pick_field(enc_req, fam["style"], "style")
+    f_lyrics = _pick_field(enc_req, fam["lyrics"], "lyrics", taken=(f_style,))
+    if not f_style:
+        raise _MusicError(f"{enc_cls} has no field to put the style description in")
+    pos = {f_style: style}
+    neg = {f_style: ""}
+    if f_lyrics:
+        pos[f_lyrics] = lyrics or ""
+        neg[f_lyrics] = ""
+    _wire_node(info, enc_cls, "2", graph, links, pos)
+    _wire_node(info, enc_cls, "3", graph, links, neg)
+    links["CONDITIONING"] = ["2", 0]
+    links["CONDITIONING_NEG"] = ["3", 0]
+
+    lat_req = _oi_required(info, lat_cls)
+    f_secs = _pick_field(lat_req, fam["seconds"], "seconds")
+    _wire_node(info, lat_cls, "4", graph, links, {f_secs: seconds} if f_secs else None)
+    links["LATENT"] = ["4", 0]
+
+    if "KSampler" not in (info or {}):
+        raise _MusicError("host has no KSampler node")
+    _wire_node(info, "KSampler", "5", graph, links,
+               {"seed": seed, "steps": steps, "cfg": cfg, "denoise": 1.0})
+    links["LATENT"] = ["5", 0]
+
+    dec = "VAEDecodeAudio" if "VAEDecodeAudio" in (info or {}) else None
+    if not dec:
+        for cls in sorted(info or {}):
+            if "AUDIO" in _oi_outputs(info, cls) and "LATENT" in [
+                    (e[0] if isinstance(e, list) and e else None)
+                    for e in _oi_required(info, cls).values()]:
+                dec = cls
+                break
+    if not dec:
+        raise _MusicError("host has no node that decodes latents to audio")
+    _wire_node(info, dec, "6", graph, links)
+    links["AUDIO"] = ["6", 0]
+
+    save = next((c for c in ("SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced")
+                 if c in (info or {})), None)
+    if not save:
+        raise _MusicError("host has no SaveAudio node")
+    _wire_node(info, save, "7", graph, links, {"filename_prefix": "dyva/music"})
+    return graph, model_ref
+
+
+def _find_music_hosts(target_host=None):
+    """ComfyUI hosts carrying an audio/music-class model. Whether they can
+    actually generate music is decided by probing /object_info at submit time —
+    a model class alone never implies capability."""
+    if target_host:
+        return [target_host] if _host_has_class(target_host, _AUDIO_CLASSES) else []
+    hosts = [s.get("server") for s in load_servers()
+             if s.get("service") == "comfyui" and s.get("server")
+             and _host_has_class(s.get("server"), _AUDIO_CLASSES)]
+    bad, good = load_bad(), load_good()
+    hosts.sort(key=lambda h: 0 if f"{h} {MUSIC_KEY}" in good else (1 if f"{h} {MUSIC_KEY}" not in bad else 2))
+    last = get_last(MUSIC_KEY)
+    if last and last[0]:
+        hosts = [last[0]] + [h for h in hosts if h != last[0]]
+    return hosts
+
+
+def _music_job_save():
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        clean = {k: {kk: vv for kk, vv in v.items() if not isinstance(vv, (bytes, bytearray))}
+                 for k, v in _MUSIC_JOBS.items() if isinstance(v, dict)}
+        with open(MUSIC_JOBS_FILE, "w", encoding="utf-8") as f:
+            json.dump(clean, f)
+    except Exception:
+        pass
+
+
+def _load_music_jobs():
+    global _MUSIC_JOBS, _MUSIC_JOB_ID_CTR
+    if _MUSIC_JOBS:
+        return
+    if os.path.exists(MUSIC_JOBS_FILE):
+        try:
+            with open(MUSIC_JOBS_FILE, encoding="utf-8") as f:
+                _MUSIC_JOBS = json.load(f)
+            for k in _MUSIC_JOBS:
+                m = re.match(r"m(\d+)$", str(k))
+                if m:
+                    _MUSIC_JOB_ID_CTR = max(_MUSIC_JOB_ID_CTR, int(m.group(1)))
+        except Exception:
+            _MUSIC_JOBS = {}
+    # a job left running when the process died can never finish
+    for k, v in list(_MUSIC_JOBS.items()):
+        if isinstance(v, dict) and v.get("status") in ("pending", "in_progress"):
+            v["status"] = "failed"
+            v["error"] = "interrupted by a restart"
+
+
+def _music_job_new(job):
+    global _MUSIC_JOB_ID_CTR
+    _load_music_jobs()
+    _MUSIC_JOB_ID_CTR += 1
+    jid = f"m{_MUSIC_JOB_ID_CTR}"
+    _MUSIC_JOBS[jid] = job
+    if len(_MUSIC_JOBS) > MUSIC_JOB_MAX:
+        for k in sorted(_MUSIC_JOBS, key=lambda k: _MUSIC_JOBS[k].get("created") or 0)[:len(_MUSIC_JOBS) - MUSIC_JOB_MAX]:
+            cp = (_MUSIC_JOBS[k] or {}).get("content_path")
+            if cp:
+                try:
+                    os.remove(cp)
+                except OSError:
+                    pass
+            del _MUSIC_JOBS[k]
+    _music_job_save()
+    return jid
+
+
+async def _poll_comfy_audio(session, host, prompt_id, timeout=900):
+    """Poll /history until the graph saves audio; return (bytes, filename)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        await asyncio.sleep(3)
+        try:
+            r = await session.get(_host_url(host, f"/history/{prompt_id}"),
+                                  timeout=aiohttp.ClientTimeout(total=30))
+            if r.status != 200:
+                await r.release()
+                continue
+            hist = await r.json()
+            await r.release()
+        except Exception:
+            continue
+        entry = hist.get(prompt_id)
+        if not entry:
+            continue
+        status = entry.get("status", {})
+        if status.get("status_str") == "error":
+            msgs = [str(m) for m in (status.get("messages") or [])]
+            raise _MusicError("execution error" + (": " + "; ".join(msgs)[:200] if msgs else ""))
+        if status.get("completed"):
+            for _nid, out in (entry.get("outputs") or {}).items():
+                for af in (out.get("audio") or []):
+                    try:
+                        ar = await session.get(
+                            _host_url(host, "/view"),
+                            params={"filename": af["filename"], "subfolder": af.get("subfolder", ""),
+                                    "type": af.get("type", "output")},
+                            timeout=aiohttp.ClientTimeout(total=120))
+                        if ar.status == 200:
+                            raw = await ar.read()
+                            await ar.release()
+                            return raw, af["filename"]
+                        await ar.release()
+                    except Exception:
+                        pass
+            raise _MusicError("the graph finished but saved no audio")
+    raise _MusicError("timeout waiting for audio")
+
+
+async def _run_music_job(session, jid):
+    import uuid as uuid_mod
+    job = _MUSIC_JOBS.get(jid)
+    if not job:
+        return
+    job["status"] = "in_progress"
+    _music_job_save()
+    p = job.get("params") or {}
+    label = f"music: {job.get('style', '')[:40]}"
+    t0 = time.time()
+    host = None
+    errors = []
+    try:
+        for cand in job.get("hosts") or []:
+            info = await _get_object_info(session, cand)
+            if not info:
+                errors.append(f"{cand}: unreachable")
+                continue
+            fam, enc, lat = _music_family_on_host(info)
+            if not fam:
+                errors.append(f"{cand}: no known music nodes")
+                continue
+            try:
+                graph, model_ref = _build_music_workflow(
+                    info, fam, enc, lat, job["style"], job.get("lyrics") or "",
+                    job["seconds"], job["seed"], int(p.get("steps", 50)), float(p.get("cfg", 5.0)))
+            except _MusicError as e:
+                errors.append(f"{cand}: {e}")
+                continue
+            host = cand
+            job["host"] = host
+            job["family"] = fam["name"]
+            job["model"] = model_ref
+            _music_job_save()
+            await broadcast_activity(host, label, "trying", label)
+            r = await session.post(_host_url(host, "/prompt"),
+                                   json={"prompt": graph, "client_id": str(uuid_mod.uuid4())},
+                                   timeout=aiohttp.ClientTimeout(total=30))
+            body = await r.json(content_type=None)
+            await r.release()
+            pid = (body or {}).get("prompt_id")
+            if not pid:
+                errors.append(f"{host}: host rejected the graph")
+                host = None
+                continue
+            job["comfyui_prompt_id"] = pid
+            _music_job_save()
+            content, filename = await _poll_comfy_audio(session, host, pid)
+            os.makedirs(MUSIC_JOBS_DIR, exist_ok=True)
+            content_path = os.path.join(MUSIC_JOBS_DIR, f"{jid}.bin")
+            with open(content_path, "wb") as f:
+                f.write(content)
+            job["content_path"] = content_path
+            job["filename"] = filename
+            job["status"] = "completed"
+            job["unsigned_urls"] = [f"/v1/music/{jid}/content"]
+            add_good(host, MUSIC_KEY)
+            set_last(MUSIC_KEY, host, model_ref)
+            await broadcast_activity(host, label, "done", label, duration=time.time() - t0)
+            _music_job_save()
+            return
+        raise _MusicError("; ".join(errors) if errors else "no music-capable host answered")
+    except (_MusicError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        job["status"] = "failed"
+        job["error"] = str(e) or type(e).__name__
+        if host:
+            add_bad(host, MUSIC_KEY)
+            await broadcast_activity(host, label, "failed", f"{label}: {job['error']}", duration=time.time() - t0)
+        _music_job_save()
+
+
+async def handle_music_post(request):
+    """
+    Submit a music generation job
+    ---
+    tags: [Music]
+    summary: POST /v1/music — start an async text-to-music job on a ComfyUI host
+    description: |
+      One shape for every music model: a style description, optional lyrics, and
+      a length. Backed by ComfyUI hosts running ACE-Step, MiniMax Music 3, or any
+      family listed in node-classifier.json. Returns an id immediately; poll
+      GET /v1/music/{id} until status is `completed`, then fetch
+      GET /v1/music/{id}/content.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              prompt:
+                type: string
+                description: Style/caption — genre, mood, BPM, instrumentation, vocal
+              lyrics:
+                type: string
+                description: Optional lyrics, section tags like [Verse]/[Chorus] allowed
+              duration:
+                type: number
+                description: Seconds of audio (default 120)
+              model:
+                type: string
+                description: Optional model filter
+              seed:
+                type: integer
+              steps:
+                type: integer
+              cfg:
+                type: number
+    responses:
+      '202':
+        description: Job submitted
+      '400':
+        description: Missing prompt
+      '503':
+        description: No music-capable hosts
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    style = str(body.get("prompt") or body.get("style") or "").strip()
+    lyrics = str(body.get("lyrics") or "").strip()
+    if not style and not lyrics:
+        return web.json_response({"error": "'prompt' (a style description) is required"}, status=400)
+    hosts = _find_music_hosts(request.query.get("host"))
+    if not hosts:
+        return web.json_response({"error": "no ComfyUI hosts with an audio-capable model available"}, status=503)
+    try:
+        seconds = float(body.get("duration") or 120)
+    except (TypeError, ValueError):
+        seconds = 120.0
+    seconds = max(1.0, min(seconds, 300.0))
+    seed = body.get("seed")
+    try:
+        seed = int(seed)
+    except (TypeError, ValueError):
+        seed = -1
+    if seed < 0:
+        import random
+        seed = random.randint(0, 2 ** 31 - 1)
+    model_filter = str(body.get("model") or "")
+    if model_filter:
+        hosts = [h for h in hosts if _pick_music_model(h, model_filter)] or hosts
+    job = {"id": None, "status": "pending", "hosts": hosts[:8], "host": None,
+           "model": None, "family": None, "style": style, "lyrics": lyrics,
+           "seconds": seconds, "seed": seed, "params": dict(body),
+           "created": time.time(), "unsigned_urls": []}
+    jid = _music_job_new(job)
+    job["id"] = jid
+    job["polling_url"] = f"/v1/music/{jid}"
+    _music_job_save()
+    asyncio.get_event_loop().create_task(_run_music_job(request.app["session"], jid))
+    return web.json_response({"id": jid, "polling_url": job["polling_url"], "status": "pending"}, status=202)
+
+
+def _pick_music_model(host, model_filter=None):
+    for s in load_servers():
+        if s.get("server") != host:
+            continue
+        for m in s.get("models") or []:
+            if classify_model(m) not in _AUDIO_CLASSES:
+                continue
+            if model_filter and not match_model(m, model_filter):
+                continue
+            return m
+    return None
+
+
+async def handle_music_get(request):
+    """
+    Poll a music generation job
+    ---
+    tags: [Music]
+    summary: GET /v1/music/{id} — poll a music job until completed
+    parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+    responses:
+      '200':
+        description: Job status
+      '404':
+        description: Unknown job id
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jid = request.match_info.get("id")
+    _load_music_jobs()
+    job = _MUSIC_JOBS.get(jid)
+    if not job:
+        return web.json_response({"error": "unknown job"}, status=404)
+    out = {"id": jid, "status": job["status"], "model": job.get("model"),
+           "family": job.get("family"), "host": _norm_host(job.get("host") or ""),
+           "polling_url": f"/v1/music/{jid}"}
+    if job["status"] == "completed":
+        out["unsigned_urls"] = job.get("unsigned_urls") or []
+    if job["status"] == "failed":
+        out["error"] = job.get("error")
+    return web.json_response(out)
+
+
+async def handle_music_content(request):
+    """
+    Download finished music
+    ---
+    tags: [Music]
+    summary: GET /v1/music/{id}/content — stream the generated audio
+    parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+    responses:
+      '200':
+        description: Audio bytes
+      '404':
+        description: Unknown job, or not finished
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jid = request.match_info.get("id")
+    _load_music_jobs()
+    job = _MUSIC_JOBS.get(jid)
+    if not job:
+        return web.json_response({"error": "unknown job"}, status=404)
+    if job.get("status") != "completed":
+        return web.json_response({"error": f"job is {job.get('status')}"}, status=404)
+    path = job.get("content_path")
+    if not path or not os.path.exists(path):
+        return web.json_response({"error": "audio no longer on disk"}, status=404)
+    name = job.get("filename") or f"{jid}.flac"
+    ctype = _TTS_MIME.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
+    with open(path, "rb") as f:
+        return web.Response(body=f.read(), content_type=ctype,
+                            headers={"Content-Disposition": f'inline; filename="{name}"'})
+
+
+async def handle_music_models(request):
+    """
+    List music-capable hosts and the families they run
+    ---
+    tags: [Music]
+    summary: GET /v1/music/models — probe audio hosts for known music node families
+    responses:
+      '200':
+        description: Per-host music capability
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    session = request.app["session"]
+    hosts = _find_music_hosts(request.query.get("host"))
+    if not hosts:
+        return web.json_response({"hosts": [], "families": []})
+
+    async def probe(host):
+        info = await _get_object_info(session, host)
+        if not info:
+            return None
+        fam, enc, lat = _music_family_on_host(info)
+        if not fam:
+            return None
+        return {"host": _norm_host(host), "family": fam["name"],
+                "encode_node": enc, "latent_node": lat,
+                "models": [m for m in (_host_models(host) or [])
+                           if classify_model(m) in _AUDIO_CLASSES]}
+
+    found = [r for r in await asyncio.gather(*(probe(h) for h in hosts[:12]),
+                                             return_exceptions=True) if isinstance(r, dict)]
+    return web.json_response({"hosts": found,
+                              "families": sorted({f["family"] for f in found})})
+
+
+def _host_models(host):
+    for s in load_servers():
+        if s.get("server") == host:
+            return s.get("models") or []
+    return []
+
+
 def make_app():
     app = web.Application(client_max_size=128 * 1024 * 1024)
 
@@ -4863,6 +5468,7 @@ def make_app():
     swagger.add_get("/sdapi/v1/images/{name}", handle_image_file)
     swagger.add_post("/v1/audio/speech", handle_tts_speech)
     swagger.add_get("/v1/audio/voices", handle_audio_voices)
+    swagger.add_get("/v1/music/models", handle_music_models)
     # Registered on the plain router (not swagger) so path params and the
     # sendBeacon POST body aren't subject to swagger request validation.
     app.router.add_get("/api/chats", handle_chats_get)
@@ -4874,6 +5480,9 @@ def make_app():
     app.router.add_post("/v1/videos", handle_videos_post)
     app.router.add_get("/v1/videos/{id}", handle_videos_get)
     app.router.add_get("/v1/videos/{id}/content", handle_videos_content)
+    app.router.add_post("/v1/music", handle_music_post)
+    app.router.add_get("/v1/music/{id}", handle_music_get)
+    app.router.add_get("/v1/music/{id}/content", handle_music_content)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)

@@ -2,73 +2,135 @@
   "tts": [
     {
       "name": "QwenTTS",
-      "patterns": ["^Qwen(3)?TTS"],
+      "patterns": [
+        "^Qwen(3)?TTS"
+      ],
       "text": "content",
       "voice": "voice",
       "lang": null
     },
     {
       "name": "AILab_VoxCPM",
-      "patterns": ["^AILab_VoxCPMTTS"],
+      "patterns": [
+        "^AILab_VoxCPMTTS"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
     },
     {
       "name": "MegaTTS3",
-      "patterns": ["^MegaTTS3"],
+      "patterns": [
+        "^MegaTTS3"
+      ],
       "text": "input_text",
       "voice": "reference_voice",
       "lang": "language"
     },
     {
       "name": "CosyVoice",
-      "patterns": ["(?i)cosyvoice|^cosy"],
+      "patterns": [
+        "(?i)cosyvoice|^cosy"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
     },
     {
       "name": "IndexTTS",
-      "patterns": ["(?i)indextts"],
+      "patterns": [
+        "(?i)indextts"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
     },
     {
       "name": "F5TTS",
-      "patterns": ["(?i)f5[-_]?tts|^f5tts"],
+      "patterns": [
+        "(?i)f5[-_]?tts|^f5tts"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
     },
     {
       "name": "ChatTTS",
-      "patterns": ["(?i)chattts"],
+      "patterns": [
+        "(?i)chattts"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
     },
     {
       "name": "OuteTTS",
-      "patterns": ["(?i)outetts|oute"],
+      "patterns": [
+        "(?i)outetts|oute"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
     },
     {
       "name": "StepAudio",
-      "patterns": ["(?i)step[-_]?audio"],
+      "patterns": [
+        "(?i)step[-_]?audio"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
     },
     {
       "name": "Generic",
-      "patterns": ["(?i)tts"],
+      "patterns": [
+        "(?i)tts"
+      ],
       "text": "text",
       "voice": null,
       "lang": null
+    }
+  ],
+  "music": [
+    {
+      "name": "AceStep",
+      "encode": [
+        "^TextEncodeAceStepAudio"
+      ],
+      "latent": [
+        "^EmptyAceStepLatentAudio"
+      ],
+      "style": "tags",
+      "lyrics": "lyrics",
+      "seconds": "seconds",
+      "ckpt": "(?i)ace.?step"
+    },
+    {
+      "name": "MiniMaxMusic3",
+      "encode": [
+        "(?i)minimax.*music.*3?.*encode",
+        "(?i)textencode.*minimax.*music"
+      ],
+      "latent": [
+        "(?i)empty.*minimax.*music.*latent"
+      ],
+      "style": "caption",
+      "lyrics": "lyrics",
+      "seconds": "max_duration",
+      "ckpt": "(?i)minimax.*music"
+    },
+    {
+      "name": "Generic",
+      "encode": [
+        "(?i)^textencode.*(?:music|song|audio)"
+      ],
+      "latent": [
+        "(?i)^empty.*(?:music|song|audio).*latent"
+      ],
+      "style": null,
+      "lyrics": null,
+      "seconds": null,
+      "ckpt": "(?i)music|song"
     }
   ]
 }

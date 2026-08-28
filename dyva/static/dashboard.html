@@ -460,11 +460,24 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
 input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .check-row{display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-4);font-size:var(--fs-md);color:var(--text-3)}
 .check-row input{accent-color:var(--accent)}
+.media-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:var(--sp-5);flex-wrap:wrap}
+.media-form{max-width:820px}
+.media-result{margin-top:14px}
+.media-result audio{width:100%;margin-top:10px}
+.media-result video{max-width:100%;border-radius:var(--r-lg);border:1px solid var(--border);margin-top:10px;background:#000}
+.media-result .status{color:var(--text-dim);font-size:var(--fs-md)}
+.media-result .error{color:var(--err);font-size:var(--fs-md)}
+.media-result .dl{display:inline-block;margin-top:10px;font-size:var(--fs-sm)}
+.media-note{color:var(--text-dim);font-size:var(--fs-md);line-height:var(--line-body);max-width:60ch}
+.media-note code{background:var(--bg-inset);padding:.05em .3em;border-radius:var(--r-sm);font-size:var(--fs-2xs)}
+.media-models{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-4)}
+.media-models .mm{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:3px var(--sp-3);font-size:var(--fs-xs);font-family:var(--font-mono);color:var(--text-2)}
+.media-models .mm b{color:var(--text-dim);font-weight:400}
 #imgResult{margin-top:14px}
 #imgResult img{max-width:100%;border-radius:var(--r-lg);border:1px solid var(--border);margin-top:10px}
 #imgResult .status{color:var(--text-dim);font-size:var(--fs-md)}
 #imgResult .error{color:var(--err);font-size:var(--fs-md)}
-#image{max-width:none}
+#media{max-width:none}
 .img-layout{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}
 .img-main{flex:1 1 460px;min-width:0;max-width:640px}
 .img-side{flex:1 1 300px;min-width:260px}
@@ -506,7 +519,7 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <div class="tabs">
 <button class="tab active" data-tab="serverroom">Servers</button>
 <button class="tab" data-tab="chat">Chat</button>
-<button class="tab" data-tab="image">Image</button>
+<button class="tab" data-tab="media">Media</button>
 <button class="tab" data-tab="settings">Settings</button>
 </div>
 
@@ -611,7 +624,14 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 </div>
 </div>
 
-<div id="image" class="panel">
+<div id="media" class="panel">
+<div class="media-tabs">
+<button class="htab active" data-mediapane="image">Image</button>
+<button class="htab" data-mediapane="music">Music</button>
+<button class="htab" data-mediapane="speech">Speech</button>
+<button class="htab" data-mediapane="video">Video</button>
+</div>
+<div class="media-pane" id="mediapane-image">
 <div class="img-layout">
 <div class="img-main">
 <div class="img-params">
@@ -690,6 +710,93 @@ __SD_MODELS__
 </div>
 </div>
 
+<div class="media-pane" id="mediapane-music" style="display:none">
+<div class="media-form">
+<div class="img-params">
+<div class="field">
+<label for="musModel">Model <small class="setting-help">optional</small></label>
+<input id="musModel" type="text" placeholder="any music-capable host" autocomplete="off">
+</div>
+<div class="img-dims" style="margin:0">
+<div class="field">
+<label for="musDuration">Length (s)</label>
+<input id="musDuration" type="number" min="5" max="300" value="120">
+</div>
+<div class="field">
+<label for="musSeed">Seed (-1 = random)</label>
+<input id="musSeed" type="number" value="-1">
+</div>
+</div>
+</div>
+<div class="field">
+<label for="musStyle">Style</label>
+<textarea id="musStyle" rows="2" placeholder="dream pop, 90 bpm, female vocal, reverbed guitars, warm analog production"></textarea>
+</div>
+<div class="field">
+<label for="musLyrics">Lyrics <small class="setting-help">optional — [Verse] / [Chorus] section tags are understood</small></label>
+<textarea id="musLyrics" rows="6" placeholder="[Verse]&#10;rain on the gutter, paper boat going nowhere&#10;&#10;[Chorus]&#10;..."></textarea>
+</div>
+<button id="musGenerate">Generate</button>
+<div id="musResult" class="media-result"></div>
+<div class="media-note" id="musicNote"></div>
+<div id="musicModels" class="media-models"></div>
+</div>
+</div>
+
+<div class="media-pane" id="mediapane-speech" style="display:none">
+<div class="media-form">
+<div class="img-params">
+<div class="field">
+<label for="ttsVoice">Voice</label>
+<input id="ttsVoice" type="text" list="ttsVoices" placeholder="host default" autocomplete="off">
+<datalist id="ttsVoices"></datalist>
+</div>
+<div class="field">
+<label for="ttsModel">Model <small class="setting-help">optional</small></label>
+<input id="ttsModel" type="text" placeholder="any TTS host" autocomplete="off">
+</div>
+</div>
+<div class="field">
+<label for="ttsText">Text</label>
+<textarea id="ttsText" rows="4" placeholder="Say something worth hearing."></textarea>
+</div>
+<button id="ttsGenerate">Speak</button>
+<div id="ttsResult" class="media-result"></div>
+</div>
+</div>
+
+<div class="media-pane" id="mediapane-video" style="display:none">
+<div class="media-form">
+<div class="img-params">
+<div class="field">
+<label for="vidModel">Model <small class="setting-help">optional</small></label>
+<input id="vidModel" type="text" placeholder="first video-class model" autocomplete="off">
+</div>
+<div class="field">
+<label for="vidResolution">Resolution</label>
+<input id="vidResolution" type="text" placeholder="e.g. 832x480" autocomplete="off">
+</div>
+</div>
+<div class="img-dims">
+<div class="field">
+<label for="vidDuration">Duration (s)</label>
+<input id="vidDuration" type="number" min="1" max="60" placeholder="host default">
+</div>
+<div class="field">
+<label for="vidSeed">Seed (-1 = random)</label>
+<input id="vidSeed" type="number" value="-1">
+</div>
+</div>
+<div class="field">
+<label for="vidPrompt">Prompt</label>
+<textarea id="vidPrompt" rows="3" placeholder="a paper boat drifting down a rain gutter, slow motion"></textarea>
+</div>
+<button id="vidGenerate">Generate</button>
+<div id="vidResult" class="media-result"></div>
+</div>
+</div>
+</div>
+
 <div id="settings" class="panel">
 <div class="settings-wrap">
 <div class="card"><div class="card-inner settings-inner">
@@ -761,7 +868,9 @@ __SD_MODELS__
 // (a synchronous XHR later on would otherwise delay navigation until it returns).
 (function(){
   var h=(location.hash||'').replace(/^#/,'');
-  var tab=h.indexOf('chat/')===0?'chat':(['serverroom','chat','image','settings'].indexOf(h)>=0?h:'serverroom');
+  if(h==='image')h='media';                       // legacy bookmark
+  if(h.indexOf('media/')===0)h='media';
+  var tab=h.indexOf('chat/')===0?'chat':(['serverroom','chat','media','settings'].indexOf(h)>=0?h:'serverroom');
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===tab)});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===tab)});
   if(tab==='chat')document.body.classList.add('chat');
@@ -2526,6 +2635,216 @@ async function generateImage(){
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
 
 var _imgHistoryLoaded=false;
+// ---- Media tab: image / music / speech / video --------------------------
+// Each pane drives the endpoint dyva already exposes for that modality:
+//   image  POST /sdapi/v1/txt2img          (A1111 shape, synchronous)
+//   speech POST /v1/audio/speech           (OpenAI shape, returns audio bytes)
+//   video  POST /v1/videos -> poll GET /v1/videos/{id} -> GET .../content
+//   music  no endpoint yet — see the note in that pane
+var _mediaPane='image',_ttsVoicesLoaded=false,_musicLoaded=false;
+function showMediaPane(name){
+  _mediaPane=name;
+  document.querySelectorAll('[data-mediapane]').forEach(function(b){
+    b.classList.toggle('active',b.getAttribute('data-mediapane')===name);
+  });
+  ['image','music','speech','video'].forEach(function(k){
+    var el=document.getElementById('mediapane-'+k);
+    if(el)el.style.display=(k===name)?'':'none';
+  });
+  try{localStorage.setItem('dyva_mediapane',name)}catch(e){}
+  if(name==='image'&&!_imgHistoryLoaded){_imgHistoryLoaded=true;loadImgHistory()}
+  if(name==='speech'&&!_ttsVoicesLoaded)loadTtsVoices();
+  if(name==='music'&&!_musicLoaded)loadMusicModels();
+}
+document.querySelectorAll('[data-mediapane]').forEach(function(b){
+  b.addEventListener('click',function(){showMediaPane(b.getAttribute('data-mediapane'))});
+});
+function _mediaStatus(el,text){
+  el.innerHTML='';
+  var st=document.createElement('div');
+  st.className='chat-status';
+  st.textContent=text;
+  el.appendChild(st);
+  return st;
+}
+function _mediaError(el,msg){el.innerHTML='<div class="error">Error: '+escHtml(msg)+'</div>'}
+async function _errText(resp){
+  var msg='HTTP '+resp.status;
+  try{var j=await resp.json();msg=(j&&(j.error&&(j.error.message||j.error)))||msg}catch(e){}
+  return msg;
+}
+
+// ---- speech --------------------------------------------------------------
+// GET /v1/audio/voices probes every TTS-capable ComfyUI host for its nodes and
+// the voice lists they declare; 503 just means none are up right now.
+function loadTtsVoices(){
+  _ttsVoicesLoaded=true;
+  fetch('v1/audio/voices',{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw new Error('no hosts');
+    return r.json();
+  }).then(function(j){
+    var dl=document.getElementById('ttsVoices');
+    dl.innerHTML='';
+    (j.voices||[]).forEach(function(v){
+      var o=document.createElement('option');o.value=v;dl.appendChild(o);
+    });
+    var inp=document.getElementById('ttsVoice');
+    var hosts=(j.hosts||[]).length;
+    inp.placeholder=(j.voices||[]).length
+      ? (j.voices.length+' voices from '+hosts+' host'+(hosts===1?'':'s'))
+      : 'host default';
+  }).catch(function(){_ttsVoicesLoaded=false});
+}
+async function generateSpeech(){
+  var btn=document.getElementById('ttsGenerate'),out=document.getElementById('ttsResult');
+  var text=document.getElementById('ttsText').value.trim();
+  if(!text){_mediaError(out,"there's nothing to say — type some text");return}
+  var body={input:text};
+  var v=document.getElementById('ttsVoice').value.trim();if(v)body.voice=v;
+  var m=document.getElementById('ttsModel').value.trim();if(m)body.model=m;
+  btn.disabled=true;
+  _mediaStatus(out,'finding a TTS host…');
+  try{
+    var r=await fetch('v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){_mediaError(out,await _errText(r));return}
+    // the host's native format (usually flac) — let the browser sniff it
+    var blob=await r.blob();
+    var url=URL.createObjectURL(blob);
+    out.innerHTML='';
+    var au=document.createElement('audio');au.controls=true;au.src=url;out.appendChild(au);
+    var a=document.createElement('a');a.className='dl';a.href=url;
+    a.download='dyva-speech'+(/(flac|wav|mpeg|ogg)/.test(blob.type)?'.'+blob.type.split('/')[1].replace('mpeg','mp3'):'.audio');
+    a.textContent='download';
+    out.appendChild(a);
+  }catch(ex){_mediaError(out,ex.message)}
+  finally{btn.disabled=false}
+}
+document.getElementById('ttsGenerate').addEventListener('click',generateSpeech);
+
+// ---- video ---------------------------------------------------------------
+// Async: POST returns 202 + an id, then poll until completed/failed.
+var _vidPoll=null;
+async function generateVideo(){
+  var btn=document.getElementById('vidGenerate'),out=document.getElementById('vidResult');
+  var prompt=document.getElementById('vidPrompt').value.trim();
+  if(!prompt){_mediaError(out,'a prompt is required');return}
+  var body={prompt:prompt};
+  var m=document.getElementById('vidModel').value.trim();if(m)body.model=m;
+  var res=document.getElementById('vidResolution').value.trim();if(res)body.resolution=res;
+  var dur=parseInt(document.getElementById('vidDuration').value,10);if(!isNaN(dur)&&dur>0)body.duration=dur;
+  var seed=parseInt(document.getElementById('vidSeed').value,10);if(!isNaN(seed)&&seed>=0)body.seed=seed;
+  if(_vidPoll){clearTimeout(_vidPoll);_vidPoll=null}
+  btn.disabled=true;
+  var st=_mediaStatus(out,'submitting…');
+  try{
+    var r=await fetch('v1/videos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){_mediaError(out,await _errText(r));btn.disabled=false;return}
+    var job=await r.json();
+    if(!job||!job.id){_mediaError(out,'no job id came back');btn.disabled=false;return}
+    var t0=Date.now();
+    (function poll(){
+      _vidPoll=setTimeout(async function(){
+        try{
+          var pr=await fetch('v1/videos/'+encodeURIComponent(job.id),{cache:'no-store'});
+          if(!pr.ok){_mediaError(out,await _errText(pr));btn.disabled=false;return}
+          var j=await pr.json();
+          if(j.status==='completed'){
+            out.innerHTML='';
+            var vid=document.createElement('video');
+            vid.controls=true;vid.src='v1/videos/'+encodeURIComponent(job.id)+'/content';
+            out.appendChild(vid);
+            var a=document.createElement('a');a.className='dl';a.href=vid.src;a.download='dyva-video.mp4';
+            a.textContent='download';out.appendChild(a);
+            btn.disabled=false;return;
+          }
+          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');btn.disabled=false;return}
+          if(st&&st.parentNode)st.textContent=(j.status||'working')+'… '+Math.round((Date.now()-t0)/1000)+'s'
+            +(j.model?' on '+j.model:'');
+          poll();
+        }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+      },2000);
+    })();
+  }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+}
+document.getElementById('vidGenerate').addEventListener('click',generateVideo);
+
+// ---- music ---------------------------------------------------------------
+// Same async job shape as video: POST /v1/music -> poll -> /content. Every
+// music model takes the same three things (style, optional lyrics, length);
+// which ComfyUI node family serves it is decided server-side per host.
+function loadMusicModels(){
+  _musicLoaded=true;
+  var note=document.getElementById('musicNote'),box=document.getElementById('musicModels');
+  note.textContent='Looking for music-capable hosts…';
+  fetch('v1/music/models',{cache:'no-store'})
+    .then(function(r){return r.json()})
+    .then(function(j){
+      var hosts=j.hosts||[];
+      box.innerHTML='';
+      if(!hosts.length){
+        note.textContent='No host is currently running a music graph dyva recognises '
+          +'(ACE-Step, MiniMax Music 3, …). You can still submit — it will report which hosts it tried.';
+        return;
+      }
+      note.textContent=hosts.length+' host'+(hosts.length===1?'':'s')+' can generate music: '
+        +(j.families||[]).join(', ');
+      hosts.slice(0,40).forEach(function(h){
+        var d=document.createElement('span');d.className='mm';
+        d.innerHTML=escHtml(h.host)+' <b>'+escHtml(h.family)+'</b>';
+        d.title=(h.models||[]).join('\n');
+        box.appendChild(d);
+      });
+    })
+    .catch(function(){note.textContent='Could not reach the music host list.';_musicLoaded=false});
+}
+var _musPoll=null;
+async function generateMusic(){
+  var btn=document.getElementById('musGenerate'),out=document.getElementById('musResult');
+  var style=document.getElementById('musStyle').value.trim();
+  var lyrics=document.getElementById('musLyrics').value.trim();
+  if(!style&&!lyrics){_mediaError(out,'describe the music you want (or paste lyrics)');return}
+  var body={prompt:style};
+  if(lyrics)body.lyrics=lyrics;
+  var m=document.getElementById('musModel').value.trim();if(m)body.model=m;
+  var dur=parseFloat(document.getElementById('musDuration').value);if(!isNaN(dur)&&dur>0)body.duration=dur;
+  var seed=parseInt(document.getElementById('musSeed').value,10);if(!isNaN(seed)&&seed>=0)body.seed=seed;
+  if(_musPoll){clearTimeout(_musPoll);_musPoll=null}
+  btn.disabled=true;
+  var st=_mediaStatus(out,'submitting…');
+  try{
+    var r=await fetch('v1/music',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){_mediaError(out,await _errText(r));btn.disabled=false;return}
+    var job=await r.json();
+    if(!job||!job.id){_mediaError(out,'no job id came back');btn.disabled=false;return}
+    var t0=Date.now();
+    (function poll(){
+      _musPoll=setTimeout(async function(){
+        try{
+          var pr=await fetch('v1/music/'+encodeURIComponent(job.id),{cache:'no-store'});
+          if(!pr.ok){_mediaError(out,await _errText(pr));btn.disabled=false;return}
+          var j=await pr.json();
+          if(j.status==='completed'){
+            out.innerHTML='';
+            var src='v1/music/'+encodeURIComponent(job.id)+'/content';
+            var au=document.createElement('audio');au.controls=true;au.src=src;out.appendChild(au);
+            var cap=document.createElement('div');cap.className='status';
+            cap.textContent=(j.family||'')+(j.model?' · '+j.model:'')+(j.host?' · '+j.host:'');
+            out.appendChild(cap);
+            var a=document.createElement('a');a.className='dl';a.href=src;a.download='dyva-music.flac';
+            a.textContent='download';out.appendChild(a);
+            btn.disabled=false;return;
+          }
+          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');btn.disabled=false;return}
+          if(st&&st.parentNode)st.textContent=(j.status||'working')+'… '+Math.round((Date.now()-t0)/1000)+'s'
+            +(j.family?' · '+j.family:'')+(j.host?' on '+j.host:'');
+          poll();
+        }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+      },3000);
+    })();
+  }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+}
+document.getElementById('musGenerate').addEventListener('click',generateMusic);
+
 function loadImgHistory(){
   _imgHistoryLoaded=true;
   fetch('sdapi/v1/images',{cache:'no-store'}).then(function(r){return r.json()}).then(function(list){
@@ -2614,7 +2933,7 @@ chatLog.addEventListener('click',function(e){
   });
 });
 
-function activateTab(name,chatId){
+function activateTab(name,chatId,pane){
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
   document.body.classList.toggle('chat',name==='chat');
@@ -2627,7 +2946,11 @@ function activateTab(name,chatId){
   if(name==='settings'){injectSettingsPwFields();loadSettings();}
   // Lazy-load the image gallery only when its tab is first opened — building a
   // node per image on every page load (even in the Server Room) is wasteful.
-  if(name==='image'&&!_imgHistoryLoaded){_imgHistoryLoaded=true;loadImgHistory();}
+  if(name==='media'){
+    var want=pane;
+    if(!want){try{want=localStorage.getItem('dyva_mediapane')}catch(e){}}
+    showMediaPane(/^(image|music|speech|video)$/.test(want||'')?want:'image');
+  }
 }
 // Admin password: when set on the server, the settings endpoints 403 unless the
 // browser sends X-Admin-Key. We keep the unlocked password in localStorage and
@@ -2864,14 +3187,16 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape')srcHelpPop.c
 function tabFromHash(){
   var h=location.hash.replace(/^#/,'');
   if(h.indexOf('chat/')===0)return{tab:'chat',chatId:h.slice(5)};
-  if(h==='serverroom'||h==='chat'||h==='image'||h==='settings')return{tab:h};
+  if(h==='image')return{tab:'media'};        // legacy bookmark
+  if(h.indexOf('media/')===0)return{tab:'media',pane:h.slice(6)};
+  if(h==='serverroom'||h==='chat'||h==='media'||h==='settings')return{tab:h};
   return{tab:'serverroom'};
 }
 document.querySelectorAll('.tab').forEach(function(t){
   t.addEventListener('click',function(){location.hash=t.getAttribute('data-tab');});
 });
-window.addEventListener('hashchange',function(){var h=tabFromHash();activateTab(h.tab,h.chatId);});
-var init=tabFromHash();activateTab(init.tab,init.chatId);
+window.addEventListener('hashchange',function(){var h=tabFromHash();activateTab(h.tab,h.chatId,h.pane);});
+var init=tabFromHash();activateTab(init.tab,init.chatId,init.pane);
 tryResume();
 </script>
 </body>
