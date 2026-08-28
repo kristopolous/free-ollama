@@ -27,6 +27,13 @@ LOG_FORMAT = "%(asctime)s %(srcaddr)s %(levelname)s %(message)s"
 
 
 class ApacheStyleFormatter(logging.Formatter):
+    # logging.Formatter's `defaults=` kwarg is 3.10+, so supply the missing
+    # srcaddr here instead — records logged without extra={} still format.
+    def format(self, record):
+        if not hasattr(record, "srcaddr"):
+            record.srcaddr = "-"
+        return super().format(record)
+
     def formatTime(self, record, datefmt=None):
         tz = datetime.timezone(datetime.timedelta(seconds=time.localtime().tm_gmtoff))
         return datetime.datetime.fromtimestamp(record.created, tz=tz).strftime("[%d/%b/%Y:%H:%M:%S %z]")
@@ -37,7 +44,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stderr)],
 )
 for _handler in logging.getLogger().handlers:
-    _handler.setFormatter(ApacheStyleFormatter(LOG_FORMAT, defaults={"srcaddr": "-"}))
+    _handler.setFormatter(ApacheStyleFormatter(LOG_FORMAT))
 log = logging.getLogger("dumpster-dyva")
 
 access_logger = logging.getLogger("aiohttp.access")
