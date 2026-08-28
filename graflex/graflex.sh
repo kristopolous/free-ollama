@@ -12,7 +12,6 @@ source .env
 
 case "$SERVICE" in
   combine)
-    set -x
     jq -s 'add' ~/.cache/free-ollama/*-working.json | ssh $_SERVER "cat > $_SERVER_PATH"
     source .venv/bin/activate
     ./dyva.py --refresh $_SOURCE
@@ -140,8 +139,6 @@ query=()
 # gradio has no --service entry; -n gradio alone selects the named query
 svc_args=( --service "$SERVICE" )
 [[ "$SERVICE" == "gradio" ]] && svc_args=()
-
-set -x
 
 exec ./graflex.py \
       --action "fetch" \

@@ -4638,6 +4638,8 @@ def make_app():
     swagger.add_get("/sdapi/v1/images/delete", handle_image_delete)
     swagger.add_get("/sdapi/v1/images/thumb/{name}", handle_image_thumb)
     swagger.add_get("/sdapi/v1/images/{name}", handle_image_file)
+    swagger.add_post("/v1/audio/speech", handle_tts_speech)
+    swagger.add_get("/v1/audio/voices", handle_audio_voices)
     # Registered on the plain router (not swagger) so path params and the
     # sendBeacon POST body aren't subject to swagger request validation.
     app.router.add_get("/api/chats", handle_chats_get)
@@ -4646,8 +4648,6 @@ def make_app():
     app.router.add_post("/api/chats/{cid}/delete", handle_chat_delete)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
-    app.router.add_post("/v1/audio/speech", handle_tts_speech)
-    app.router.add_get("/v1/audio/voices", handle_audio_voices)
     app.router.add_post("/v1/videos", handle_videos_post)
     app.router.add_get("/v1/videos/{id}", handle_videos_get)
     app.router.add_get("/v1/videos/{id}/content", handle_videos_content)
