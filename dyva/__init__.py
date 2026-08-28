@@ -86,7 +86,7 @@ PORT = 11434
 TIMEOUT = 30
 WORKER_COUNT = 10
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
-MODEL_LIST = []  # when set, the exact model ids /api/tags and /v1/models advertise
+MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
                 # settings & sources requires it (localhost always exempt).
 VERSION = "0"
@@ -1144,7 +1144,7 @@ def listed_models():
     optional MIN_COUNT floor applied. The dashboard uses all_models() directly
     and always shows everything.
 
-    A configured MODEL_LIST replaces the discovered catalog outright. Tools that
+    A non-empty MODEL_LIST replaces the discovered catalog outright. Tools that
     make you pick one id from this endpoint then get a short, stable menu, and
     because every dyva model name is a routing pattern, one entry like "qwen3"
     covers every qwen3:* variant any host happens to carry. MIN_COUNT is not
