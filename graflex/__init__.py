@@ -1166,6 +1166,87 @@ def check(service, name=None, check_timeout=60, check_new=False, check_all=False
     asyncio.run(_check_all(service, name, check_timeout, check_new, check_all, workers))
 
 
+async def _check_working(service, name=None, check_timeout=60, workers=10):
+    """Re-survey the currently-working hosts: refresh their model list (people
+    keep downloading new models) and prune hosts that no longer respond."""
+    from datetime import datetime, timezone
+
+    if name is None:
+        name = service
+    working_file = _cache_file(name, "working")
+    notworking_file = _cache_file(name, "notworking")
+
+    working = _load_json(working_file)
+    if not service and working:
+        service = working[0].get("service", "")
+    working = [w for w in working if w.get("service") == service]
+    if not working:
+        log.warning(f"check-working: no working {service or '?'} hosts to rescan")
+        return
+
+    log.info(f"check-working: rescanning {len(working)} working hosts to refresh models / prune dead")
+
+    sem = asyncio.Semaphore(workers)
+    start = time.time()
+    completed = 0
+
+    async def probe(entry):
+        nonlocal completed
+        async with sem:
+            host_port = entry["host"].split(":")
+            h = host_port[0]
+            p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+            try:
+                result = await _check_host(session, h, p, service, timeout=check_timeout)
+            except Exception as e:
+                result = {"error": str(e)}
+            if isinstance(result, dict) and "error" not in result:
+                result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
+                return ("keep", entry, result)
+            reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
+            return ("dead", entry, reason)
+
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
+        done = await asyncio.gather(*[probe(e) for e in working], return_exceptions=True)
+
+    kept = []
+    removed = 0
+    notworking = _load_json(notworking_file)
+    if not isinstance(notworking, dict):
+        notworking = {}
+    for outcome in done:
+        if isinstance(outcome, Exception):
+            outcome = ("dead", None, str(outcome))
+        status, entry, payload = outcome
+        host = _entry_host(entry) if entry else "?"
+        if status == "keep":
+            rec = dict(payload)
+            rec["host"] = entry["host"]
+            kept.append(rec)
+        else:
+            removed += 1
+            if entry:
+                notworking[entry["host"]] = {
+                    "service": service,
+                    "host": entry["host"],
+                    "url": f"http://{entry['host']}",
+                    "reason": payload,
+                    "result": "unreachable",
+                    "checked": datetime.now(timezone.utc).isoformat(),
+                }
+            log.info(f"~ {host} dead: {payload}")
+
+    kept.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
+    _save_json_atomic(working_file, kept)
+    _save_json_atomic(notworking_file, notworking)
+    refreshed = len(kept)
+    log.info(f"check-working: {len(working)} rescanned, {refreshed} still working (models refreshed), {removed} pruned")
+
+
+def check_working(service, name=None, check_timeout=60, workers=10):
+    asyncio.run(_check_working(service, name, check_timeout, workers))
+
+
 def _load_classifier():
     with open(CLASSIFIER_FILE) as f:
         raw = json.load(f)
@@ -1245,7 +1326,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "fetch-check", "classify"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -1272,6 +1353,16 @@ def main():
     parts = args.action.split("-")
     check_new = args.action == "check-new"
     check_all = args.action == "check-all"
+
+    if args.action == "check-working":
+        log.info("--- check-working ---")
+        try:
+            check_working(service=args.service, name=args.name, check_timeout=args.check_timeout, workers=args.workers)
+        except KeyboardInterrupt:
+            base = f"graflex -s {args.service}" if args.service else f"graflex -n {args.name or 'image-gen'}"
+            log.warning(f"\ninterrupted — refreshed hosts are saved; rerun {base} -a check-working to continue")
+            sys.exit(130)
+        return
 
     try:
         for step in parts:

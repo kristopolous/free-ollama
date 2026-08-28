@@ -209,6 +209,7 @@ recorded.
 | `check` | Skips hosts already in the working file (including empty-model ollama hosts) and hosts with `result: "error"` in the not-working file. Rechecks `unreachable` hosts. |
 | `check-new` | Skips all hosts with any previous record (working or not-working). Only checks hosts never tested before. |
 | `check-all` | Rechecks every host regardless of previous status. |
+| `check-working` | Re-surveys only the currently-working hosts: refreshes each host's model list (operators keep downloading new models) and prunes hosts that no longer respond, dropping them from the working file and recording them as not-working. |
 | `classify` | Bucket every model of every host in `{name}-working.json` by type. See below. |
 
 Working: `~/.cache/free-ollama/{name}-working.json` (default: `image-gen-working.json`)
@@ -257,7 +258,7 @@ warning.
 | Flag | Description |
 |------|-------------|
 | `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`) |
-| `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `fetch-check`, or `classify` |
+| `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `check-working`, `fetch-check`, or `classify` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging requests) |
 | `-q`, `--query` | Custom FOFA query (requires `--name`) |

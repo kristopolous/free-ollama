@@ -901,6 +901,7 @@ function serializeChat(c){
     if(m.files&&m.files.length)x.files=m.files.slice();
     return x;
   })};
+  if(c.system)o.system=c.system;
   if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}});
   return o;
 }
@@ -983,13 +984,7 @@ function renderSidebar(){
     item.className='chat-item'+(String(c.id)===String(currentChat.id)?' active':'');
     item.title=fmtWhen(c.createdAt);
     var t=document.createElement('span');t.className='title';t.textContent=c.title||'(untitled)';
-    var re=document.createElement('span');re.className='re';re.textContent='\u27f3';re.title='Regenerate title';
-    re.addEventListener('click',function(e){e.stopPropagation();regenTitle(c,re);});
-    var dl=document.createElement('span');dl.className='dl';dl.textContent='\u2193';dl.title='Download JSON';
-    dl.addEventListener('click',function(e){e.stopPropagation();downloadChatJson(c);});
-    var del=document.createElement('span');del.className='del';del.textContent='\u2715';
-    del.addEventListener('click',function(e){e.stopPropagation();deleteChat(c.id);});
-    item.appendChild(t);item.appendChild(re);item.appendChild(dl);item.appendChild(del);
+    item.appendChild(t);
     item.addEventListener('click',function(){loadChatById(c.id);});
     list.appendChild(item);
   });
@@ -1062,7 +1057,7 @@ function fileIsText(f){
   return false;
 }
 function chatPayload(c){
-  return {model:c.model||'',messages:(c.messages||[]).map(function(m){
+  var messages=(c.messages||[]).map(function(m){
     if(m.role==='user'&&m.files&&m.files.length){
       var parts=[];
       if(m.content)parts.push({type:'text',text:m.content});
@@ -1081,7 +1076,9 @@ function chatPayload(c){
       return {role:m.role,content:parts};
     }
     return {role:m.role,content:m.content};
-  })};
+  });
+  if(c.system)messages=[{role:'system',content:c.system}].concat(messages);
+  return {model:c.model||'',messages:messages};
 }
 function downloadChatJson(entry){
   var live=liveChat(entry.id);
@@ -1351,7 +1348,7 @@ function loadChatById(id){
   if(g&&g.chat){currentChat=g.chat;afterLoadChat(String(id));return;}
   fetchChat(id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
     afterLoadChat(String(id));
   });
 }
@@ -1427,12 +1424,67 @@ function stopChat(){
   var g=genOf(currentChat.id);
   if(g&&g.ac){g.stopped=true;g.ac.abort();}
 }
+// Slash commands for the chat composer: /retitle /download /delete /help.
+// Returns true if the text was consumed as a command (so the caller shouldn't
+// send it as a normal chat message).
+function handleSlashCommand(text){
+  var m=String(text||'').trim().match(/^\/(\S+)\s*(.*)$/);
+  if(!m)return false;
+  var cmd=m[1].toLowerCase(),arg=(m[2]||'').trim();
+  function info(msg){
+    var bubble=addMsg('assistant','');
+    bubble.bodyEl.innerHTML=mdRender(msg);
+    highlightBlocks(bubble.bodyEl);
+    return bubble;
+  }
+  if(cmd==='retitle'){
+    regenTitle(currentChat,null);
+    info('Retitling current chat…');
+  }else if(cmd==='download'){
+    if(currentChat&&currentChat.title!==undefined)downloadChatJson(currentChat);
+    else info('No chat to download.');
+  }else if(cmd==='delete'){
+    deleteChat(currentChat.id);
+    info('Chat deleted.');
+  }else if(cmd==='system'){
+    if(arg){
+      currentChat.system=arg;
+      saveChat(currentChat);
+      info('System prompt set.');
+    }else{
+      info(currentChat.system?('> '+currentChat.system.split('\n').join('\n> ')):'(no system prompt set)');
+    }
+  }else if(cmd==='info'){
+    _dyvaInfo=true;
+    document.getElementById('chatInput').value='__dyva_info__';
+    return false;   // fall through: send __dyva_info__ through the normal chat flow
+  }else if(cmd==='help'){
+    info('* `/system [prompt]` set or show the system prompt\n* `/info` show host/model\n* `/retitle` regenerate the chat title\n* `/download` download the chat as JSON\n* `/delete` delete the current chat\n* `/help` show this help');
+  }else{
+    info("Unknown command: /"+cmd+"\nTry /help for available commands.");
+  }
+  return true;
+}
+// Prompt history for Up/Down cycling in the composer. promptHistIdx is -1 when
+// the input isn't showing a recalled prompt; temp holds the in-progress text.
+var promptHist=[],promptHistIdx=-1,promptHistTemp='';
+var _dyvaInfo=false;   // set by /info so the JSON reply renders as a fenced block
+function pushHist(t){
+  if(!t)return;
+  if(promptHist[promptHist.length-1]!==t)promptHist.push(t);
+  if(promptHist.length>200)promptHist.shift();
+  promptHistIdx=-1;
+}
 async function sendChat(){
   if(genOf(currentChat.id))return;   // this conversation is already generating
   var model=document.getElementById('chatModel').value.trim();
   var input=document.getElementById('chatInput');
   var text=input.value.trim();
   if(!text)return;
+  if(handleSlashCommand(text)){input.value='';return;}
+  text=input.value.trim();   // a command may rewrite the input (e.g. /info → __dyva_info__)
+  if(!text)return;
+  pushHist(text);
   if(!model){
     model='*';
     document.getElementById('chatModel').value='*';
@@ -1473,6 +1525,7 @@ async function sendChat(){
       }
       return o;
     });
+    if(currentChat.system)msgs.unshift({role:'system',content:currentChat.system});
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
   runStream(chatId,chatCreated,chatTitle,model,msgs,bubble);
 }
@@ -1670,15 +1723,21 @@ function reattachGen(id){
 function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full){
   var sp=splitThink(full);
   var thAll=think+sp.t;
+  var content=sp.c;
+  if(_dyvaInfo){
+    _dyvaInfo=false;
+    var infoText=full.trim();
+    try{if(JSON.parse(infoText))content='```json\n'+infoText+'\n```';}catch(e){}
+  }
   if(isLive){
     setAssistantLabel(bubble.roleEl,host,fmodel,tps);
     bubble.bodyEl.classList.remove('streaming');
     bubble.bodyEl.removeAttribute('data-stream');
-    bubble.bodyEl.innerHTML=thinkHtml(thAll,true)+mdRender(sp.c);
+    bubble.bodyEl.innerHTML=thinkHtml(thAll,true)+mdRender(content);
     highlightBlocks(bubble.bodyEl);
     chatLog.scrollTop=chatLog.scrollHeight;
   }
-  pushAssistant(chatId,chatCreated,chatTitle,model,sp.c,host,fmodel,tps,isLive,thAll);
+  pushAssistant(chatId,chatCreated,chatTitle,model,content,host,fmodel,tps,isLive,thAll);
 }
 function tryResume(){
   for(var k in gens)return;
@@ -1691,7 +1750,7 @@ function tryResume(){
   if((j.n||0)>=2)return;
   fetchChat(j.id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
     touchIndex(currentChat);
     renderMessages();
     renderSidebar();
@@ -1709,8 +1768,34 @@ document.getElementById('chatSend').addEventListener('click',function(e){
   else sendChat();
 });
 document.getElementById('chatInput').addEventListener('keydown',function(e){
+  if(e.key==='ArrowUp'){recallPrompt(-1,e);return;}
+  if(e.key==='ArrowDown'){recallPrompt(1,e);return;}
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
 });
+// Cycle the composer through prompt history. dir -1 walks back (older), dir +1
+// forward (newer). Up only recalls when the input is empty, saving your current
+// text into a temp slot so Down can restore it.
+function recallPrompt(dir,e){
+  if(!promptHist.length)return;
+  e.preventDefault();
+  var input=document.getElementById('chatInput');
+  if(dir<0){
+    if(input.value.trim()!==''&&promptHistIdx<0)return;   // only recall from empty / already-cycling
+    if(promptHistIdx<0)promptHistTemp=input.value;        // stash current draft on first Up
+    promptHistIdx=Math.max(0,promptHistIdx-1);
+  }else{
+    if(promptHistIdx<0)return;                            // nothing forward to return to
+    promptHistIdx++;
+    if(promptHistIdx>=promptHist.length){
+      promptHistIdx=-1;
+      input.value=promptHistTemp;
+      input.selectionStart=input.selectionEnd=input.value.length;
+      return;
+    }
+  }
+  input.value=promptHist[promptHistIdx];
+  input.selectionStart=input.selectionEnd=input.value.length;
+}
 
 var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}};
 var DOC_TOOLS=[

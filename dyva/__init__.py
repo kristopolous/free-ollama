@@ -873,6 +873,8 @@ def find_servers(sub, caps=None):
                     host_state[h] = st
     matched = []
     for s in servers:
+        if s.get("service") in ("comfyui", "a1111"):
+            continue
         models = s.get("models", [])
         ms = [m for m in models if match_model(m, sub)]
         if not ms:
@@ -946,6 +948,8 @@ def all_models():
     servers = load_servers()
     seen = {}
     for s in servers:
+        if s.get("service") in ("comfyui", "a1111"):
+            continue
         for m in s.get("models", []):
             if re.search(r"[:-]cloud", m) or len(m) == 0:
                 continue
@@ -1494,17 +1498,23 @@ DYVA_INFO_TAG = "__dyva_info__"
 
 
 def _content_contains(payload, needle):
-    """True if `needle` appears anywhere in the prompt or message contents."""
+    """True if `needle` appears in the standalone prompt or the LAST message
+    only. Deliberately does not scan the whole history: `__dyva_info__` is meant
+    to act on the current turn, so a tag stored deep in a past message must not
+    keep triggering the diagnostic on every later request."""
     if needle in str(payload.get("prompt") or ""):
         return True
-    for m in payload.get("messages") or []:
-        c = m.get("content")
-        if isinstance(c, str) and needle in c:
-            return True
-        if isinstance(c, list):
-            for part in c:
-                if isinstance(part, dict) and needle in str(part.get("text") or ""):
-                    return True
+    msgs = payload.get("messages") or []
+    if not msgs:
+        return False
+    m = msgs[-1]
+    c = m.get("content")
+    if isinstance(c, str) and needle in c:
+        return True
+    if isinstance(c, list):
+        for part in c:
+            if isinstance(part, dict) and needle in str(part.get("text") or ""):
+                return True
     return False
 
 
