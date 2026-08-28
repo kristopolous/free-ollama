@@ -39,6 +39,15 @@ class ApacheStyleFormatter(logging.Formatter):
         return datetime.datetime.fromtimestamp(record.created, tz=tz).strftime("[%d/%b/%Y:%H:%M:%S %z]")
 
 
+# Console output uses the locale encoding, which on Windows is a codepage that
+# can't represent the ✓/— we log. Keep the console's own encoding (so nothing
+# turns to mojibake) but degrade an unencodable character instead of raising.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 logging.basicConfig(
     level=getattr(logging, LOGLEVEL, logging.INFO),
     handlers=[logging.StreamHandler(sys.stderr)],
@@ -134,7 +143,7 @@ def load_classifier():
     compiled = {}
     if os.path.exists(CLASSIFIER_FILE):
         try:
-            with open(CLASSIFIER_FILE) as f:
+            with open(CLASSIFIER_FILE, encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, dict):
                 for ctype, patterns in raw.items():
@@ -179,7 +188,7 @@ def load_settings():
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
-        with open(SETTINGS_FILE) as f:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
             s = json.load(f)
     except Exception:
         return
@@ -202,7 +211,7 @@ def save_settings(extra=None):
     data = {}
     if os.path.exists(SETTINGS_FILE):
         try:
-            with open(SETTINGS_FILE) as f:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             data = {}
@@ -215,7 +224,7 @@ def save_settings(extra=None):
         data.update(extra)
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(SETTINGS_FILE, "w") as f:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass
@@ -226,7 +235,7 @@ def _stored_sources():
     if not os.path.exists(SETTINGS_FILE):
         return []
     try:
-        with open(SETTINGS_FILE) as f:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
         return []
@@ -243,7 +252,7 @@ def _config_sources():
     if not os.path.exists(SETTINGS_FILE):
         return []
     try:
-        with open(SETTINGS_FILE) as f:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
         return []
@@ -495,7 +504,7 @@ def refresh_cache(source=None):
         response = requests.get(url)
         logging.info(f"Grabbing {url}")
         # If this fails we try to use the existing one
-        with open(loc, "w") as f:
+        with open(loc, "w", encoding="utf-8", errors="replace") as f:
           f.write(response.text)
       except Exception as ex:
         logging.warning(f"Unable to get {url}: {ex}")
@@ -510,7 +519,7 @@ def refresh_cache(source=None):
       if not os.path.exists(loc):
         continue
       try:
-        with open(loc) as f:
+        with open(loc, encoding="utf-8", errors="replace") as f:
           data = json.loads(f.read())
       except Exception as ex:
         logging.warning(f"Unable to parse {loc}: {ex}")
@@ -536,7 +545,7 @@ def refresh_cache(source=None):
           host_map[ip] = entry
 
     if os.path.exists(f'{_db}-forrany.tmp'):
-      with open(f'{_db}-forrany.tmp', 'r') as f:
+      with open(f'{_db}-forrany.tmp', 'r', encoding="utf-8", errors="replace") as f:
         try:
           for row in json.loads(f.read()):
             if row.get('server') not in host_map:
@@ -546,7 +555,7 @@ def refresh_cache(source=None):
           logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
 
     if os.path.exists(f"{_db}-happyshua.tmp"):
-      with open(f"{_db}-happyshua.tmp", 'r') as csvfile:
+      with open(f"{_db}-happyshua.tmp", 'r', encoding="utf-8", errors="replace", newline="") as csvfile:
         for r in csv.reader(csvfile):
           ip = re.sub(r'/?v1', '', r[0])
           models = [m.strip() for m in r[1].split(',')]
@@ -556,7 +565,7 @@ def refresh_cache(source=None):
           host_map[ip]['models'] += models
 
     if os.path.exists(f"{_db}-spider.tmp"):
-      with open(f'{_db}-spider.tmp', 'r') as f:
+      with open(f'{_db}-spider.tmp', 'r', encoding="utf-8", errors="replace") as f:
         for row in json.loads(f.read()):
           ip = re.sub(r'/?v1', '', row.get('url'))
           models = [ n.get('name') for n in row.get('models') ]
@@ -574,7 +583,7 @@ def refresh_cache(source=None):
       except TypeError:
         v['models'] = list(v.get('models') or [])
 
-    with open(_db, 'w') as f:
+    with open(_db, 'w', encoding="utf-8") as f:
       json.dump(list(host_map.values()), f)
 
     by_source = {}
@@ -605,7 +614,7 @@ def load_servers():
         if not os.path.exists(CACHE_FILE):
             _servers_cache = []
         else:
-            with open(CACHE_FILE) as f:
+            with open(CACHE_FILE, encoding="utf-8") as f:
                 _servers_cache = json.load(f)
     return _servers_cache or []
 
@@ -643,7 +652,7 @@ def _migrate_status_from_txt():
     def _lines(path, state):
         if not os.path.exists(path):
             return
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 key = line.strip()
                 if not key:
@@ -766,7 +775,7 @@ def load_unreachable():
 def load_last():
     global _last_cache
     if os.path.exists(LAST_FILE):
-        with open(LAST_FILE) as f:
+        with open(LAST_FILE, encoding="utf-8") as f:
             _last_cache = json.load(f)
     else:
         _last_cache = {}
@@ -774,7 +783,7 @@ def load_last():
 
 def save_last():
     os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(LAST_FILE, "w") as f:
+    with open(LAST_FILE, "w", encoding="utf-8") as f:
         json.dump(_last_cache, f)
 
 
@@ -865,7 +874,7 @@ def load_knowns():
         _knowns_cache = {}
         if os.path.exists(KNOWN_FILE):
             try:
-                with open(KNOWN_FILE) as f:
+                with open(KNOWN_FILE, encoding="utf-8") as f:
                     _knowns_cache = json.load(f)
             except Exception:
                 _knowns_cache = {}
@@ -874,7 +883,7 @@ def load_knowns():
 
 def save_knowns():
     os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(KNOWN_FILE, "w") as f:
+    with open(KNOWN_FILE, "w", encoding="utf-8") as f:
         json.dump(_knowns_cache, f, indent=2)
 
 
@@ -1996,7 +2005,7 @@ async def handle_dashboard(request):
     servers = load_servers()
     models = all_models()
     tpl_dir = os.path.join(os.path.dirname(__file__), "static")
-    with open(os.path.join(tpl_dir, "dashboard.html")) as f:
+    with open(os.path.join(tpl_dir, "dashboard.html"), encoding="utf-8") as f:
         html = f.read()
     # Only small scalars and the SD-model datalist are inlined; the Server Room's
     # heavy data (per-model hosts, good/bad/last lists, checked timestamps) AND
@@ -3024,7 +3033,7 @@ def _save_image_history(data, body, host="", requested_model=""):
     try:
         os.makedirs(IMG_DIR, exist_ok=True)
         try:
-            with open(IMG_HISTORY_FILE) as f:
+            with open(IMG_HISTORY_FILE, encoding="utf-8") as f:
                 history = json.load(f)
         except Exception:
             history = []
@@ -3074,7 +3083,7 @@ def _save_image_history(data, body, host="", requested_model=""):
             except OSError:
                 pass
         history = history[:IMG_HISTORY_MAX]
-        with open(IMG_HISTORY_FILE, "w") as f:
+        with open(IMG_HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(history, f)
     except Exception as e:
         log.debug(f"image history: {e}")
@@ -3097,7 +3106,7 @@ async def handle_image_history(request):
                 type: object
     """
     try:
-        with open(IMG_HISTORY_FILE) as f:
+        with open(IMG_HISTORY_FILE, encoding="utf-8") as f:
             history = json.load(f)
     except Exception:
         history = []
@@ -3186,12 +3195,12 @@ async def handle_image_delete(request):
         pass
     removed = False
     try:
-        with open(IMG_HISTORY_FILE) as f:
+        with open(IMG_HISTORY_FILE, encoding="utf-8") as f:
             history = json.load(f)
         n = len(history)
         history = [e for e in history if e.get("file") != name]
         if len(history) != n:
-            with open(IMG_HISTORY_FILE, "w") as f:
+            with open(IMG_HISTORY_FILE, "w", encoding="utf-8") as f:
                 json.dump(history, f)
             removed = True
     except Exception:
@@ -3856,7 +3865,7 @@ def load_node_classifier():
     compiled = []
     if os.path.exists(NODE_CLASSIFIER_FILE):
         try:
-            with open(NODE_CLASSIFIER_FILE) as f:
+            with open(NODE_CLASSIFIER_FILE, encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, dict):
                 for spec in raw.get("tts") or []:
@@ -4150,7 +4159,7 @@ def _video_job_save():
                 serializable[k] = {kk: vv for kk, vv in v.items() if not isinstance(vv, (bytes, bytearray))}
             else:
                 serializable[k] = v
-        with open(VIDEO_JOBS_FILE, "w") as f:
+        with open(VIDEO_JOBS_FILE, "w", encoding="utf-8") as f:
             json.dump(serializable, f, indent=2)
     except Exception as e:
         log.warning(f"video jobs: failed to persist: {e}")
@@ -4162,7 +4171,7 @@ def _load_video_jobs():
         return
     if os.path.exists(VIDEO_JOBS_FILE):
         try:
-            with open(VIDEO_JOBS_FILE) as f:
+            with open(VIDEO_JOBS_FILE, encoding="utf-8") as f:
                 _VIDEO_JOBS = json.load(f)
             for k, v in _VIDEO_JOBS.items():
                 m = re.match(r"^v(\d+)$", k)

@@ -95,20 +95,20 @@ def _load_json(path, silent=False):
         print(f"Loading {path}")
     if not os.path.exists(path):
         return []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def _save_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
 def _save_json_atomic(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
 
@@ -618,7 +618,7 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
     tmp_dir = "/tmp/graflex"
     os.makedirs(tmp_dir, exist_ok=True)
     out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8", errors="replace") as f:
         f.write(resp.text)
 
     hosts = _parse_fofa_html(out_path, service)
@@ -639,7 +639,7 @@ def _parse_fofa_html(html_path, service):
     global _last_result_file
     _last_result_file = html_path
 
-    with open(html_path) as f:
+    with open(html_path, encoding="utf-8", errors="replace") as f:
         content = f.read()
 
     values = re.findall(r'data-clipboard-text="([^"]+)"', content)
@@ -670,7 +670,7 @@ def _parse_shodan_html(html_path, service):
     global _last_result_file
     _last_result_file = html_path
 
-    with open(html_path) as f:
+    with open(html_path, encoding="utf-8", errors="replace") as f:
         content = f.read()
 
     hrefs = []
@@ -789,7 +789,7 @@ def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=
     tmp_dir = "/tmp/graflex"
     os.makedirs(tmp_dir, exist_ok=True)
     out_path = os.path.join(tmp_dir, f"shodan-results-{label}-{run_ts}.txt")
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8", errors="replace") as f:
         f.write(resp.text)
 
     return _parse_shodan_html(out_path, svc)
@@ -1263,7 +1263,7 @@ def check_working(service, name=None, check_timeout=60, workers=10):
 
 
 def _load_classifier():
-    with open(CLASSIFIER_FILE) as f:
+    with open(CLASSIFIER_FILE, encoding="utf-8") as f:
         raw = json.load(f)
     compiled = {}
     for ctype, patterns in raw.items():
@@ -1331,6 +1331,14 @@ def main():
     global FOFA_COOKIE, SHODAN_KEY
     FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
     SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
+
+    # a Windows console codepage can't encode the — in our log lines; replace
+    # the character rather than dying partway through a long scan
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
 
     logging.basicConfig(
         level=getattr(logging, os.getenv("LOGLEVEL", "INFO").upper(), logging.INFO),
