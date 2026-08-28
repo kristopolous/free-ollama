@@ -165,9 +165,9 @@ def model_modalities(model):
 
 
 def load_settings():
-    """Apply persisted runtime settings (workers/timeout/min_count) over the
-    CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW
+    """Apply persisted runtime settings (workers/timeout/min_count/local) over
+    the CLI defaults, so changes made in the dashboard survive restarts."""
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -183,6 +183,8 @@ def load_settings():
         MIN_COUNT = s["min_count"]
     if isinstance(s.get("admin_pw"), str):
         ADMIN_PW = s["admin_pw"]
+    if isinstance(s.get("local"), bool):
+        _LOCAL = s["local"]
 
 
 def save_settings(extra=None):
@@ -197,7 +199,8 @@ def save_settings(extra=None):
     if not isinstance(data, dict):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                 "min_count": MIN_COUNT, "admin_pw": ADMIN_PW})
+                 "min_count": MIN_COUNT, "local": _LOCAL,
+                 "admin_pw": ADMIN_PW})
     if isinstance(extra, dict):
         data.update(extra)
     try:
@@ -1918,7 +1921,8 @@ async def handle_settings_get(request):
         # show a password prompt instead of the controls.
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "min_count": MIN_COUNT, "admin_pw_set": bool(ADMIN_PW),
+                              "min_count": MIN_COUNT, "local": _LOCAL,
+                              "admin_pw_set": bool(ADMIN_PW),
                               "admin": True, "sources": _stored_sources()})
 
 
@@ -1932,7 +1936,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL
     resp = _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -1946,6 +1950,8 @@ async def handle_settings_post(request):
         TIMEOUT = min(body["timeout"], 600)
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
         MIN_COUNT = body["min_count"]
+    if isinstance(body.get("local"), bool):
+        _LOCAL = body["local"]
     # admin_pw: only when the key is present. A non-empty value sets/changes the
     # password (stored hashed); an explicit empty string clears protection. The
     # plaintext is never stored or echoed back.
@@ -1964,7 +1970,8 @@ async def handle_settings_post(request):
     if sources_changed:
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "min_count": MIN_COUNT, "admin_pw_set": bool(ADMIN_PW),
+                              "min_count": MIN_COUNT, "local": _LOCAL,
+                              "admin_pw_set": bool(ADMIN_PW),
                               "admin": True, "sources": _stored_sources(),
                               "refreshed": sources_changed})
 
@@ -4719,6 +4726,8 @@ def main():
     _LOCAL = args.local
     _CURLIFY = args.curlify
     load_settings()   # persisted dashboard settings override the CLI defaults
+    if args.local:       # an explicit -l flag always wins over saved settings
+        _LOCAL = True
     log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, MIN_COUNT={MIN_COUNT}, LOCAL={_LOCAL}")
 
     app = make_app()
