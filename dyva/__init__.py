@@ -422,6 +422,14 @@ def refresh_cache(source=None):
     with open(_db, 'w') as f:
       json.dump(list(host_map.values()), f)
 
+    by_source = {}
+    for v in host_map.values():
+        by_source[v.get('source') or 'unknown'] = by_source.get(v.get('source') or 'unknown', 0) + 1
+    total = sum(by_source.values())
+    log.info(f"cache survey ({total} hosts by source): " + ", ".join(
+        f"{src}={n}" for src, n in sorted(by_source.items(), key=lambda x: -x[1])
+    ))
+
     return True
 
 

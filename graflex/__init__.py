@@ -604,6 +604,13 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
             else:
                 log.error(f"FOFA web request failed: {e}")
                 return None
+        except requests.exceptions.Timeout as e:
+            # Read/connect timeouts are transient network conditions — retry
+            # with backoff instead of silently dropping the query.
+            log.warning(f"timeout ({type(e).__name__}), retrying in {backoff}s")
+            time.sleep(backoff)
+            backoff = min(int(backoff * 1.2), MAX_BACKOFF)
+            continue
         except Exception as e:
             log.error(f"FOFA web request failed: {e}")
             return None
