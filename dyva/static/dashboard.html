@@ -383,6 +383,14 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
 .settings-save{background:var(--accent-bg-active);color:var(--accent-bright);border:none;border-radius:var(--r-md);padding:var(--sp-3) var(--sp-6);font-size:var(--fs-md);cursor:pointer}
 .settings-save:hover{background:var(--accent-bg-hover)}
 .settings-status{color:var(--ok);font-size:var(--fs-sm)}
+.doc-preview{display:flex;align-items:center;justify-content:center;min-height:100%;padding:var(--sp-4);border-radius:var(--r-md);
+  background-color:var(--bg-inset);
+  background-image:linear-gradient(45deg,var(--bg-sunken) 25%,transparent 25%),linear-gradient(-45deg,var(--bg-sunken) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--bg-sunken) 75%),linear-gradient(-45deg,transparent 75%,var(--bg-sunken) 75%);
+  background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0}
+.doc-preview svg{max-width:100%;max-height:100%;height:auto}
+.doc-body.framed{padding:0;overflow:hidden;display:flex}
+.doc-frame{flex:1;width:100%;border:0;background:#fff}
+.doc-btn.on{color:var(--accent)}
 .doc-btn,.doc-close{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:1rem;flex-shrink:0;padding:0 2px;display:flex;align-items:center}
 .doc-btn:hover{color:var(--text-2)}
 .doc-btn svg{width:16px;height:16px}
@@ -593,6 +601,7 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <div class="doc-head">
 <select id="docSelect" class="doc-select"></select>
 <span id="docType" class="doc-type"></span>
+<button id="docView" class="doc-btn" title="Show rendered" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
 <button id="docDownload" class="doc-btn" title="Download"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></button>
 <button id="docClose" class="doc-close" title="Close">✕</button>
 </div>
@@ -1717,7 +1726,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   function clearInflight(){try{localStorage.removeItem('dyva_inflight')}catch(e){}}
   function keepInflight(){try{var m=JSON.parse(localStorage.getItem('dyva_inflight')||'null');if(!m)return;m.n=(m.n||0)+1;if(m.n<=2)localStorage.setItem('dyva_inflight',JSON.stringify(m));else localStorage.removeItem('dyva_inflight')}catch(e){try{localStorage.removeItem('dyva_inflight')}catch(e2){}}}
   try{sessionStorage.setItem('dyva_own','1')}catch(e){}
-  var full='',think='',tps=null,acc='',toolCalls=[],host='',fmodel=model;
+  var full='',think='',tps=null,acc='',toolCalls=[],host='',fmodel=model,gotToken=false;
   async function complete(){
     clearInflight();
     if(useTools&&toolCalls.length&&depth<3){
@@ -1757,8 +1766,10 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           results.push({text:'Error generating image: '+ex.message});
         }
       }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'){
+        var dverb=fn.name==='create_document'?'making':(fn.name==='edit_document'?'editing':'renaming');
+        setStatus(dverb+' \u201c'+String(args.title||args.new_title||'document')+'\u201d\u2026');
         var dr=applyDocOp(chatId,fn.name,args);
-        results.push({text:dr.text});
+        results.push({text:dr.text,md:dr.md});
       }else results.push({text:'Error: unknown tool '+fn.name});
     }
     msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
@@ -1821,10 +1832,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
         if(d.message&&d.message.content){
           full+=d.message.content;
           gen.raw=full;
+          if(!gotToken){gotToken=true;setStatus('generating\u2026')}
           if(live())scheduleRender(gen);
         }
         if(d.message&&d.message.thinking){
           think+=d.message.thinking;
+          if(!gotToken)setStatus('thinking\u2026');
           gen.think=think;
           if(live())scheduleRender(gen);
         }
@@ -2068,17 +2081,17 @@ function applyDocOp(chatId,name,args){
   if(name==='create_document'){
     doc={id:_docId(),title:String(args.title||'Untitled').slice(0,120),type:(args.type==='code'?'code':'markdown'),language:args.language?String(args.language):'',content:String(args.content||''),updated:Date.now()};
     docs.push(doc);
-    out={text:'Created '+doc.type+' document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id};
+    out={text:'Created '+doc.type+' document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Created **'+doc.title+'**'};
   }else if(name==='edit_document'){
     doc=findDoc(docs,args.id)||findDoc(docs,args.title);
     if(!doc)return {text:'Error: document not found'};
     doc.content=String(args.content||'');doc.updated=Date.now();
-    out={text:'Updated document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id};
+    out={text:'Updated document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Updated **'+doc.title+'**'};
   }else if(name==='rename_document'){
     doc=findDoc(docs,args.id)||findDoc(docs,args.title);
     if(!doc)return {text:'Error: document not found'};
     doc.title=String(args.new_title||args.title||doc.title).slice(0,120);doc.updated=Date.now();
-    out={text:'Renamed document to "'+doc.title+'" (id: '+doc.id+')',docId:doc.id};
+    out={text:'Renamed document to "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Renamed to **'+doc.title+'**'};
   }else return {text:'Error: unknown document tool '+name};
   ctx.commit();
   if(ctx.inView){refreshDocUI();if(out.docId)openDoc(out.docId);}
@@ -2178,6 +2191,9 @@ function syncStreamDocs(gen,docs,final){
     touched=rec;
   });
   if(!changed)return;
+  // say what's being written where the reader is already looking
+  if(gen.statusEl&&gen.statusEl.parentNode&&touched)
+    gen.statusEl.textContent=touched.streaming?('making \u201c'+touched.title+'\u201d\u2026'):'generating\u2026';
   if(settled)ctx.commit();          // a finished document is worth persisting
   if(!ctx.inView)return;            // background chat: painted when it comes back
   if(created){refreshDocUI();openDoc(created.id);return}
@@ -2214,6 +2230,26 @@ function downloadDoc(){
   document.body.appendChild(a);a.click();document.body.removeChild(a);
   setTimeout(function(){URL.revokeObjectURL(url)},1000);
 }
+// Which documents get a rendered view, and how they're contained.
+//   svg  — sanitised and inlined; mandatory, since an .svg can carry <script>
+//          and event handlers, so with no DOMPurify we stay on source
+//   html — a sandboxed iframe; inlining would strip the page down to nothing,
+//          and the sandbox (no allow-same-origin) keeps it off this origin
+function docRenderKind(doc){
+  if(!doc)return '';
+  var t=doc.title||'',c=doc.content||'';
+  var lead='^\\s*(?:<\\?xml[^>]*\\?>\\s*|<!--[\\s\\S]*?-->\\s*)*';
+  if(window.DOMPurify&&(/\.svgz?$/i.test(t)||new RegExp(lead+'(?:<!DOCTYPE[^>]*>\\s*)*<svg[\\s>]','i').test(c)))return 'svg';
+  if(/\.x?html?$/i.test(t)||new RegExp(lead+'(?:<!DOCTYPE\\s+html|<html[\\s>])','i').test(c))return 'html';
+  return '';
+}
+function docRenderable(doc){return !!docRenderKind(doc)}
+var _docView={};   // doc id -> 'source' when the reader asked to see the markup
+function docPreviewOn(doc){
+  if(!docRenderable(doc))return false;
+  if(doc.streaming)return false;          // watch it being written, then it renders
+  return _docView[doc.id]!=='source';
+}
 function renderDocPanel(streaming){
   var docs=currentDocs();
   if(!docs.length){closeDoc();return;}
@@ -2221,12 +2257,44 @@ function renderDocPanel(streaming){
   var sel=document.getElementById('docSelect');sel.innerHTML='';
   docs.forEach(function(d){var o=document.createElement('option');o.value=d.id;o.textContent=d.title;if(d.id===activeDocId)o.selected=true;sel.appendChild(o)});
   var doc=findDoc(docs,activeDocId);
-  var kind=doc.type==='code'?(doc.language||'code'):'markdown';
+  // the title already carries the extension — the slot only speaks up mid-write
   var typeEl=document.getElementById('docType');
-  typeEl.textContent=doc.streaming?'writing… '+kind:kind;
+  typeEl.textContent=doc.streaming?'writing…':'';
   typeEl.classList.toggle('doc-writing',!!doc.streaming);
   var body=document.getElementById('docBody');
   var pinned=streaming&&(body.scrollTop+body.clientHeight>=body.scrollHeight-40);
+  var canRender=docRenderKind(doc),preview=docPreviewOn(doc);
+  var vb=document.getElementById('docView');
+  vb.style.display=(canRender&&!doc.streaming)?'':'none';
+  vb.classList.toggle('on',preview);
+  vb.title=preview?'Show source':'Show rendered';
+  body.classList.toggle('framed',preview&&canRender==='html');
+  if(preview&&canRender==='html'){
+    var fr=document.createElement('iframe');
+    fr.className='doc-frame';
+    // scripts may run, but with no allow-same-origin the page sits in an opaque
+    // origin: no reach into this document, its storage, or its cookies
+    fr.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-popups');
+    fr.setAttribute('referrerpolicy','no-referrer');
+    fr.srcdoc=doc.content;
+    body.innerHTML='';
+    body.appendChild(fr);
+    return;
+  }
+  if(preview){
+    var wrap=document.createElement('div');
+    wrap.className='doc-preview';
+    var clean='';
+    try{clean=window.DOMPurify.sanitize(doc.content,{USE_PROFILES:{svg:true,svgFilters:true}})}catch(e){clean=''}
+    wrap.innerHTML=clean;
+    body.innerHTML='';
+    body.appendChild(wrap);
+    if(!wrap.querySelector('svg')){        // nothing survived sanitising
+      _docView[doc.id]='source';
+      renderDocPanel(streaming);
+    }
+    return;
+  }
   if(doc.type==='code'){
     body.innerHTML='<pre><code></code></pre>';
     var code=body.querySelector('code');
@@ -2245,6 +2313,12 @@ chatLog.addEventListener('click',function(e){
   if(!chip)return;
   var d=findDoc(currentDocs(),chip.getAttribute('data-doctitle'));
   if(d)openDoc(d.id);
+});
+document.getElementById('docView').addEventListener('click',function(){
+  var doc=findDoc(currentDocs(),activeDocId);
+  if(!doc)return;
+  _docView[doc.id]=docPreviewOn(doc)?'source':'preview';
+  renderDocPanel();
 });
 document.getElementById('docDownload').addEventListener('click',downloadDoc);
 document.getElementById('docClose').addEventListener('click',closeDoc);
