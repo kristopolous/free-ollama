@@ -316,6 +316,7 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
 .setting input[type=number]{width:120px;flex-shrink:0}
 .setting input[type=text],.setting input[type=password]{width:180px;flex-shrink:0;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-2) var(--sp-3);font-size:var(--fs-sm)}
 .admin-pw-field{display:flex;align-items:center;gap:var(--sp-3);flex-shrink:0}
+.admin-pw-field input[type=password]{width:120px}
 .settings-login{padding:var(--sp-3) 0 var(--sp-1)}
 .login-row{display:flex;align-items:center;gap:10px;margin-top:var(--sp-3)}
 .login-row input[type=password]{flex:1;max-width:280px;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-3);font-size:var(--fs-lg)}
@@ -655,7 +656,7 @@ __SD_MODELS__
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
-<label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><button type="button" id="setAdminPwClear" class="src-test-btn" style="display:none">Remove</button></span><template id="setAdminPwTpl"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><template id="setAdminPwTpl"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></span></label>
 <div class="setting-sources">
 <div class="src-head"><span class="setting-name">Additional sources</span><button type="button" id="srcHelpBtn" class="src-help-btn" title="Format &amp; examples">?</button>
 <div id="srcHelp" class="src-help-pop">
@@ -2072,7 +2073,7 @@ function injectSettingsPwFields(){
   var lr=document.querySelector('#settingsLogin .login-row');
   if(lr)lr.insertBefore(document.getElementById('loginPwTpl').content.cloneNode(true),document.getElementById('loginBtn'));
   var apf=document.querySelector('.admin-pw-field');
-  if(apf)apf.insertBefore(document.getElementById('setAdminPwTpl').content.cloneNode(true),document.getElementById('setAdminPwClear'));
+  if(apf)apf.appendChild(document.getElementById('setAdminPwTpl').content.cloneNode(true));
   var lp=document.getElementById('loginPw');
   if(lp)lp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();unlockSettings();}});
 }
@@ -2083,7 +2084,6 @@ function showSettingsLocked(locked){
 function setPwState(isSet){
   var pw=document.getElementById('setAdminPw');pw.value='';
   pw.placeholder=isSet?'•••••• set — blank keeps it':'none';
-  document.getElementById('setAdminPwClear').style.display=isSet?'':'none';
 }
 function populateSettings(s){
   showSettingsLocked(false);
@@ -2144,18 +2144,6 @@ function saveSettings(){
       st.style.color='var(--ok)';st.textContent=s.refreshed?'saved · sources re-pulled':'saved';setTimeout(function(){st.textContent=''},3000);
     })
     .catch(function(){st.style.color='var(--err)';st.textContent='save failed';});
-}
-function removeAdminPw(){
-  if(!confirm('Remove the admin password? The Settings tab will be public again.'))return;
-  var st=document.getElementById('settingsStatus');st.style.color='#4a4';st.textContent='removing…';
-  fetch('settings',{method:'POST',headers:adminHeaders({'Content-Type':'application/json'}),body:JSON.stringify({admin_pw:''})})
-    .then(function(r){return r.json().then(function(s){return {ok:r.ok,s:s}})})
-    .then(function(res){
-      if(!res.ok){st.style.color='#c33';st.textContent=(res.s&&res.s.error)||'failed';return;}
-      setAdminKeyStored('');setPwState(false);
-      st.style.color='#4a4';st.textContent='password removed';setTimeout(function(){st.textContent=''},3000);
-    })
-    .catch(function(){st.style.color='#c33';st.textContent='failed';});
 }
 function testSources(){
   var srcErr=document.getElementById('srcError');srcErr.textContent='';
@@ -2224,7 +2212,6 @@ function addFromUrl(){
     .catch(function(){srcErr.style.color='var(--err)';srcErr.textContent='import failed';});
 }
 document.getElementById('settingsSave').addEventListener('click',saveSettings);
-document.getElementById('setAdminPwClear').addEventListener('click',removeAdminPw);
 document.getElementById('loginBtn').addEventListener('click',unlockSettings);
 document.getElementById('srcAddBtn').addEventListener('click',addSource);
 document.getElementById('srcUrlBtn').addEventListener('click',addFromUrl);
