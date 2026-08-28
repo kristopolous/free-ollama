@@ -40,10 +40,7 @@ def _clean_cookie(value):
     return value.replace("\\u0021", "!").strip()
 
 
-FOFA_KEY = os.getenv("FOFA_KEY", "")
 FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
-FOFA_AUTHORIZATION = os.getenv("FOFA_AUTHORIZATION", "")
-FOFA_API = "https://fofa.info/api/v1/search/all"
 FOFA_WEB = "https://en.fofa.info/result"
 
 SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
@@ -511,7 +508,7 @@ def _tag(value):
     return hashlib.md5(str(value).encode()).hexdigest()[:8]
 
 
-def _fetch_web(dry, limit, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, label=""):
+def _fetch_web(dry, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, label=""):
     import base64
     import re
     import requests
@@ -529,8 +526,6 @@ def _fetch_web(dry, limit, service, combined, country=None, port=None, server=No
     }
     if cookie_header:
         headers["Cookie"] = cookie_header
-    if FOFA_AUTHORIZATION:
-        headers["Authorization"] = FOFA_AUTHORIZATION
 
     if curlify:
         req = requests.Request("GET", url, headers=headers)
@@ -786,7 +781,7 @@ def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=
     return _parse_shodan_html(out_path, svc)
 
 
-def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa"):
+def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa"):
     global _RUN_TS
     hosts_file = _cache_file(name, "hosts")
 
@@ -878,7 +873,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                     time.sleep(sleep)
 
         hosts = pool
-    elif method == "web":
+    else:
         if not FOFA_COOKIE:
             log.error("FOFA_COOKIE must be set in .env for the web method. See README for instructions on how to obtain it from your browser.")
             return []
@@ -887,6 +882,12 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         _RUN_TS = run_ts
         if session:
             log.info(f"resuming session {run_ts}")
+        # Seed the RNG with run_ts so --random produces the SAME shuffle order
+        # every time this session is resumed via -i <run_ts>. Without this the
+        # grid is scrambled differently each run, so the already-fetched pages
+        # get scattered across the whole grid and resume has to re-scan all of
+        # them instead of skipping the exact already-done prefix.
+        random.seed(run_ts)
 
         if isinstance(countries, str):
             country_list = [None] + [s.strip() for s in countries.split(",")]
@@ -927,17 +928,20 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
         else:
             base_queries = [NAMED_QUERIES[name]]
 
-        # FIDs are targeted follow-ups: each is fetched as QUERY+fid on its
-        # own, never crossed with country/port/server (those intersections
-        # are almost always empty). They run FIRST, before the combinatorics,
-        # since they're the high-value targeted queries.
+        # Each base query runs as an independent, full pass over the entire
+        # country/port/server combinatorics — the query is the OUTER loop, so
+        # it stays fixed while country/port/server cycle underneath. Otherwise
+        # the query would change on every combo and the two passes would bleed
+        # into each other.
+        fid_combos = [(bq, None, None, None, fid) for fid in fid_specs for bq in base_queries]
         combo_grid = [(bq, c, p, s, None)
-                      for s in server_list for p in port_list for c in country_list
-                      for bq in base_queries]
+                      for bq in base_queries
+                      for s in server_list for p in port_list for c in country_list]
         if shuffle:
+            random.shuffle(fid_combos)
             random.shuffle(combo_grid)
 
-        combos = [(None, None, None, None, fid) for fid in fid_specs] + combo_grid
+        combos = fid_combos + combo_grid
 
         start = time.time()
         for i, (base_query, country, port, server, fid) in enumerate(combos):
@@ -966,7 +970,7 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                     continue
 
             svc = service or name or "unknown"
-            hosts = _fetch_web(dry, limit, svc, combined, country, port, server, run_ts, curlify=curlify, label=label)
+            hosts = _fetch_web(dry, svc, combined, country, port, server, run_ts, curlify=curlify, label=label)
             if hosts is None:
                 continue
 
@@ -993,27 +997,6 @@ def fetch(dry=False, curlify=False, limit=2, service=None, method="api", query=N
                 time.sleep(sleep)
 
         hosts = pool
-    else:
-        if not FOFA_KEY:
-            log.error("FOFA_KEY must be set in .env")
-            return
-        if not service and not query and name not in NAMED_QUERIES:
-            log.error("--service is required for API method")
-            return
-        if query:
-            base_queries = [query]
-        elif service:
-            q = SERVICE_CONFIG[service]["fofa_query"]
-            base_queries = q if isinstance(q, list) else [q]
-        else:
-            base_queries = [NAMED_QUERIES.get(name) or ""]
-        hosts = []
-        for bq in base_queries:
-            if fids:
-                for fid in [s.strip() for s in fids.split(",")]:
-                    hosts.extend(_fetch_api(dry, limit, service, fid=fid, curlify=curlify, query=bq))
-            else:
-                hosts.extend(_fetch_api(dry, limit, service, curlify=curlify, query=bq))
 
     if dry:
         return
@@ -1243,10 +1226,8 @@ def classify(name=None):
 def main():
     load_dotenv()
 
-    global FOFA_KEY, FOFA_COOKIE, FOFA_AUTHORIZATION, SHODAN_KEY
-    FOFA_KEY = os.getenv("FOFA_KEY", "")
+    global FOFA_COOKIE, SHODAN_KEY
     FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
-    FOFA_AUTHORIZATION = os.getenv("FOFA_AUTHORIZATION", "")
     SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
 
     logging.basicConfig(
@@ -1264,8 +1245,6 @@ def main():
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
     parser.add_argument("-f", "--fid", dest="fids", help="comma-separated FID values to filter by")
     parser.add_argument("-i", "--id", dest="session", help="resume a previous session by providing its run timestamp (the run_ts from the log)")
-    parser.add_argument("-l", "--limit", type=int, default=2, help="max results per query (default: 2)")
-    parser.add_argument("-m", "--method", choices=["api", "web"], default="web", help="fetch method (default: web)")
     parser.add_argument("-n", "--name", help="cache file name prefix (default: image-gen); a named query (e.g. gradio) also selects its built-in FOFA query for fetch")
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
@@ -1281,8 +1260,6 @@ def main():
     if not args.service and not args.query and not args.name:
         parser.error("either --service, --query, or --name is required")
     if args.site == "shodan":
-        if args.method != "web":
-            log.warning("-m/--method is ignored with --site shodan")
         if args.fids:
             log.warning("-f/--fid is ignored with --site shodan")
 
@@ -1294,7 +1271,7 @@ def main():
         for step in parts:
             log.info(f"--- {step} ---")
             if step == "fetch":
-                fetch(dry=args.dry, curlify=args.curlify, limit=args.limit, service=args.service, method=args.method, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
+                fetch(dry=args.dry, curlify=args.curlify, service=args.service, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
             elif step == "check":
                 check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers)
             elif step == "classify":

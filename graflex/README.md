@@ -17,13 +17,8 @@ pip install -e .
 Create a `.env` file:
 
 ```env
-# Required for -t fofa (default)
-FOFA_KEY=your_fofa_api_key
-
-# Required — FOFA Authorization header token
-FOFA_AUTHORIZATION=your_fofa_authorization_token
-
-# Optional — Cookie header from browser (required for web method)
+# Required for -t fofa (default) — cookie header from your browser.
+# Omitting fofa_result_page_size makes FOFA default to 10 results/page.
 FOFA_COOKIE="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
 
 # Required for -t shodan — shodan.io session cookie.
@@ -76,9 +71,9 @@ graflex -s ollama -a check-all -n ollama
 
 # Dry run — shows plaintext queries instead of hitting FOFA
 graflex -s a1111 -a fetch -d
-# Print curl commands for FOFA API requests
-gralex -s a1111 -a fetch --curlify -m api
-gralex -q 'body="ollama"' -a fetch -n ollama --curlify
+# Print curl commands instead of executing
+graflex -s a1111 -a fetch --curlify
+graflex -q 'body="ollama"' -a fetch -n ollama --curlify
 
 # Resume a run that hit the daily usage limit (use the run_ts from the error message)
 graflex -s ollama -a fetch \
@@ -106,7 +101,6 @@ method scrapes FOFA. Differences from the FOFA flow:
 - Results are the hrefs of the `<a rel="noopener noreferrer nofollow">` links
   on the results page.
 - Requires `SHODAN_KEY` in `.env` — your shodan session cookie (`polito="..."`).
-- `-l/--limit` does not apply (page size is whatever shodan serves).
 - Only some services have built-in shodan queries (`ollama`, `comfyui`);
   others require an explicit `--query` in shodan syntax.
 
@@ -265,9 +259,7 @@ warning.
 | `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`) |
 | `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `fetch-check`, or `classify` |
 | `-d`, `--dry` | Print what would be done without making requests |
-| `--curlify` | Print curl command instead of executing (useful for debugging API requests) |
-| `-l`, `--limit` | Max results per query (default: 2) |
-| `-m`, `--method` | Fetch method: `api` or `web` (default: web) |
+| `--curlify` | Print curl command instead of executing (useful for debugging requests) |
 | `-q`, `--query` | Custom FOFA query (requires `--name`) |
 | `-n`, `--name` | Cache file name prefix (default: `image-gen`); for fetch, a named query (`gradio`) also selects its built-in FOFA query |
 | `-c`, `--countries` | Comma-separated country codes to cycle |

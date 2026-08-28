@@ -26,7 +26,6 @@ case "$SERVICE" in
     ;;
 
   ollama)
-    QUERY="body='ollama is running'"
     PORTS="11434,10443,1025,9443,9200,8085,1024,1025,10001,10000,8888,9000,8080,8083,3000,16000,80,443,1194,110,8983,28017,21,5060,5601"
     SERVERS="nginx,cloudflare,Apache"
     COUNTRIES="TH,FI,MX,TR,IR,AR,TW,MA,MY,NZ,BH,SG,AT,KR,PE,GB,AE,US,NL,AU,IN,VN,JP,DE,CA,RU,IL,BR,BE,CN,IE,FR,UA,ES,ID,IT,CH,ZA,HK,PL"
@@ -140,6 +139,7 @@ query=()
 svc_args=( --service "$SERVICE" )
 [[ "$SERVICE" == "gradio" ]] && svc_args=()
 
+set -x
 exec ./graflex.py \
       --action "fetch" \
       --countries "$COUNTRIES" \
