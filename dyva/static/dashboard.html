@@ -1766,8 +1766,10 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           if(ac.signal.aborted)return;
           results.push({text:'Error generating image: '+ex.message});
         }
-      }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'){
-        var dverb=fn.name==='create_document'?'making':(fn.name==='edit_document'?'editing':'renaming');
+      }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'
+               ||fn.name==='replace_in_document'||fn.name==='search_document'){
+        var dverb={create_document:'making',edit_document:'rewriting',rename_document:'renaming',
+                   replace_in_document:'editing',search_document:'searching'}[fn.name];
         setStatus(dverb+' \u201c'+String(args.title||args.new_title||'document')+'\u201d\u2026');
         var dr=applyDocOp(chatId,fn.name,args);
         results.push({text:dr.text,md:dr.md});
@@ -2017,8 +2019,10 @@ function recallPrompt(dir,e){
 var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}};
 var DOC_TOOLS=[
   {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
-  {type:'function',function:{name:'edit_document',description:'Replace the full contents of an existing document. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
-  {type:'function',function:{name:'rename_document',description:'Rename an existing document. Identify it by id (preferred) or current title.',parameters:{type:'object',properties:{id:{type:'string'},title:{type:'string',description:'current title if id unknown'},new_title:{type:'string',description:'the new title'}},required:['new_title']}}}
+  {type:'function',function:{name:'edit_document',description:'Replace the ENTIRE contents of an existing document. Only for a wholesale rewrite — to change part of one, use replace_in_document instead. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
+  {type:'function',function:{name:'rename_document',description:'Rename an existing document. Identify it by id (preferred) or current title.',parameters:{type:'object',properties:{id:{type:'string'},title:{type:'string',description:'current title if id unknown'},new_title:{type:'string',description:'the new title'}},required:['new_title']}}},
+  {type:'function',function:{name:'search_document',description:'Search inside a document and get back the matching lines with their line numbers and surrounding context. Use this to find the exact text you want to change before calling replace_in_document, so you never have to hold the whole document in mind.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},query:{type:'string',description:'Text to look for (case-insensitive)'},regex:{type:'boolean',description:'Treat query as a regular expression'},context:{type:'integer',description:'Lines of context around each match (default 2)'}},required:['query']}}},
+  {type:'function',function:{name:'replace_in_document',description:'Change PART of a document: replace an exact snippet with new text, leaving the rest untouched. Prefer this over edit_document for anything short of a total rewrite. old_text must appear EXACTLY ONCE — copy it verbatim from the document, including indentation, and include enough surrounding lines to make it unique. Do not use line numbers.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},old_text:{type:'string',description:'The exact text to replace, copied verbatim from the document'},new_text:{type:'string',description:'What to put in its place. Empty string deletes the snippet.'},all:{type:'boolean',description:'Replace every occurrence instead of requiring exactly one'}},required:['old_text','new_text']}}}
 ];
 var chatToolsBtn=document.getElementById('chatTools');
 var toolsPop=document.getElementById('toolsPop');
@@ -2075,6 +2079,77 @@ function docCtx(chatId){
   chat.documents=chat.documents||[];
   return {docs:chat.documents,inView:false,commit:function(){saveChat(chat);touchIndex(chat);}};
 }
+// ---- partial document edits ---------------------------------------------
+// Content-addressed, not line-numbered, on purpose. Line numbers are the one
+// thing models reliably get wrong (they can't count, and every applied edit
+// invalidates the numbers below it), which is why aider's search/replace and
+// Anthropic's str_replace both anchor on the text itself. Line numbers appear
+// only in *search output*, where they orient the reader and are never echoed
+// back as an address.
+function _docLines(c){return String(c==null?'':c).split('\n')}
+// exact first; then the same match ignoring per-line indentation, since drifting
+// leading whitespace is the usual reason a verbatim copy fails to match
+function findSnippet(content, needle){
+  content=String(content==null?'':content).replace(/\r\n/g,'\n');
+  needle=String(needle==null?'':needle).replace(/\r\n/g,'\n');
+  if(!needle)return {hits:[],how:'exact'};
+  var hits=[],i=content.indexOf(needle);
+  while(i>=0){hits.push({start:i,end:i+needle.length});i=content.indexOf(needle,i+1)}
+  if(hits.length)return {hits:hits,how:'exact'};
+  // whitespace-insensitive sliding window over lines
+  var cl=_docLines(content),nl=_docLines(needle);
+  while(nl.length&&!nl[nl.length-1].trim())nl.pop();
+  while(nl.length&&!nl[0].trim())nl.shift();
+  if(!nl.length)return {hits:[],how:'exact'};
+  var starts=[0];
+  for(var k=0;k<cl.length;k++)starts.push(starts[k]+cl[k].length+1);
+  for(var a=0;a+nl.length<=cl.length;a++){
+    var ok=true;
+    for(var b=0;b<nl.length;b++){if(cl[a+b].trim()!==nl[b].trim()){ok=false;break}}
+    if(ok)hits.push({start:starts[a],end:starts[a+nl.length-1]+cl[a+nl.length-1].length});
+  }
+  return {hits:hits,how:'whitespace'};
+}
+function _snip(t,n){t=String(t).replace(/\n/g,'\\n');return t.length>n?t.slice(0,n)+'…':t}
+function replaceInDoc(doc, oldText, newText, all){
+  var content=String(doc.content||'').replace(/\r\n/g,'\n');
+  var r=findSnippet(content,oldText);
+  if(!oldText)return {error:'old_text was empty. Give the exact snippet to replace.'};
+  if(!r.hits.length)
+    return {error:'no match for old_text in "'+doc.title+'" (tried exact, then ignoring indentation). '
+      +'Copy the snippet verbatim from the document — call search_document to see the current text.'};
+  if(r.hits.length>1&&!all)
+    return {error:'old_text matches '+r.hits.length+' places in "'+doc.title+'". '
+      +'Include more surrounding lines so it is unique, or pass all:true to change every one.'};
+  var use=all?r.hits:[r.hits[0]];
+  var out='',prev=0;
+  for(var i=0;i<use.length;i++){out+=content.slice(prev,use[i].start)+String(newText==null?'':newText);prev=use[i].end}
+  out+=content.slice(prev);
+  doc.content=out;
+  doc.updated=Date.now();
+  return {count:use.length,how:r.how};
+}
+function searchDoc(doc, query, useRegex, ctx){
+  var lines=_docLines(doc.content),re;
+  ctx=(typeof ctx==='number'&&ctx>=0)?Math.min(ctx,10):2;
+  try{re=new RegExp(useRegex?query:String(query).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i')}
+  catch(e){return {error:'bad regex: '+e.message}}
+  var hits=[];
+  for(var i=0;i<lines.length;i++)if(re.test(lines[i]))hits.push(i);
+  if(!hits.length)return {text:'No match for '+JSON.stringify(query)+' in "'+doc.title+'" ('+lines.length+' lines).'};
+  var CAP=30,shown=hits.slice(0,CAP),out=[],last=-1;
+  for(var h=0;h<shown.length;h++){
+    var lo=Math.max(0,shown[h]-ctx),hi=Math.min(lines.length-1,shown[h]+ctx);
+    if(lo>last+1&&last>=0)out.push('  --');
+    for(var n=Math.max(lo,last+1);n<=hi;n++)
+      out.push('  '+(n+1)+(n===shown[h]?'> ':': ')+lines[n]);
+    last=hi;
+  }
+  var head='"'+doc.title+'" ('+lines.length+' lines) — '+hits.length+' match'+(hits.length===1?'':'es')
+    +(hits.length>CAP?', first '+CAP+' shown':'');
+  return {text:head+'\n'+out.join('\n')
+    +'\n(line numbers are for reading only — replace_in_document takes the text itself)'};
+}
 function applyDocOp(chatId,name,args){
   var ctx=docCtx(chatId);
   if(!ctx)return {text:'Error: conversation not found'};
@@ -2088,6 +2163,21 @@ function applyDocOp(chatId,name,args){
     if(!doc)return {text:'Error: document not found'};
     doc.content=String(args.content||'');doc.updated=Date.now();
     out={text:'Updated document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Updated **'+doc.title+'**'};
+  }else if(name==='replace_in_document'){
+    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
+    if(!doc)return {text:'Error: document not found'};
+    var rr=replaceInDoc(doc,args.old_text,args.new_text,!!args.all);
+    if(rr.error)return {text:'Error: '+rr.error};
+    out={text:'Replaced '+rr.count+' occurrence'+(rr.count===1?'':'s')+' in "'+doc.title+'"'
+              +(rr.how==='whitespace'?' (matched ignoring indentation)':'')
+              +'. It is now '+_docLines(doc.content).length+' lines.',
+         docId:doc.id,md:'\ud83d\udcc4 Edited **'+doc.title+'**'};
+  }else if(name==='search_document'){
+    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
+    if(!doc&&docs.length===1)doc=docs[0];
+    if(!doc)return {text:'Error: document not found'};
+    var sr=searchDoc(doc,String(args.query||''),!!args.regex,args.context);
+    return {text:sr.error?('Error: '+sr.error):sr.text};   // read-only: nothing to commit
   }else if(name==='rename_document'){
     doc=findDoc(docs,args.id)||findDoc(docs,args.title);
     if(!doc)return {text:'Error: document not found'};
@@ -2113,7 +2203,10 @@ var DOC_SYSTEM='When you produce something the user will keep, copy, or iterate 
   +'"code" or "markdown"; put nothing else on the opening and closing tag lines, and never wrap the '
   +'block in a code fence. To revise a document, emit the whole block again with the same title. '
   +'Prefer this inline form over the document tools — it lets the user watch the document being '
-  +'written. Keep ordinary conversational replies outside document blocks.';
+  +'written. Keep ordinary conversational replies outside document blocks.\n\n'
+  +'To CHANGE a document you already wrote, do not repeat the whole thing: use search_document to '
+  +'find the text, then replace_in_document with that exact snippet. Re-emit a full block only for a '
+  +'total rewrite.';
 var DOC_OPEN_RE=/<document\b([^>]*)>/i;
 var DOC_CLOSE_RE=/<\/document\s*>/i;
 // a tag still being typed shouldn't flash into the bubble as literal text
