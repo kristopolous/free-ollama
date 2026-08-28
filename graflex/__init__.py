@@ -928,15 +928,14 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         else:
             base_queries = [NAMED_QUERIES[name]]
 
-        # Each base query runs as an independent, full pass over the entire
-        # country/port/server combinatorics — the query is the OUTER loop, so
-        # it stays fixed while country/port/server cycle underneath. Otherwise
-        # the query would change on every combo and the two passes would bleed
-        # into each other.
+        # The query is one axis of the country/port/server cross product. It
+        # cycles INNERMOST, so each (server,port,country) combo iterates all
+        # base queries in a row (e.g. app="ollama" then body="..." for a fixed
+        # country), then the next combo advances.
         fid_combos = [(bq, None, None, None, fid) for fid in fid_specs for bq in base_queries]
         combo_grid = [(bq, c, p, s, None)
-                      for bq in base_queries
-                      for s in server_list for p in port_list for c in country_list]
+                      for s in server_list for p in port_list for c in country_list
+                      for bq in base_queries]
         if shuffle:
             random.shuffle(fid_combos)
             random.shuffle(combo_grid)
