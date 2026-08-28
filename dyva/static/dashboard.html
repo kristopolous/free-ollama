@@ -364,6 +364,10 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
 .src-help-pop ul{margin:.4em 0;padding-left:1.4em}
 .src-help-pop code{background:var(--bg-inset);padding:.05em .3em;border-radius:var(--r-sm);font-size:var(--fs-2xs)}
 .src-help-pop pre{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:.6em;overflow-x:auto;font-size:var(--fs-2xs);margin:.4em 0;white-space:pre}
+.ml-row{display:flex;align-items:center;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-3)}
+.ml-row .src-test-btn{margin-left:0}
+.ml-summary{color:var(--text-dim);font-size:var(--fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.ml-summary.pending{color:var(--accent)}
 .src-textarea{width:100%;min-height:360px;margin-top:var(--sp-3);font-family:var(--font-mono);font-size:var(--fs-sm);background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-3);resize:vertical}
 .src-error{color:var(--err);font-size:var(--fs-xs);margin-top:5px;min-height:1em;white-space:pre-wrap}
 .src-add-btn,.src-test-btn{background:var(--surface-hover);color:var(--text-2);border:1px solid var(--border-strong);border-radius:var(--r-md);padding:var(--sp-2) 14px;font-size:var(--fs-sm);cursor:pointer;flex-shrink:0}
@@ -693,6 +697,18 @@ __SD_MODELS__
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
+<div class="setting">
+<span class="setting-text"><span class="setting-name">Model list override</span>
+<small class="setting-help">Advertise a fixed list of model names from <code>/api/tags</code> and <code>/v1/models</code> instead of the discovered catalog, for tools that make you pick one specific model id. Every dyva model name is a routing pattern, so one entry like <code>qwen3</code> covers every <code>qwen3:*</code> variant on every host. Upload a plain text file, one name per line; blank lines and <code>#comments</code> are ignored. Names no host currently serves stay listed (count 0) so the menu can't shift under a tool that pinned one. <b>Minimum model count</b> doesn't apply to an explicit list.</small>
+<span class="ml-row">
+<button type="button" id="mlUpload" class="src-test-btn">Upload list…</button>
+<button type="button" id="mlDownload" class="src-test-btn">Download</button>
+<button type="button" id="mlClear" class="src-test-btn">Clear</button>
+<span id="mlSummary" class="ml-summary"></span>
+</span></span>
+<input type="checkbox" id="setModelListOn">
+</div>
+<input type="file" id="mlFile" accept=".txt,.list,.text,text/plain" style="display:none">
 <label class="setting"><span class="setting-text"><span class="setting-name">Localhost only</span><small class="setting-help">Restrict inference endpoints to localhost only (a remote host that reaches this port can't chat or generate). Equivalent to the <code>./dyva -l</code> flag; saved here it persists across restarts.</small></span><input type="checkbox" id="setLocal"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><template id="setAdminPwTpl"><input type="text" id="adminPwUserDecoy" name="username" class="admin-pw-decoy" placeholder="username" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" tabindex="-1" aria-hidden="true"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></span></label>
 <div class="setting-sources">
@@ -2481,6 +2497,7 @@ function populateSettings(s){
   document.getElementById('setWorkers').value=s.workers;
   document.getElementById('setTimeout').value=s.timeout;
   document.getElementById('setMinCount').value=s.min_count;
+  document.getElementById('setModelList').value=(s.model_list||[]).join('\n');
   document.getElementById('setLocal').checked=!!s.local;
   setPwState(!!s.admin_pw_set);
   document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
@@ -2507,6 +2524,7 @@ function saveSettings(){
     workers:parseInt(document.getElementById('setWorkers').value,10),
     timeout:parseInt(document.getElementById('setTimeout').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
+    model_list:document.getElementById('setModelList').value,
     local:document.getElementById('setLocal').checked
   };
   if(isNaN(body.workers)||body.workers<1)delete body.workers;
@@ -2532,6 +2550,7 @@ function saveSettings(){
       document.getElementById('setWorkers').value=s.workers;
       document.getElementById('setTimeout').value=s.timeout;
       document.getElementById('setMinCount').value=s.min_count;
+      document.getElementById('setModelList').value=(s.model_list||[]).join('\n');
       document.getElementById('setLocal').checked=!!s.local;
       setPwState(!!s.admin_pw_set);
       document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);

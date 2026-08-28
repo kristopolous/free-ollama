@@ -86,6 +86,7 @@ PORT = 11434
 TIMEOUT = 30
 WORKER_COUNT = 10
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
+MODEL_LIST = []  # when set, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
                 # settings & sources requires it (localhost always exempt).
 VERSION = "0"
@@ -174,7 +175,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -192,6 +193,8 @@ def load_settings():
         ADMIN_PW = s["admin_pw"]
     if isinstance(s.get("local"), bool):
         _LOCAL = s["local"]
+    if "model_list" in s:
+        MODEL_LIST = parse_model_list(s["model_list"])
 
 
 def save_settings(extra=None):
@@ -207,7 +210,7 @@ def save_settings(extra=None):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                  "min_count": MIN_COUNT, "local": _LOCAL,
-                 "admin_pw": ADMIN_PW})
+                 "admin_pw": ADMIN_PW, "model_list": MODEL_LIST})
     if isinstance(extra, dict):
         data.update(extra)
     try:
@@ -1118,10 +1121,43 @@ def all_models():
     return list(sorty)
 
 
+def parse_model_list(v):
+    """Accept the override as a list of names or as one newline/comma-separated
+    blob (what the dashboard textarea sends). Blank lines and #comments drop out,
+    order and duplicates-after-the-first do not."""
+    if isinstance(v, str):
+        v = re.split(r"[\r\n,]+", v)
+    if not isinstance(v, list):
+        return []
+    out = []
+    for item in v:
+        name = str(item or "").strip()
+        if not name or name.startswith("#"):
+            continue
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def listed_models():
     """Models for third-party enumeration (/api/tags, /v1/models), with the
     optional MIN_COUNT floor applied. The dashboard uses all_models() directly
-    and always shows everything."""
+    and always shows everything.
+
+    A configured MODEL_LIST replaces the discovered catalog outright. Tools that
+    make you pick one id from this endpoint then get a short, stable menu, and
+    because every dyva model name is a routing pattern, one entry like "qwen3"
+    covers every qwen3:* variant any host happens to carry. MIN_COUNT is not
+    applied to an explicit list — the operator asked for these names by hand."""
+    if MODEL_LIST:
+        out = []
+        for name in MODEL_LIST:
+            try:
+                count = len(find_servers(name))
+            except Exception:
+                count = 0
+            out.append({"id": name, "count": count, "modalities": model_modalities(name)})
+        return out
     models = all_models()
     if MIN_COUNT > 1:
         models = [m for m in models if m.get('count', 0) >= MIN_COUNT]
@@ -2072,6 +2108,7 @@ async def handle_settings_get(request):
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "admin_pw_set": bool(ADMIN_PW),
+                              "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources()})
 
 
@@ -2085,7 +2122,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST
     resp = _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -2101,6 +2138,8 @@ async def handle_settings_post(request):
         MIN_COUNT = body["min_count"]
     if isinstance(body.get("local"), bool):
         _LOCAL = body["local"]
+    if "model_list" in body:
+        MODEL_LIST = parse_model_list(body["model_list"])
     # admin_pw: only when the key is present. A non-empty value sets/changes the
     # password (stored hashed); an explicit empty string clears protection. The
     # plaintext is never stored or echoed back.
@@ -2121,6 +2160,7 @@ async def handle_settings_post(request):
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "admin_pw_set": bool(ADMIN_PW),
+                              "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources(),
                               "refreshed": sources_changed})
 
