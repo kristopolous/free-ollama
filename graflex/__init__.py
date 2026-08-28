@@ -630,8 +630,14 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
     return hosts
 
 
+_last_result_file = ""
+
+
 def _parse_fofa_html(html_path, service):
     import re
+
+    global _last_result_file
+    _last_result_file = html_path
 
     with open(html_path) as f:
         content = f.read()
@@ -655,12 +661,14 @@ def _parse_fofa_html(html_path, service):
             "site": "fofa",
         })
 
-    log.info(f"  {len(hosts)} hosts from {html_path}")
     return hosts
 
 
 def _parse_shodan_html(html_path, service):
     import re
+
+    global _last_result_file
+    _last_result_file = html_path
 
     with open(html_path) as f:
         content = f.read()
@@ -695,7 +703,6 @@ def _parse_shodan_html(html_path, service):
             "site": "shodan",
         })
 
-    log.info(f"  {len(hosts)} hosts from {html_path}")
     return hosts
 
 
@@ -864,11 +871,15 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 if hosts is None:
                     continue
 
+                fresh = 0
                 for h in hosts:
                     key = f"{h['service']}@{h['host']}"
                     if key not in seen:
                         pool.append(h)
                         seen.add(key)
+                        fresh += 1
+                if hosts and not dry:
+                    log.info(f"  {len(hosts)} hosts (+{fresh} new) from {_last_result_file}")
 
                 if not dry:
                     _save_json(hosts_file, pool)
@@ -980,6 +991,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             if hosts is None:
                 continue
 
+            fresh = 0
             for h in hosts:
                 if fid:
                     h["fid"] = fid
@@ -988,8 +1000,11 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     pool.append(h)
                     seen.add(key)
                     index[key] = h
+                    fresh += 1
                 elif fid and not index[key].get("fid"):
                     index[key]["fid"] = fid
+            if hosts and not dry:
+                log.info(f"  {len(hosts)} hosts (+{fresh} new) from {_last_result_file}")
 
             if not dry:
                 _save_json(hosts_file, pool)
