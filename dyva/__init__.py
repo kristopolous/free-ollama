@@ -260,6 +260,60 @@ def _normalize_url(u):
     return u
 
 
+SOURCE_DEF_EXAMPLE = """expected a JSON list of source *definitions*, e.g.
+
+[{
+  "name": "graflex",
+  "url": "https://9ol.es/graflex-4a8621dd9470.json",
+  "mapping": {
+    "server":  {"field": "url"},
+    "models":  {"field": "models"},
+    "version": {"field": "version"},
+    "service": {"value": "ollama"}
+  }
+}]
+
+Each definition needs a "url" (where the host rows live) and a "mapping" that
+says which field of each row holds what. A mapping entry is either
+{"field": "<row key>"} to copy from the row or {"value": "<constant>"}, and
+"server" (or "url") is required so hosts can be keyed."""
+
+
+def validate_source_defs(defs):
+    """Raise ValueError unless every entry is a source *definition*
+    ({name, url, mapping}) rather than a host row. Pointing --source add at a
+    host list (rows that happen to carry a 'url') would otherwise fill
+    settings.json with junk sources that yield nothing."""
+    problems = []
+    for i, d in enumerate(defs):
+        where = f"[{i}]"
+        if not isinstance(d, dict):
+            problems.append(f"{where} is {type(d).__name__}, not an object")
+            continue
+        name = d.get("name")
+        if name:
+            where = f"[{i}] ({name})"
+        if not str(d.get("url") or "").strip():
+            problems.append(f"{where} has no \"url\"")
+        m = d.get("mapping")
+        if m is None:
+            problems.append(f"{where} has no \"mapping\" — is this a list of hosts "
+                            f"rather than a list of sources?")
+            continue
+        if not isinstance(m, dict) or not m:
+            problems.append(f"{where} \"mapping\" must be a non-empty object")
+            continue
+        if not (m.get("server") or m.get("url")):
+            problems.append(f"{where} \"mapping\" needs a \"server\" (or \"url\") entry, "
+                            f"got: {', '.join(sorted(m.keys()))}")
+        for target, spec in m.items():
+            if not isinstance(spec, dict) or not ("field" in spec or "value" in spec):
+                problems.append(f'{where} mapping.{target} must be '
+                                f'{{"field": "..."}} or {{"value": "..."}}')
+    if problems:
+        raise ValueError("\n".join(["  - " + p for p in problems]) + "\n\n" + SOURCE_DEF_EXAMPLE)
+
+
 def fetch_source_defs(url):
     """Fetch a URL that returns a JSON list of source definitions, the same way
     the dashboard's "add from URL" button does. A bare dict is treated as a
@@ -271,11 +325,11 @@ def fetch_source_defs(url):
     if isinstance(data, dict):
         data = [data]
     if not isinstance(data, list):
-        raise ValueError("url did not return a JSON list of sources")
-    defs = [s for s in data if isinstance(s, dict) and s.get("url")]
-    if not defs:
-        raise ValueError("no usable source definitions (each needs a 'url')")
-    return defs
+        raise ValueError("url did not return a JSON list.\n\n" + SOURCE_DEF_EXAMPLE)
+    if not data:
+        raise ValueError("url returned an empty list.\n\n" + SOURCE_DEF_EXAMPLE)
+    validate_source_defs(data)
+    return data
 
 
 def add_sources_from_url(url):
@@ -2169,13 +2223,13 @@ async def handle_settings_import(request):
     if not url:
         return web.json_response({"error": "url required"}, status=400)
     try:
-        text = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: requests.get(url, timeout=20).text)
-        data = json.loads(text)
+        data = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: fetch_source_defs(url))
+    except ValueError as ex:
+        # shape problems: say what we expected instead of silently importing junk
+        return web.json_response({"error": str(ex)}, status=400)
     except Exception as ex:
         return web.json_response({"error": f"fetch/parse failed: {ex}"}, status=400)
-    if not isinstance(data, list):
-        return web.json_response({"error": "url did not return a JSON list of sources"}, status=400)
     return web.json_response({"sources": data})
 
 
