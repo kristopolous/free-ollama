@@ -5506,7 +5506,7 @@ def banner():
  ll       DD  dD   yY     VvvV   aA  Aa   ll
  llama~  DDDDd"   yY       VV   aA    Aa  llama~
  || ||               v{VERSION}               || ||
- '' ''               dibatag              '' ''
+ '' ''               dibatag               '' ''
 """)
 
 def main():
