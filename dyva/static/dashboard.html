@@ -203,6 +203,11 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-2)}
 input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-3) 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--field-bg);color:var(--text);font-size:var(--fs-md);outline:none;font-family:var(--font-mono)}
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:var(--border-focus)}
+.filter-row{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3);flex-shrink:0}
+.filter-row #modelFilter{margin-bottom:0;flex:1 1 auto;min-width:0;width:auto}
+.use-btn{flex-shrink:0;padding:var(--sp-2) 14px;font-size:var(--fs-sm);background:var(--surface-hover);color:var(--text-2);border:1px solid var(--border-strong)}
+.use-btn:hover{background:var(--accent-bg);color:var(--text)}
+.use-btn:disabled{opacity:.4;background:var(--surface-hover);color:var(--text-dim)}
 #modelFilter{margin-bottom:var(--sp-3);flex-shrink:0}
 textarea{resize:vertical;min-height:64px}
 button{background:var(--btn-bg);color:var(--text);border:none;border-radius:var(--r-md);padding:10px var(--sp-6);font-size:var(--fs-lg);cursor:pointer}
@@ -213,9 +218,9 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .messages{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);height:46vh;overflow-y:auto;padding:.75em;margin-bottom:.75em}
 .msg{margin-bottom:.75em}
 .msg .role{font-size:var(--fs-2xs);color:var(--text-dim);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);margin-bottom:.25em;display:flex;align-items:center;gap:.4em;position:relative}
-.msg .actions{display:inline-flex;align-items:center;gap:.2em;height:.75rem;overflow:hidden;opacity:0;pointer-events:none}
+.msg .actions{display:inline-flex;align-items:center;gap:.15em;height:.75rem;overflow:visible;opacity:0;pointer-events:none}
 .msg:hover .actions{opacity:1;pointer-events:auto}
-.msg .actions .act{cursor:pointer;color:var(--accent);font-size:var(--fs-3xs);padding:0 3px;border-radius:3px;user-select:none;line-height:1;height:1em;display:inline-flex;align-items:center}
+.msg .actions .act{cursor:pointer;color:var(--accent);font-size:1rem;line-height:1;height:1.5rem;min-width:1.5rem;margin:-.375rem 0;padding:0 4px;border-radius:var(--r-sm);user-select:none;display:inline-flex;align-items:center;justify-content:center}
 .msg .actions .act:hover{background:var(--accent-bg-active)}
 .msg .editbox{width:100%;min-height:3em;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:.5em;font-size:var(--fs-md);font-family:var(--font-mono);outline:none;resize:vertical}
 .msg.user .role{color:var(--accent)}
@@ -537,7 +542,10 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <button type="button" class="htab active" data-mpane="text">Text</button>
 <button type="button" class="htab" data-mpane="image">Image</button>
 </div>
+<div class="filter-row">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
+</div>
 <div id="mpane-text">
 <div id="modelList" class="modellist"></div>
 </div>
@@ -895,7 +903,25 @@ document.getElementById('activityBtn').addEventListener('click',function(e){e.st
 document.addEventListener('keydown',function(e){if(e.key==='Escape')actPop.classList.remove('open')});
 </script>
 <script>
+function useFilterModel(){
+  var q=document.getElementById('modelFilter').value.trim()||_currentModel||'';
+  if(!q)return;
+  var el=document.getElementById('chatModel');
+  if(!el)return;
+  el.value=q;
+  try{el.dispatchEvent(new Event('input',{bubbles:true}))}catch(e){}   // refresh the server count
+  location.hash='chat';
+}
+document.getElementById('modelUse').addEventListener('click',useFilterModel);
+document.getElementById('modelFilter').addEventListener('keydown',function(e){
+  if(e.key==='Enter'){e.preventDefault();useFilterModel()}
+});
+function refreshUseBtn(){
+  var b=document.getElementById('modelUse');
+  if(b)b.disabled=!(document.getElementById('modelFilter').value.trim()||_currentModel);
+}
 function filterModels(){
+  refreshUseBtn();
   var q=document.getElementById('modelFilter').value.toLowerCase();
   document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=el.getAttribute('data-name').toLowerCase().includes(q)?'':'none'});
   // the same query re-renders the Hosts card panes from the full arrays, so it
@@ -1024,6 +1050,7 @@ document.getElementById('serverroom').addEventListener('click',function(e){
   var el=e.target.closest('.modellist .model-item[data-name]');if(!el)return;
   document.querySelectorAll('.modellist .model-item').forEach(function(x){x.style.background=''});
   el.style.background='var(--accent-bg-active)';_currentModel=el.getAttribute('data-name');
+  refreshUseBtn();
   var hosts=(modelHosts[_currentModel]||[]).slice().sort(function(a,b){
     var ta=hostChecked[a]?Date.parse(hostChecked[a]):NaN,tb=hostChecked[b]?Date.parse(hostChecked[b]):NaN;
     if(isNaN(ta))ta=-Infinity;if(isNaN(tb))tb=-Infinity;
@@ -1038,6 +1065,15 @@ loadDashboard();
 </script>
 <script>
 var chatLog=document.getElementById('chatMessages');
+// Autoscroll only while the reader is parked at the bottom. The flag has to be
+// tracked from scroll events rather than measured at append time: appending
+// grows scrollHeight, so a "are we at the bottom?" check made afterwards is
+// always false and would disable itself. Appending doesn't fire scroll, so the
+// flag still reflects the last thing the reader actually did.
+var _stickBottom=true;
+function chatAtBottom(){return chatLog.scrollHeight-chatLog.scrollTop-chatLog.clientHeight<=40}
+function scrollChat(force){if(force||_stickBottom){_stickBottom=true;chatLog.scrollTop=chatLog.scrollHeight}}
+chatLog.addEventListener('scroll',function(){_stickBottom=chatAtBottom()});
 // the server's host-diagnostic marker; sending it as a message asks dyva which
 // host/model it *would* use instead of running a completion
 var DYVA_INFO_TAG='__dyva_info__';
@@ -1327,7 +1363,7 @@ function addMsg(role,text,index){
   var _tstr=fmtMsgTime(_ts);
   if(_tstr){var when=document.createElement('span');when.className='msg-time';when.textContent=_tstr;when.title=fmtWhen(_ts);r.appendChild(when)}
   chatLog.appendChild(d);
-  chatLog.scrollTop=chatLog.scrollHeight;
+  scrollChat();
   return {roleEl:r,bodyEl:b};
 }
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
@@ -1435,7 +1471,7 @@ function paintGen(gen){
   // keep the thinking window pinned to its latest line while it streams
   var tb=gen.bubble.bodyEl.querySelector('.think-body');
   if(tb)tb.scrollTop=tb.scrollHeight;
-  chatLog.scrollTop=chatLog.scrollHeight;
+  scrollChat();
 }
 function highlightBlocks(scope){
   if(!window.hljs)return;
@@ -1530,13 +1566,14 @@ function setAssistantLabel(el,host,fmodel,tps){
   var lbl=el.querySelector('.role-label')||el;
   lbl.textContent=s;
 }
-function newChat(){saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[],documents:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
+function newChat(){_stickBottom=true;saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[],documents:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
 function loadChatById(id){
   closeChatDrawer();
   // Already viewing this chat (e.g. the hashchange fired by saveCurrentChat
   // when a brand-new chat is first persisted). Don't tear it down and
   // re-render — that would wipe a live streaming bubble mid-response.
   if(String(currentChat.id)===String(id))return;
+  _stickBottom=true;
   saveCurrentChat();
   // If this chat is generating in the background, reuse its live object (so
   // appends stay unified); otherwise fetch its full content from the server.
@@ -1592,7 +1629,7 @@ document.getElementById('chatNextBtn').addEventListener('click',function(e){
       var wrap=document.createElement('div');wrap.className='msg system';
       wrap.style.cssText='padding:.4em .8em;font-size:.85em;opacity:.7;text-align:center;font-style:italic';
       var body=document.createElement('div');body.className='body';body.textContent=txt;
-      wrap.appendChild(body);chatLog.appendChild(wrap);chatLog.scrollTop=chatLog.scrollHeight;
+      wrap.appendChild(body);chatLog.appendChild(wrap);scrollChat(true);
       setTimeout(function(){location.reload()},600);
     })
     .catch(function(){location.reload()});
@@ -1709,13 +1746,13 @@ function handleSlashCommand(text){
     var lbl=document.createElement('span');lbl.className='note-cmd';lbl.textContent='/'+cmd;
     var t=document.createElement('div');t.className='note-text';t.innerHTML=mdRender(msg);
     b.appendChild(lbl);b.appendChild(t);d.appendChild(b);
-    chatLog.appendChild(d);chatLog.scrollTop=chatLog.scrollHeight;
+    chatLog.appendChild(d);scrollChat();
     highlightBlocks(t);
     return {set:function(msg2,kind2){
       d.className='msg note'+(kind2?' '+kind2:'');
       t.innerHTML=mdRender(msg2);
       highlightBlocks(t);
-      chatLog.scrollTop=chatLog.scrollHeight;
+      scrollChat();
     }};
   }
   if(cmd==='retitle'){
@@ -1784,6 +1821,7 @@ async function sendChat(){
   if(!currentChat.title)currentChat.title=text.replace(/\s+/g,' ').slice(0,40);
   saveCurrentChat();
   var chatTitle=currentChat.title;
+  _stickBottom=true;          // sending is an explicit "show me the newest"
   addMsg('user',text,currentChat.messages.length-1);
   var bubble=addMsg('assistant','');
   bubble.bodyEl.classList.add('streaming');
@@ -2037,7 +2075,7 @@ function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle
     bubble.bodyEl.removeAttribute('data-stream');
     bubble.bodyEl.innerHTML=thinkHtml(thAll,true)+renderChatText(content);
     highlightBlocks(bubble.bodyEl);
-    chatLog.scrollTop=chatLog.scrollHeight;
+    scrollChat();
   }
   var _fin=splitDocBlocks(content);
   if(_fin.docs.length)syncStreamDocs(genOf(chatId),_fin.docs,true);
@@ -2942,6 +2980,11 @@ function activateTab(name,chatId,pane){
   if(name==='chat'){
     if(!_chatIndexLoaded)loadChatIndex(chatId?function(){loadChatById(chatId)}:null);
     else if(chatId)loadChatById(chatId);
+    // land ready to type. Skipped on phones, where focusing a textarea throws
+    // up the on-screen keyboard over the conversation you just opened.
+    if(!(window.matchMedia&&window.matchMedia('(max-width:640px)').matches)){
+      setTimeout(function(){var i=document.getElementById('chatInput');if(i)i.focus()},0);
+    }
   }
   if(name==='settings'){injectSettingsPwFields();loadSettings();}
   // Lazy-load the image gallery only when its tab is first opened — building a
