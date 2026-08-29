@@ -1319,7 +1319,12 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             # untested ones get probed first, caps refreshed only if needed
             trusted = prio < 0
             if not trusted and not await probe_host(session, host):
+                # Host-wide mark so it isn't re-probed for every other model...
                 mark_unreachable(host)
+                # ...plus a mark against the model actually being asked for, so
+                # looking at that model shows the hosts that failed it. The
+                # sentinel row carries no model name and is invisible per-model.
+                add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
                     f"unreachable: {host}")
                 continue

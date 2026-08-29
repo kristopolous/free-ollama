@@ -1006,7 +1006,8 @@ function renderHostPanes(){
   var q=document.getElementById('modelFilter').value.toLowerCase();
   var last=document.getElementById('lastList');last.innerHTML='';
   var lm=q?_hostData.last.filter(function(e){return ((e.host||'')+' '+(e.model||'')).toLowerCase().indexOf(q)>=0}):_hostData.last;
-  if(!lm.length){last.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">None</div>'}
+  if(!lm.length){last.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">'
+    +(q&&_hostData.last.length?'None matching the filter':'None')+'</div>'}
   else lm.forEach(function(e){last.appendChild(hostRow(e.host,e.model,'next-host?model='+encodeURIComponent(e.model||'')))});
   _setCount('cnt-last',lm.length);
   renderKeyPane('goodList','goodMore','cnt-good',_hostData.good,q,true);
