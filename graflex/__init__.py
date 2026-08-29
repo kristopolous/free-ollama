@@ -22,7 +22,7 @@ CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
-CLASSIFIER_FILE = os.path.join(os.path.dirname(__file__), os.pardir, "dyva", "model-classifier.json")
+CLASSIFIER_FILE = os.path.join(os.path.dirname(__file__), os.pardir, "graflex", "model-classifier.json")
 
 
 def _cache_file(name, suffix):
@@ -33,7 +33,7 @@ TIMEOUT = 60
 BACKOFF = 15
 MAX_BACKOFF = 300
 SLEEP_DEFAULT = 4
-STATS_EVERY = 250
+STATS_EVERY = 50
 
 
 def _clean_cookie(value):
@@ -161,6 +161,9 @@ def _model_name(model):
     return ""
 
 
+MODEL_EXTS = (".safetensors", ".sft", ".ckpt", ".pth", ".pt", ".bin", ".gguf", ".onnx")
+
+
 def _filter_models(models):
     return [m for m in models if not _model_name(m).endswith(":cloud")]
 
@@ -187,18 +190,24 @@ async def _comfyui_model_tree(session, base_url, timeout=TIMEOUT, workers=8):
     host doesn't expose a usable /models index (older ComfyUI)."""
     import urllib.parse
 
-    try:
-        resp = await asyncio.wait_for(
-            session.get(f"{base_url}models", allow_redirects=False), timeout=timeout
-        )
-        if resp.status != 200:
+    prefix = None
+    cats = None
+    for pfx in ("", "api/"):
+        try:
+            resp = await asyncio.wait_for(
+                session.get(f"{base_url}{pfx}models", allow_redirects=False), timeout=timeout
+            )
+            if resp.status != 200:
+                await resp.release()
+                continue
+            got = await resp.json()
             await resp.release()
-            return None
-        cats = await resp.json()
-        await resp.release()
-    except Exception:
-        return None
-    if not isinstance(cats, list) or not cats:
+        except Exception:
+            continue
+        if isinstance(got, list) and got:
+            prefix, cats = pfx, got
+            break
+    if cats is None:
         return None
     cats = [c for c in cats if isinstance(c, str) and c]
 
@@ -207,7 +216,7 @@ async def _comfyui_model_tree(session, base_url, timeout=TIMEOUT, workers=8):
     async def list_folder(cat):
         async with sem:
             try:
-                url = f"{base_url}models/{urllib.parse.quote(cat)}"
+                url = f"{base_url}{prefix}models/{urllib.parse.quote(cat)}"
                 r = await asyncio.wait_for(session.get(url, allow_redirects=False), timeout=timeout)
                 if r.status != 200:
                     await r.release()
@@ -218,11 +227,10 @@ async def _comfyui_model_tree(session, base_url, timeout=TIMEOUT, workers=8):
                 return []
             if not isinstance(files, list):
                 return []
-            model_exts = (".safetensors", ".pth", ".gguf")
             return [
                 f"{cat}/{f}".replace("\\", "/")
                 for f in files
-                if isinstance(f, str) and f.lower().endswith(model_exts)
+                if isinstance(f, str) and f.lower().endswith(MODEL_EXTS)
             ]
 
     folders = await asyncio.gather(*(list_folder(c) for c in cats))
@@ -386,9 +394,8 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 elif service == "comfyui":
                     data = await resp.json()
                     await resp.release()
-                    model_exts = (".safetensors", ".pth", ".gguf")
                     raw = data if isinstance(data, list) else []
-                    models = _filter_models([m for m in raw if isinstance(m, str) and m.lower().endswith(model_exts)])
+                    models = _filter_models([m for m in raw if isinstance(m, str) and m.lower().endswith(MODEL_EXTS)])
                     tree = await _comfyui_model_tree(session, base_url, timeout=timeout)
                     if tree:
                         models = _filter_models(tree)
@@ -404,6 +411,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                             "service": service,
                             "url": base_url,
                             "models": models,
+                            "model_tree": False,
                             "checked": datetime.now(timezone.utc).isoformat(),
                         }
                     try:
@@ -1149,7 +1157,13 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                     working.append(result)
                 working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
                 _save_json_atomic(working_file, working)
-                log.info(f"+ {entry['host']}: {len(result['models'])} models")
+                note = ""
+                if service == "comfyui" and not result["models"]:
+                    # "0 models" is ambiguous on its own: no index at all reads
+                    # very differently from an index that listed nothing usable
+                    note = (" (index listed no model files)" if result.get("model_tree")
+                            else " (no /models index; /models/checkpoints was empty)")
+                log.info(f"+ {entry['host']}: {len(result['models'])} models{note}")
                 ok = True
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
