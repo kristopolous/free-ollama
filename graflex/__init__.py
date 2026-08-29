@@ -852,6 +852,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
 
         start = time.time()
         done_reqs = 0
+        skipped_reqs = 0
         for country, port in combos:
             qparts = [base_query]
             if port:
@@ -872,6 +873,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                         if not dry:
                             log.info(f"  skip page {page} (already fetched)")
                         done_reqs += 1
+                        skipped_reqs += 1
                         continue
 
                 hosts = _fetch_shodan(dry, svc, combined, page=page, run_ts=run_ts, curlify=curlify, label=label)
@@ -892,7 +894,8 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 if not dry:
                     _save_json(hosts_file, pool)
                     elapsed = time.time() - start
-                    eta = elapsed * (total_reqs / done_reqs) - elapsed
+                    worked = done_reqs - skipped_reqs
+                    eta = elapsed * (total_reqs - done_reqs) / worked
                     log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}")
 
                 if not dry and not curlify and done_reqs < total_reqs:
@@ -969,6 +972,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         combos = fid_combos + combo_grid
 
         start = time.time()
+        skipped_combos = 0
         for i, (base_query, country, port, server, fid) in enumerate(combos):
             qparts = [base_query] if base_query else []
             if not qparts:
@@ -991,7 +995,8 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 out_path = os.path.join("/tmp/graflex", f"fofa-results-{label}-{run_ts}.txt")
                 if os.path.exists(out_path):
                     if not dry:
-                        log.info(f"  skip (already fetched)")
+                        log.info(f"  skip ({out_path})")
+                    skipped_combos += 1
                     continue
 
             svc = service or name or "unknown"
@@ -1018,8 +1023,9 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 _save_json(hosts_file, pool)
 
                 done = i + 1
+                worked = done - skipped_combos
                 elapsed = time.time() - start
-                eta = elapsed * (len(combos) / done) - elapsed
+                eta = elapsed * (len(combos) - done) / worked
                 log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}\n")
 
             if i < len(combos) - 1 and not dry and not curlify:
