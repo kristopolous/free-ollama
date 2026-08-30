@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ## Method 1: Liberated Infrastructure
 
-**Dyva** is a managed proxy that you can connect to with any OpenAI, Ollama, ComfyUI, llama.cpp, vllm, or a1111 compatible client (graflex finds the open ones). 
+**Dyva** is a managed proxy that you can connect to with any OpenAI, Ollama, ComfyUI, SGLang, LM Studio, llama.cpp, vllm, or a1111 compatible client (graflex finds the open ones). 
 
 It will cycle through and find working hosts automatically. 
 
