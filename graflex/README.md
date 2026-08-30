@@ -40,6 +40,9 @@ graflex -s llama.cpp -a fetch-check
 # vLLM hosts (uvicorn default response on port 8000)
 graflex -s vllm -a fetch-check
 
+# LM Studio hosts (default response body on port 1234)
+graflex -s lmstudio -a fetch-check
+
 # Custom FOFA query — saves results to ollama-hosts.json
 graflex -q 'body="ollama"' -a fetch -n ollama -p 11434
 
@@ -109,7 +112,7 @@ method scrapes FOFA. Differences from the FOFA flow:
 `graflex.sh` wraps the fetch command with curated defaults per service:
 
 ```bash
-# Fetch hosts for ollama (or comfyui / a1111 / vllm / llama.cpp / gradio)
+# Fetch hosts for ollama (or comfyui / a1111 / vllm / llama.cpp / lmstudio / gradio)
 ./graflex.sh ollama
 ```
 
@@ -125,6 +128,7 @@ Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 1
 | `ollama` | 11434 | `/api/tags` |
 | `llama.cpp` | 8080 | `/v1/models` |
 | `vllm` | 8000 | `/v1/models` |
+| `lmstudio` | 1234 | `/v1/models` |
 
 ## Named queries
 
@@ -187,6 +191,11 @@ For `vllm`, FOFA discovers candidates by matching the uvicorn default response
 (`{"detail": "Not Found"}`) on port 8000. Each candidate is then probed at
 `/v1/models` — most won't respond (hit rate is low), but the ones that do
 reveal their loaded models in the same OpenAI-compatible format as `llama.cpp`.
+
+For `lmstudio`, FOFA discovers candidates by matching LM Studio's default
+response body (`Unexpected endpoint or method. (GET /)`) on port 1234. Each
+candidate is then probed at `/v1/models`, which returns loaded models in the
+same OpenAI-compatible format (`data[].id`) as `llama.cpp` and `vllm`.
 
 For `llama.cpp`, hosts are also probed at `/props`; a `401` means the instance
 is locked down with an API key and is rejected (`auth required`).
@@ -257,7 +266,7 @@ warning.
 
 | Flag | Description |
 |------|-------------|
-| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`) |
+| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`, `lmstudio`) |
 | `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `check-working`, `fetch-check`, or `classify` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging requests) |

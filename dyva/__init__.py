@@ -379,6 +379,10 @@ def source_cli(argv):
     cmd = str(argv[0]).lower()
     if cmd == "list":
         srcs = _stored_sources()
+        print(f"{len(BUILTIN_SOURCES)} built-in source{'' if len(BUILTIN_SOURCES) == 1 else 's'}:")
+        for s in BUILTIN_SOURCES:
+            print(_source_line(s))
+        print()
         if not srcs:
             print("No additional sources configured.")
             return 0
@@ -475,6 +479,22 @@ async def _remove_activity_listener(q):
             _activity_queues.remove(q)
 
 
+BUILTIN_SOURCES = [
+    {
+        "name": "forrany",
+        "url": "https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json",
+    },
+    {
+        "name": "spider",
+        "url": "https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json",
+    },
+    {
+        "name": "happyshua",
+        "url": "https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv",
+    },
+]
+
+
 def refresh_cache(source=None):
     global _servers_cache
     _servers_cache = None
@@ -487,9 +507,7 @@ def refresh_cache(source=None):
     downloads = [
        (_normalize_url(s.get("url")), f"{_db}-extra-{_source_slug(s.get('name'))}.tmp", str(s.get('name') or '')) for s in extra_sources
     ] + [
-       ( 'https://raw.githubusercontent.com/forrany/Awesome-Ollama-Server/refs/heads/main/public/data.json', f"{_db}-forrany.tmp", 'forrany' ),
-       ( 'https://raw.githubusercontent.com/PuddinCat/OllamaSpider/refs/heads/main/url_models.json', f"{_db}-spider.tmp", 'spider' ),
-       ( 'https://raw.githubusercontent.com/happyshua/ollamalist/refs/heads/main/output_with_models.csv', f"{_db}-happyshua.tmp", 'happyshua' ),
+       ( _normalize_url(s["url"]), f"{_db}-{_source_slug(s['name'])}.tmp", s["name"] ) for s in BUILTIN_SOURCES
     ]
     if source:
         want = _source_slug(source)

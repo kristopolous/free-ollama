@@ -101,6 +101,13 @@ ENDL
     COUNTRIES="US,CN,DE,RU,IN,FR,NL,SG,HK,JP,FI,BR,IE,VN,CA,AU,SE,ID,TW,IT,DE,KZ,TH,ES,PL,UA,TR,KR,FI,GB"
     ;;
 
+  lmstudio)
+    QUERY='body="Unexpected endpoint or method. (GET /)"'
+    PORTS="1234,80,443,8080,8000,12345"
+    SERVERS="nginx,nginx/1.24.0 (Ubuntu)"
+    COUNTRIES="US,CN,TR,KR,RU,TH,RO,TW,DE,HK,JP,BR,VN,CA,FR,ES,IN,SG,CL,IT,NL,GB"
+    ;;
+
   gradio)
     QUERY='icon_hash=="55115683"'
     SITE=fofa
@@ -122,7 +129,7 @@ ENDL
     ;;
 
   *)
-    echo "Usage: $0 [ollama|comfyui|a1111|vllm|llama.cpp|gradio|combine]" >&2
+    echo "Usage: $0 [ollama|comfyui|a1111|vllm|llama.cpp|lmstudio|gradio|combine]" >&2
     exit 1
     ;;
 esac

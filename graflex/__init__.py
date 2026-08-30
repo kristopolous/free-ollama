@@ -80,6 +80,11 @@ SERVICE_CONFIG = {
         "fofa_query": '{"detail": "Not Found"} && server=="uvicorn"',
         "check_path": "/v1/models",
     },
+    "lmstudio": {
+        "port": 1234,
+        "fofa_query": 'body="Unexpected endpoint or method. (GET /)"',
+        "check_path": "/v1/models",
+    },
 }
 
 # Named searches aren't services: they have a FOFA query but no probe/check
@@ -482,6 +487,29 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     if version:
                         result["version"] = version
                     return result
+                elif service == "lmstudio":
+                    data = await resp.json()
+                    await resp.release()
+                    items = data.get("data", []) if isinstance(data, dict) else []
+                    models = []
+                    seen = set()
+                    for m in items:
+                        if not isinstance(m, dict):
+                            continue
+                        name = m.get("id", "")
+                        if name and name not in seen:
+                            seen.add(name)
+                            models.append(name)
+                    models = _filter_models(models)
+                    if not models:
+                        last_error = {"error": "no real models"}
+                        break
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
                 else:
                     data = await resp.json()
                     await resp.release()
