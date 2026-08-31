@@ -308,7 +308,7 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
   #chat.panel.active{min-height:0}
   body.chat{height:auto;min-height:100vh;overflow-y:scroll}
   .chat-layout{max-height:calc(100vh - 12rem);gap:0}
-  .chat-menu-btn{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:var(--ctl-h);height:var(--ctl-h);padding:0;font-size:1rem}
+  .chat-menu-btn{display:flex;align-items:center;justify-content:center;flex-shrink:0;min-width:var(--ctl-h);height:var(--ctl-h);padding:.5rem;font-size:1rem;box-sizing:border-box}
   .chat-sidebar{position:fixed;top:0;bottom:0;left:0;width:240px;max-width:80vw;z-index:100;border-radius:0;border-right:1px solid var(--border);box-shadow:var(--shadow-drawer);transform:translateX(-100%);transition:transform .2s ease}
   .chat-sidebar.open{transform:translateX(0)}
   .chat-backdrop{position:fixed;inset:0;background:var(--scrim);z-index:99}
@@ -1495,7 +1495,7 @@ var RUMMAGE_MSGS=[
   "Your call is very important to us and will be answered in the order received",
   "Someone's gotta be home ... let's find out!",
   "It's gotta be around here somewhere.",
-  "[ music playing in background ]",
+  "[music playing in background]",
   "First a word from our sponsors...",
   "It's probably nice outside right now...",
   "Checking the card catalog.",
