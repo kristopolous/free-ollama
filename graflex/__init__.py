@@ -110,6 +110,35 @@ def _save_json(path, data):
         json.dump(data, f, indent=2)
 
 
+def _save_check_snapshot(host, port, data):
+    """Cache a raw API response (e.g. ollama /api/tags) to
+    /tmp/graflex/tags/check-{tag}-{date}.json following the same /tmp/graflex
+    dir and %Y%m%d%H%M%S date convention as the fetch result files. The
+    filename uses the _tag() md5 hash of the full host:port so the port can't
+    collide; the real host (with port), a unix check_time, and the raw payload
+    are all stored in a super-structure inside the file. The date is the active
+    session run_ts when resuming (-i) so already-saved hosts are skippable."""
+    from datetime import datetime, timezone
+    hostport = f"{host}:{port}"
+    ident = _tag(hostport)
+    date = _RUN_TS or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    tmp_dir = "/tmp/graflex/tags"
+    os.makedirs(tmp_dir, exist_ok=True)
+    with open(os.path.join(tmp_dir, f"check-{ident}-{date}.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "host": hostport,
+            "check_time": time.time(),
+            "payload": data,
+        }, f, indent=2)
+
+
+def _check_snapshot_exists(host, port, run_ts):
+    """True if a snapshot for host:port was already saved in this session, so a
+    resumed -i run skips hosts it already checked."""
+    ident = _tag(f"{host}:{port}")
+    return os.path.exists(os.path.join("/tmp/graflex/tags", f"check-{ident}-{run_ts}.json"))
+
+
 def _save_json_atomic(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
@@ -320,6 +349,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 elif service == "ollama":
                     data = await resp.json()
                     await resp.release()
+                    _save_check_snapshot(host, port, data)
                     models = _filter_models([m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)])
                     model = models[0] if models else None
                     if model:
@@ -1112,8 +1142,12 @@ async def _is_network_reachable(session, check_hosts=None, timeout=10):
     return False
 
 
-async def _check_all(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10):
+async def _check_all(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10, session=None):
     from datetime import datetime, timezone
+
+    global _RUN_TS
+    if session:
+        _RUN_TS = session
 
     if name is None:
         name = service
@@ -1148,6 +1182,20 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values() if n.get("result") == "error")
 
     to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
+    if session:
+        resumed = 0
+        kept = []
+        for h in to_check:
+            host_port = h["host"].split(":")
+            hh = host_port[0]
+            pp = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+            if service == "ollama" and _check_snapshot_exists(hh, pp, session):
+                resumed += 1
+                continue
+            kept.append(h)
+        to_check = kept
+        if resumed:
+            log.info(f"check: skipping {resumed} hosts already snapshot in session {session}")
     if not to_check:
         log.info(f"check: all {len(hosts)} hosts already have model data")
         existing_working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
@@ -1232,14 +1280,18 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         log.info(f"check: {len(to_check)} checked, {success} working, {failed} notworking")
 
 
-def check(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10):
-    asyncio.run(_check_all(service, name, check_timeout, check_new, check_all, workers))
+def check(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10, session=None):
+    asyncio.run(_check_all(service, name, check_timeout, check_new, check_all, workers, session))
 
 
-async def _check_working(service, name=None, check_timeout=60, workers=10):
+async def _check_working(service, name=None, check_timeout=60, workers=10, session=None):
     """Re-survey the currently-working hosts: refresh their model list (people
     keep downloading new models) and prune hosts that no longer respond."""
     from datetime import datetime, timezone
+
+    global _RUN_TS
+    if session:
+        _RUN_TS = session
 
     if name is None:
         name = service
@@ -1252,6 +1304,24 @@ async def _check_working(service, name=None, check_timeout=60, workers=10):
     working = [w for w in working if w.get("service") == service]
     if not working:
         log.warning(f"check-working: no working {service or '?'} hosts to rescan")
+        return
+
+    if session:
+        kept = []
+        skipped = 0
+        for w in working:
+            hp = w["host"].split(":")
+            hh = hp[0]
+            pp = int(hp[1]) if len(hp) > 1 else SERVICE_CONFIG[service]["port"]
+            if service == "ollama" and _check_snapshot_exists(hh, pp, session):
+                skipped += 1
+                continue
+            kept.append(w)
+        working = kept
+        if skipped:
+            log.info(f"check-working: skipping {skipped} hosts already snapshot in session {session}")
+    if not working:
+        log.info("check-working: all hosts already snapshot in this session")
         return
 
     log.info(f"check-working: rescanning {len(working)} working hosts to refresh models / prune dead")
@@ -1313,8 +1383,8 @@ async def _check_working(service, name=None, check_timeout=60, workers=10):
     log.info(f"check-working: {len(working)} rescanned, {refreshed} still working (models refreshed), {removed} pruned")
 
 
-def check_working(service, name=None, check_timeout=60, workers=10):
-    asyncio.run(_check_working(service, name, check_timeout, workers))
+def check_working(service, name=None, check_timeout=60, workers=10, session=None):
+    asyncio.run(_check_working(service, name, check_timeout, workers, session))
 
 
 def _load_classifier():
@@ -1435,10 +1505,12 @@ def main():
     if args.action == "check-working":
         log.info("--- check-working ---")
         try:
-            check_working(service=args.service, name=args.name, check_timeout=args.check_timeout, workers=args.workers)
+            check_working(service=args.service, name=args.name, check_timeout=args.check_timeout, workers=args.workers, session=args.session)
         except KeyboardInterrupt:
             base = f"graflex -s {args.service}" if args.service else f"graflex -n {args.name or 'image-gen'}"
-            log.warning(f"\ninterrupted — refreshed hosts are saved; rerun {base} -a check-working to continue")
+            ts = _RUN_TS or args.session
+            hint = f"{base} -a check-working{f' -i {ts}' if ts else ''}"
+            log.warning(f"\ninterrupted — tag snapshots are saved; resume with: {hint}")
             sys.exit(130)
         return
 
@@ -1448,7 +1520,7 @@ def main():
             if step == "fetch":
                 fetch(dry=args.dry, curlify=args.curlify, service=args.service, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
             elif step == "check":
-                check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers)
+                check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers, session=args.session)
             elif step == "classify":
                 classify(name=args.name)
     except SystemExit as e:
@@ -1460,7 +1532,9 @@ def main():
             hint = f"{base} -a fetch{f' -i {ts}' if ts else ''}"
             log.warning(f"\ninterrupted — already-fetched pages are saved; resume with: {hint}")
         elif step == "check":
-            log.warning(f"\ninterrupted — checked hosts are saved; rerun {base} -a check (or -a check-all) to continue")
+            ts = _RUN_TS or args.session
+            hint = f"{base} -a check{f' -i {ts}' if ts else ''}"
+            log.warning(f"\ninterrupted — tag snapshots are saved; resume with: {hint}")
         else:
             log.warning("\ninterrupted")
         sys.exit(130)

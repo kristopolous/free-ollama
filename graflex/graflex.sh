@@ -12,7 +12,10 @@ source .env
 
 case "$SERVICE" in
   combine)
-    jq -s 'add' ~/.cache/free-ollama/*-working.json | ssh $_SERVER "cat > $_SERVER_PATH"
+    DATE=$(date +%Y%m%d%H%M%S)
+    COMBINED_JSON=$(jq -s 'add' ~/.cache/free-ollama/*-working.json)
+    echo "$COMBINED_JSON" | ssh $_SERVER "cat > $_SERVER_PATH"
+    echo "$COMBINED_JSON" | ssh $_SERVER "cat > ${_SERVER_PATH%.json}-$DATE.json"
     source .venv/bin/activate
     ./dyva.py --refresh $_SOURCE
     exit
