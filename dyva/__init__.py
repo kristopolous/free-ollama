@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import base64
 import datetime
 import fnmatch
 import csv
@@ -936,6 +937,86 @@ def canon_pattern(pattern):
     '*', '**' and '' all become '' (= any). Safe because match_model() wraps
     patterns in *...* anyway, so edge stars never change the match set."""
     return (pattern or "").strip().lower().strip("*").strip()
+
+
+_DATA_URL_RE = re.compile(r"^data:([^;,]*?)(;base64)?,(.*)$", re.S)
+
+
+def _part_text(part):
+    """The text a content part carries, whichever spelling it uses."""
+    for k in ("text", "input_text"):
+        v = part.get(k)
+        if isinstance(v, str):
+            return v
+    return ""
+
+
+def _flatten_content(messages):
+    """Collapse OpenAI-style content *arrays* into Ollama's native shape.
+
+    Ollama declares messages[].content as a Go string, so forwarding a
+    multimodal array verbatim earns a 400 from every host in the race:
+      json: cannot unmarshal array into Go struct field
+      ChatRequest.messages.content of type string
+    Text parts are joined into content; inline data-URL images move to the
+    sibling `images` list as bare base64, which is where Ollama looks for them
+    (and is what needs_caps() reads to require a vision model).
+    """
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict) or not isinstance(m.get("content"), list):
+            out.append(m)
+            continue
+        m = dict(m)
+        texts = []
+        images = list(m.get("images") or [])
+        for part in m["content"]:
+            if isinstance(part, str):
+                texts.append(part)
+                continue
+            if not isinstance(part, dict):
+                continue
+            t = part.get("type") or ""
+            if t in ("text", "input_text") or (not t and "text" in part):
+                texts.append(_part_text(part))
+            elif t in ("image_url", "input_image", "image"):
+                url = part.get("image_url") or part.get("url") or ""
+                if isinstance(url, dict):
+                    url = url.get("url") or ""
+                mt = _DATA_URL_RE.match(url) if isinstance(url, str) else None
+                if mt and mt.group(2):
+                    images.append(mt.group(3))
+                elif url:
+                    # A remote image we can't inline: say it exists rather than
+                    # dropping it silently.
+                    texts.append(f"[image: {url}]")
+            elif t == "file":
+                f = part.get("file") if isinstance(part.get("file"), dict) else {}
+                name = f.get("filename") or part.get("filename") or "file"
+                data = f.get("file_data") or part.get("file_data") or ""
+                raw = ""
+                mt = _DATA_URL_RE.match(data) if isinstance(data, str) else None
+                if mt and mt.group(2):
+                    try:
+                        raw = base64.b64decode(mt.group(3)).decode("utf-8")
+                    except (ValueError, UnicodeDecodeError):
+                        raw = ""
+                elif isinstance(data, str) and data and not mt:
+                    raw = data
+                if raw:
+                    texts.append(f"--- File: {name} ---\n{raw}")
+                else:
+                    texts.append(f"[attached file: {name} (contents not text)]")
+            else:
+                # Unknown part type (audio, refusal, ...): keep any text on it.
+                extra = _part_text(part)
+                if extra:
+                    texts.append(extra)
+        m["content"] = "\n".join(t for t in texts if t)
+        if images:
+            m["images"] = images
+        out.append(m)
+    return out
 
 
 def needs_caps(messages):
@@ -2029,6 +2110,11 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
         model_list = model_in.split('/')
     else:
         model_list = [model_in]
+
+    # Do this before needs_caps(): flattening lifts inline images out to the
+    # `images` list, which is the signal needs_caps() uses to require vision.
+    if isinstance(opayload.get("messages"), list):
+        opayload = dict(opayload, messages=_flatten_content(opayload["messages"]))
 
     req_caps = needs_caps(opayload.get("messages", []))
     if opayload.get("tools"):

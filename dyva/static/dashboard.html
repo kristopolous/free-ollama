@@ -207,6 +207,8 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 .worker-card .worker-meta{font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap}
 .worker-stop{background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);padding:4px 10px;font-size:var(--fs-sm);cursor:pointer}
 .worker-stop:hover{background:var(--accent-bg-active);color:var(--text)}
+.worker-stop[disabled]{opacity:.6;cursor:default;font-style:italic}
+.worker-stop[disabled]:hover{background:var(--accent-bg);color:var(--text-2)}
 
 label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-2)}
 input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-3) 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--field-bg);color:var(--text);font-size:var(--fs-md);outline:none;font-family:var(--font-mono)}
@@ -1111,8 +1113,15 @@ function agoText(secs){
   if(secs<3600)return Math.floor(secs/60)+'m '+(secs%60|0)+'s';
   return Math.floor(secs/3600)+'h '+(Math.floor(secs%3600/60))+'m';
 }
+// wids with a stop in flight. Kept outside renderWorkers because every
+// snapshot rebuilds the cards from scratch, which would otherwise throw the
+// button's "stopping…" state away a fraction of a second after the click.
+var _stopping={};
 function renderWorkers(workers){
   var c=document.getElementById('workersList'),arr=workers||[];
+  // Forget wids that are gone from the snapshot — that worker stopped.
+  var live={};arr.forEach(function(w){live[w.wid]=1});
+  Object.keys(_stopping).forEach(function(k){if(!live[k])delete _stopping[k]});
   _setCount('cnt-workers',arr.length);
   c.innerHTML='';
   if(!arr.length){c.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">None racing right now</div>';return}
@@ -1125,8 +1134,24 @@ function renderWorkers(workers){
     var body=document.createElement('div');body.className='worker-meta';
     body.textContent='checked '+w.checked+(w.total?' / '+w.total:'');
     card.appendChild(body);
-    var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';stop.textContent='stop';
-    stop.addEventListener('click',function(){fetch('stop-worker?wid='+encodeURIComponent(w.wid)).catch(function(){})});
+    var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
+    // A stop isn't instant — the race has to unwind and the in-flight upstream
+    // request has to be cancelled — so the button latches into "stopping…"
+    // until the worker actually disappears from a snapshot.
+    if(_stopping[w.wid]){stop.textContent='stopping\u2026';stop.disabled=true;}
+    else stop.textContent='stop';
+    stop.addEventListener('click',function(){
+      if(_stopping[w.wid])return;
+      _stopping[w.wid]=Date.now();
+      stop.textContent='stopping\u2026';stop.disabled=true;
+      fetch('stop-worker?wid='+encodeURIComponent(w.wid)).then(function(r){
+        if(!r.ok)throw 0;
+      }).catch(function(){
+        // The request never landed, so nothing is stopping — give the button back.
+        delete _stopping[w.wid];
+        stop.textContent='stop';stop.disabled=false;
+      });
+    });
     card.appendChild(stop);
     c.appendChild(card);
   });
