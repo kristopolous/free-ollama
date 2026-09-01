@@ -2163,7 +2163,16 @@ async def handle_settings_post(request):
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
     if isinstance(body.get("workers"), int) and body["workers"] > 0:
-        WORKER_COUNT = min(body["workers"], 200)
+        new_workers = min(body["workers"], 200)
+        if new_workers != WORKER_COUNT:
+            WORKER_COUNT = new_workers
+            # Resize the global concurrency semaphore live so the new cap takes
+            # effect without a restart. In-flight requests keep their original
+            # semaphore; new ones use the resized value.
+            app = request.app
+            if isinstance(app.get("semaphore"), asyncio.Semaphore):
+                app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)
+            log.info(f"worker count changed to {WORKER_COUNT}")
     if isinstance(body.get("timeout"), int) and body["timeout"] > 0:
         TIMEOUT = min(body["timeout"], 600)
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
