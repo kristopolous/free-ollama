@@ -21,7 +21,7 @@ case "$SERVICE" in
     ;;
 
   combine)
-    DATE=$(date +%Y%m%d%H%M%S)
+    DATE=$(date +%Y%m%d)
     COMBINED_JSON=$(jq -s 'add' ~/.cache/free-ollama/*-working.json)
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > $_SERVER_PATH"
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > ${_SERVER_PATH%.json}-$DATE.json"
