@@ -581,15 +581,15 @@ def _tag(value):
     return hashlib.md5(str(value).encode()).hexdigest()[:8]
 
 
-def _fofa_path(label, run_ts):
-    return os.path.join("/tmp/graflex", run_ts, "fofa", f"{label}.txt")
+def _fofa_path(label, run_ts, svc="any"):
+    return os.path.join("/tmp/graflex", run_ts, "fofa", f"{svc}-{label}.txt")
 
 
-def _shodan_path(label, run_ts):
-    return os.path.join("/tmp/graflex", run_ts, "shodan", f"{label}.txt")
+def _shodan_path(label, run_ts, svc="any"):
+    return os.path.join("/tmp/graflex", run_ts, "shodan", f"{svc}-{label}.txt")
 
 
-def _fetch_web(dry, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, label=""):
+def _fetch_web(dry, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, label="", pname="any"):
     import base64
     import re
     import requests
@@ -628,7 +628,7 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
             resp.raise_for_status()
             body = resp.text.lower()
             if "daily usage limit" in body:
-                out_path = _fofa_path(label, run_ts)
+                out_path = _fofa_path(label, run_ts, pname)
                 if os.path.exists(out_path):
                     os.remove(out_path)
                 log.error(f"daily usage limit hit, resume by using --id {run_ts}")
@@ -695,9 +695,9 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
             log.error(f"FOFA web request failed: {e}")
             return None
 
-    tmp_dir = os.path.dirname(_fofa_path(label, run_ts))
+    tmp_dir = os.path.dirname(_fofa_path(label, run_ts, pname))
     os.makedirs(tmp_dir, exist_ok=True)
-    out_path = _fofa_path(label, run_ts)
+    out_path = _fofa_path(label, run_ts, pname)
     with open(out_path, "w", encoding="utf-8", errors="replace") as f:
         f.write(resp.text)
 
@@ -786,7 +786,7 @@ def _parse_shodan_html(html_path, service):
     return hosts
 
 
-def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=""):
+def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label="", pname="any"):
     import requests
     import curlify as curlify_mod
     from urllib.parse import quote
@@ -866,16 +866,16 @@ def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=
             log.error(f"Shodan request failed: {e}")
             return None
 
-    tmp_dir = os.path.dirname(_shodan_path(label, run_ts))
+    tmp_dir = os.path.dirname(_shodan_path(label, run_ts, pname))
     os.makedirs(tmp_dir, exist_ok=True)
-    out_path = _shodan_path(label, run_ts)
+    out_path = _shodan_path(label, run_ts, pname)
     with open(out_path, "w", encoding="utf-8", errors="replace") as f:
         f.write(resp.text)
 
     return _parse_shodan_html(out_path, svc)
 
 
-def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa"):
+def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa", check_batch_fn=None):
     global _RUN_TS
     hosts_file = _cache_file(name, "hosts")
 
@@ -940,7 +940,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             for page in range(1, SHODAN_PAGES + 1):
                 label = f"{country or 'any'}-{port or 'any'}-p{page}"
                 if session:
-                    out_path = _shodan_path(label, run_ts)
+                    out_path = _shodan_path(label, run_ts, service or name or "any")
                     if os.path.exists(out_path):
                         if not dry:
                             log.info(f"  skip page {page} (already fetched)")
@@ -948,18 +948,20 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                         skipped_reqs += 1
                         continue
 
-                hosts = _fetch_shodan(dry, svc, combined, page=page, run_ts=run_ts, curlify=curlify, label=label)
+                hosts = _fetch_shodan(dry, svc, combined, page=page, run_ts=run_ts, curlify=curlify, label=label, pname=service or name or "any")
                 done_reqs += 1
                 if hosts is None:
                     continue
 
                 fresh = 0
+                fresh_hosts = []
                 for h in hosts:
                     key = f"{h['service']}@{h['host']}"
                     if key not in seen:
                         pool.append(h)
                         seen.add(key)
                         fresh += 1
+                        fresh_hosts.append(h)
                 if hosts and not dry:
                     log.info(f"  {len(hosts)} hosts (+{fresh} new) from {_last_result_file}")
 
@@ -969,6 +971,9 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     worked = done_reqs - skipped_reqs
                     eta = elapsed * (total_reqs - done_reqs) / worked
                     log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}")
+
+                if check_batch_fn and fresh_hosts:
+                    check_batch_fn(fresh_hosts)
 
                 if not dry and not curlify and done_reqs < total_reqs:
                     time.sleep(sleep)
@@ -1064,7 +1069,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
 
             label = f"{_tag(base_query)}-{country or 'any'}-{port or 'any'}-{_tag(server)}-{_tag(fid)}"
             if session:
-                out_path = _fofa_path(label, run_ts)
+                out_path = _fofa_path(label, run_ts, service or name or "any")
                 if os.path.exists(out_path):
                     if not dry:
                         log.info(f"  skip ({out_path})")
@@ -1072,11 +1077,12 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     continue
 
             svc = service or name or "unknown"
-            hosts = _fetch_web(dry, svc, combined, country, port, server, run_ts, curlify=curlify, label=label)
+            hosts = _fetch_web(dry, svc, combined, country, port, server, run_ts, curlify=curlify, label=label, pname=service or name or "any")
             if hosts is None:
                 continue
 
             fresh = 0
+            fresh_hosts = []
             for h in hosts:
                 if fid:
                     h["fid"] = fid
@@ -1086,6 +1092,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     seen.add(key)
                     index[key] = h
                     fresh += 1
+                    fresh_hosts.append(h)
                 elif fid and not index[key].get("fid"):
                     index[key]["fid"] = fid
             if hosts and not dry:
@@ -1099,6 +1106,9 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 elapsed = time.time() - start
                 eta = elapsed * (len(combos) - done) / worked
                 log.info(f"  total: {len(pool)}    eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}\n")
+
+            if check_batch_fn and fresh_hosts:
+                check_batch_fn(fresh_hosts)
 
             if i < len(combos) - 1 and not dry and not curlify:
                 time.sleep(sleep)
@@ -1210,7 +1220,20 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         return
 
     log.info(f"check: {len(to_check)} to check ({len(done)} already done)")
+    await _check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working)
 
+
+async def _check_hosts(hosts, service, working_file, notworking_file, check_timeout=60, workers=10, existing_working=None):
+    """Run the worker-pool probe over an explicit list of host entries and
+    record results to the working/notworking files. Shared by _check_all and
+    the interleaved fetch-check pipeline (which drains a bounded batch of
+    freshly-fetched hosts between page fetches)."""
+    from datetime import datetime, timezone
+
+    if existing_working is None:
+        existing_working = _load_json(working_file)
+
+    to_check = hosts
     sem = asyncio.Semaphore(workers)
     wlock = asyncio.Lock()
     start = time.time()
@@ -1279,7 +1302,8 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             log.info(f"Checked: {completed} | Runtime: {_fmt_duration(elapsed)} | Remaining: {len(to_check) - completed} | ETA: {_fmt_duration(eta)}")
         return ok
 
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
+        session = client
         tasks = [check_one(entry) for entry in to_check]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         success = sum(1 for r in results if r is True)
@@ -1289,6 +1313,50 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
 
 def check(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10, session=None):
     asyncio.run(_check_all(service, name, check_timeout, check_new, check_all, workers, session))
+
+
+def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session=None):
+    """Check an explicit list of host entries (the 'check-new' table, bounded to
+    a single worker-count round during fetch-check). Hosts already recorded in
+    working/notworking, and already-snapshotted hosts when resuming -i, are
+    skipped so only never-tested hosts are probed."""
+    if not hosts:
+        return
+    if name is None:
+        name = service
+    if not service and hosts:
+        service = hosts[0].get("service", "")
+    working_file = _cache_file(name, "working")
+    notworking_file = _cache_file(name, "notworking")
+
+    existing_working = _load_json(working_file)
+    existing_notworking_raw = _load_json(notworking_file)
+    if isinstance(existing_notworking_raw, dict):
+        existing_notworking = existing_notworking_raw
+    elif isinstance(existing_notworking_raw, list):
+        existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
+    else:
+        existing_notworking = {}
+
+    done = set()
+    done.update(f"{h['service']}@{_entry_host(h)}" for h in existing_working)
+    done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values())
+
+    to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
+    if session:
+        kept = []
+        for h in to_check:
+            host_port = h["host"].split(":")
+            hh = host_port[0]
+            pp = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+            if service == "ollama" and _check_snapshot_exists(hh, pp, session):
+                continue
+            kept.append(h)
+        to_check = kept
+    if not to_check:
+        return
+
+    asyncio.run(_check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working))
 
 
 async def _check_working(service, name=None, check_timeout=60, workers=10, session=None):
@@ -1522,24 +1590,44 @@ def main():
         return
 
     try:
-        for step in parts:
-            log.info(f"--- {step} ---")
-            if step == "fetch":
-                fetch(dry=args.dry, curlify=args.curlify, service=args.service, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
-            elif step == "check":
-                check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers, session=args.session)
-            elif step == "classify":
-                classify(name=args.name)
+        if args.action == "fetch-check":
+            log.info("--- fetch-check (interleaved) ---")
+
+            def batch_cb(fresh_hosts):
+                batch = fresh_hosts[:args.workers]
+                log.info(f"  check batch: {len(batch)} new host(s) (interleaved)")
+                check_batch(batch, args.service, args.name, args.check_timeout, args.workers, args.session)
+
+            fetch(dry=args.dry, curlify=args.curlify, service=args.service, query=args.query,
+                  name=args.name, servers=args.servers, ports=args.ports, countries=args.countries,
+                  fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle,
+                  site=args.site, check_batch_fn=batch_cb)
+
+            if not args.dry and not args.curlify:
+                log.info("--- drain remaining new hosts ---")
+                check(service=args.service, name=args.name, check_timeout=args.check_timeout,
+                      check_new=True, check_all=False, workers=args.workers, session=args.session)
+        else:
+            for step in parts:
+                log.info(f"--- {step} ---")
+                if step == "fetch":
+                    fetch(dry=args.dry, curlify=args.curlify, service=args.service, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
+                elif step == "check":
+                    check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers, session=args.session)
+                elif step == "classify":
+                    classify(name=args.name)
     except SystemExit as e:
         sys.exit(e.code)
     except KeyboardInterrupt:
         base = f"graflex -s {args.service}" if args.service else f"graflex -n {args.name or 'image-gen'}"
-        if step == "fetch":
-            ts = _RUN_TS or args.session
+        ts = _RUN_TS or args.session
+        if args.action == "fetch-check":
+            hint = f"{base} -a fetch-check{f' -i {ts}' if ts else ''}"
+            log.warning(f"\ninterrupted — fetched pages and tag snapshots are saved; resume with: {hint}")
+        elif step == "fetch":
             hint = f"{base} -a fetch{f' -i {ts}' if ts else ''}"
             log.warning(f"\ninterrupted — already-fetched pages are saved; resume with: {hint}")
         elif step == "check":
-            ts = _RUN_TS or args.session
             hint = f"{base} -a check{f' -i {ts}' if ts else ''}"
             log.warning(f"\ninterrupted — tag snapshots are saved; resume with: {hint}")
         else:

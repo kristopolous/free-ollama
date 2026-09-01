@@ -151,7 +151,7 @@ svc_args=( --service "$SERVICE" )
 
 set -x
 exec ./graflex.py \
-      --action "fetch" \
+      --action "fetch-check" \
       --countries "$COUNTRIES" \
       "${EXTRA_ARGS[@]}" "${fid[@]}" \
       --ports "$PORTS" \
