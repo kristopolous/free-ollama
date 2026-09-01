@@ -449,6 +449,86 @@ _activity_history = []
 _activity_lock = asyncio.Lock()
 _ACTIVITY_HISTORY_MAX = 500
 
+# Registry of currently-running "race" efforts that fan out across hosts to
+# resolve a model. Keyed by model string; each entry tracks when the race
+# started, how many hosts it's gone through (checked), the total candidates,
+# and an optional stop handle used to abort the race from the UI.
+_workers = {}
+_workers_seq = 0
+_WORKERS_MAX = 200
+_worker_queues = []
+_worker_lock = asyncio.Lock()
+
+
+def _worker_snapshot():
+    now = time.time()
+    out = []
+    for w in _workers.values():
+        out.append({
+            "model": w["model"],
+            "started": w["started"],
+            "age": round(now - w["started"], 1),
+            "checked": w["checked"],
+            "total": w["total"],
+        })
+    out.sort(key=lambda w: w["started"])
+    return out
+
+
+async def _broadcast_workers():
+    payload = json.dumps(_worker_snapshot())
+    async with _worker_lock:
+        dead = []
+        for q in _worker_queues:
+            try:
+                await q.put(payload)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            _worker_queues.remove(q)
+
+
+async def _add_worker_listener(q):
+    async with _worker_lock:
+        _worker_queues.append(q)
+
+
+async def _remove_worker_listener(q):
+    async with _worker_lock:
+        _worker_queues.remove(q)
+
+
+async def _register_worker(model, total, stop):
+    global _workers_seq
+    if model not in _workers and len(_workers) >= _WORKERS_MAX:
+        _workers.pop(next(iter(_workers)))
+    _workers_seq += 1
+    _workers[model] = {
+        "model": model,
+        "started": time.time(),
+        "checked": 0,
+        "total": total,
+        "stop": stop,
+        "wid": _workers_seq,
+    }
+    await _broadcast_workers()
+    return _workers_seq
+
+
+async def _worker_checked(model):
+    w = _workers.get(model)
+    if w:
+        w["checked"] += 1
+        await _broadcast_workers()
+
+
+async def _unregister_worker(model, wid=None):
+    w = _workers.get(model)
+    if wid is None or (w and w.get("wid") == wid):
+        _workers.pop(model, None)
+        await _broadcast_workers()
+
+
 
 async def broadcast_activity(host, model, status, message, duration=None, wid=None):
     entry = {'host': host, 'model': model, 'status': status, 'message': message, 'time': time.time()}
@@ -1328,6 +1408,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     return
 
             full = ms[0]
+            await _worker_checked(model)
 
             wid = asyncio.current_task().get_name()
             await broadcast_activity(host, model, "trying",
@@ -1488,20 +1569,30 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
     tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(servers)))]
 
-    while True:
-        try:
-            result = result_queue.get_nowait()
-            break
-        except asyncio.QueueEmpty:
-            if all(t.done() for t in tasks):
-                result = None
-                break
-        await asyncio.sleep(0.1)
+    def _stop():
+        done.set()
+        for t in tasks:
+            t.cancel()
 
-    done.set()
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    await _register_worker(model, len(servers), _stop)
+    wwid = _workers.get(model, {}).get("wid")
+    try:
+        while True:
+            try:
+                result = result_queue.get_nowait()
+                break
+            except asyncio.QueueEmpty:
+                if all(t.done() for t in tasks):
+                    result = None
+                    break
+            await asyncio.sleep(0.1)
+
+        done.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await _unregister_worker(model, wwid)
 
     return result, errors
 
@@ -2513,6 +2604,80 @@ async def handle_skip_good(request):
     raise web.HTTPFound("/")
 
 
+async def handle_workers(request):
+    """
+    Live workers stream (SSE)
+    ---
+    tags: [Monitoring]
+    summary: Server-sent events stream of currently-running model-resolution races
+    responses:
+      '200':
+        description: SSE stream of running workers
+        content:
+          text/event-stream:
+            schema:
+              type: string
+    """
+    response = web.StreamResponse()
+    response.headers["Content-Type"] = "text/event-stream"
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    await response.prepare(request)
+
+    try:
+        await response.write(f"data: {json.dumps({'workers': _worker_snapshot()})}\n\n".encode())
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        return response
+
+    q = asyncio.Queue()
+    await _add_worker_listener(q)
+    try:
+        while True:
+            try:
+                payload = await asyncio.wait_for(q.get(), timeout=1)
+            except asyncio.TimeoutError:
+                continue
+            if payload is None:
+                break
+            try:
+                await response.write(f"data: {payload}\n\n".encode())
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                break
+    finally:
+        await _remove_worker_listener(q)
+    return response
+
+
+async def handle_stop_worker(request):
+    """
+    Abort a running race effort.
+    ---
+    tags: [Admin]
+    summary: Stop a running model-resolution race
+    parameters:
+      - in: query
+        name: model
+        schema:
+          type: string
+        required: true
+        description: Model string to stop racing on
+    responses:
+      '200':
+        description: Stop requested
+    """
+    model = request.query.get("model")
+    if not model:
+        return web.json_response({"error": "missing model parameter"}, status=400)
+    w = _workers.get(model)
+    if not w:
+        return web.json_response({"error": "worker not found"}, status=404)
+    stop = w.get("stop")
+    if callable(stop):
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(stop) if loop.is_running() else stop()
+    return web.json_response({"stopped": model})
+
+
 async def handle_api_tags(request):
     """
     List models (Ollama-compatible)
@@ -3516,6 +3681,7 @@ async def handle_txt2img(request):
                         host = next(host_iter)
                     except StopIteration:
                         return
+                await _worker_checked(wkey)
                 await broadcast_activity(host, activity_label, "trying",
                     f"txt2img: {activity_label}")
                 try:
@@ -3548,7 +3714,16 @@ async def handle_txt2img(request):
                     await broadcast_activity(host, activity_label, "failed",
                         f"txt2img: {type(_e).__name__}")
 
+        wkey = f"{activity_label} (image)"
         tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(host_list)))]
+
+        def _stop():
+            done.set()
+            for t in tasks:
+                t.cancel()
+
+        await _register_worker(wkey, len(host_list), _stop)
+        wwid = _workers.get(wkey, {}).get("wid")
         try:
             while True:
                 try:
@@ -3562,6 +3737,7 @@ async def handle_txt2img(request):
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await _unregister_worker(wkey, wwid)
 
     # A host-wide unreachable mark (dead at the connection level) must exclude a
     # host from image routing too — it's stored under a sentinel "model", so the
@@ -3609,6 +3785,7 @@ async def handle_txt2img(request):
                             host = next(host_iter)
                         except StopIteration:
                             return
+                    await _worker_checked(wkey)
                     await broadcast_activity(host, activity_label, "trying",
                         f"txt2img (comfy): {activity_label}")
                     t0 = time.time()
@@ -3626,7 +3803,16 @@ async def handle_txt2img(request):
                     await broadcast_activity(host, activity_label, "failed",
                         f"txt2img (comfy): no response")
 
+            wkey = f"{activity_label} (image)"
             tasks = [asyncio.create_task(worker()) for _ in range(min(3, len(host_list)))]
+
+            def _stop():
+                done.set()
+                for t in tasks:
+                    t.cancel()
+
+            await _register_worker(wkey, len(host_list), _stop)
+            wwid = _workers.get(wkey, {}).get("wid")
             try:
                 while True:
                     try:
@@ -3640,6 +3826,7 @@ async def handle_txt2img(request):
                 for t in tasks:
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                await _unregister_worker(wkey, wwid)
 
         data = await _race_comfy(comfy_hosts)
         if data:
@@ -5478,6 +5665,8 @@ def make_app():
     swagger.add_get("/clear-bad", handle_clear_bad)
     swagger.add_get("/next-host", handle_next_host)
     swagger.add_get("/skip-good", handle_skip_good)
+    swagger.add_get("/workers", handle_workers)
+    swagger.add_get("/stop-worker", handle_stop_worker)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
     swagger.add_get("/api/version", handle_api_version)

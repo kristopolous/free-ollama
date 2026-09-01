@@ -200,6 +200,13 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 .htab-count{background:var(--accent-bg);color:var(--text-3);border-radius:var(--r-lg);padding:1px var(--sp-2);font-size:var(--fs-2xs);font-family:var(--font-mono);min-width:1.4em;text-align:center;line-height:1.4}
 .htab.active .htab-count{background:var(--accent-bg-active);color:var(--text-2)}
 .more{font-size:var(--fs-sm);color:var(--text-faint);margin-top:var(--sp-2)}
+.worker-card{display:flex;align-items:center;gap:var(--sp-2);justify-content:space-between;padding:var(--sp-2) var(--sp-3);border:1px solid var(--border);border-radius:var(--r-lg);margin-bottom:var(--sp-2)}
+.worker-card .worker-title{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}
+.worker-card .worker-model{font-family:var(--font-mono);font-size:var(--fs-md);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-card .worker-ago{font-size:var(--fs-2xs);color:var(--text-faint)}
+.worker-card .worker-meta{font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap}
+.worker-stop{background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);padding:4px 10px;font-size:var(--fs-sm);cursor:pointer}
+.worker-stop:hover{background:var(--accent-bg-active);color:var(--text)}
 
 label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-2)}
 input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-3) 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--field-bg);color:var(--text);font-size:var(--fs-md);outline:none;font-family:var(--font-mono)}
@@ -577,6 +584,7 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <button type="button" class="htab" data-pane="good">Good<span class="htab-count" id="cnt-good"></span></button>
 <button type="button" class="htab" data-pane="maybe">Maybe<span class="htab-count" id="cnt-maybe"></span></button>
 <button type="button" class="htab" data-pane="bad">Bad<span class="htab-count" id="cnt-bad"></span></button>
+<button type="button" class="htab" data-pane="workers">Workers<span class="htab-count" id="cnt-workers"></span></button>
 </div>
 <div id="pane-last">
 <div id="lastList"></div>
@@ -592,6 +600,9 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <div id="pane-bad" style="display:none">
 <div id="badList"></div>
 <div id="badMore"></div>
+</div>
+<div id="pane-workers" style="display:none">
+<div id="workersList"></div>
 </div>
 </div>
 </div>
@@ -993,7 +1004,7 @@ document.querySelectorAll('.htab[data-pane]').forEach(function(t){
   t.addEventListener('click',function(){
     var pane=t.getAttribute('data-pane');
     document.querySelectorAll('.htab[data-pane]').forEach(function(x){x.classList.toggle('active',x===t)});
-    ['good','maybe','bad','last'].forEach(function(p){document.getElementById('pane-'+p).style.display=p===pane?'':'none'});
+    ['good','maybe','bad','last','workers'].forEach(function(p){document.getElementById('pane-'+p).style.display=p===pane?'':'none'});
     localStorage.setItem('dyva_hostpane',pane);
   })
 });
@@ -1081,6 +1092,36 @@ function renderHostLists(d){
   _hostData.bad=(d.bad||[]).filter(function(x){return x.indexOf(' ')>=0}).sort();
   renderHostPanes();
 }
+function agoText(secs){
+  if(!isFinite(secs)||secs<0)secs=0;
+  if(secs<60)return Math.floor(secs)+'s';
+  if(secs<3600)return Math.floor(secs/60)+'m '+(secs%60|0)+'s';
+  return Math.floor(secs/3600)+'h '+(Math.floor(secs%3600/60))+'m';
+}
+function renderWorkers(workers){
+  var c=document.getElementById('workersList'),arr=workers||[];
+  _setCount('cnt-workers',arr.length);
+  c.innerHTML='';
+  if(!arr.length){c.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">None racing right now</div>';return}
+  arr.forEach(function(w){
+    var card=document.createElement('div');card.className='worker-card';
+    var top=document.createElement('div');top.className='worker-title';
+    var n=document.createElement('span');n.className='worker-model';n.textContent=w.model||'';n.title=w.model;top.appendChild(n);
+    var ago=document.createElement('span');ago.className='worker-ago';ago.textContent='started '+agoText(w.age||0)+' ago';top.appendChild(ago);
+    card.appendChild(top);
+    var body=document.createElement('div');body.className='worker-meta';
+    body.textContent='checked '+w.checked+(w.total?' / '+w.total:'');
+    card.appendChild(body);
+    var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';stop.textContent='stop';
+    stop.addEventListener('click',function(){fetch('stop-worker?model='+encodeURIComponent(w.model)).catch(function(){})});
+    card.appendChild(stop);
+    c.appendChild(card);
+  });
+}
+// The workers list is pushed over SSE from the server whenever a race starts,
+// advances, or finishes, so the pane updates live without polling.
+var _workersSSE=new EventSource('workers');
+_workersSSE.onmessage=function(e){try{var d=JSON.parse(e.data);renderWorkers(d.workers||[])}catch(ex){}};
 // The snackbar is server-rendered visible (in the markup with class "show") so
 // it paints on first load without waiting for JS; here we only take it down.
 var snackbar=document.getElementById('snackbar');

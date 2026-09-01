@@ -94,6 +94,10 @@ NAMED_QUERIES = {
     "gradio": 'icon_hash=="55115683"',
 }
 
+# Services that cache a raw model-list snapshot per host during check, so a
+# resume (-i) run can skip hosts already snapshotted this session.
+SNAPSHOT_SERVICES = {"ollama", "vllm", "lmstudio"}
+
 
 def _load_json(path, silent=False):
     if not silent:
@@ -111,7 +115,8 @@ def _save_json(path, data):
 
 
 def _save_check_snapshot(host, port, data):
-    """Cache a raw API response (e.g. ollama /api/tags) to
+    """Cache a raw model-list API response (ollama /api/tags, vllm /v1/models,
+    lmstudio /v1/models) to
     /tmp/graflex/{date}/check/{ident}.json following the same /tmp/graflex
     dir and %Y%m%d%H%M%S date convention as the fetch result files. The
     filename uses the _tag() md5 hash of the full host:port so the port can't
@@ -483,6 +488,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 elif service == "vllm":
                     data = await resp.json()
                     await resp.release()
+                    _save_check_snapshot(host, port, data)
                     items = data.get("data", []) if isinstance(data, dict) else []
                     models = []
                     seen = set()
@@ -520,6 +526,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 elif service == "lmstudio":
                     data = await resp.json()
                     await resp.release()
+                    _save_check_snapshot(host, port, data)
                     items = data.get("data", []) if isinstance(data, dict) else []
                     models = []
                     seen = set()
@@ -1206,7 +1213,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             host_port = h["host"].split(":")
             hh = host_port[0]
             pp = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-            if service == "ollama" and _check_snapshot_exists(hh, pp, session):
+            if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
                 resumed += 1
                 continue
             kept.append(h)
@@ -1349,7 +1356,7 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
             host_port = h["host"].split(":")
             hh = host_port[0]
             pp = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-            if service == "ollama" and _check_snapshot_exists(hh, pp, session):
+            if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
                 continue
             kept.append(h)
         to_check = kept
@@ -1388,7 +1395,7 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
             hp = w["host"].split(":")
             hh = hp[0]
             pp = int(hp[1]) if len(hp) > 1 else SERVICE_CONFIG[service]["port"]
-            if service == "ollama" and _check_snapshot_exists(hh, pp, session):
+            if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
                 skipped += 1
                 continue
             kept.append(w)
