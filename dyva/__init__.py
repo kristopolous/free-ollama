@@ -422,6 +422,139 @@ def source_cli(argv):
     return 1
 
 
+# Reputation keys are mostly model names, but a few are sentinels for the
+# non-chat capabilities. UNREACHABLE_KEY holds a NUL so it can never collide
+# with a real model name; give it a printable face for the CLI.
+_KEY_ALIASES = {UNREACHABLE_KEY: "__unreachable__"}
+_STATE_ALIASES = {"maybe": "maybe_good", "maybe-good": "maybe_good"}
+_STATES = ("good", "maybe_good", "bad")
+
+
+def _key_label(key):
+    return _KEY_ALIASES.get(key, key)
+
+
+def _hosts_usage():
+    print("usage:", file=sys.stderr)
+    print("  dyva --hosts                     summary of the host reputation table", file=sys.stderr)
+    print("  dyva --hosts list [STATE]        hosts per key, optionally one state", file=sys.stderr)
+    print("  dyva --hosts del STATE           show the keys marked STATE (deletes nothing)", file=sys.stderr)
+    print("  dyva --hosts del STATE KEY...    clear those marks", file=sys.stderr)
+    print(f"\n  STATE is one of: {', '.join(_STATES)}", file=sys.stderr)
+
+
+def _hosts_counts(state=None):
+    """[(key, n)] for one state (or every state), commonest first."""
+    db = _get_db()
+    if state:
+        rows = db.execute(
+            "SELECT model, COUNT(*) FROM host_status WHERE state=? GROUP BY model ORDER BY 2 DESC, 1",
+            (state,)).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT model, COUNT(*) FROM host_status GROUP BY model ORDER BY 2 DESC, 1").fetchall()
+    return rows
+
+
+def _print_key_table(rows):
+    width = max((len(_key_label(k)) for k, _ in rows), default=0)
+    for key, count in rows:
+        print(f"  {_key_label(key):<{width}}  {count:>6}")
+
+
+def hosts_cli(argv):
+    """Handle `--hosts ...`: inspect and prune the host reputation table.
+
+    Deleting is deliberately two-step. `del bad` never clears the whole state —
+    it prints the keys and their host counts so you can see what you would be
+    throwing away, and you then name the key. Reputation is expensive to rebuild
+    (every mark cost a real probe of a real host), so an unqualified "delete all
+    the bad ones" is too easy to type by accident.
+    """
+    argv = [str(a) for a in argv]
+    cmd = argv[0].lower() if argv else "summary"
+
+    if cmd in ("summary", "list"):
+        state = None
+        if len(argv) > 1:
+            state = _STATE_ALIASES.get(argv[1].lower(), argv[1].lower())
+            if state not in _STATES:
+                print(f"unknown state '{argv[1]}' (expected {', '.join(_STATES)})", file=sys.stderr)
+                return 1
+        db = _get_db()
+        totals = dict(db.execute("SELECT state, COUNT(*) FROM host_status GROUP BY state").fetchall())
+        if not totals:
+            print("host reputation table is empty")
+            return 0
+        for st in _STATES:
+            if state and st != state:
+                continue
+            n = totals.get(st, 0)
+            print(f"{st}: {n} host/key mark{'' if n == 1 else 's'}")
+            if n and (state or cmd == "list"):
+                _print_key_table(_hosts_counts(st))
+            print()
+        return 0
+
+    if cmd in ("del", "delete", "clear", "rm"):
+        if len(argv) < 2:
+            print("a state is required", file=sys.stderr)
+            _hosts_usage()
+            return 1
+        state = _STATE_ALIASES.get(argv[1].lower(), argv[1].lower())
+        if state not in _STATES:
+            print(f"unknown state '{argv[1]}' (expected {', '.join(_STATES)})", file=sys.stderr)
+            return 1
+
+        rows = _hosts_counts(state)
+        if not rows:
+            print(f"no hosts marked '{state}'")
+            return 0
+
+        keys = argv[2:]
+        if not keys:
+            total = sum(c for _, c in rows)
+            print(f"{total} host mark{'' if total == 1 else 's'} in '{state}', "
+                  f"across {len(rows)} key{'' if len(rows) == 1 else 's'}:\n")
+            _print_key_table(rows)
+            print(f"\nName a key to clear it — '{argv[0]} {argv[1]}' on its own deletes nothing:")
+            print(f"  dyva --hosts del {state} {_key_label(rows[0][0])}")
+            return 0
+
+        # Resolve what the user typed against the keys actually present, so the
+        # printable alias for the NUL-bearing sentinel round-trips.
+        present = {k: c for k, c in rows}
+        by_label = {_key_label(k).lower(): k for k in present}
+        resolved, unknown = [], []
+        for want in keys:
+            if want in present:
+                resolved.append(want)
+            elif want.lower() in by_label:
+                resolved.append(by_label[want.lower()])
+            else:
+                unknown.append(want)
+        if unknown:
+            print(f"not marked '{state}': {', '.join(unknown)}", file=sys.stderr)
+            print(f"known keys: {', '.join(_key_label(k) for k, _ in rows)}", file=sys.stderr)
+            return 1
+
+        db = _get_db()
+        cleared = 0
+        for key in resolved:
+            cur = db.execute("DELETE FROM host_status WHERE state=? AND model=?", (state, key))
+            cleared += cur.rowcount
+            print(f"cleared {cur.rowcount} '{state}' mark{'' if cur.rowcount == 1 else 's'} "
+                  f"for {_key_label(key)}")
+        db.commit()
+        if cleared:
+            print("\nThose hosts are now unranked and will be retried on the next request.")
+        return 0
+
+    print(f"unknown --hosts command '{cmd}' (expected 'list' or 'del')", file=sys.stderr)
+    _hosts_usage()
+    return 1
+
+
 def _apply_source_mapping(row, mapping):
     """Turn a raw source row into a host entry per the mapping."""
     out = {}
@@ -560,6 +693,11 @@ async def broadcast_activity(host, model, status, message, duration=None, wid=No
         entry['id'] = aid
     if duration is not None:
         entry['duration'] = round(duration, 2)
+    # Mirror to stderr so the server log carries the same narrative as the
+    # dashboard feed — otherwise a failure is only visible to whoever happens to
+    # have the Activity pane open, and is gone once it scrolls past the cap.
+    dur = f" [{entry['duration']:.2f}s]" if 'duration' in entry else ""
+    (log.warning if status == "failed" else log.info)(f"activity{dur} {message}")
     async with _activity_lock:
         _activity_history.append(entry)
         if len(_activity_history) > _ACTIVITY_HISTORY_MAX:
@@ -1492,184 +1630,48 @@ def _curlify(method, url, json_body):
         logging.debug(f"curlify failed: {e}")
 
 
-async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None):
+async def _race_hosts(entries, attempt, key, job_wid=None, workers=None):
+    """The host race: run `attempt` against candidate hosts in parallel, keep the
+    first success, cancel the rest.
+
+    This is the scaffolding every capability shares — a bounded worker pool
+    drawing from one best-first candidate list, a done-event so losers stop as
+    soon as someone wins, the /workers registry with its stop button, and error
+    collection. `attempt` supplies only the part that differs per capability.
+
+      entries - candidate items, best-first; passed to `attempt` untouched
+      attempt - async fn(item, wid, done) -> result, where a falsy result means
+                "this host didn't work, move to the next"
+      key     - the reputation/worker key: a model name, or a __capability__
+                sentinel like __tts__
+
+    Returns (result, stopped, tried). `tried` is how many hosts were actually
+    attempted, which is what a failure message should quote — it is not
+    len(entries), since the pool stops early on success.
+    """
     done = asyncio.Event()
     result_queue = asyncio.Queue()
-    errors = []
-    errors_lock = asyncio.Lock()
-    server_iter = iter(servers)
+    entry_iter = iter(entries)
     iter_lock = asyncio.Lock()
     stopped = False
-
-    async def _collect_err(msg):
-        async with errors_lock:
-            errors.append(msg)
+    tried = 0
 
     async def worker():
-        resp = None
+        nonlocal tried
         while not done.is_set():
             async with iter_lock:
                 try:
-                    prio, host, ms = next(server_iter)
+                    item = next(entry_iter)
                 except StopIteration:
                     return
-
-            full = ms[0]
+                tried += 1
             await _worker_checked(wwid)
-
             wid = asyncio.current_task().get_name()
-            await broadcast_activity(host, model, "trying",
-                f"trying: {host} for {model}", wid=wid)
-
-            # last-used / known-good hosts go straight to the request;
-            # untested ones get probed first, caps refreshed only if needed
-            trusted = prio < 0
-            if not trusted and not await probe_host(session, host):
-                # Host-wide mark so it isn't re-probed for every other model...
-                mark_unreachable(host)
-                # ...plus a mark against the model actually being asked for, so
-                # looking at that model shows the hosts that failed it. The
-                # sentinel row carries no model name and is invisible per-model.
-                add_bad(host, model)
-                await broadcast_activity(host, model, "failed",
-                    f"unreachable: {host}")
-                continue
-            if not trusted and caps and caps != {"completion"}:
-                await refresh_host_caps(session, host)
-
-            if "vision" in (caps or []) and not _known_has(host, full, "vision"):
-                sees = await trial_balloon(session, host, full, model)
-                if sees is None:
-                    continue
-                if sees:
-                    mark_vision(host, full)
-                    set_last(model, host, full)
-                    await broadcast_activity(host, model, "trying",
-                        f"trial balloon: {full} has vision", wid=wid)
-                else:
-                    mark_no_vision(host, full)
-                    await broadcast_activity(host, model, "failed",
-                        f"trial balloon: {full} has no vision", wid=wid)
-                    continue
-
-            start = time.time()
-            tag = f"{host} {full}"
-            p = dict(payload, model=full, stream=do_stream)
-            _curlify("POST", f"{host}{endpoint}", p)
-            try:
-                resp = await asyncio.wait_for(
-                    session.post(f"{host}{endpoint}", json=p),
-                    timeout=TIMEOUT,
-                )
-            except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-                dur = time.time() - start
-                add_bad(host, model)
-                await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-                continue
-
-            if resp.status != 200:
-                dur = time.time() - start
-                code = resp.status
-                try:
-                    raw = await resp.read()
-                    body = raw.decode('utf-8', errors='replace')[:500]
-                    log_upstream(code, host, endpoint, body, remote=remote)
-                    await _collect_err(f"{host}: {body}")
-                except Exception:
-                    pass
-                await resp.release()
-                resp = None
-                add_bad(host, model)
-                await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - status {code}", duration=dur, wid=wid)
-                continue
-
-            if not do_stream:
-                try:
-                    data = await resp.json()
-                except asyncio.TimeoutError:
-                    dur = time.time() - start
-                    await resp.release()
-                    resp = None
-                    await broadcast_activity(host, model, "failed",
-                        f"failure: {host} for {model} - timeout", duration=dur, wid=wid)
-                    continue
-                except json.JSONDecodeError:
-                    dur = time.time() - start
-                    await resp.release()
-                    resp = None
-                    add_bad(host, model)
-                    await broadcast_activity(host, model, "failed",
-                        f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-                    continue
-                await resp.release()
-                if "error" in data:
-                    dur = time.time() - start
-                    add_bad(host, model)
-                    await _collect_err(f"{host}: {data['error']}")
-                    await broadcast_activity(host, model, "failed",
-                        f"failure: {host} for {model} - error: {data['error']}", duration=dur, wid=wid)
-                    continue
-                dur = time.time() - start
-                log.debug(f"  \u2713 {tag}")
-                set_last(model, host, full)
-                add_good(host, model)
-                await broadcast_activity(host, model, "connected",
-                    f"success: {host} for {model}", duration=dur, wid=wid)
-                await result_queue.put(("ok", host, full, data))
+            res = await attempt(item, wid, done)
+            if res:
+                await result_queue.put(res)
                 done.set()
                 return
-
-            try:
-                first_line = await resp.content.readline()
-            except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
-                await resp.release()
-                resp = None
-                continue
-            if not first_line or not first_line.strip():
-                dur = time.time() - start
-                await resp.release()
-                resp = None
-                add_bad(host, model)
-                await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - empty response", duration=dur, wid=wid)
-                continue
-
-            try:
-                first = json.loads(first_line)
-            except json.JSONDecodeError:
-                dur = time.time() - start
-                await resp.release()
-                resp = None
-                add_bad(host, model)
-                await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-                continue
-
-            if "error" in first:
-                dur = time.time() - start
-                await resp.release()
-                resp = None
-                add_bad(host, model)
-                await _collect_err(f"{host}: {first['error']}")
-                await broadcast_activity(host, model, "failed",
-                    f"failure: {host} for {model} - error: {first['error']}", duration=dur, wid=wid)
-                continue
-
-            if done.is_set():
-                await resp.release()
-                return
-
-            dur = time.time() - start
-            log.debug(f"  \u2713 {tag}")
-            set_last(model, host, full)
-            add_good(host, model)
-            await broadcast_activity(host, model, "connected",
-                f"success: {host} for {model}", duration=dur, wid=wid)
-            await result_queue.put(("ok_stream", host, full, resp, first_line, first))
-            done.set()
-            return
 
     _tasks_holder = []
 
@@ -1684,8 +1686,9 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         _workers[job_wid]["stop"] = _stop
         wwid = job_wid
     else:
-        wwid = await _register_worker(model, len(servers), _stop)
-    tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(servers)))]
+        wwid = await _register_worker(key, len(entries), _stop)
+    n = min(workers or WORKER_COUNT, len(entries)) or 1
+    tasks = [asyncio.create_task(worker()) for _ in range(n)]
     _tasks_holder[:] = tasks
     try:
         while True:
@@ -1706,6 +1709,171 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         if job_wid is None:
             await _unregister_worker(wwid)
 
+    return result, stopped, tried
+
+
+async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None):
+    errors = []
+    errors_lock = asyncio.Lock()
+
+    async def _collect_err(msg):
+        async with errors_lock:
+            errors.append(msg)
+
+    async def attempt(item, wid, done):
+        prio, host, ms = item
+        resp = None
+        full = ms[0]
+        await broadcast_activity(host, model, "trying",
+            f"trying: {host} for {model}", wid=wid)
+
+        # last-used / known-good hosts go straight to the request;
+        # untested ones get probed first, caps refreshed only if needed
+        trusted = prio < 0
+        if not trusted and not await probe_host(session, host):
+            # Host-wide mark so it isn't re-probed for every other model...
+            mark_unreachable(host)
+            # ...plus a mark against the model actually being asked for, so
+            # looking at that model shows the hosts that failed it. The
+            # sentinel row carries no model name and is invisible per-model.
+            add_bad(host, model)
+            await broadcast_activity(host, model, "failed",
+                f"unreachable: {host}")
+            return None
+        if not trusted and caps and caps != {"completion"}:
+            await refresh_host_caps(session, host)
+
+        if "vision" in (caps or []) and not _known_has(host, full, "vision"):
+            sees = await trial_balloon(session, host, full, model)
+            if sees is None:
+                return None
+            if sees:
+                mark_vision(host, full)
+                set_last(model, host, full)
+                await broadcast_activity(host, model, "trying",
+                    f"trial balloon: {full} has vision", wid=wid)
+            else:
+                mark_no_vision(host, full)
+                await broadcast_activity(host, model, "failed",
+                    f"trial balloon: {full} has no vision", wid=wid)
+                return None
+
+        start = time.time()
+        tag = f"{host} {full}"
+        p = dict(payload, model=full, stream=do_stream)
+        _curlify("POST", f"{host}{endpoint}", p)
+        try:
+            resp = await asyncio.wait_for(
+                session.post(f"{host}{endpoint}", json=p),
+                timeout=TIMEOUT,
+            )
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            dur = time.time() - start
+            add_bad(host, model)
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
+            return None
+
+        if resp.status != 200:
+            dur = time.time() - start
+            code = resp.status
+            try:
+                raw = await resp.read()
+                body = raw.decode('utf-8', errors='replace')[:500]
+                log_upstream(code, host, endpoint, body, remote=remote)
+                await _collect_err(f"{host}: {body}")
+            except Exception:
+                pass
+            await resp.release()
+            resp = None
+            add_bad(host, model)
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - status {code}", duration=dur, wid=wid)
+            return None
+
+        if not do_stream:
+            try:
+                data = await resp.json()
+            except asyncio.TimeoutError:
+                dur = time.time() - start
+                await resp.release()
+                resp = None
+                await broadcast_activity(host, model, "failed",
+                    f"failure: {host} for {model} - timeout", duration=dur, wid=wid)
+                return None
+            except json.JSONDecodeError:
+                dur = time.time() - start
+                await resp.release()
+                resp = None
+                add_bad(host, model)
+                await broadcast_activity(host, model, "failed",
+                    f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
+                return None
+            await resp.release()
+            if "error" in data:
+                dur = time.time() - start
+                add_bad(host, model)
+                await _collect_err(f"{host}: {data['error']}")
+                await broadcast_activity(host, model, "failed",
+                    f"failure: {host} for {model} - error: {data['error']}", duration=dur, wid=wid)
+                return None
+            dur = time.time() - start
+            log.debug(f"  \u2713 {tag}")
+            set_last(model, host, full)
+            add_good(host, model)
+            await broadcast_activity(host, model, "connected",
+                f"success: {host} for {model}", duration=dur, wid=wid)
+            return ("ok", host, full, data)
+
+        try:
+            first_line = await resp.content.readline()
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+            await resp.release()
+            resp = None
+            return None
+        if not first_line or not first_line.strip():
+            dur = time.time() - start
+            await resp.release()
+            resp = None
+            add_bad(host, model)
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - empty response", duration=dur, wid=wid)
+            return None
+
+        try:
+            first = json.loads(first_line)
+        except json.JSONDecodeError:
+            dur = time.time() - start
+            await resp.release()
+            resp = None
+            add_bad(host, model)
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
+            return None
+
+        if "error" in first:
+            dur = time.time() - start
+            await resp.release()
+            resp = None
+            add_bad(host, model)
+            await _collect_err(f"{host}: {first['error']}")
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - error: {first['error']}", duration=dur, wid=wid)
+            return None
+
+        if done.is_set():
+            await resp.release()
+            return None
+
+        dur = time.time() - start
+        log.debug(f"  \u2713 {tag}")
+        set_last(model, host, full)
+        add_good(host, model)
+        await broadcast_activity(host, model, "connected",
+            f"success: {host} for {model}", duration=dur, wid=wid)
+        return ("ok_stream", host, full, resp, first_line, first)
+
+    result, stopped, _tried = await _race_hosts(servers, attempt, model, job_wid=job_wid)
     return result, errors, stopped
 
 
@@ -4480,7 +4648,10 @@ async def _tts_object_info(session, host):
     try:
         r = await session.get(
             _host_url(host, "/object_info"),
-            timeout=aiohttp.ClientTimeout(total=20),
+            # A full ComfyUI node index runs to several megabytes (6.1 MB and
+            # 16.3s on a measured host), so this needs a generous ceiling —
+            # a short timeout here reads downstream as "no known TTS node".
+            timeout=aiohttp.ClientTimeout(total=90),
         )
         status = r.status
         if status != 200:
@@ -4540,10 +4711,34 @@ async def _tts_node_for(session, host, info=None):
     return None
 
 
+# Enum entries that mean "no voice — I'll supply reference audio instead".
+# Selecting one of these and then supplying no reference audio makes the node
+# fail at execution time, so an unspecified voice must skip past them.
+_VOICE_PLACEHOLDER = re.compile(r"(?i)^\s*(none|null|custom|zero.?shot|default)\b|zero.?shot|custom\)")
+
+
+def _tts_pick_voice(opts):
+    """First option that is a real voice, not a zero-shot/custom placeholder."""
+    for o in opts:
+        if isinstance(o, str) and not _VOICE_PLACEHOLDER.search(o):
+            return o
+    return None
+
+
 def _tts_workflow(spec, schema, input_text, voice, host_info=None):
     cls = spec["class"]
-    inputs = {spec["text"]: input_text}
     required = ((schema.get(cls) or {}).get("input") or {}).get("required") or {}
+    node_info = schema.get(cls) or {}
+    outputs = node_info.get("output") or []
+    is_engine = bool(outputs) and outputs[0] == "TTS_ENGINE"
+
+    # An engine node only configures the voice; the words are spoken by the
+    # downstream UnifiedTTSTextNode. Its declared "text" field is really a style
+    # directive (Qwen3TTSEngineNode calls it "instruct"), so pushing the user's
+    # sentence into it makes the engine treat "hi" as an instruction rather than
+    # something to say. Leave it at its default and let the fill loop below
+    # supply that.
+    inputs = {} if is_engine else {spec["text"]: input_text}
 
     voice_field = spec.get("voice")
     lang_field = spec.get("lang")
@@ -4552,6 +4747,12 @@ def _tts_workflow(spec, schema, input_text, voice, host_info=None):
         opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else []
         if isinstance(opts, list) and (not opts or voice in opts):
             inputs[voice_field] = voice
+    elif voice_field and voice_field in required:
+        entry = required.get(voice_field)
+        opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else []
+        pick = _tts_pick_voice(opts) if isinstance(opts, list) else None
+        if pick:
+            inputs[voice_field] = pick
 
     if lang_field:
         entry = required.get(lang_field)
@@ -4570,10 +4771,6 @@ def _tts_workflow(spec, schema, input_text, voice, host_info=None):
         elif isinstance(entry[0], list) and entry[0]:
             inputs[name] = entry[0][0]
 
-    # Check if this node outputs TTS_ENGINE (engine that needs downstream synthesis)
-    node_info = schema.get(cls) or {}
-    outputs = node_info.get("output") or []
-
     # Find an available SaveAudio variant on this host
     save_node = "SaveAudio"
     if host_info:
@@ -4589,7 +4786,7 @@ def _tts_workflow(spec, schema, input_text, voice, host_info=None):
 
     graph = {"1": {"class_type": cls, "inputs": inputs}}
 
-    if outputs and outputs[0] == "TTS_ENGINE":
+    if is_engine:
         # Engine node (Qwen3TTSEngineNode, F5TTSEngineNode, IndexTTSEngineNode, etc.)
         # needs UnifiedTTSTextNode to actually generate audio
         graph["2"] = {
@@ -4695,9 +4892,6 @@ async def _tts_comfyui(session, host, input_text, voice=None):
     raise _TtsError("timeout waiting for audio")
 
 
-_TTS_FANOUT = 8
-
-
 def _find_tts_hosts(target_host=None):
     """ComfyUI hosts that can generate TTS.
 
@@ -4714,8 +4908,9 @@ def _find_tts_hosts(target_host=None):
       5. everything else
       6. hosts a previous probe found *no* TTS node on, and known-bad hosts
 
-    The list is capped at _TTS_FANOUT so one request doesn't broadcast to every
-    host on the network (and spray the activity feed with failures)."""
+    The whole ranked list is returned: _race_hosts draws from it with a bounded
+    worker pool and stops at the first success, so the list is a priority order,
+    not a fan-out width."""
     if target_host:
         # If a specific host was requested, just try it
         return [target_host] if any(s.get("service") == "comfyui"
@@ -4747,7 +4942,7 @@ def _find_tts_hosts(target_host=None):
         return 5
 
     hosts.sort(key=rank)
-    return hosts[:_TTS_FANOUT]
+    return hosts
 
 
 def _host_has_class(host, classes):
@@ -5342,54 +5537,50 @@ async def handle_tts_speech(request):
     snippet = input_text[:60] + ("..." if len(input_text) > 60 else "")
     errors_list = []
 
-    # Register worker so TTS checks appear in dashboard worker view
-    job_wid = await _register_worker(TTS_KEY, len(hosts), lambda: None)
-
-    # The request gets ONE activity line, updated in place. Fanning out over N
-    # hosts previously emitted a trying+failed pair per host, so a single "hi"
-    # filled the feed with 2N near-identical rows.
     label = f"tts: {snippet}"
-    aid = f"tts:{uuid.uuid4().hex}"
-    req_t0 = time.time()
-    await broadcast_activity(None, label, "trying", f"{label} ({len(hosts)} hosts)", aid=aid)
 
-    async def _try_tts_host(host):
-        t0 = time.time()
-        await _worker_checked(job_wid)
+    # Same race as text generation: one bounded worker pool over the ranked host
+    # list, first success wins, and the same activity vocabulary
+    # (trying/failure/success naming the host) so the feed reads identically
+    # whether the request was for tokens or for audio.
+    async def attempt(host, wid, done):
+        await broadcast_activity(host, TTS_KEY, "trying",
+            f"trying: {host} for {label}", wid=wid)
+        start = time.time()
         try:
             raw, filename = await _tts_comfyui(session, host, input_text, voice)
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
-            log.warning(f"tts: {host}: {err}")
+            dur = time.time() - start
             add_bad(host, TTS_KEY)
             errors_list.append(f"{host}: {err}")
+            await broadcast_activity(host, TTS_KEY, "failed",
+                f"failure: {host} for {label} - {err}", duration=dur, wid=wid)
             return None
+        dur = time.time() - start
         add_good(host, TTS_KEY)
         set_last(TTS_KEY, host, "")
-        log.info(f"tts: {host}: {len(raw)} bytes in {time.time() - t0:.2f}s")
+        await broadcast_activity(host, TTS_KEY, "connected",
+            f"success: {host} for {label}", duration=dur, wid=wid)
         return host, raw, filename
 
-    results = await asyncio.gather(*[_try_tts_host(h) for h in hosts], return_exceptions=False)
-    for hit in results:
-        if hit is not None:
-            host, raw, filename = hit
-            ext = os.path.splitext(filename)[1].lower()
-            await _unregister_worker(job_wid)
-            await broadcast_activity(host, label, "done", f"{label} ({host})",
-                                     duration=time.time() - req_t0, aid=aid)
-            return web.Response(body=raw, content_type=_TTS_MIME.get(ext, "application/octet-stream"))
+    result, stopped, tried = await _race_hosts(hosts, attempt, TTS_KEY)
 
-    await _unregister_worker(job_wid)
-    # Collapse the per-host reasons: "8 hosts: no known TTS node" reads better
-    # than eight identical lines, and a genuinely mixed failure still shows each.
+    if result:
+        host, raw, filename = result
+        ext = os.path.splitext(filename)[1].lower()
+        return web.Response(body=raw, content_type=_TTS_MIME.get(ext, "application/octet-stream"))
+    if stopped:
+        return web.json_response({"error": "tts stopped"}, status=499)
+
+    # Quote what was actually attempted, and collapse repeated reasons: a
+    # mismatch between "tried N hosts" and a list of M reasons is confusing, and
+    # N identical lines are no more informative than one with a count.
     reasons = collections.Counter(e.split(": ", 1)[1] if ": " in e else e for e in errors_list)
-    if reasons:
-        detail = "; ".join(f"{c} host{'s' if c > 1 else ''}: {r}" for r, c in reasons.most_common())
-    else:
-        detail = "no hosts tried"
-    await broadcast_activity(None, label, "failed", f"{label}: {detail}",
-                             duration=time.time() - req_t0, aid=aid)
-    return web.json_response({"error": f"tts failed: {detail}"}, status=502)
+    detail = "; ".join(f"{c}x {r}" for r, c in reasons.most_common()) or "no hosts tried"
+    return web.json_response(
+        {"error": f"tts failed on {tried} host{'' if tried == 1 else 's'}: {detail}"},
+        status=502)
 
 
 async def handle_audio_voices(request):
@@ -6181,12 +6372,20 @@ def main():
     parser.add_argument("--source", nargs="+", metavar=("CMD"),
                         help="manage additional host sources: '--source list' or '--source add <url>' "
                              "(the url returns a JSON list of source definitions, same as the dashboard's add-by-URL)")
+    parser.add_argument("--hosts", nargs="*", metavar="CMD",
+                        help="inspect or prune the host reputation table: '--hosts' for a summary, "
+                             "'--hosts list [STATE]' for the per-key breakdown, '--hosts del STATE' to "
+                             "see what is marked STATE, and '--hosts del STATE KEY' to clear one key "
+                             "(e.g. '--hosts del bad __tts__')")
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
 
     if args.source:
         sys.exit(source_cli(args.source))
+
+    if args.hosts is not None:
+        sys.exit(hosts_cli(args.hosts))
 
     if args.refresh:
         ok = refresh_cache(args.refresh if isinstance(args.refresh, str) else None)
