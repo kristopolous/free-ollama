@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import uuid
 import requests
 import sqlite3
 import importlib.metadata
@@ -449,15 +450,19 @@ _activity_history = []
 _activity_lock = asyncio.Lock()
 _ACTIVITY_HISTORY_MAX = 500
 
-# Registry of currently-running "race" efforts that fan out across hosts to
-# resolve a model. Keyed by model string; each entry tracks when the race
-# started, how many hosts it's gone through (checked), the total candidates,
-# and an optional stop handle used to abort the race from the UI.
+# Registry of currently-running race "jobs" that fan out across hosts to
+# resolve (and serve) a model. Each job is keyed by a unique UUID so concurrent
+# efforts for the same model don't clobber each other; the model string is kept
+# only for display. Each entry tracks when the job started, how many hosts it's
+# gone through (checked), the total candidates, and a stop handle to abort it.
 _workers = {}
-_workers_seq = 0
-_WORKERS_MAX = 200
+_WORKERS_MAX = 500
 _worker_queues = []
 _worker_lock = asyncio.Lock()
+
+
+def _new_wid():
+    return str(uuid.uuid4())
 
 
 def _worker_snapshot():
@@ -465,6 +470,7 @@ def _worker_snapshot():
     out = []
     for w in _workers.values():
         out.append({
+            "wid": w["wid"],
             "model": w["model"],
             "started": w["started"],
             "age": round(now - w["started"], 1),
@@ -499,33 +505,31 @@ async def _remove_worker_listener(q):
 
 
 async def _register_worker(model, total, stop):
-    global _workers_seq
-    if model not in _workers and len(_workers) >= _WORKERS_MAX:
+    wid = _new_wid()
+    if len(_workers) >= _WORKERS_MAX:
         _workers.pop(next(iter(_workers)))
-    _workers_seq += 1
-    _workers[model] = {
+    _workers[wid] = {
+        "wid": wid,
         "model": model,
         "started": time.time(),
         "checked": 0,
         "total": total,
         "stop": stop,
-        "wid": _workers_seq,
     }
     await _broadcast_workers()
-    return _workers_seq
+    return wid
 
 
-async def _worker_checked(model):
-    w = _workers.get(model)
+async def _worker_checked(wid):
+    w = _workers.get(wid)
     if w:
         w["checked"] += 1
         await _broadcast_workers()
 
 
-async def _unregister_worker(model, wid=None):
-    w = _workers.get(model)
-    if wid is None or (w and w.get("wid") == wid):
-        _workers.pop(model, None)
+async def _unregister_worker(wid):
+    if wid in _workers:
+        _workers.pop(wid, None)
         await _broadcast_workers()
 
 
@@ -1408,7 +1412,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     return
 
             full = ms[0]
-            await _worker_checked(model)
+            await _worker_checked(wwid)
 
             wid = asyncio.current_task().get_name()
             await broadcast_activity(host, model, "trying",
@@ -1564,18 +1568,19 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             done.set()
             return
 
-        if resp is not None:
-            await resp.release()
+    if resp is not None:
+        await resp.release()
 
-    tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(servers)))]
+    _tasks_holder = []
 
     def _stop():
         done.set()
-        for t in tasks:
+        for t in _tasks_holder:
             t.cancel()
 
-    await _register_worker(model, len(servers), _stop)
-    wwid = _workers.get(model, {}).get("wid")
+    wwid = await _register_worker(model, len(servers), _stop)
+    tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(servers)))]
+    _tasks_holder[:] = tasks
     try:
         while True:
             try:
@@ -1592,7 +1597,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        await _unregister_worker(model, wwid)
+        await _unregister_worker(wwid)
 
     return result, errors
 
@@ -2666,16 +2671,22 @@ async def handle_stop_worker(request):
         description: Stop requested
     """
     model = request.query.get("model")
-    if not model:
-        return web.json_response({"error": "missing model parameter"}, status=400)
-    w = _workers.get(model)
-    if not w:
+    wid = request.query.get("wid")
+    w = None
+    if wid:
+        w = _workers.get(wid)
+    if w is None and model:
+        for _w in _workers.values():
+            if _w.get("model") == model:
+                w = _w
+                break
+    if w is None:
         return web.json_response({"error": "worker not found"}, status=404)
     stop = w.get("stop")
     if callable(stop):
         loop = asyncio.get_event_loop()
         loop.call_soon_threadsafe(stop) if loop.is_running() else stop()
-    return web.json_response({"stopped": model})
+    return web.json_response({"stopped": w.get("model"), "wid": w.get("wid")})
 
 
 async def handle_api_tags(request):
@@ -3681,7 +3692,7 @@ async def handle_txt2img(request):
                         host = next(host_iter)
                     except StopIteration:
                         return
-                await _worker_checked(wkey)
+                await _worker_checked(wwid)
                 await broadcast_activity(host, activity_label, "trying",
                     f"txt2img: {activity_label}")
                 try:
@@ -3715,15 +3726,16 @@ async def handle_txt2img(request):
                         f"txt2img: {type(_e).__name__}")
 
         wkey = f"{activity_label} (image)"
-        tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(host_list)))]
+        _tasks_holder = []
 
         def _stop():
             done.set()
-            for t in tasks:
+            for t in _tasks_holder:
                 t.cancel()
 
-        await _register_worker(wkey, len(host_list), _stop)
-        wwid = _workers.get(wkey, {}).get("wid")
+        wwid = await _register_worker(wkey, len(host_list), _stop)
+        tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(host_list)))]
+        _tasks_holder[:] = tasks
         try:
             while True:
                 try:
@@ -3737,7 +3749,7 @@ async def handle_txt2img(request):
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await _unregister_worker(wkey, wwid)
+            await _unregister_worker(wwid)
 
     # A host-wide unreachable mark (dead at the connection level) must exclude a
     # host from image routing too — it's stored under a sentinel "model", so the
@@ -3785,7 +3797,7 @@ async def handle_txt2img(request):
                             host = next(host_iter)
                         except StopIteration:
                             return
-                    await _worker_checked(wkey)
+                    await _worker_checked(wwid)
                     await broadcast_activity(host, activity_label, "trying",
                         f"txt2img (comfy): {activity_label}")
                     t0 = time.time()
@@ -3804,15 +3816,16 @@ async def handle_txt2img(request):
                         f"txt2img (comfy): no response")
 
             wkey = f"{activity_label} (image)"
-            tasks = [asyncio.create_task(worker()) for _ in range(min(3, len(host_list)))]
+            _tasks_holder = []
 
             def _stop():
                 done.set()
-                for t in tasks:
+                for t in _tasks_holder:
                     t.cancel()
 
-            await _register_worker(wkey, len(host_list), _stop)
-            wwid = _workers.get(wkey, {}).get("wid")
+            wwid = await _register_worker(wkey, len(host_list), _stop)
+            tasks = [asyncio.create_task(worker()) for _ in range(min(3, len(host_list)))]
+            _tasks_holder[:] = tasks
             try:
                 while True:
                     try:
@@ -3826,7 +3839,7 @@ async def handle_txt2img(request):
                 for t in tasks:
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-                await _unregister_worker(wkey, wwid)
+                await _unregister_worker(wwid)
 
         data = await _race_comfy(comfy_hosts)
         if data:
