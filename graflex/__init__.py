@@ -926,7 +926,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             random.shuffle(port_list)
 
         pool = _load_json(hosts_file)
-        seen = {f"{h['service']}@{h['host']}" for h in pool}
+        seen = {_entry_host(h) for h in pool}
         combos = [(c, p) for p in port_list for c in country_list]
         total_reqs = len(combos) * SHODAN_PAGES
 
@@ -964,7 +964,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 fresh = 0
                 fresh_hosts = []
                 for h in hosts:
-                    key = f"{h['service']}@{h['host']}"
+                    key = _entry_host(h)
                     if key not in seen:
                         pool.append(h)
                         seen.add(key)
@@ -1028,7 +1028,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             random.shuffle(server_list)
 
         pool = _load_json(hosts_file)
-        index = {f"{h['service']}@{h['host']}": h for h in pool}
+        index = {_entry_host(h): h for h in pool}
         seen = set(index)
         # Resolve the base FOFA query/queries. A service may define several
         # (e.g. ollama: app="ollama" then body="ollama is running"); each is
@@ -1094,7 +1094,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             for h in hosts:
                 if fid:
                     h["fid"] = fid
-                key = f"{h['service']}@{h['host']}"
+                key = _entry_host(h)
                 if key not in seen:
                     pool.append(h)
                     seen.add(key)
@@ -1128,10 +1128,10 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
 
     # print(f"Loading {hosts_file}")
     existing = _load_json(hosts_file)
-    index = {f"{h['service']}@{h['host']}": h for h in existing}
+    index = {_entry_host(h): h for h in existing}
     seen = set(index)
     for h in hosts:
-        key = f"{h['service']}@{h['host']}"
+        key = _entry_host(h)
         if key not in seen:
             existing.append(h)
             seen.add(key)
@@ -1184,7 +1184,10 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     hosts = _load_json(hosts_file)
     if not service and hosts:
         service = hosts[0].get("service", "")
-    hosts = [h for h in hosts if h.get("service") == service]
+    # No service filter: these caches are already per-service (the file name is
+    # the service), and a probe may re-label what it found — an ollama-shaped
+    # host with no /api/version is recorded as "sglang". Filtering on the label
+    # would silently drop exactly those hosts from the sweep.
     if not hosts:
         log.warning(f"check: no {service or '?'} hosts - run fetch first")
         return
@@ -1199,14 +1202,20 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         existing_notworking = {}
     done = set()
     if not check_all:
+        # Keyed by host alone, not service@host: the working/notworking files are
+        # already per-service caches, and a probe may *re-label* the service it
+        # found (an ollama-shaped host with no /api/version is recorded as
+        # "sglang"). Keying on the recorded service made those hosts never match
+        # the "ollama" entry in hosts.json, so they were re-probed on every run
+        # and appended to working.json again each time.
         if check_new:
-            done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working}
-            done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values())
+            done = {_entry_host(h) for h in existing_working}
+            done.update(_entry_host(n) for n in existing_notworking.values())
         else:
-            done = {f"{h['service']}@{_entry_host(h)}" for h in existing_working}
-            done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values() if n.get("result") == "error")
+            done = {_entry_host(h) for h in existing_working}
+            done.update(_entry_host(n) for n in existing_notworking.values() if n.get("result") == "error")
 
-    to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
+    to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
         resumed = 0
         kept = []
@@ -1267,7 +1276,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                     continue
                 break
 
-        key = f"{service}@{entry['host']}"
+        key = _entry_host(entry)
         ok = False
         async with wlock:
             if isinstance(result, dict) and "error" not in result:
@@ -1276,7 +1285,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                 working = _load_json(working_file, silent=True)
                 found = False
                 for i, w in enumerate(working):
-                    if f"{w['service']}@{_entry_host(w)}" == key:
+                    if _entry_host(w) == key:
                         working[i] = result
                         found = True
                         break
@@ -1346,11 +1355,13 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
     else:
         existing_notworking = {}
 
+    # Host-keyed for the same reason as _check_all: the probe may relabel the
+    # service, and a service-qualified key would then never match.
     done = set()
-    done.update(f"{h['service']}@{_entry_host(h)}" for h in existing_working)
-    done.update(f"{n['service']}@{_entry_host(n)}" for n in existing_notworking.values())
+    done.update(_entry_host(h) for h in existing_working)
+    done.update(_entry_host(n) for n in existing_notworking.values())
 
-    to_check = [h for h in hosts if f"{h['service']}@{h['host']}" not in done]
+    to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
         kept = []
         for h in to_check:
@@ -1384,7 +1395,8 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
     working = _load_json(working_file)
     if not service and working:
         service = working[0].get("service", "")
-    working = [w for w in working if w.get("service") == service]
+    # Not filtered by service, for the same reason as _check_all: re-labelled
+    # hosts (ollama -> sglang) must still be rescanned.
     if not working:
         log.warning(f"check-working: no working {service or '?'} hosts to rescan")
         return

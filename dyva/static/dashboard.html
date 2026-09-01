@@ -922,6 +922,7 @@ __SD_MODELS__
 })();
 var evtSource=new EventSource('api/activity');
 var paused=false;
+var _actLines={};  // activity id -> its line element, for in-place updates
 function refreshListsNow(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d)}).catch(function(){})}
 // Debounced: the activity stream replays its whole backlog on connect, and each
 // connected/failed event would otherwise trigger its own /dashboard-data fetch
@@ -933,7 +934,14 @@ evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if
   // replays its whole backlog; those are historical and already reflected in the
   // fresh data loadDashboard() just fetched, so refetching for them is redundant
   // (that was the 2nd dashboard-data hit on load). Live events have a ~now time.
-  if((d.status==='connected'||d.status==='failed')&&d.time&&(Date.now()/1e3-d.time)<5)refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);var c=document.getElementById('activityList');var p=document.createElement('div');p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+d.message;c.insertBefore(p,c.firstChild);while(c.children.length>50)c.removeChild(c.lastChild)}catch(ex){}}
+  if((d.status==='connected'||d.status==='failed')&&d.time&&(Date.now()/1e3-d.time)<5)refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);var c=document.getElementById('activityList');
+  // An event carrying an id owns one line for the life of the request: reuse
+  // that line so a fan-out resolves in place instead of stacking a row per host.
+  var p=d.id?_actLines[d.id]:null;var fresh=!p;
+  if(fresh){p=document.createElement('div');if(d.id)_actLines[d.id]=p}
+  p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+d.message;
+  if(fresh)c.insertBefore(p,c.firstChild);
+  while(c.children.length>50){var gone=c.lastChild;for(var k in _actLines)if(_actLines[k]===gone)delete _actLines[k];c.removeChild(gone)}}catch(ex){}}
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
 document.getElementById('activityBtn').addEventListener('click',function(e){e.stopPropagation();actPop.classList.toggle('open')});

@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import base64
+import collections
 import datetime
 import fnmatch
 import csv
@@ -547,8 +548,16 @@ async def _unregister_worker(wid):
 
 
 
-async def broadcast_activity(host, model, status, message, duration=None, wid=None):
+async def broadcast_activity(host, model, status, message, duration=None, wid=None, aid=None):
+    """Publish one activity event.
+
+    `aid` gives the event a stable identity: the dashboard replaces the existing
+    line with that id rather than prepending a new one, so a request that fans
+    out over many hosts shows a single line that resolves in place instead of a
+    trying/failed pair per host."""
     entry = {'host': host, 'model': model, 'status': status, 'message': message, 'time': time.time()}
+    if aid is not None:
+        entry['id'] = aid
     if duration is not None:
         entry['duration'] = round(duration, 2)
     async with _activity_lock:
@@ -5331,41 +5340,56 @@ async def handle_tts_speech(request):
 
     session = request.app["session"]
     snippet = input_text[:60] + ("..." if len(input_text) > 60 else "")
-    last_err = None
     errors_list = []
 
     # Register worker so TTS checks appear in dashboard worker view
     job_wid = await _register_worker(TTS_KEY, len(hosts), lambda: None)
 
+    # The request gets ONE activity line, updated in place. Fanning out over N
+    # hosts previously emitted a trying+failed pair per host, so a single "hi"
+    # filled the feed with 2N near-identical rows.
+    label = f"tts: {snippet}"
+    aid = f"tts:{uuid.uuid4().hex}"
+    req_t0 = time.time()
+    await broadcast_activity(None, label, "trying", f"{label} ({len(hosts)} hosts)", aid=aid)
+
     async def _try_tts_host(host):
-        label = f"tts: {snippet}"
         t0 = time.time()
         await _worker_checked(job_wid)
-        await broadcast_activity(host, label, "trying", label)
         try:
             raw, filename = await _tts_comfyui(session, host, input_text, voice)
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
             log.warning(f"tts: {host}: {err}")
             add_bad(host, TTS_KEY)
-            await broadcast_activity(host, label, "failed", f"{label}: {err}", duration=time.time() - t0)
             errors_list.append(f"{host}: {err}")
             return None
         add_good(host, TTS_KEY)
         set_last(TTS_KEY, host, "")
-        await broadcast_activity(host, label, "done", label, duration=time.time() - t0)
-        return raw, filename
+        log.info(f"tts: {host}: {len(raw)} bytes in {time.time() - t0:.2f}s")
+        return host, raw, filename
 
     results = await asyncio.gather(*[_try_tts_host(h) for h in hosts], return_exceptions=False)
-    for raw_and_file in results:
-        if raw_and_file is not None:
-            raw, filename = raw_and_file
+    for hit in results:
+        if hit is not None:
+            host, raw, filename = hit
             ext = os.path.splitext(filename)[1].lower()
             await _unregister_worker(job_wid)
+            await broadcast_activity(host, label, "done", f"{label} ({host})",
+                                     duration=time.time() - req_t0, aid=aid)
             return web.Response(body=raw, content_type=_TTS_MIME.get(ext, "application/octet-stream"))
 
     await _unregister_worker(job_wid)
-    return web.json_response({"error": "tts failed: " + "; ".join(errors_list) if errors_list else "no known TTS node"}, status=502)
+    # Collapse the per-host reasons: "8 hosts: no known TTS node" reads better
+    # than eight identical lines, and a genuinely mixed failure still shows each.
+    reasons = collections.Counter(e.split(": ", 1)[1] if ": " in e else e for e in errors_list)
+    if reasons:
+        detail = "; ".join(f"{c} host{'s' if c > 1 else ''}: {r}" for r, c in reasons.most_common())
+    else:
+        detail = "no hosts tried"
+    await broadcast_activity(None, label, "failed", f"{label}: {detail}",
+                             duration=time.time() - req_t0, aid=aid)
+    return web.json_response({"error": f"tts failed: {detail}"}, status=502)
 
 
 async def handle_audio_voices(request):
