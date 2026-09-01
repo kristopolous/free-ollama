@@ -4441,6 +4441,10 @@ def _tts_node_family(node_class):
 
 _TTS_NODE_CACHE = {}
 _TTS_NODE_CACHE_TTL = 300
+# Full /object_info per host, shared by node detection and workflow building so
+# a single speech request doesn't fetch the (large) schema three times.
+_TTS_INFO_CACHE = {}
+_TTS_INFO_CACHE_TTL = 300
 
 _TTS_MIME = {
     ".flac": "audio/flac",
@@ -4456,27 +4460,48 @@ class _TtsError(Exception):
     pass
 
 
-async def _tts_node_for(session, host):
-    """Find a host's TTS node by classifying its installed node-class names
-    against the node-classifier (data-driven, popularity-seeded) — never a
-    hardcoded boutique list and never structural model probing."""
-    hit = _TTS_NODE_CACHE.get(host)
-    if hit and time.time() - hit[1] < _TTS_NODE_CACHE_TTL:
+async def _tts_object_info(session, host):
+    """Fetch (and briefly cache) a ComfyUI host's full /object_info.
+
+    Raises _TtsError when the host can't be reached or answers badly, so
+    callers can report *that* instead of mislabeling it "no known TTS node"."""
+    hit = _TTS_INFO_CACHE.get(host)
+    if hit and time.time() - hit[1] < _TTS_INFO_CACHE_TTL:
         return hit[0]
     try:
         r = await session.get(
             _host_url(host, "/object_info"),
             timeout=aiohttp.ClientTimeout(total=20),
         )
-        if r.status != 200:
+        status = r.status
+        if status != 200:
             await r.release()
-            return None
+            raise _TtsError(f"object_info HTTP {status}")
         info = await r.json(content_type=None)
         await r.release()
-    except Exception:
-        return None
+    except _TtsError:
+        raise
+    except Exception as e:
+        raise _TtsError(str(e) or type(e).__name__)
     if not isinstance(info, dict):
-        return None
+        raise _TtsError("object_info: unexpected response")
+    _TTS_INFO_CACHE[host] = (info, time.time())
+    return info
+
+
+async def _tts_node_for(session, host, info=None):
+    """Find a host's TTS node by classifying its installed node-class names
+    against the node-classifier (data-driven, popularity-seeded) — never a
+    hardcoded boutique list and never structural model probing.
+
+    Returns None only when the host genuinely has no usable TTS node; that
+    verdict is cached (negatively) so we stop re-probing every host on every
+    speech request."""
+    hit = _TTS_NODE_CACHE.get(host)
+    if hit and time.time() - hit[1] < _TTS_NODE_CACHE_TTL:
+        return hit[0]
+    if info is None:
+        info = await _tts_object_info(session, host)
 
     # family priority wins over host node order (QwenTTS before Generic TTS)
     for fam in load_node_classifier():
@@ -4502,10 +4527,11 @@ async def _tts_node_for(session, host):
             }
             _TTS_NODE_CACHE[host] = (spec, time.time())
             return spec
+    _TTS_NODE_CACHE[host] = (None, time.time())
     return None
 
 
-def _tts_workflow(spec, schema, input_text, voice):
+def _tts_workflow(spec, schema, input_text, voice, host_info=None):
     cls = spec["class"]
     inputs = {spec["text"]: input_text}
     required = ((schema.get(cls) or {}).get("input") or {}).get("required") or {}
@@ -4539,6 +4565,19 @@ def _tts_workflow(spec, schema, input_text, voice):
     node_info = schema.get(cls) or {}
     outputs = node_info.get("output") or []
 
+    # Find an available SaveAudio variant on this host
+    save_node = "SaveAudio"
+    if host_info:
+        for candidate in ("SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced"):
+            if candidate in host_info:
+                save_node = candidate
+                break
+        else:
+            for key in host_info:
+                if key.startswith("SaveAudio"):
+                    save_node = key
+                    break
+
     graph = {"1": {"class_type": cls, "inputs": inputs}}
 
     if outputs and outputs[0] == "TTS_ENGINE":
@@ -4553,10 +4592,10 @@ def _tts_workflow(spec, schema, input_text, voice):
                 "seed": 1,
             }
         }
-        graph["3"] = {"class_type": "SaveAudio", "inputs": {"audio": ["2", 0], "filename_prefix": "dyva/tts"}}
+        graph["3"] = {"class_type": save_node, "inputs": {"audio": ["2", 0], "filename_prefix": "dyva/tts"}}
     else:
         # Direct audio output node
-        graph["2"] = {"class_type": "SaveAudio", "inputs": {"audio": ["1", 0], "filename_prefix": "dyva/tts"}}
+        graph["2"] = {"class_type": save_node, "inputs": {"audio": ["1", 0], "filename_prefix": "dyva/tts"}}
 
     return graph
 
@@ -4567,23 +4606,12 @@ async def _tts_comfyui(session, host, input_text, voice=None):
     spec = await _tts_node_for(session, host)
     if not spec:
         raise _TtsError("no known TTS node")
+    host_info = await _tts_object_info(session, host)
+    if spec["class"] not in host_info:
+        raise _TtsError(f"node {spec['class']} vanished from object_info")
 
-    try:
-        info_resp = await session.get(
-            _host_url(host, f"/object_info/{spec['class']}"),
-            timeout=aiohttp.ClientTimeout(total=15),
-        )
-        if info_resp.status != 200:
-            await info_resp.release()
-            raise _TtsError(f"object_info HTTP {info_resp.status}")
-        schema = await info_resp.json(content_type=None)
-        await info_resp.release()
-    except _TtsError:
-        raise
-    except Exception as e:
-        raise _TtsError(str(e))
-
-    workflow = _tts_workflow(spec, schema, input_text, voice)
+    schema = {spec["class"]: host_info[spec["class"]]}
+    workflow = _tts_workflow(spec, schema, input_text, voice, host_info)
     client_id = str(uuid_mod.uuid4())
     try:
         prompt_resp = await session.post(
@@ -4658,34 +4686,59 @@ async def _tts_comfyui(session, host, input_text, voice=None):
     raise _TtsError("timeout waiting for audio")
 
 
+_TTS_FANOUT = 8
+
+
 def _find_tts_hosts(target_host=None):
     """ComfyUI hosts that can generate TTS.
-    Priority: 1) host explicitly requested, 2) hosts with audio-class models,
-    3) all other ComfyUI hosts (TTS is node-based not model-class-based)."""
+
+    TTS is *node*-based, not model-class-based: a host with a Qwen3TTS custom
+    node may expose no audio-class checkpoint at all, while a host full of
+    AceStep music models may have no TTS node. So every ComfyUI host is a
+    candidate and the ordering carries the signal:
+
+      0. the host explicitly requested via ?host=
+      1. hosts a previous probe found a TTS node on (_TTS_NODE_CACHE)
+      2. the last host that successfully spoke
+      3. hosts with a good TTS reputation
+      4. hosts with audio-class models (weak hint)
+      5. everything else
+      6. hosts a previous probe found *no* TTS node on, and known-bad hosts
+
+    The list is capped at _TTS_FANOUT so one request doesn't broadcast to every
+    host on the network (and spray the activity feed with failures)."""
     if target_host:
-        if _host_has_class(target_host, _AUDIO_CLASSES):
-            return [target_host]
-        # Still try the host if it exists — TTS is node-based
-        for s in load_servers():
-            if s.get("server") == target_host and s.get("service") == "comfyui":
-                return [target_host]
-        return []
+        # If a specific host was requested, just try it
+        return [target_host] if any(s.get("service") == "comfyui"
+                                     for s in load_servers()
+                                     if s.get("server") == target_host) else []
     servers = load_servers()
-    # First pass: hosts with audio-class models
-    audio_hosts = [s.get("server") for s in servers
-                   if s.get("service") == "comfyui" and s.get("server")
-                   and _host_has_class(s.get("server"), _AUDIO_CLASSES)]
-    # Second pass: all other comfyui hosts not already in the list
-    all_comfyui = set(s.get("server") for s in servers
-                      if s.get("service") == "comfyui" and s.get("server"))
-    other_hosts = sorted(all_comfyui - set(audio_hosts))
-    hosts = audio_hosts + other_hosts
+    hosts = [s.get("server") for s in servers
+             if s.get("service") == "comfyui" and s.get("server")]
     bad, good = load_bad(), load_good()
-    hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
     last = get_last(TTS_KEY)
-    if last and last[0]:
-        hosts = [last[0]] + [h for h in hosts if h != last[0]]
-    return hosts
+    last_host = last[0] if last and last[0] else None
+    now = time.time()
+
+    def rank(h):
+        hit = _TTS_NODE_CACHE.get(h)
+        fresh = hit and now - hit[1] < _TTS_NODE_CACHE_TTL
+        if fresh and hit[0] is None:
+            return 6
+        if fresh:
+            return 1
+        if h == last_host:
+            return 2
+        if f"{h} {TTS_KEY}" in good:
+            return 3
+        if f"{h} {TTS_KEY}" in bad:
+            return 6
+        if _host_has_class(h, _AUDIO_CLASSES):
+            return 4
+        return 5
+
+    hosts.sort(key=rank)
+    return hosts[:_TTS_FANOUT]
 
 
 def _host_has_class(host, classes):
@@ -5244,7 +5297,7 @@ async def handle_tts_speech(request):
         name: host
         schema:
           type: string
-        description: Target a specific ComfyUI host (ip:port)
+          description: Target a specific ComfyUI host (ip:port)
     responses:
       '200':
         description: Audio bytes
@@ -5279,25 +5332,40 @@ async def handle_tts_speech(request):
     session = request.app["session"]
     snippet = input_text[:60] + ("..." if len(input_text) > 60 else "")
     last_err = None
-    for host in hosts:
+    errors_list = []
+
+    # Register worker so TTS checks appear in dashboard worker view
+    job_wid = await _register_worker(TTS_KEY, len(hosts), lambda: None)
+
+    async def _try_tts_host(host):
         label = f"tts: {snippet}"
         t0 = time.time()
+        await _worker_checked(job_wid)
         await broadcast_activity(host, label, "trying", label)
         try:
             raw, filename = await _tts_comfyui(session, host, input_text, voice)
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-            last_err = str(e) or type(e).__name__
-            log.warning(f"tts: {host}: {last_err}")
+            err = str(e) or type(e).__name__
+            log.warning(f"tts: {host}: {err}")
             add_bad(host, TTS_KEY)
-            await broadcast_activity(host, label, "failed", f"{label}: {last_err}", duration=time.time() - t0)
-            continue
+            await broadcast_activity(host, label, "failed", f"{label}: {err}", duration=time.time() - t0)
+            errors_list.append(f"{host}: {err}")
+            return None
         add_good(host, TTS_KEY)
         set_last(TTS_KEY, host, "")
         await broadcast_activity(host, label, "done", label, duration=time.time() - t0)
-        ext = os.path.splitext(filename)[1].lower()
-        return web.Response(body=raw, content_type=_TTS_MIME.get(ext, "application/octet-stream"))
+        return raw, filename
 
-    return web.json_response({"error": f"tts failed: {last_err}"}, status=502)
+    results = await asyncio.gather(*[_try_tts_host(h) for h in hosts], return_exceptions=False)
+    for raw_and_file in results:
+        if raw_and_file is not None:
+            raw, filename = raw_and_file
+            ext = os.path.splitext(filename)[1].lower()
+            await _unregister_worker(job_wid)
+            return web.Response(body=raw, content_type=_TTS_MIME.get(ext, "application/octet-stream"))
+
+    await _unregister_worker(job_wid)
+    return web.json_response({"error": "tts failed: " + "; ".join(errors_list) if errors_list else "no known TTS node"}, status=502)
 
 
 async def handle_audio_voices(request):
@@ -5330,18 +5398,8 @@ async def handle_audio_voices(request):
     async def probe(host):
         found = []
         try:
-            r = await session.get(
-                _host_url(host, "/object_info"),
-                timeout=aiohttp.ClientTimeout(total=20),
-            )
-            if r.status != 200:
-                await r.release()
-                return host, found
-            info = await r.json(content_type=None)
-            await r.release()
-        except Exception:
-            return host, found
-        if not isinstance(info, dict):
+            info = await _tts_object_info(session, host)
+        except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError):
             return host, found
         seen = set()
         for fam in load_node_classifier():

@@ -519,6 +519,10 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .mini-search:focus{outline:none;border-color:var(--border-focus)}
 .mini-search::placeholder{color:var(--text-faint)}
 #imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:var(--sp-3)}
+.media-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--sp-2);margin-top:var(--sp-3)}
+.tts-item{border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-2);background:var(--bg-sunken-alt)}
+.tts-item audio{width:100%;height:36px}
+.tts-item .tts-text{font-size:var(--fs-2xs);color:var(--text-3);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hist-item{position:relative;display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-2);background:var(--bg-sunken-alt)}
 .hist-item:hover{border-color:var(--border-accent)}
 .hist-del{position:absolute;top:2px;right:var(--sp-1);color:var(--border-hover);cursor:pointer;font-size:var(--fs-xs);line-height:1;padding:2px 5px;border-radius:var(--r-sm);z-index:2}
@@ -785,7 +789,7 @@ __SD_MODELS__
 </div>
 </div>
 
-<div class="media-pane" id="mediapane-speech" style="display:none">
+<div class="media-pane" id="mediapane-speech">
 <div class="media-form">
 <div class="media-row media-row-3" style="grid-template-columns:1fr 1fr">
 <div class="field">
@@ -804,6 +808,7 @@ __SD_MODELS__
 </div>
 <button id="ttsGenerate">Speak</button>
 <div id="ttsResult" class="media-result"></div>
+  <div id="ttsGallery" class="media-gallery"></div>
 </div>
 </div>
 
@@ -2901,6 +2906,7 @@ function showMediaPane(name){
   try{localStorage.setItem('dyva_mediapane',name)}catch(e){}
   if(name==='image'&&!_imgHistoryLoaded){_imgHistoryLoaded=true;loadImgHistory()}
   if(name==='speech'&&!_ttsVoicesLoaded)loadTtsVoices();
+  if(name==='speech')loadTtsHistory();
   if(name==='music'&&!_musicLoaded)loadMusicModels();
 }
 document.querySelectorAll('[data-mediapane]').forEach(function(b){
@@ -2954,7 +2960,6 @@ async function generateSpeech(){
   try{
     var r=await fetch('v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){_mediaError(out,await _errText(r));return}
-    // the host's native format (usually flac) — let the browser sniff it
     var blob=await r.blob();
     var url=URL.createObjectURL(blob);
     out.innerHTML='';
@@ -2963,10 +2968,49 @@ async function generateSpeech(){
     a.download='dyva-speech'+(/(flac|wav|mpeg|ogg)/.test(blob.type)?'.'+blob.type.split('/')[1].replace('mpeg','mp3'):'.audio');
     a.textContent='download';
     out.appendChild(a);
+    // save to local history for gallery
+    var hist=JSON.parse(localStorage.getItem('dyva_tts_history')||'[]');
+    hist.unshift({text:text.slice(0,200),voice:v||'default',model:m||'auto',ts:Date.now(),url:url});
+    hist=hist.slice(0,50); // keep last 50
+    localStorage.setItem('dyva_tts_history',JSON.stringify(hist));
+    loadTtsHistory();
   }catch(ex){_mediaError(out,ex.message)}
   finally{btn.disabled=false}
 }
 document.getElementById('ttsGenerate').addEventListener('click',generateSpeech);
+
+function loadTtsHistory(){
+  var hist=JSON.parse(localStorage.getItem('dyva_tts_history')||'[]');
+  var el=document.getElementById('ttsGallery');
+  el.innerHTML='';
+  hist.forEach(function(e){
+    var item=document.createElement('div');
+    item.className='tts-item';
+    var au=document.createElement('audio');
+    au.controls=true;
+    au.src=e.url;
+    au.preload='none';
+    var t=document.createElement('div');
+    t.className='tts-text';
+    t.textContent=(e.voice&&e.voice!=='default'?e.voice+': ':'')+e.text;
+    t.title=e.text;
+    var del=document.createElement('span');
+    del.className='hist-del';
+    del.textContent='\u2715';
+    del.title='Remove from history';
+    del.addEventListener('click',function(ev){
+      ev.stopPropagation();
+      var h=JSON.parse(localStorage.getItem('dyva_tts_history')||'[]');
+      h=h.filter(function(x){return x.ts!==e.ts});
+      localStorage.setItem('dyva_tts_history',JSON.stringify(h));
+      loadTtsHistory();
+    });
+    item.appendChild(au);
+    item.appendChild(t);
+    item.appendChild(del);
+    el.appendChild(item);
+  });
+}
 
 // ---- video ---------------------------------------------------------------
 // Async: POST returns 202 + an id, then poll until completed/failed.
