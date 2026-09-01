@@ -933,8 +933,14 @@ document.getElementById('activityBtn').addEventListener('click',function(e){e.st
 document.addEventListener('keydown',function(e){if(e.key==='Escape')actPop.classList.remove('open')});
 </script>
 <script>
-function useFilterModel(){
-  var q=document.getElementById('modelFilter').value.trim()||_currentModel||'';
+// An explicitly-selected model wins over whatever is in the filter box: the
+// filter is a way to *find* a model, so once one has been picked (e.g.
+// llama3:latest) that exact name is what "use" sends to chat, not the partial
+// text that was typed to narrow the list down to it. Pressing Enter in the
+// filter box is the other way round — there the typed text is the intent.
+function useFilterModel(preferTyped){
+  var typed=document.getElementById('modelFilter').value.trim();
+  var q=preferTyped?(typed||_currentModel||''):(_currentModel||typed||'');
   if(!q)return;
   var el=document.getElementById('chatModel');
   if(!el)return;
@@ -942,9 +948,9 @@ function useFilterModel(){
   try{el.dispatchEvent(new Event('input',{bubbles:true}))}catch(e){}   // refresh the server count
   location.hash='chat';
 }
-document.getElementById('modelUse').addEventListener('click',useFilterModel);
+document.getElementById('modelUse').addEventListener('click',function(){useFilterModel(false)});
 document.getElementById('modelFilter').addEventListener('keydown',function(e){
-  if(e.key==='Enter'){e.preventDefault();useFilterModel()}
+  if(e.key==='Enter'){e.preventDefault();useFilterModel(true)}
 });
 function refreshUseBtn(){
   var b=document.getElementById('modelUse');
@@ -992,8 +998,15 @@ function matchModel(name,pattern){
   return n.indexOf(p)>=0;
 }
 function filterModels(){
-  refreshUseBtn();
   var q=document.getElementById('modelFilter').value.trim();
+  // Narrowing the filter until the selected model is no longer listed clears
+  // the selection, so "use" can't send a model that's been filtered away.
+  if(_currentModel&&!matchModel(_currentModel,q)){
+    _currentModel=null;
+    document.querySelectorAll('.modellist .model-item').forEach(function(x){x.style.background=''});
+    var hc=document.getElementById('hostCard');if(hc)hc.style.display='none';
+  }
+  refreshUseBtn();
   document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=matchModel(el.getAttribute('data-name'),q)?'':'none'});
   // the same query re-renders the Hosts card panes from the full arrays, so it
   // searches the whole list and the "... and N more" count matches the results
@@ -1118,14 +1131,46 @@ function renderWorkers(workers){
     c.appendChild(card);
   });
 }
-// The workers list is polled from the server every couple of seconds (plain
-// JSON, not SSE — SSE to this endpoint is flaky and drops mid-race), so the
-// pane always reflects whatever is currently racing.
-function pollWorkers(){
-  fetch('workers-now',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){renderWorkers(d.workers||[])}).catch(function(){});
+// Live worker updates over WebSocket (robust through the reverse proxy where
+// SSE streaming gets buffered/dropped). Auto-reconnects on close.
+function renderWorkersFromMsg(ev){
+  try{var d=JSON.parse(ev.data);renderWorkers(d.workers||[]);}catch(e){}
 }
-pollWorkers();
-setInterval(pollWorkers,2000);
+// Preferred transport is the WebSocket; if the upgrade never completes (some
+// reverse proxies drop the Upgrade header) we fall back to polling instead of
+// reconnecting forever. The polling requests are excluded from the server's
+// access log so they don't bury it.
+var _wsFailures=0,_workerPoll=null;
+function startWorkerPolling(){
+  if(_workerPoll)return;
+  function poll(){
+    fetch('workers-now',{cache:'no-store'}).then(function(r){return r.json()})
+      .then(function(d){renderWorkers(d.workers||[])}).catch(function(){});
+  }
+  poll();
+  _workerPoll=setInterval(poll,2000);
+}
+function stopWorkerPolling(){
+  if(_workerPoll){clearInterval(_workerPoll);_workerPoll=null;}
+}
+function connectWorkersWs(){
+  // Resolve relative to the page so a dashboard mounted under a sub-path works.
+  var u=new URL('workers-ws',location.href);
+  u.protocol=(u.protocol==='https:')?'wss:':'ws:';
+  var ws;
+  try{ws=new WebSocket(u.href);}catch(e){startWorkerPolling();return;}
+  ws.onopen=function(){_wsFailures=0;stopWorkerPolling();};
+  ws.onmessage=renderWorkersFromMsg;
+  ws.onerror=function(){try{ws.close()}catch(e){}};
+  ws.onclose=function(){
+    _wsFailures++;
+    // Two failed attempts is enough to conclude the upgrade isn't getting
+    // through; settle on polling and stop hammering the endpoint.
+    if(_wsFailures>=2){startWorkerPolling();return;}
+    setTimeout(connectWorkersWs,1500);
+  };
+}
+connectWorkersWs();
 // The snackbar is server-rendered visible (in the markup with class "show") so
 // it paints on first load without waiting for JS; here we only take it down.
 var snackbar=document.getElementById('snackbar');
@@ -1154,8 +1199,17 @@ function loadDashboard(){
 }
 document.getElementById('serverroom').addEventListener('click',function(e){
   var el=e.target.closest('.modellist .model-item[data-name]');if(!el)return;
+  var name=el.getAttribute('data-name');
   document.querySelectorAll('.modellist .model-item').forEach(function(x){x.style.background=''});
-  el.style.background='var(--accent-bg-active)';_currentModel=el.getAttribute('data-name');
+  // Clicking the already-selected model toggles it off, back to the
+  // nothing-selected state (no highlight, no host card).
+  if(name===_currentModel){
+    _currentModel=null;
+    refreshUseBtn();
+    document.getElementById('hostCard').style.display='none';
+    return;
+  }
+  el.style.background='var(--accent-bg-active)';_currentModel=name;
   refreshUseBtn();
   var hosts=(modelHosts[_currentModel]||[]).slice().sort(function(a,b){
     var ta=hostChecked[a]?Date.parse(hostChecked[a]):NaN,tb=hostChecked[b]?Date.parse(hostChecked[b]):NaN;

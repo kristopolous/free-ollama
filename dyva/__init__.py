@@ -19,7 +19,7 @@ import sqlite3
 import importlib.metadata
 
 import aiohttp
-from aiohttp import web
+from aiohttp import web, web_log
 from aiohttp_swagger3 import SwaggerDocs, SwaggerInfo, SwaggerUiSettings
 
 LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
@@ -492,7 +492,7 @@ def _worker_snapshot():
 
 
 async def _broadcast_workers():
-    payload = json.dumps(_worker_snapshot())
+    payload = json.dumps({"workers": _worker_snapshot()})
     async with _worker_lock:
         dead = []
         for q in _worker_queues:
@@ -511,7 +511,8 @@ async def _add_worker_listener(q):
 
 async def _remove_worker_listener(q):
     async with _worker_lock:
-        _worker_queues.remove(q)
+        if q in _worker_queues:
+            _worker_queues.remove(q)
 
 
 async def _register_worker(model, total, stop):
@@ -1407,6 +1408,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     errors_lock = asyncio.Lock()
     server_iter = iter(servers)
     iter_lock = asyncio.Lock()
+    stopped = False
 
     async def _collect_err(msg):
         async with errors_lock:
@@ -1581,6 +1583,8 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     _tasks_holder = []
 
     def _stop():
+        nonlocal stopped
+        stopped = True
         done.set()
         for t in _tasks_holder:
             t.cancel()
@@ -1611,7 +1615,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         if job_wid is None:
             await _unregister_worker(wwid)
 
-    return result, errors
+    return result, errors, stopped
 
 
 async def _try_one(session, host, model, full_model, opayload, remote=None):
@@ -2077,15 +2081,16 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                 err_msg += f": {last_host_err}"
             return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
+        stopped = False
         for model in model_list:
             if do_stream:
-                result, errors = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid)
+                result, errors, stopped = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid)
                 if result:
                     _, host, full, resp, first_line, first = result
                     stream_resp = web.StreamResponse()
                     await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format)
                     return stream_resp
-                msg = "all servers failed"
+                msg = "worker manually stopped" if stopped else "all servers failed"
                 if errors:
                     msg += ": " + "; ".join(dict.fromkeys(errors))
                 if openai_format:
@@ -2094,7 +2099,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                         content_type="text/event-stream",
                     )
             else:
-                result, errors = await _race_servers(session, model, _servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid)
+                result, errors, stopped = await _race_servers(session, model, _servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid)
 
                 if result:
                     _, host, full, data = result
@@ -2103,7 +2108,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     resp.headers["X-Dyva-Model"] = full
                     return resp
 
-        msg = "all servers failed"
+        msg = "worker manually stopped" if stopped else "all servers failed"
         if errors:
             msg += ": " + "; ".join(dict.fromkeys(errors))
         return web.json_response(err_obj(msg), status=502)
@@ -2219,23 +2224,23 @@ async def _proxy_generate(request, session):
             return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
         if do_stream:
-            result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
+            result, errors, stopped = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
             if result:
                 _, host, full, resp, first_line, first = result
                 stream_resp = web.StreamResponse()
                 await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format=False)
                 return stream_resp
-            msg = "all servers failed"
+            msg = "worker manually stopped" if stopped else "all servers failed"
             if errors:
                 msg += ": " + "; ".join(dict.fromkeys(errors))
             return web.json_response(err_obj(msg), status=502)
 
-        result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
+        result, errors, stopped = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
         if result:
             _, host, full, data = result
             return web.json_response(data)
 
-        msg = "all servers failed"
+        msg = "worker manually stopped" if stopped else "all servers failed"
         if errors:
             msg += ": " + "; ".join(dict.fromkeys(errors))
         return web.json_response(err_obj(msg), status=502)
@@ -2789,6 +2794,22 @@ async def handle_workers(request):
     return response
 
 
+class QuietAccessLogger(web_log.AccessLogger):
+    """Access logger that drops the high-frequency worker-pane requests.
+
+    The workers pane refreshes every couple of seconds when it has to fall back
+    to polling (WebSocket upgrades don't survive every reverse proxy), which
+    would otherwise bury the log in identical lines.
+    """
+
+    QUIET_PATHS = ("/workers-now", "/workers-ws", "/workers")
+
+    def log(self, request, response, time):
+        if request.path in self.QUIET_PATHS:
+            return
+        super().log(request, response, time)
+
+
 async def handle_workers_now(request):
     """
     Current workers snapshot (plain JSON)
@@ -2806,6 +2827,38 @@ async def handle_workers_now(request):
     return web.json_response({"workers": _worker_snapshot()})
 
 
+async def handle_workers_ws(request):
+    """
+    Live workers stream (WebSocket)
+    ---
+    tags: [Monitoring]
+    summary: WebSocket stream of currently-running model-resolution races
+    responses:
+      '101':
+        description: Upgraded WebSocket pushing worker snapshots
+    """
+    ws = web.WebSocketResponse(heartbeat=25)
+    await ws.prepare(request)
+    q = asyncio.Queue()
+    await _add_worker_listener(q)
+    try:
+        await ws.send_json({"workers": _worker_snapshot()})
+        while not ws.closed:
+            try:
+                payload = await asyncio.wait_for(q.get(), timeout=25)
+            except asyncio.TimeoutError:
+                continue
+            if payload is None:
+                break
+            try:
+                await ws.send_str(payload)
+            except Exception:
+                break
+    finally:
+        await _remove_worker_listener(q)
+    return ws
+
+
 async def handle_stop_worker(request):
     """
     Abort a running race effort.
@@ -2814,11 +2867,17 @@ async def handle_stop_worker(request):
     summary: Stop a running model-resolution race
     parameters:
       - in: query
+        name: wid
+        schema:
+          type: string
+        required: false
+        description: Worker id to stop
+      - in: query
         name: model
         schema:
           type: string
-        required: true
-        description: Model string to stop racing on
+        required: false
+        description: Model string to stop racing on (used when wid is omitted)
     responses:
       '200':
         description: Stop requested
@@ -2837,6 +2896,9 @@ async def handle_stop_worker(request):
         return web.json_response({"error": "worker not found"}, status=404)
     stop = w.get("stop")
     if callable(stop):
+        log.warning(f"worker manually stopped: model={w.get('model')} wid={w.get('wid')}")
+        await broadcast_activity("", w.get("model"), "stopped",
+            f"worker manually stopped: {w.get('model')}")
         loop = asyncio.get_event_loop()
         loop.call_soon_threadsafe(stop) if loop.is_running() else stop()
     return web.json_response({"stopped": w.get("model"), "wid": w.get("wid")})
@@ -5833,6 +5895,7 @@ def make_app():
     swagger.add_get("/skip-good", handle_skip_good)
     swagger.add_get("/workers", handle_workers)
     swagger.add_get("/workers-now", handle_workers_now)
+    app.router.add_get("/workers-ws", handle_workers_ws)
     swagger.add_get("/stop-worker", handle_stop_worker)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
@@ -5944,6 +6007,7 @@ def main():
             host=args.host or "0.0.0.0",
             port=PORT,
             access_log_format='%t %a "%r" %s %b "%{Referer}i" "%{User-Agent}i"',
+            access_log_class=QuietAccessLogger,
             print=lambda *a: None,
         )
 
