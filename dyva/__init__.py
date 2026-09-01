@@ -57,6 +57,7 @@ logging.basicConfig(
 for _handler in logging.getLogger().handlers:
     _handler.setFormatter(ApacheStyleFormatter(LOG_FORMAT))
 log = logging.getLogger("dumpster-dyva")
+log.setLevel(getattr(logging, LOGLEVEL, logging.INFO))
 
 access_logger = logging.getLogger("aiohttp.access")
 access_logger.propagate = False
@@ -4660,35 +4661,31 @@ async def _tts_comfyui(session, host, input_text, voice=None):
 def _find_tts_hosts(target_host=None):
     """ComfyUI hosts that can generate TTS.
     Priority: 1) host explicitly requested, 2) hosts with audio-class models,
-    3) all ComfyUI hosts (fallback - TTS is node-based not model-class-based)."""
+    3) all other ComfyUI hosts (TTS is node-based not model-class-based)."""
     if target_host:
-        # If a specific host was requested, just try it
-        return [target_host] if any(s.get("service") == "comfyui"
-                                     for s in load_servers()
-                                     if s.get("server") == target_host) else []
+        if _host_has_class(target_host, _AUDIO_CLASSES):
+            return [target_host]
+        # Still try the host if it exists — TTS is node-based
+        for s in load_servers():
+            if s.get("server") == target_host and s.get("service") == "comfyui":
+                return [target_host]
+        return []
     servers = load_servers()
-    # First try: hosts with audio-class models
-    hosts = [s.get("server") for s in servers
-             if s.get("service") == "comfyui" and s.get("server")
-             and _host_has_class(s.get("server"), _AUDIO_CLASSES)]
-    if hosts:
-        bad, good = load_bad(), load_good()
-        hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
-        last = get_last(TTS_KEY)
-        if last and last[0]:
-            hosts = [last[0]] + [h for h in hosts if h != last[0]]
-        return hosts
-    # Fallback: all ComfyUI hosts (TTS is determined by node presence, not model class)
-    hosts = [s.get("server") for s in servers
-             if s.get("service") == "comfyui" and s.get("server")]
-    if hosts:
-        bad, good = load_bad(), load_good()
-        hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
-        last = get_last(TTS_KEY)
-        if last and last[0]:
-            hosts = [last[0]] + [h for h in hosts if h != last[0]]
-        return hosts
-    return []
+    # First pass: hosts with audio-class models
+    audio_hosts = [s.get("server") for s in servers
+                   if s.get("service") == "comfyui" and s.get("server")
+                   and _host_has_class(s.get("server"), _AUDIO_CLASSES)]
+    # Second pass: all other comfyui hosts not already in the list
+    all_comfyui = set(s.get("server") for s in servers
+                      if s.get("service") == "comfyui" and s.get("server"))
+    other_hosts = sorted(all_comfyui - set(audio_hosts))
+    hosts = audio_hosts + other_hosts
+    bad, good = load_bad(), load_good()
+    hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
+    last = get_last(TTS_KEY)
+    if last and last[0]:
+        hosts = [last[0]] + [h for h in hosts if h != last[0]]
+    return hosts
 
 
 def _host_has_class(host, classes):
@@ -4815,6 +4812,7 @@ async def _run_video_job(session, jid):
     except (_VideoError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
         job["status"] = "failed"
         job["error"] = str(e) or type(e).__name__
+        log.warning(f"video: {host}: {job['error']}")
         add_bad(host, VIDEO_KEY)
         await broadcast_activity(host, label, "failed", f"{label}: {job['error']}", duration=time.time() - t0)
         _video_job_save()
@@ -5289,6 +5287,7 @@ async def handle_tts_speech(request):
             raw, filename = await _tts_comfyui(session, host, input_text, voice)
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             last_err = str(e) or type(e).__name__
+            log.warning(f"tts: {host}: {last_err}")
             add_bad(host, TTS_KEY)
             await broadcast_activity(host, label, "failed", f"{label}: {last_err}", duration=time.time() - t0)
             continue
@@ -5723,6 +5722,7 @@ async def _run_music_job(session, jid):
                     info, fam, enc, lat, job["style"], job.get("lyrics") or "",
                     job["seconds"], job["seed"], int(p.get("steps", 50)), float(p.get("cfg", 5.0)))
             except _MusicError as e:
+                log.warning(f"music build: {cand}: {e}")
                 errors.append(f"{cand}: {e}")
                 continue
             host = cand
@@ -5762,6 +5762,7 @@ async def _run_music_job(session, jid):
         job["status"] = "failed"
         job["error"] = str(e) or type(e).__name__
         if host:
+            log.warning(f"music: {host}: {job['error']}")
             add_bad(host, MUSIC_KEY)
             await broadcast_activity(host, label, "failed", f"{label}: {job['error']}", duration=time.time() - t0)
         _music_job_save()
