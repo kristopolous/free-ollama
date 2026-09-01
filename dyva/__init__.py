@@ -1390,7 +1390,7 @@ def _curlify(method, url, json_body):
         logging.debug(f"curlify failed: {e}")
 
 
-async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None):
+async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None):
     done = asyncio.Event()
     result_queue = asyncio.Queue()
     errors = []
@@ -1568,9 +1568,6 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             done.set()
             return
 
-    if resp is not None:
-        await resp.release()
-
     _tasks_holder = []
 
     def _stop():
@@ -1578,7 +1575,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         for t in _tasks_holder:
             t.cancel()
 
-    wwid = await _register_worker(model, len(servers), _stop)
+    wwid = job_wid if job_wid is not None else await _register_worker(model, len(servers), _stop)
     tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(servers)))]
     _tasks_holder[:] = tasks
     try:
@@ -1597,7 +1594,8 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        await _unregister_worker(wwid)
+        if job_wid is None:
+            await _unregister_worker(wwid)
 
     return result, errors
 
@@ -1926,63 +1924,69 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
             return web.json_response(err_obj(f"no available servers for '{model_in}'", "model_not_found"), status=404)
         return _info_response(model_list[0], info, do_stream=do_stream, openai_format=openai_format)
 
-    last = get_last(model_list[0])
-    last_host_err = None
-    if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
-        last_host, last_full = last
-        log.debug(f"Reusing {last_host} for {model_list[0]}")
-        if do_stream:
-            result, last_host_err = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True, remote=request.remote)
-            if result:
-                resp, first_line, first = result
-                stream_resp = web.StreamResponse()
-                await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format)
-                return stream_resp
-        else:
-            data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload, remote=request.remote)
-            if data:
-                resp = chat_fmt(data, model_list[0], openai_format)
-                resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", last_host)
-                resp.headers["X-Dyva-Model"] = last_full
-                return resp
+    _servers = find_servers(model_in, req_caps)
+    total = len(_servers)
+    job_wid = await _register_worker(model_list[0], total, lambda: None)
+    try:
+        last = get_last(model_list[0])
+        last_host_err = None
+        if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
+            last_host, last_full = last
+            log.debug(f"Reusing {last_host} for {model_list[0]}")
+            await _worker_checked(job_wid)
+            if do_stream:
+                result, last_host_err = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True, remote=request.remote)
+                if result:
+                    resp, first_line, first = result
+                    stream_resp = web.StreamResponse()
+                    await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format)
+                    return stream_resp
+            else:
+                data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload, remote=request.remote)
+                if data:
+                    resp = chat_fmt(data, model_list[0], openai_format)
+                    resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", last_host)
+                    resp.headers["X-Dyva-Model"] = last_full
+                    return resp
 
-    servers = find_servers(model_in, req_caps)
-    if not servers:
-        err_msg = f"no available servers for '{model_in}'"
-        if last_host_err:
-            err_msg += f": {last_host_err}"
-        return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
+        if not _servers:
+            err_msg = f"no available servers for '{model_in}'"
+            if last_host_err:
+                err_msg += f": {last_host_err}"
+            return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
-    for model in model_list:
-        if do_stream:
-            result, errors = await _race_servers(session, model, servers, opayload, do_stream=True, remote=request.remote, caps=req_caps)
-            if result:
-                _, host, full, resp, first_line, first = result
-                stream_resp = web.StreamResponse()
-                await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format)
-                return stream_resp
-            msg = "all servers failed"
-            if errors:
-                msg += ": " + "; ".join(dict.fromkeys(errors))
-            if openai_format:
-                return web.Response(
-                    text=sse_str({"error": msg}) + sse_str(sse_chunk("", {}, done=True)),
-                    content_type="text/event-stream",
-                )
-        else:
-            result, errors = await _race_servers(session, model, servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps)
+        for model in model_list:
+            if do_stream:
+                result, errors = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid)
+                if result:
+                    _, host, full, resp, first_line, first = result
+                    stream_resp = web.StreamResponse()
+                    await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format)
+                    return stream_resp
+                msg = "all servers failed"
+                if errors:
+                    msg += ": " + "; ".join(dict.fromkeys(errors))
+                if openai_format:
+                    return web.Response(
+                        text=sse_str({"error": msg}) + sse_str(sse_chunk("", {}, done=True)),
+                        content_type="text/event-stream",
+                    )
+            else:
+                result, errors = await _race_servers(session, model, _servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid)
 
-            if result:
-                _, host, full, data = result
-                resp = chat_fmt(data, model, openai_format)
-                resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
-                resp.headers["X-Dyva-Model"] = full
-                return resp
+                if result:
+                    _, host, full, data = result
+                    resp = chat_fmt(data, model, openai_format)
+                    resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
+                    resp.headers["X-Dyva-Model"] = full
+                    return resp
 
-    msg = "all servers failed"
-    if errors:
-        msg += ": " + "; ".join(dict.fromkeys(errors))
-    return web.json_response(err_obj(msg), status=502)
+        msg = "all servers failed"
+        if errors:
+            msg += ": " + "; ".join(dict.fromkeys(errors))
+        return web.json_response(err_obj(msg), status=502)
+    finally:
+        await _unregister_worker(job_wid)
 
 
 async def _proxy_generate(request, session):
@@ -2015,96 +2019,101 @@ async def _proxy_generate(request, session):
             return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
         return _info_response(model, info, do_stream=do_stream)
 
-    last = get_last(model)
-    last_host_err = None
-    if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
-        last_host, last_full = last
-        log.debug(f"Reusing {last_host} for {model}")
-        if do_stream:
-            result, last_host_err = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint, remote=request.remote)
-            if result:
-                resp, first_line, first = result
-                stream_resp = web.StreamResponse()
-                await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format=False)
-                return stream_resp
-        else:
-            wid = asyncio.current_task().get_name()
-            await broadcast_activity(last_host, model, "trying",
-                f"trying: {last_host} for {model}", wid=wid)
-            start = time.time()
-            p = dict(body, model=last_full, stream=False)
-            _curlify("POST", f"{last_host}{endpoint}", p)
-            try:
-                r = await asyncio.wait_for(
-                    session.post(f"{last_host}{endpoint}", json=p),
-                    timeout=TIMEOUT,
-                )
-            except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-                dur = time.time() - start
-                await broadcast_activity(last_host, model, "failed",
-                    f"failure: {last_host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-                pass
+    job_wid = await _register_worker(model, len(find_servers(model, req_caps)), lambda: None)
+    try:
+        last = get_last(model)
+        last_host_err = None
+        if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
+            last_host, last_full = last
+            log.debug(f"Reusing {last_host} for {model}")
+            await _worker_checked(job_wid)
+            if do_stream:
+                result, last_host_err = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint, remote=request.remote)
+                if result:
+                    resp, first_line, first = result
+                    stream_resp = web.StreamResponse()
+                    await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format=False)
+                    return stream_resp
             else:
-                if r.status == 200:
-                    try:
-                        data = await r.json()
-                    except Exception:
-                        data = None
-                    await r.release()
-                    if data and "error" not in data:
-                        dur = time.time() - start
-                        set_last(model, last_host, last_full)
-                        add_good(last_host, model)
-                        await broadcast_activity(last_host, model, "connected",
-                            f"success: {last_host} for {model}", duration=dur, wid=wid)
-                        return web.json_response(data)
+                wid = asyncio.current_task().get_name()
+                await broadcast_activity(last_host, model, "trying",
+                    f"trying: {last_host} for {model}", wid=wid)
+                start = time.time()
+                p = dict(body, model=last_full, stream=False)
+                _curlify("POST", f"{last_host}{endpoint}", p)
+                try:
+                    r = await asyncio.wait_for(
+                        session.post(f"{last_host}{endpoint}", json=p),
+                        timeout=TIMEOUT,
+                    )
+                except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
                     dur = time.time() - start
-                    add_bad(last_host, model)
-                    if data and "error" in data:
-                        last_host_err = data["error"]
                     await broadcast_activity(last_host, model, "failed",
-                        f"failure: {last_host} for {model} - bad response", duration=dur, wid=wid)
+                        f"failure: {last_host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
+                    pass
                 else:
-                    dur = time.time() - start
-                    try:
-                        raw = await r.read()
-                        last_host_err = raw.decode('utf-8', errors='replace')[:500]
-                        log_upstream(r.status, last_host, endpoint, last_host_err, remote=request.remote)
-                    except Exception:
-                        pass
-                    await r.release()
-                    add_bad(last_host, model)
-                    await broadcast_activity(last_host, model, "failed",
-                        f"failure: {last_host} for {model} - status {r.status}", duration=dur, wid=wid)
+                    if r.status == 200:
+                        try:
+                            data = await r.json()
+                        except Exception:
+                            data = None
+                        await r.release()
+                        if data and "error" not in data:
+                            dur = time.time() - start
+                            set_last(model, last_host, last_full)
+                            add_good(last_host, model)
+                            await broadcast_activity(last_host, model, "connected",
+                                f"success: {last_host} for {model}", duration=dur, wid=wid)
+                            return web.json_response(data)
+                        dur = time.time() - start
+                        add_bad(last_host, model)
+                        if data and "error" in data:
+                            last_host_err = data["error"]
+                        await broadcast_activity(last_host, model, "failed",
+                            f"failure: {last_host} for {model} - bad response", duration=dur, wid=wid)
+                    else:
+                        dur = time.time() - start
+                        try:
+                            raw = await r.read()
+                            last_host_err = raw.decode('utf-8', errors='replace')[:500]
+                            log_upstream(r.status, last_host, endpoint, last_host_err, remote=request.remote)
+                        except Exception:
+                            pass
+                        await r.release()
+                        add_bad(last_host, model)
+                        await broadcast_activity(last_host, model, "failed",
+                            f"failure: {last_host} for {model} - status {r.status}", duration=dur, wid=wid)
 
-    servers = find_servers(model, req_caps)
-    if not servers:
-        err_msg = f"no available servers for '{model}'"
-        if last_host_err:
-            err_msg += f": {last_host_err}"
-        return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
+        servers = find_servers(model, req_caps)
+        if not servers:
+            err_msg = f"no available servers for '{model}'"
+            if last_host_err:
+                err_msg += f": {last_host_err}"
+            return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
 
-    if do_stream:
-        result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps)
+        if do_stream:
+            result, errors = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
+            if result:
+                _, host, full, resp, first_line, first = result
+                stream_resp = web.StreamResponse()
+                await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format=False)
+                return stream_resp
+            msg = "all servers failed"
+            if errors:
+                msg += ": " + "; ".join(dict.fromkeys(errors))
+            return web.json_response(err_obj(msg), status=502)
+
+        result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
         if result:
-            _, host, full, resp, first_line, first = result
-            stream_resp = web.StreamResponse()
-            await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format=False)
-            return stream_resp
+            _, host, full, data = result
+            return web.json_response(data)
+
         msg = "all servers failed"
         if errors:
             msg += ": " + "; ".join(dict.fromkeys(errors))
         return web.json_response(err_obj(msg), status=502)
-
-    result, errors = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps)
-    if result:
-        _, host, full, data = result
-        return web.json_response(data)
-
-    msg = "all servers failed"
-    if errors:
-        msg += ": " + "; ".join(dict.fromkeys(errors))
-    return web.json_response(err_obj(msg), status=502)
+    finally:
+        await _unregister_worker(job_wid)
 
 
 async def handle_dashboard(request):
