@@ -1339,6 +1339,47 @@ def _known_capable(host, model, caps):
     return _model_capable(known, caps)
 
 
+# Priority tiers, best first:
+#   recent (last success) -> good -> maybe_good -> unknown -> bad
+# One definition, used by chat (find_servers) and by the capability endpoints
+# (tts, txt2img, ...) which key their reputation on a __sentinel__ instead of a
+# model name. last/good/maybe deliberately outrank a stale bad mark, so a host
+# with one transient failure isn't buried behind the unreachable junk; a host
+# dead at the connection level drops to the bad tier for everything at once.
+TIER_LAST, TIER_GOOD, TIER_MAYBE, TIER_UNKNOWN, TIER_BAD = -3, -2, -1, 0, 1
+
+
+def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False):
+    if unreachable:
+        return TIER_BAD
+    if is_last:
+        return TIER_LAST
+    if in_good:
+        return TIER_GOOD
+    if in_maybe:
+        return TIER_MAYBE
+    if in_bad:
+        return TIER_BAD
+    return TIER_UNKNOWN
+
+
+def capability_tier(host, key, marks, last_host, extra_bad=False):
+    """host_tier for a capability sentinel key (__tts__, __a1111__, ...).
+
+    `marks` is (good, maybe, bad, unreachable) loaded once by the caller.
+    `extra_bad` lets a capability fold in its own hard negative — for TTS, a
+    fresh probe that found no usable node is better evidence than a stale mark.
+    """
+    good, maybe, bad, unreachable = marks
+    k = f"{host} {key}"
+    return host_tier(host == last_host, k in good, k in maybe,
+                     extra_bad or k in bad, host in unreachable)
+
+
+def load_marks():
+    return load_good(), load_maybe(), load_bad(), load_unreachable()
+
+
 def _checked_rank(s):
     """Sort key for the unknown tier: most-recently-checked first. Returns the
     negated epoch of the entry's `checked` timestamp (so newer sorts earlier);
@@ -1414,10 +1455,6 @@ def find_servers(sub, caps=None):
             in_good = st == "good"
             in_maybe = st == "maybe_good"
             in_bad = st == "bad"
-        # Priority tiers, best first:
-        #   recent (last success) -> good -> maybe_good -> unknown -> bad
-        # last/good/maybe win over a stale bad mark so a host that had one
-        # transient failure isn't buried behind the unreachable junk.
         _last = get_last(sub)
         if _last is None and not sub:
             if _last_cache is None:
@@ -1427,24 +1464,11 @@ def find_servers(sub, caps=None):
                  if v.get("host") == host),
                 None)
         is_last = _last is not None and host == _last[0]
-        if host in unreachable:
-            # dead at the connection level -> bad tier for every model, so it
-            # isn't re-probed as "unknown" for each new model query
-            prio = 1
-        elif is_last:
-            prio = -3
-        elif in_good:
-            prio = -2
-        elif in_maybe:
-            prio = -1
-        elif in_bad:
-            prio = 1
-        else:
-            prio = 0
+        prio = host_tier(is_last, in_good, in_maybe, in_bad, host in unreachable)
         # Within the UNKNOWN tier only, try the most-recently-checked hosts
         # first (recently reachable => likelier still up). Other tiers keep
         # their existing order via a constant secondary key (stable sort).
-        crank = _checked_rank(s) if prio == 0 else 0
+        crank = _checked_rank(s) if prio == TIER_UNKNOWN else 0
         matched.append((prio, crank, host, ms))
     matched.sort(key=lambda x: (x[0], x[1]))
     return [(p, h, m) for p, c, h, m in matched]
@@ -4162,8 +4186,12 @@ async def handle_txt2img(request):
     if not hosts:
         return web.json_response({"error": "no available image-gen hosts"}, status=503)
 
-    good = load_good()
-    hosts.sort(key=lambda h: 0 if f"{h} {IMG_KEY}" in good else 1)
+    # Was a two-way good/not-good sort, which meant a1111 never used maybe_good
+    # and re-probed hosts already known dead at the connection level.
+    marks = load_marks()
+    _last_img = get_last(IMG_KEY)
+    hosts.sort(key=lambda h: capability_tier(
+        h, IMG_KEY, marks, _last_img[0] if _last_img else None))
 
     async def _race(host_list):
         done = asyncio.Event()
@@ -4669,6 +4697,99 @@ async def _tts_object_info(session, host):
     return info
 
 
+# ComfyUI required-input types we can satisfy inline. Anything else — AUDIO,
+# MODEL, ELEVENLABS_VOICE, a bare COMBO with no inline options — is a *socket*
+# that has to be fed by another node, so a node needing one can't be driven by
+# the three-node graph this builds.
+_FILLABLE_PRIMITIVE = {"STRING": "", "INT": 0, "FLOAT": 0.0, "BOOLEAN": False}
+
+
+def _tts_fill(entry):
+    """(can_fill, value) for one required input's schema entry."""
+    if not isinstance(entry, list) or not entry:
+        return False, None
+    kind = entry[0]
+    attrs = entry[1] if len(entry) > 1 and isinstance(entry[1], dict) else {}
+    if isinstance(kind, list):                      # enum
+        if not kind:
+            return False, None
+        if attrs.get("default") in kind:
+            return True, attrs["default"]
+        return True, kind[0]
+    if "default" in attrs:
+        return True, attrs["default"]
+    if kind in _FILLABLE_PRIMITIVE:
+        return True, _FILLABLE_PRIMITIVE[kind]
+    return False, None
+
+
+def _tts_unfillable(required, skip=()):
+    """Names of required inputs we can neither fill nor wire."""
+    return [k for k, v in required.items()
+            if k not in skip and not _tts_fill(v)[0]]
+
+
+_SAVE_AUDIO_RE = re.compile(r"(?i)save.*audio|audio.*save")
+
+
+def _tts_save_node(host_info):
+    """The node that will actually write the audio file, or None if this host
+    has no audio saver at all. Defaulting to the name "SaveAudio" when it isn't
+    installed just moves the failure to the host, as missing_node_type."""
+    for candidate in ("SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced"):
+        if candidate in host_info:
+            return candidate
+    for key in host_info:
+        if _SAVE_AUDIO_RE.search(key):
+            req = ((host_info[key].get("input") or {}).get("required")) or {}
+            if any(isinstance(v, list) and v and v[0] == "AUDIO" for v in req.values()):
+                return key
+    return None
+
+
+def _tts_viable(node_class, info, fam):
+    """Can this node actually be driven end to end on this host?
+
+    Name-matching a family is not enough. The graph is only three nodes deep, so
+    every required input has to be fillable inline, and every node it references
+    — the audio saver, and UnifiedTTSTextNode behind an engine — has to be
+    installed. Skipping this check produced two distinct host-side rejections:
+    `required_input_missing` on ElevenLabsTextToSpeech (its `voice` is an
+    ELEVENLABS_VOICE socket, fed by a separate selector node) and
+    `missing_node_type` for SaveAudio on a host that ships no audio saver.
+    """
+    node = info.get(node_class) or {}
+    required = ((node.get("input") or {}).get("required")) or {}
+    text_field = fam["text"]
+    if text_field and text_field not in required:
+        return False
+    voice_field = fam["voice"]
+    if voice_field and voice_field in required:
+        entry = required.get(voice_field)
+        opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else None
+        if isinstance(opts, list) and not opts:
+            return False
+    if _tts_unfillable(required):
+        return False
+    if not _tts_save_node(info):
+        return False
+    outputs = node.get("output") or []
+    is_engine = bool(outputs) and outputs[0] == "TTS_ENGINE"
+    # Matching a family by name says nothing about what a node emits.
+    # GoogleTranslateTextNode matched the GoogleTTS pattern and outputs STRING,
+    # so the saver was handed text and the host answered return_type_mismatch.
+    if not is_engine and "AUDIO" not in outputs:
+        return False
+    if is_engine:
+        synth = info.get("UnifiedTTSTextNode")
+        if not synth:
+            return False
+        synth_req = ((synth.get("input") or {}).get("required")) or {}
+        if _tts_unfillable(synth_req, skip=("TTS_engine", "text")):
+            return False
+    return True
+
+
 async def _tts_node_for(session, host, info=None):
     """Find a host's TTS node by classifying its installed node-class names
     against the node-classifier (data-driven, popularity-seeded) — never a
@@ -4688,22 +4809,13 @@ async def _tts_node_for(session, host, info=None):
         for node_class in info:
             if not any(r.search(node_class) for r in fam["regs"]):
                 continue
-            required = ((info[node_class].get("input") or {}).get("required")) or {}
-            text_field = fam["text"]
-            if text_field and text_field not in required:
+            if not _tts_viable(node_class, info, fam):
                 continue
-            voice_field = fam["voice"]
-            lang_field = fam["lang"]
-            if voice_field and voice_field in required:
-                entry = required.get(voice_field)
-                opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else None
-                if isinstance(opts, list) and not opts:
-                    continue
             spec = {
                 "class": node_class,
-                "text": text_field,
-                "voice": voice_field,
-                "lang": lang_field,
+                "text": fam["text"],
+                "voice": fam["voice"],
+                "lang": fam["lang"],
             }
             _TTS_NODE_CACHE[host] = (spec, time.time())
             return spec
@@ -4723,6 +4835,14 @@ def _tts_pick_voice(opts):
         if isinstance(o, str) and not _VOICE_PLACEHOLDER.search(o):
             return o
     return None
+
+
+def _audio_out(node_info):
+    """Index of a node's AUDIO output. Nodes declare several outputs in their own
+    order (UnifiedTTSTextNode is AUDIO,STRING; others put the text first), so the
+    audio slot has to be looked up rather than assumed to be 0."""
+    outputs = (node_info or {}).get("output") or []
+    return outputs.index("AUDIO") if "AUDIO" in outputs else None
 
 
 def _tts_workflow(spec, schema, input_text, voice, host_info=None):
@@ -4763,26 +4883,15 @@ def _tts_workflow(spec, schema, input_text, voice, host_info=None):
         inputs[lang_field] = lang
 
     for name, entry in required.items():
-        if name in inputs or not isinstance(entry, list) or len(entry) < 2:
+        if name in inputs:
             continue
-        attrs = entry[1] if isinstance(entry[1], dict) else {}
-        if "default" in attrs:
-            inputs[name] = attrs["default"]
-        elif isinstance(entry[0], list) and entry[0]:
-            inputs[name] = entry[0][0]
+        ok, value = _tts_fill(entry)
+        if ok:
+            inputs[name] = value
 
-    # Find an available SaveAudio variant on this host
-    save_node = "SaveAudio"
-    if host_info:
-        for candidate in ("SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced"):
-            if candidate in host_info:
-                save_node = candidate
-                break
-        else:
-            for key in host_info:
-                if key.startswith("SaveAudio"):
-                    save_node = key
-                    break
+    save_node = _tts_save_node(host_info or {})
+    if not save_node:
+        raise _TtsError("host has no audio-save node")
 
     graph = {"1": {"class_type": cls, "inputs": inputs}}
 
@@ -4798,12 +4907,45 @@ def _tts_workflow(spec, schema, input_text, voice, host_info=None):
                 "seed": 1,
             }
         }
-        graph["3"] = {"class_type": save_node, "inputs": {"audio": ["2", 0], "filename_prefix": "dyva/tts"}}
+        idx = _audio_out((host_info or {}).get("UnifiedTTSTextNode"))
+        if idx is None:
+            raise _TtsError("UnifiedTTSTextNode has no AUDIO output")
+        graph["3"] = {"class_type": save_node,
+                      "inputs": {"audio": ["2", idx], "filename_prefix": "dyva/tts"}}
     else:
         # Direct audio output node
-        graph["2"] = {"class_type": save_node, "inputs": {"audio": ["1", 0], "filename_prefix": "dyva/tts"}}
+        idx = _audio_out(node_info)
+        if idx is None:
+            raise _TtsError(f"{cls} has no AUDIO output")
+        graph["2"] = {"class_type": save_node,
+                      "inputs": {"audio": ["1", idx], "filename_prefix": "dyva/tts"}}
 
     return graph
+
+
+def _comfy_prompt_error(body, graph=None):
+    """Turn ComfyUI's /prompt rejection envelope into one readable line.
+
+    The raw body is a nested JSON blob whose useful part — which node, which
+    input — sits inside node_errors and gets cut off by any sane truncation.
+    """
+    try:
+        data = json.loads(body)
+    except Exception:
+        return body[:200]
+    parts = []
+    for node_id, ne in (data.get("node_errors") or {}).items():
+        cls = (graph or {}).get(node_id, {}).get("class_type", f"node {node_id}")
+        for err in (ne.get("errors") or []):
+            kind = err.get("type") or err.get("message") or "error"
+            detail = err.get("details")
+            parts.append(f"{cls}: {kind}: {detail}" if detail else f"{cls}: {kind}")
+    if not parts:
+        err = data.get("error") or {}
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        detail = err.get("details") if isinstance(err, dict) else ""
+        parts.append(": ".join(x for x in (msg, detail) if x) or body[:200])
+    return "; ".join(parts)[:300]
 
 
 async def _tts_comfyui(session, host, input_text, voice=None):
@@ -4828,7 +4970,7 @@ async def _tts_comfyui(session, host, input_text, voice=None):
         if prompt_resp.status != 200:
             body = await prompt_resp.text()
             await prompt_resp.release()
-            raise _TtsError(f"prompt rejected: {body[:200]}")
+            raise _TtsError(f"prompt rejected: {_comfy_prompt_error(body, workflow)}")
         prompt_data = await prompt_resp.json(content_type=None)
         await prompt_resp.release()
     except _TtsError:
@@ -4881,7 +5023,7 @@ async def _tts_comfyui(session, host, input_text, voice=None):
                 raise
             except Exception as e:
                 raise _TtsError(str(e))
-            return raw, af.get("filename") or "tts.flac"
+            return raw, af.get("filename") or "tts.flac", spec["class"]
         status = entry.get("status") or {}
         if status.get("status_str") == "error":
             msgs = [str(m) for m in (status.get("messages") or [])]
@@ -4893,53 +5035,44 @@ async def _tts_comfyui(session, host, input_text, voice=None):
 
 
 def _find_tts_hosts(target_host=None):
-    """ComfyUI hosts that can generate TTS.
+    """ComfyUI hosts that can generate TTS, best-first.
 
-    TTS is *node*-based, not model-class-based: a host with a Qwen3TTS custom
-    node may expose no audio-class checkpoint at all, while a host full of
-    AceStep music models may have no TTS node. So every ComfyUI host is a
-    candidate and the ordering carries the signal:
+    TTS is a *node* feature, not a model-file feature: a host with a Qwen3TTS
+    node may expose no audio checkpoint at all, while a host full of AceStep
+    music models may have no TTS node. So every ComfyUI host is a candidate and
+    the ordering carries the signal.
 
-      0. the host explicitly requested via ?host=
-      1. hosts a previous probe found a TTS node on (_TTS_NODE_CACHE)
-      2. the last host that successfully spoke
-      3. hosts with a good TTS reputation
-      4. hosts with audio-class models (weak hint)
-      5. everything else
-      6. hosts a previous probe found *no* TTS node on, and known-bad hosts
-
-    The whole ranked list is returned: _race_hosts draws from it with a bounded
-    worker pool and stops at the first success, so the list is a priority order,
-    not a fan-out width."""
+    Ordering is the same recent/good/maybe_good/unknown/bad tiering chat uses,
+    keyed on the __tts__ sentinel (capability_tier), with one capability-
+    specific refinement: a *fresh* probe that found no usable node is harder
+    evidence than any reputation mark, so it folds straight into the bad tier.
+    Within a tier, hosts we've already seen a TTS node on come first, then hosts
+    carrying audio-class models (a weak hint), then everyone else.
+    """
     if target_host:
         # If a specific host was requested, just try it
         return [target_host] if any(s.get("service") == "comfyui"
                                      for s in load_servers()
                                      if s.get("server") == target_host) else []
-    servers = load_servers()
-    hosts = [s.get("server") for s in servers
+    hosts = [s.get("server") for s in load_servers()
              if s.get("service") == "comfyui" and s.get("server")]
-    bad, good = load_bad(), load_good()
+    marks = load_marks()
     last = get_last(TTS_KEY)
     last_host = last[0] if last and last[0] else None
     now = time.time()
 
     def rank(h):
         hit = _TTS_NODE_CACHE.get(h)
-        fresh = hit and now - hit[1] < _TTS_NODE_CACHE_TTL
-        if fresh and hit[0] is None:
-            return 6
-        if fresh:
-            return 1
-        if h == last_host:
-            return 2
-        if f"{h} {TTS_KEY}" in good:
-            return 3
-        if f"{h} {TTS_KEY}" in bad:
-            return 6
-        if _host_has_class(h, _AUDIO_CLASSES):
-            return 4
-        return 5
+        fresh = bool(hit) and now - hit[1] < _TTS_NODE_CACHE_TTL
+        known_nodeless = fresh and hit[0] is None
+        tier = capability_tier(h, TTS_KEY, marks, last_host, extra_bad=known_nodeless)
+        if fresh and hit[0] is not None:
+            within = 0
+        elif _host_has_class(h, _AUDIO_CLASSES):
+            within = 1
+        else:
+            within = 2
+        return (tier, within)
 
     hosts.sort(key=rank)
     return hosts
@@ -5495,7 +5628,10 @@ async def handle_tts_speech(request):
       `response_format`, `speed`) and returns binary audio. Backed by ComfyUI
       hosts with known TTS custom nodes (MegaTTS3, VoxCPM, QwenTTS, ...).
       `response_format` and `speed` are accepted but ignored — you get the
-      host-native format (usually flac).
+      host-native format (usually flac). The response carries provenance in
+      `X-Dyva-Host` (the ComfyUI host that spoke) and `X-Dyva-Node` (the TTS
+      node class that produced it); both are listed in
+      `Access-Control-Expose-Headers` so cross-origin callers can read them.
     parameters:
       - in: query
         name: host
@@ -5548,7 +5684,7 @@ async def handle_tts_speech(request):
             f"trying: {host} for {label}", wid=wid)
         start = time.time()
         try:
-            raw, filename = await _tts_comfyui(session, host, input_text, voice)
+            raw, filename, node = await _tts_comfyui(session, host, input_text, voice)
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
             dur = time.time() - start
@@ -5562,14 +5698,24 @@ async def handle_tts_speech(request):
         set_last(TTS_KEY, host, "")
         await broadcast_activity(host, TTS_KEY, "connected",
             f"success: {host} for {label}", duration=dur, wid=wid)
-        return host, raw, filename
+        return host, raw, filename, node
 
     result, stopped, tried = await _race_hosts(hosts, attempt, TTS_KEY)
 
     if result:
-        host, raw, filename = result
+        host, raw, filename, node = result
         ext = os.path.splitext(filename)[1].lower()
-        return web.Response(body=raw, content_type=_TTS_MIME.get(ext, "application/octet-stream"))
+        # Provenance travels with the audio: which host spoke and which node did
+        # it. The body is raw bytes, so headers are the only place to put it —
+        # and they have to be exposed explicitly to be readable cross-origin.
+        return web.Response(
+            body=raw,
+            content_type=_TTS_MIME.get(ext, "application/octet-stream"),
+            headers={
+                "X-Dyva-Host": host,
+                "X-Dyva-Node": node,
+                "Access-Control-Expose-Headers": "X-Dyva-Host, X-Dyva-Node",
+            })
     if stopped:
         return web.json_response({"error": "tts stopped"}, status=499)
 

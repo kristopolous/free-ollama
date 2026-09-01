@@ -57,7 +57,7 @@
     {
       "name": "OuteTTS",
       "patterns": [
-        "(?i)outetts|oute"
+        "(?i)outetts"
       ],
       "text": "text",
       "voice": null,
@@ -129,7 +129,7 @@
     {
       "name": "AzureTTS",
       "patterns": [
-        "(?i)azure"
+        "(?i)azure[-_ ]?(tts|text_?to_?speech|speech|voice)"
       ],
       "text": "text",
       "voice": "voice",
@@ -138,7 +138,8 @@
     {
       "name": "GoogleTTS",
       "patterns": [
-        "(?i)google|tts[-_]?google"
+        "(?i)google[-_ ]?(tts|text_?to_?speech|speech|voice)",
+        "(?i)(tts|speech)[-_]?google"
       ],
       "text": "text",
       "voice": "voice",
@@ -156,7 +157,7 @@
     {
       "name": "AIGymTTS",
       "patterns": [
-        "(?i)aigym|silero"
+        "(?i)aigym.*(tts|speech|voice)"
       ],
       "text": "text",
       "voice": "speaker",

@@ -520,9 +520,14 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .mini-search::placeholder{color:var(--text-faint)}
 #imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:var(--sp-3)}
 .media-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--sp-2);margin-top:var(--sp-3)}
-.tts-item{border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-2);background:var(--bg-sunken-alt)}
-.tts-item audio{width:100%;height:36px}
-.tts-item .tts-text{font-size:var(--fs-2xs);color:var(--text-3);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tts-item{position:relative;border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-2);background:var(--bg-sunken-alt)}
+.tts-item audio{width:100%;height:36px;margin-top:var(--sp-2);display:block}
+/* Text first, controls under it, so the remove button gets the usual top-right
+   corner instead of being squeezed into whatever gap the player leaves. The
+   padding keeps the label from running under the X. */
+.tts-item .tts-text{font-size:var(--fs-2xs);color:var(--text-3);padding-right:18px;min-height:1.2em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tts-item .tts-prov{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-dim);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#ttsResult .tts-prov{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-dim);margin-top:var(--sp-2)}
 .hist-item{position:relative;display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-2);background:var(--bg-sunken-alt)}
 .hist-item:hover{border-color:var(--border-accent)}
 .hist-del{position:absolute;top:2px;right:var(--sp-1);color:var(--border-hover);cursor:pointer;font-size:var(--fs-xs);line-height:1;padding:2px 5px;border-radius:var(--r-sm);z-index:2}
@@ -2970,15 +2975,26 @@ async function generateSpeech(){
     if(!r.ok){_mediaError(out,await _errText(r));return}
     var blob=await r.blob();
     var url=URL.createObjectURL(blob);
+    // Which host actually spoke, and with which node — the server reports it in
+    // headers since the body is raw audio. Not the same as what was requested:
+    // `model` is a hint, this is what really produced the sound.
+    var provHost=r.headers.get('X-Dyva-Host')||'';
+    var provNode=r.headers.get('X-Dyva-Node')||'';
     out.innerHTML='';
     var au=document.createElement('audio');au.controls=true;au.src=url;out.appendChild(au);
+    if(provHost){
+      var pv=document.createElement('div');pv.className='tts-prov';
+      pv.textContent=provHost+(provNode?' · '+provNode:'');
+      out.appendChild(pv);
+    }
     var a=document.createElement('a');a.className='dl';a.href=url;
     a.download='dyva-speech'+(/(flac|wav|mpeg|ogg)/.test(blob.type)?'.'+blob.type.split('/')[1].replace('mpeg','mp3'):'.audio');
     a.textContent='download';
     out.appendChild(a);
     // save to local history for gallery
     var hist=JSON.parse(localStorage.getItem('dyva_tts_history')||'[]');
-    hist.unshift({text:text.slice(0,200),voice:v||'default',model:m||'auto',ts:Date.now(),url:url});
+    hist.unshift({text:text.slice(0,200),voice:v||'default',model:m||'auto',
+                  host:provHost,node:provNode,ts:Date.now(),url:url});
     hist=hist.slice(0,50); // keep last 50
     localStorage.setItem('dyva_tts_history',JSON.stringify(hist));
     loadTtsHistory();
@@ -3013,8 +3029,15 @@ function loadTtsHistory(){
       localStorage.setItem('dyva_tts_history',JSON.stringify(h));
       loadTtsHistory();
     });
-    item.appendChild(au);
     item.appendChild(t);
+    item.appendChild(au);
+    if(e.host){
+      var pv=document.createElement('div');
+      pv.className='tts-prov';
+      pv.textContent=e.host+(e.node?' \u00b7 '+e.node:'');
+      pv.title=e.host+(e.node?' \u2014 '+e.node:'');
+      item.appendChild(pv);
+    }
     item.appendChild(del);
     el.appendChild(item);
   });

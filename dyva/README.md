@@ -31,8 +31,45 @@ Here it is. Running ON MY ACTUAL FUCKING PHONE! (*gasp*)
 | `-w`, `--workers` | Concurrent workers (default: 3) |
 | `-l`, `--local` | Restrict inference endpoints to localhost only |
 | `-r`, `--refresh` | Refresh server cache and exit; optionally name a single source (e.g. `--refresh graflex`) — other sources keep their last-fetched data |
+| `--source` | Manage extra host sources: `--source list`, `--source add <url>` |
+| `--hosts` | Inspect or prune the host reputation table — see [below](#host-reputation) |
 | `--curlify` | Print `curl` commands of upstream requests to stderr |
 | `-v`, `--version` | Show version |
+
+All of these run and exit; none of them start the server.
+
+## Host Reputation
+
+Every host+key pair dyva has tried carries a state — `good`, `maybe_good`, or
+`bad` — in `~/.cache/free-ollama/host-status.db`. The key is usually a model
+name, but the non-chat capabilities use sentinels: `__tts__`, `__video__`,
+`__music__`, and `__unreachable__` (a host-wide mark, so a dead host isn't
+re-probed once per model).
+
+```bash
+dyva --hosts                    # counts per state
+dyva --hosts list bad           # which keys are marked bad, and how many hosts each
+dyva --hosts del bad            # same listing — deletes nothing
+dyva --hosts del bad __tts__    # clear just that key
+```
+
+`del` always takes a key. There is deliberately no "clear the whole state"
+form: every mark cost a real probe of a real host, so reputation is expensive
+to rebuild and too easy to throw away by accident. The bare `del <state>` is a
+survey that shows you what you'd be discarding:
+
+```
+285 host marks in 'bad', across 7 keys:
+
+  __tts__             231
+  qwen3.6:27b          20
+  kimi                 11
+  __unreachable__       4
+```
+
+Clearing a key leaves those hosts unranked, so they get retried on the next
+request. This is the thing to reach for when you've fixed something and want
+the hosts that failed for the old reason reconsidered.
 
 ## Use It Like Ollama
 
@@ -69,7 +106,7 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `GET` | `/api/tags` | List available models |
 | `GET` | `/api/ps` | Last-used models |
 | `GET` | `/api/version` | Version info |
-| `GET` | `/api/activity` | SSE stream of real-time proxy activity |
+| `GET` | `/api/activity` | SSE stream of real-time proxy activity (also mirrored to stderr) |
 | `GET` | `/v1/models` | OpenAI-compatible model listing |
 | `POST` | `/sdapi/v1/txt2img` | Text-to-image (A1111 + ComfyUI fallback) |
 | `GET` | `/sdapi/v1/sd-models` | List discovered SD models |
@@ -200,12 +237,12 @@ curl "http://localhost:11434/comfyui/queue?host=1.2.3.4:8188"
 
 ### Text-to-Speech
 
-`POST /v1/audio/speech` speaks the OpenAI TTS shape and races it across
-discovered ComfyUI hosts that run a known TTS custom node (MegaTTS3, VoxCPM,
-QwenTTS, ...). dyva probes each host's `/object_info/{node}` (single-class —
-tiny responses), fills every required input from the schema defaults, appends
-`SaveAudio`, polls history and streams the audio back in the host-native
-format (usually flac). `response_format` and `speed` are accepted but ignored.
+`POST /v1/audio/speech` speaks the OpenAI TTS shape and runs it through the
+**same race as text generation** — one bounded worker pool over a ranked host
+list, first success wins, losers cancelled, and the same `trying` / `failure` /
+`success` lines in the activity feed. It shows up in the worker view with a
+working stop button like any other job. `response_format` and `speed` are
+accepted but ignored; you get the host-native format, usually flac.
 
 ```bash
 curl -X POST http://localhost:11434/v1/audio/speech \
@@ -214,11 +251,57 @@ curl -X POST http://localhost:11434/v1/audio/speech \
   --output speech.flac
 ```
 
-`GET /v1/audio/voices` returns what TTS nodes exist per host and their voice
-options (`{"voices": [...], "hosts": [{"host": ..., "nodes": [...]}]}`).
+#### How a host is chosen
 
-Note: some nodes need reference voices uploaded to the host; hosts whose
-voice list is empty are skipped automatically until they have one.
+TTS is a *node* feature, not a model-file feature — a host can run
+`Qwen3TTSEngineNode` with no audio checkpoint on disk, and a host stuffed with
+music models can have no TTS node at all. So every ComfyUI host is a candidate
+and the ordering carries the signal: an explicit `?host=`, then hosts a
+previous probe found a node on, the last host that spoke, good reputation,
+hosts with audio-class models, everything else, and known-bad last.
+
+#### How a node is chosen
+
+Node classes are matched against the families in
+[`node-classifier.json`](node-classifier.json) — surveyable, popularity-seeded
+data, not a hardcoded boutique list. But **matching a name is not enough**, so a
+candidate is only accepted if the whole three-node graph can actually be built
+from what that host has installed:
+
+- every required input can be filled inline — an enum, or a type with a
+  default, or a plain primitive. Anything else (`AUDIO`, `MODEL`,
+  `ELEVENLABS_VOICE`, a bare `COMBO`) is a *socket* that needs an upstream node
+  to feed it, and a node needing one can't be driven by this graph.
+- the node actually emits `AUDIO` — or emits `TTS_ENGINE`, in which case
+  `UnifiedTTSTextNode` has to be installed to do the synthesis.
+- the host has a real audio saver. `SaveAudio` is not universal.
+
+Everything else is read off the host's live `/object_info` rather than assumed:
+the saver is wired to the *index* of the producer's `AUDIO` output, not to slot
+0, and an unspecified voice skips past zero-shot/custom placeholder options
+(picking one and then supplying no reference audio just fails at execution).
+Hosts that don't pass are rejected during detection — before a prompt is
+submitted, so no GPU time is spent finding out.
+
+A host's verdict is cached for five minutes, negatively too, so a request
+doesn't re-probe the whole network. `/object_info` runs to several megabytes on
+a busy host, which is why the timeout on it is generous.
+
+The response carries provenance headers — `X-Dyva-Host` (which host spoke) and
+`X-Dyva-Node` (the node class that produced it). Both are exposed via
+`Access-Control-Expose-Headers`, so a browser client can read them cross-origin.
+These report what *actually* ran, which is not the same as the `model` you
+asked for — that's only a hint.
+
+`GET /v1/audio/voices` returns what TTS nodes exist per host and their voice
+options (`{"voices": [...], "hosts": [{"host": ..., "nodes": [...]}]}`), sharing
+the same cached `/object_info` as the speech path.
+
+If speech fails, the error names how many hosts were actually tried and groups
+the reasons — `tts failed on 12 hosts: 9x no known TTS node; 3x timeout` — and
+ComfyUI's rejection envelope is parsed rather than truncated, so you get
+`ElevenLabsTextToSpeech: required_input_missing: voice` instead of a clipped
+blob of JSON.
 
 ## Settings
 
