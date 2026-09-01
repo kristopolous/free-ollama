@@ -171,6 +171,33 @@
       "text": "text",
       "voice": null,
       "lang": null
+    },
+    {
+      "name": "UnifiedTTS",
+      "patterns": [
+        "^UnifiedTTSTextNode$"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "EchoTTS",
+      "patterns": [
+        "^EchoTTSEngineNode"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "VibeVoiceTTS",
+      "patterns": [
+        "^VibeVoiceTTS"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": null
     }
   ],
   "music": [

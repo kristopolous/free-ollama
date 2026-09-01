@@ -4534,21 +4534,28 @@ def _tts_workflow(spec, schema, input_text, voice):
         elif isinstance(entry[0], list) and entry[0]:
             inputs[name] = entry[0][0]
 
-    # Qwen3TTSEngineNode outputs TTS_ENGINE, not audio - needs downstream synthesis
-    output = ["1", 0]
-    save_node = "SaveAudio"
-    graph = {"1": {"class_type": cls, "inputs": inputs}}
-
-    # Check if this node outputs TTS_ENGINE (needs synthesis)
+    # Check if this node outputs TTS_ENGINE (engine that needs downstream synthesis)
     node_info = schema.get(cls) or {}
     outputs = node_info.get("output") or []
+
+    graph = {"1": {"class_type": cls, "inputs": inputs}}
+
     if outputs and outputs[0] == "TTS_ENGINE":
-        # Need a downstream synthesis node - use UnifiedTTSTextNode or SpeechSynthesis
-        graph["2"] = {"class_type": "SpeechSynthesis", "inputs": {"text": ["1", 0]}}
-        save_node = "SaveAudio"
-        graph["3"] = {"class_type": save_node, "inputs": {"audio": ["2", 0], "filename_prefix": "dyva/tts"}}
+        # Engine node (Qwen3TTSEngineNode, F5TTSEngineNode, IndexTTSEngineNode, etc.)
+        # needs UnifiedTTSTextNode to actually generate audio
+        graph["2"] = {
+            "class_type": "UnifiedTTSTextNode",
+            "inputs": {
+                "TTS_engine": ["1", 0],
+                "text": input_text,
+                "narrator_voice": "none",
+                "seed": 1,
+            }
+        }
+        graph["3"] = {"class_type": "SaveAudio", "inputs": {"audio": ["2", 0], "filename_prefix": "dyva/tts"}}
     else:
-        graph["2"] = {"class_type": save_node, "inputs": {"audio": output, "filename_prefix": "dyva/tts"}}
+        # Direct audio output node
+        graph["2"] = {"class_type": "SaveAudio", "inputs": {"audio": ["1", 0], "filename_prefix": "dyva/tts"}}
 
     return graph
 
@@ -4653,7 +4660,7 @@ async def _tts_comfyui(session, host, input_text, voice=None):
 def _find_tts_hosts(target_host=None):
     """ComfyUI hosts that can generate TTS.
     Priority: 1) host explicitly requested, 2) hosts with audio-class models,
-    3) all ComfyUI hosts (as fallback, since TTS is node-based not model-class-based)."""
+    3) all ComfyUI hosts (fallback - TTS is node-based not model-class-based)."""
     if target_host:
         # If a specific host was requested, just try it
         return [target_host] if any(s.get("service") == "comfyui"
