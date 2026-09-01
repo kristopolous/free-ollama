@@ -96,7 +96,7 @@ NAMED_QUERIES = {
 
 # Services that cache a raw model-list snapshot per host during check, so a
 # resume (-i) run can skip hosts already snapshotted this session.
-SNAPSHOT_SERVICES = {"ollama", "vllm", "lmstudio"}
+SNAPSHOT_SERVICES = {"ollama", "vllm", "lmstudio", "llama.cpp"}
 
 
 def _load_json(path, silent=False):
@@ -116,7 +116,7 @@ def _save_json(path, data):
 
 def _save_check_snapshot(host, port, data):
     """Cache a raw model-list API response (ollama /api/tags, vllm /v1/models,
-    lmstudio /v1/models) to
+    lmstudio /v1/models, llama.cpp /v1/models) to
     /tmp/graflex/{date}/check/{ident}.json following the same /tmp/graflex
     dir and %Y%m%d%H%M%S date convention as the fetch result files. The
     filename uses the _tag() md5 hash of the full host:port so the port can't
@@ -414,6 +414,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     await props_resp.release()
                     data = await resp.json()
                     await resp.release()
+                    _save_check_snapshot(host, port, data)
                     items = data.get("data", []) if isinstance(data, dict) else []
                     models = []
                     seen = set()

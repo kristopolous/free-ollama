@@ -1915,19 +1915,26 @@ def _content_contains(payload, needle):
     only. Deliberately does not scan the whole history: `__dyva_info__` is meant
     to act on the current turn, so a tag stored deep in a past message must not
     keep triggering the diagnostic on every later request."""
-    if needle in str(payload.get("prompt") or ""):
+    import re
+    
+    pattern = re.compile(r"^\s*" + re.escape(needle))
+    
+    prompt = str(payload.get("prompt") or "")
+    if pattern.match(prompt):
         return True
     msgs = payload.get("messages") or []
     if not msgs:
         return False
     m = msgs[-1]
     c = m.get("content")
-    if isinstance(c, str) and needle in c:
+    if isinstance(c, str) and pattern.match(c):
         return True
     if isinstance(c, list):
         for part in c:
-            if isinstance(part, dict) and needle in str(part.get("text") or ""):
-                return True
+            if isinstance(part, dict):
+                text = str(part.get("text") or "")
+                if pattern.match(text):
+                    return True
     return False
 
 
@@ -4476,18 +4483,22 @@ async def _tts_node_for(session, host):
             if not any(r.search(node_class) for r in fam["regs"]):
                 continue
             required = ((info[node_class].get("input") or {}).get("required")) or {}
-            spec = {
-                "class": node_class,
-                "text": fam["text"],
-                "voice": fam["voice"],
-                "lang": fam["lang"],
-            }
+            text_field = fam["text"]
+            if text_field and text_field not in required:
+                continue
             voice_field = fam["voice"]
-            if voice_field:
+            lang_field = fam["lang"]
+            if voice_field and voice_field in required:
                 entry = required.get(voice_field)
                 opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else None
                 if isinstance(opts, list) and not opts:
                     continue
+            spec = {
+                "class": node_class,
+                "text": text_field,
+                "voice": voice_field,
+                "lang": lang_field,
+            }
             _TTS_NODE_CACHE[host] = (spec, time.time())
             return spec
     return None
@@ -4523,10 +4534,23 @@ def _tts_workflow(spec, schema, input_text, voice):
         elif isinstance(entry[0], list) and entry[0]:
             inputs[name] = entry[0][0]
 
-    return {
-        "1": {"class_type": cls, "inputs": inputs},
-        "2": {"class_type": "SaveAudio", "inputs": {"audio": ["1", 0], "filename_prefix": "dyva/tts"}},
-    }
+    # Qwen3TTSEngineNode outputs TTS_ENGINE, not audio - needs downstream synthesis
+    output = ["1", 0]
+    save_node = "SaveAudio"
+    graph = {"1": {"class_type": cls, "inputs": inputs}}
+
+    # Check if this node outputs TTS_ENGINE (needs synthesis)
+    node_info = schema.get(cls) or {}
+    outputs = node_info.get("output") or []
+    if outputs and outputs[0] == "TTS_ENGINE":
+        # Need a downstream synthesis node - use UnifiedTTSTextNode or SpeechSynthesis
+        graph["2"] = {"class_type": "SpeechSynthesis", "inputs": {"text": ["1", 0]}}
+        save_node = "SaveAudio"
+        graph["3"] = {"class_type": save_node, "inputs": {"audio": ["2", 0], "filename_prefix": "dyva/tts"}}
+    else:
+        graph["2"] = {"class_type": save_node, "inputs": {"audio": output, "filename_prefix": "dyva/tts"}}
+
+    return graph
 
 
 async def _tts_comfyui(session, host, input_text, voice=None):
@@ -4627,24 +4651,37 @@ async def _tts_comfyui(session, host, input_text, voice=None):
 
 
 def _find_tts_hosts(target_host=None):
-    """ComfyUI hosts that expose a model classified as a speech/audio generator,
-    matching the classifier-driven routing used for video. A host must actually
-    survey an `audio`-class model (e.g. a qwen-tts/voxcpm checkpoint) to be a
-    TTS candidate — we never assume capability from a node-name list."""
+    """ComfyUI hosts that can generate TTS.
+    Priority: 1) host explicitly requested, 2) hosts with audio-class models,
+    3) all ComfyUI hosts (as fallback, since TTS is node-based not model-class-based)."""
     if target_host:
-        if _host_has_class(target_host, _AUDIO_CLASSES):
-            return [target_host]
-        return []
+        # If a specific host was requested, just try it
+        return [target_host] if any(s.get("service") == "comfyui"
+                                     for s in load_servers()
+                                     if s.get("server") == target_host) else []
     servers = load_servers()
+    # First try: hosts with audio-class models
     hosts = [s.get("server") for s in servers
              if s.get("service") == "comfyui" and s.get("server")
              and _host_has_class(s.get("server"), _AUDIO_CLASSES)]
-    bad, good = load_bad(), load_good()
-    hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
-    last = get_last(TTS_KEY)
-    if last and last[0]:
-        hosts = [last[0]] + [h for h in hosts if h != last[0]]
-    return hosts
+    if hosts:
+        bad, good = load_bad(), load_good()
+        hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
+        last = get_last(TTS_KEY)
+        if last and last[0]:
+            hosts = [last[0]] + [h for h in hosts if h != last[0]]
+        return hosts
+    # Fallback: all ComfyUI hosts (TTS is determined by node presence, not model class)
+    hosts = [s.get("server") for s in servers
+             if s.get("service") == "comfyui" and s.get("server")]
+    if hosts:
+        bad, good = load_bad(), load_good()
+        hosts.sort(key=lambda h: 0 if f"{h} {TTS_KEY}" in good else (1 if f"{h} {TTS_KEY}" not in bad else 2))
+        last = get_last(TTS_KEY)
+        if last and last[0]:
+            hosts = [last[0]] + [h for h in hosts if h != last[0]]
+        return hosts
+    return []
 
 
 def _host_has_class(host, classes):

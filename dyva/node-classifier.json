@@ -5,50 +5,23 @@
       "patterns": [
         "^Qwen(3)?TTS"
       ],
-      "text": "content",
-      "voice": "voice",
-      "lang": null
+      "text": "instruct",
+      "voice": "voice_preset",
+      "lang": "language"
     },
     {
-      "name": "AILab_VoxCPM",
+      "name": "Qwen3TTSEngineNode",
       "patterns": [
-        "^AILab_VoxCPMTTS"
+        "^Qwen3TTSEngineNode"
       ],
-      "text": "text",
-      "voice": null,
-      "lang": null
-    },
-    {
-      "name": "MegaTTS3",
-      "patterns": [
-        "^MegaTTS3"
-      ],
-      "text": "input_text",
-      "voice": "reference_voice",
+      "text": "instruct",
+      "voice": "voice_preset",
       "lang": "language"
     },
     {
       "name": "CosyVoice",
       "patterns": [
-        "(?i)cosyvoice|^cosy"
-      ],
-      "text": "text",
-      "voice": null,
-      "lang": null
-    },
-    {
-      "name": "IndexTTS",
-      "patterns": [
-        "(?i)indextts"
-      ],
-      "text": "text",
-      "voice": null,
-      "lang": null
-    },
-    {
-      "name": "F5TTS",
-      "patterns": [
-        "(?i)f5[-_]?tts|^f5tts"
+        "^CosyVoiceEngineNode"
       ],
       "text": "text",
       "voice": null,
@@ -58,6 +31,24 @@
       "name": "ChatTTS",
       "patterns": [
         "(?i)chattts"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "F5TTS",
+      "patterns": [
+        "^F5TTSEngineNode"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "IndexTTS",
+      "patterns": [
+        "^IndexTTSRun$|^IndexTTS2Run$"
       ],
       "text": "text",
       "voice": null,
@@ -82,9 +73,100 @@
       "lang": null
     },
     {
-      "name": "Generic",
+      "name": "XTTS",
       "patterns": [
-        "(?i)tts"
+        "(?i)xtts|^XTTSNode"
+      ],
+      "text": "input_text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "CoquiTTS",
+      "patterns": [
+        "(?i)coqui[-_]?tts|^CoquiTTS|TTSWrapper"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "ElevenLabs",
+      "patterns": [
+        "(?i)eleven[x]?[-_]?labs|ElevenLabs"
+      ],
+      "text": "text",
+      "voice": "voice",
+      "lang": null
+    },
+    {
+      "name": "Chatterbox",
+      "patterns": [
+        "(?i)chatterbox"
+      ],
+      "text": "text",
+      "voice": "speaker_prompt",
+      "lang": null
+    },
+    {
+      "name": "Kokoro",
+      "patterns": [
+        "(?i)kokoro"
+      ],
+      "text": "input_text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "SileroVITS",
+      "patterns": [
+        "(?i)silero|vits"
+      ],
+      "text": "text",
+      "voice": "speaker",
+      "lang": null
+    },
+    {
+      "name": "AzureTTS",
+      "patterns": [
+        "(?i)azure"
+      ],
+      "text": "text",
+      "voice": "voice",
+      "lang": null
+    },
+    {
+      "name": "GoogleTTS",
+      "patterns": [
+        "(?i)google|tts[-_]?google"
+      ],
+      "text": "text",
+      "voice": "voice",
+      "lang": null
+    },
+    {
+      "name": "TTS",
+      "patterns": [
+        "^TTS$|^tts$"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": null
+    },
+    {
+      "name": "AIGymTTS",
+      "patterns": [
+        "(?i)aigym|silero"
+      ],
+      "text": "text",
+      "voice": "speaker",
+      "lang": null
+    },
+    {
+      "name": "GenericTTS",
+      "patterns": [
+        "TTS",
+        "tts"
       ],
       "text": "text",
       "voice": null,
