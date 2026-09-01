@@ -3,6 +3,7 @@
 
 SLEEP=10
 SERVICE="${1:-ollama}"
+CMD="$0"
 shift 2>/dev/null || true
 EXTRA_ARGS=("$@")
 FID=
@@ -11,6 +12,14 @@ SERVERS=
 source .env
 
 case "$SERVICE" in
+  all)
+    for i in ollama ollama-shodan comfyui a1111 llama.cpp vllm lmstudio gradiu; do
+      echo "--- $i ----"
+      $CMD $i ${EXTRA_ARGS[@]}
+    done
+    exit 0
+    ;;
+
   combine)
     DATE=$(date +%Y%m%d%H%M%S)
     COMBINED_JSON=$(jq -s 'add' ~/.cache/free-ollama/*-working.json)
@@ -20,6 +29,7 @@ case "$SERVICE" in
     ./dyva.py --refresh $_SOURCE
     exit
     ;;
+
 
   ollama-shodan)
     SERVICE=ollama
