@@ -112,7 +112,7 @@ def _save_json(path, data):
 
 def _save_check_snapshot(host, port, data):
     """Cache a raw API response (e.g. ollama /api/tags) to
-    /tmp/graflex/tags/check-{tag}-{date}.json following the same /tmp/graflex
+    /tmp/graflex/{date}/check/{ident}.json following the same /tmp/graflex
     dir and %Y%m%d%H%M%S date convention as the fetch result files. The
     filename uses the _tag() md5 hash of the full host:port so the port can't
     collide; the real host (with port), a unix check_time, and the raw payload
@@ -122,9 +122,9 @@ def _save_check_snapshot(host, port, data):
     hostport = f"{host}:{port}"
     ident = _tag(hostport)
     date = _RUN_TS or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    tmp_dir = "/tmp/graflex/tags"
+    tmp_dir = os.path.join("/tmp/graflex", date, "check")
     os.makedirs(tmp_dir, exist_ok=True)
-    with open(os.path.join(tmp_dir, f"check-{ident}-{date}.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(tmp_dir, f"{ident}.json"), "w", encoding="utf-8") as f:
         json.dump({
             "host": hostport,
             "check_time": time.time(),
@@ -136,7 +136,7 @@ def _check_snapshot_exists(host, port, run_ts):
     """True if a snapshot for host:port was already saved in this session, so a
     resumed -i run skips hosts it already checked."""
     ident = _tag(f"{host}:{port}")
-    return os.path.exists(os.path.join("/tmp/graflex/tags", f"check-{ident}-{run_ts}.json"))
+    return os.path.exists(os.path.join("/tmp/graflex", run_ts, "check", f"{ident}.json"))
 
 
 def _save_json_atomic(path, data):
@@ -581,6 +581,14 @@ def _tag(value):
     return hashlib.md5(str(value).encode()).hexdigest()[:8]
 
 
+def _fofa_path(label, run_ts):
+    return os.path.join("/tmp/graflex", run_ts, "fofa", f"{label}.txt")
+
+
+def _shodan_path(label, run_ts):
+    return os.path.join("/tmp/graflex", run_ts, "shodan", f"{label}.txt")
+
+
 def _fetch_web(dry, service, combined, country=None, port=None, server=None, run_ts=None, curlify=False, label=""):
     import base64
     import re
@@ -620,15 +628,14 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
             resp.raise_for_status()
             body = resp.text.lower()
             if "daily usage limit" in body:
-                tmp_dir = "/tmp/graflex"
-                out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
+                out_path = _fofa_path(label, run_ts)
                 if os.path.exists(out_path):
                     os.remove(out_path)
                 log.error(f"daily usage limit hit, resume by using --id {run_ts}")
-                raise SystemExit(1)
+                raise SystemExit(2)
             if "access is temporarily denied" in body:
                 log.error("FOFA access denied — IP flagged as a web crawler. Try again later or use a different IP/VPN.")
-                raise SystemExit(1)
+                raise SystemExit(2)
             if "rate limit" in body or "too many requests" in body or "api request frequency out of limit" in body:
                 raise RuntimeError("rate limited")
             if "network unstable" in body:
@@ -688,9 +695,9 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
             log.error(f"FOFA web request failed: {e}")
             return None
 
-    tmp_dir = "/tmp/graflex"
+    tmp_dir = os.path.dirname(_fofa_path(label, run_ts))
     os.makedirs(tmp_dir, exist_ok=True)
-    out_path = os.path.join(tmp_dir, f"fofa-results-{label}-{run_ts}.txt")
+    out_path = _fofa_path(label, run_ts)
     with open(out_path, "w", encoding="utf-8", errors="replace") as f:
         f.write(resp.text)
 
@@ -859,9 +866,9 @@ def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=
             log.error(f"Shodan request failed: {e}")
             return None
 
-    tmp_dir = "/tmp/graflex"
+    tmp_dir = os.path.dirname(_shodan_path(label, run_ts))
     os.makedirs(tmp_dir, exist_ok=True)
-    out_path = os.path.join(tmp_dir, f"shodan-results-{label}-{run_ts}.txt")
+    out_path = _shodan_path(label, run_ts)
     with open(out_path, "w", encoding="utf-8", errors="replace") as f:
         f.write(resp.text)
 
@@ -933,7 +940,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             for page in range(1, SHODAN_PAGES + 1):
                 label = f"{country or 'any'}-{port or 'any'}-p{page}"
                 if session:
-                    out_path = os.path.join("/tmp/graflex", f"shodan-results-{label}-{run_ts}.txt")
+                    out_path = _shodan_path(label, run_ts)
                     if os.path.exists(out_path):
                         if not dry:
                             log.info(f"  skip page {page} (already fetched)")
@@ -1057,7 +1064,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
 
             label = f"{_tag(base_query)}-{country or 'any'}-{port or 'any'}-{_tag(server)}-{_tag(fid)}"
             if session:
-                out_path = os.path.join("/tmp/graflex", f"fofa-results-{label}-{run_ts}.txt")
+                out_path = _fofa_path(label, run_ts)
                 if os.path.exists(out_path):
                     if not dry:
                         log.info(f"  skip ({out_path})")
