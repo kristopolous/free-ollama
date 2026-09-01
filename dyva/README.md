@@ -101,6 +101,18 @@ With `"stream": true` the same info arrives as a normal NDJSON/SSE chat stream â
 
 Use `__dyva_info__:next` to move on: it first drops the model's sticky last-successful host (the same action as `GET /next-host` and the dashboard's "next host" link), then returns the *next* host/model the request would land on. The response shape is identical, so you get confirmation of where you moved to â€” repeat to keep walking down the list. Model matching is case-insensitive and glob-normalized, so `GEMMA*`, `gemma`, and `*gemma*` all target the same sticky host.
 
+Use `__dyva_info__:test` when a match looks bogus. Instead of just reporting the routing choice, dyva actually *probes* the candidates: it sends each one the quick factual question *"What is the name of the first United States President?"* and keeps the first host that answers with "Washington" or "George". Any host that answers wrong (or fails outright) is marked bad and skipped, so walking one suspicious model culls all its deadbeat duplicates. The response shape is the same as `__dyva_info__`, with the host/model of the first passing server:
+
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "openchat",
+  "stream": false,
+  "messages": [{"role": "user", "content": "__dyva_info__:test"}]
+}'
+```
+
+Because a real inference runs per candidate, `:test` is deliberately opt-in and scoped: it only tests the hosts serving the one model you asked for, never the whole catalog.
+
 ### Text-to-Image
 
 The `txt2img` CLI generates images via the proxy:

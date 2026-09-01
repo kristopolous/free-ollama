@@ -1118,10 +1118,14 @@ function renderWorkers(workers){
     c.appendChild(card);
   });
 }
-// The workers list is pushed over SSE from the server whenever a race starts,
-// advances, or finishes, so the pane updates live without polling.
-var _workersSSE=new EventSource('workers');
-_workersSSE.onmessage=function(e){try{var d=JSON.parse(e.data);renderWorkers(d.workers||[])}catch(ex){}};
+// The workers list is polled from the server every couple of seconds (plain
+// JSON, not SSE — SSE to this endpoint is flaky and drops mid-race), so the
+// pane always reflects whatever is currently racing.
+function pollWorkers(){
+  fetch('workers-now',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){renderWorkers(d.workers||[])}).catch(function(){});
+}
+pollWorkers();
+setInterval(pollWorkers,2000);
 // The snackbar is server-rendered visible (in the markup with class "show") so
 // it paints on first load without waiting for JS; here we only take it down.
 var snackbar=document.getElementById('snackbar');
@@ -1770,6 +1774,7 @@ function stopChat(){
 var SLASH_COMMANDS=[
   {cmd:'system',   arg:'[prompt]', desc:'set or show this chat’s system prompt'},
   {cmd:'info',     arg:'',         desc:'show which host and model answered'},
+  {cmd:'test',     arg:'',         desc:'probe the hosts with the quick test and cull the bogus ones'},
   {cmd:'retitle',  arg:'',         desc:'regenerate the chat title'},
   {cmd:'download', arg:'',         desc:'download this chat as JSON'},
   {cmd:'delete',   arg:'',         desc:'delete the current chat'},
@@ -1889,6 +1894,10 @@ function handleSlashCommand(text){
     _dyvaInfo=true;
     document.getElementById('chatInput').value=DYVA_INFO_TAG;
     return false;   // fall through: send __dyva_info__ through the normal chat flow
+  }else if(cmd==='test'){
+    _dyvaInfo=true;
+    document.getElementById('chatInput').value=DYVA_INFO_TAG+':test';
+    return false;   // fall through: probe the hosts and cull the bogus ones
   }else if(cmd==='help'){
     info(slashHelpText());
   }else{

@@ -440,6 +440,16 @@ def _apply_source_mapping(row, mapping):
 TRIAL_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
 
+# The `__dyva_info__:test` probe: a cheap factual question bogus servers get
+# wrong (they often just parrot the prompt or echo roll tokens). A host only
+# passes if its answer mentions "Washington" or "George". Cycling this through
+# every candidate for a specific model is the expensive part the operator opts
+# into explicitly, so it never runs in normal routing.
+QUICK_TEST_TAG = "__dyva_info__:test"
+QUICK_TEST_PROMPT = ("Do not be conversational. This is a test. "
+                     "What is the name of the first United States President?")
+QUICK_TEST_PASS_RE = re.compile(r"\b(Washington|George)\b", re.I)
+
 _status_db = None
 _servers_cache = None
 
@@ -1575,7 +1585,11 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         for t in _tasks_holder:
             t.cancel()
 
-    wwid = job_wid if job_wid is not None else await _register_worker(model, len(servers), _stop)
+    if job_wid is not None:
+        _workers[job_wid]["stop"] = _stop
+        wwid = job_wid
+    else:
+        wwid = await _register_worker(model, len(servers), _stop)
     tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(servers)))]
     _tasks_holder[:] = tasks
     try:
@@ -1843,6 +1857,13 @@ def _info_wants_next(payload):
     return _content_contains(payload, DYVA_INFO_TAG + ":next")
 
 
+def _info_wants_test(payload):
+    """`__dyva_info__:test` — don't just report where the request would land,
+    actually *probe* the candidate hosts with the quick factual question and
+    mark bad any that answer wrong, returning the first one that passes."""
+    return _content_contains(payload, DYVA_INFO_TAG + ":test")
+
+
 def _norm_host(h):
     return re.sub(r"^https?://", "", h or "")
 
@@ -1903,6 +1924,102 @@ def _info_response(model_in, info, do_stream=False, openai_format=False):
         content_type="application/x-ndjson")
 
 
+def _quick_test_answer_ok(content):
+    """True if a candidate host's answer to the quick test names the first US
+    president (Washington or George)."""
+    return bool(content) and QUICK_TEST_PASS_RE.search(content) is not None
+
+
+async def _run_info_test(session, model_in, tools=None):
+    """Cycle the quick factual probe through the candidate hosts for `model_in`.
+
+    Unlike `__dyva_info__`/`:next`, which only *report* the routing choice, this
+    actually performs one cheap inference per candidate and marks the host bad
+    when it answers wrong (or fails outright), so the operator can walk a bogus
+    match down the list and cull the deadbeats. Returns the info dict of the
+    first host that *passes* the test, or None if none do.
+
+    `tools` mirrors the real request: a fake server that can't speak the tool
+    schema must be caught by the test too (e.g. it 400s on a `tools` payload),
+    otherwise the test would pass a host the real request always fails on. When
+    tools are present the candidate pool is also filtered to tool-capable hosts,
+    exactly as a real tools-enabled request would be routed.
+    """
+    req_caps = needs_caps([])
+    if tools:
+        req_caps = sorted(set(req_caps) | {"tools"})
+    servers = find_servers(model_in, req_caps)
+    for _prio, host, ms in servers:
+        if ms:
+            full = ms[0]
+        else:
+            continue
+        wid = asyncio.current_task().get_name()
+        payload = {
+            "model": full,
+            "messages": [{"role": "user", "content": QUICK_TEST_PROMPT}],
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+        _curlify("POST", f"{host}/api/chat", payload)
+        start = time.time()
+        await broadcast_activity(host, model_in, "trying",
+            f"quick test: {host} for {model_in}", wid=wid)
+        try:
+            resp = await asyncio.wait_for(
+                session.post(f"{host}/api/chat", json=payload),
+                timeout=TIMEOUT,
+            )
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            add_bad(host, model_in)
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - {type(e).__name__}",
+                duration=time.time() - start, wid=wid)
+            continue
+        if resp.status != 200:
+            await resp.release()
+            add_bad(host, model_in)
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - status {resp.status}",
+                duration=time.time() - start, wid=wid)
+            continue
+        try:
+            data = await resp.json()
+        except Exception:
+            await resp.release()
+            add_bad(host, model_in)
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - bad response",
+                duration=time.time() - start, wid=wid)
+            continue
+        await resp.release()
+        content = (data.get("message") or {}).get("content") or ""
+        dur = time.time() - start
+        shown = content.strip()[:160]
+        if "error" in data:
+            add_bad(host, model_in)
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - error: {data['error']}",
+                duration=dur, wid=wid)
+            continue
+        if not _quick_test_answer_ok(content):
+            force_bad(host, model_in)
+            log.warning(f"quick test FAIL {host} ({full}): answer={shown!r}")
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - wrong answer: {shown!r}",
+                duration=dur, wid=wid)
+            continue
+        set_last(model_in, host, full)
+        add_good(host, model_in)
+        log.info(f"quick test PASS {host} ({full}): answer={shown!r}")
+        await broadcast_activity(host, model_in, "connected",
+            f"quick test: {host} for {model_in} - passes. answer: {shown!r}",
+            duration=dur, wid=wid)
+        return {"host": _norm_host(host), "model": full}
+    return None
+
+
 async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_format):
     if '/' in model_in:
         model_list = model_in.split('/')
@@ -1914,6 +2031,11 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
         req_caps = sorted(set(req_caps) | {"tools"})
 
     if _has_info_tag(opayload):
+        if _info_wants_test(opayload):
+            info = await _run_info_test(session, model_list[0], tools=opayload.get("tools"))
+            if info is None:
+                return web.json_response(err_obj(f"no server for '{model_in}' passed the quick test", "model_not_found"), status=404)
+            return _info_response(model_list[0], info, do_stream=do_stream, openai_format=openai_format)
         exclude = None
         if _info_wants_next(opayload):
             prev = get_last(model_list[0])
@@ -2009,6 +2131,11 @@ async def _proxy_generate(request, session):
         req_caps = sorted(set(req_caps) | {"tools"})
 
     if _has_info_tag(body):
+        if _info_wants_test(body):
+            info = await _run_info_test(session, model, tools=body.get("tools"))
+            if info is None:
+                return web.json_response(err_obj(f"no server for '{model}' passed the quick test", "model_not_found"), status=404)
+            return _info_response(model, info, do_stream=do_stream)
         exclude = None
         if _info_wants_next(body):
             prev = get_last(model)
@@ -2660,6 +2787,23 @@ async def handle_workers(request):
     finally:
         await _remove_worker_listener(q)
     return response
+
+
+async def handle_workers_now(request):
+    """
+    Current workers snapshot (plain JSON)
+    ---
+    tags: [Monitoring]
+    summary: Snapshot of currently-running model-resolution races (JSON)
+    responses:
+      '200':
+        description: JSON list of running workers
+        content:
+          application/json:
+            schema:
+              type: object
+    """
+    return web.json_response({"workers": _worker_snapshot()})
 
 
 async def handle_stop_worker(request):
@@ -5688,6 +5832,7 @@ def make_app():
     swagger.add_get("/next-host", handle_next_host)
     swagger.add_get("/skip-good", handle_skip_good)
     swagger.add_get("/workers", handle_workers)
+    swagger.add_get("/workers-now", handle_workers_now)
     swagger.add_get("/stop-worker", handle_stop_worker)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
