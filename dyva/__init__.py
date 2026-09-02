@@ -137,7 +137,12 @@ _VIDEO_CLASSES = {"video", "t2v", "i2v"}
 _AUDIO_CLASSES = {"audio", "music", "t2a"}
 
 # Async ComfyUI video-generation jobs (OpenRouter /v1/videos compatible).
-VIDEO_KEY = "__video__"
+VIDEO_KEY = "video"      # no wildcard: canon_pattern() eats a trailing "*"
+
+
+def video_key(model_filter=None):
+    q = _sep_insensitive((model_filter or "").replace("*", "").replace("?", ""))
+    return f"video/{q}" if q else VIDEO_KEY
 VIDEO_JOBS_FILE = os.path.join(CACHE_DIR, "video-jobs.json")
 VIDEO_JOBS_DIR = os.path.join(CACHE_DIR, "video-jobs")
 _VIDEO_JOBS = {}
@@ -4469,6 +4474,12 @@ class ComfyUnsuitable(ComfyError):
     """Structural: this host cannot run this graph, and still won't later."""
 
 
+class ComfyUnreachable(ComfyError):
+    """Never got a connection. Distinct from a slow or broken response: it says
+    nothing about this capability, only that the host is not there — so it
+    belongs on the host-wide unreachable mark, not a per-key one."""
+
+
 # ComfyUI's structural refusals, as they appear in a /prompt rejection body.
 _COMFY_STRUCTURAL = re.compile(r"prompt_outputs_failed_validation|missing_node_type"
                                r"|required_input_missing|return_type_mismatch")
@@ -4480,7 +4491,7 @@ COMFY_IMAGES = ("images",)
 COMFY_VIDEO = ("gifs", "videos")
 
 
-async def comfy_submit(session, host, workflow, timeout=30):
+async def comfy_submit(session, host, workflow, timeout=None):
     """Hand a graph to a host. Returns its prompt_id.
 
     Returning an id is the success boundary for host selection: the failures
@@ -4492,7 +4503,10 @@ async def comfy_submit(session, host, workflow, timeout=30):
         r = await session.post(
             _host_url(host, "/prompt"),
             json={"prompt": workflow, "client_id": str(uuid.uuid4())},
-            timeout=aiohttp.ClientTimeout(total=timeout),
+            # A host part-way through loading a checkpoint accepts the socket
+            # and answers late; that is a cold start, not a refusal.
+            timeout=aiohttp.ClientTimeout(total=timeout or COMFY_SUBMIT,
+                                          sock_connect=COMFY_CONNECT),
         )
         if r.status != 200:
             body = await r.text()
@@ -4805,7 +4819,18 @@ async def handle_comfyui_proxy(request):
     return web.json_response({"error": f"all ComfyUI hosts failed: {last_err}"}, status=502)
 
 
-TTS_KEY = "__tts__"
+# Two different jobs, deliberately not the same string:
+#   TTS_KEY  — the capability itself. Names the node survey in host_nodes, and
+#              is the reputation key when no particular voice model was asked
+#              for. No wildcard: canon_pattern() eats a trailing "*".
+#   tts_key() — the reputation key for one request, per model, so a host that
+#              can't run VibeVoice isn't written off for Qwen3TTS as well.
+TTS_KEY = "tts"
+
+
+def tts_key(model_filter=None):
+    q = _sep_insensitive((model_filter or "").replace("*", "").replace("?", ""))
+    return f"tts/{q}" if q else TTS_KEY
 
 NODE_CLASSIFIER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "node-classifier.json")
 _node_classifier_cache = None
@@ -4873,6 +4898,22 @@ _TTS_NODE_CACHE_TTL = 300
 # a single speech request doesn't fetch the (large) schema three times.
 _COMFY_INFO_CACHE = {}
 _COMFY_INFO_TTL = 300
+# Connect and read deserve very different patience, because they fail for very
+# different reasons.
+#
+# Connecting is answered by the kernel, so it does not care what the app is
+# doing: a host that hasn't answered the handshake in 15s is not there (or is
+# dropping packets rather than refusing them). Being strict here is safe.
+#
+# Reading is another matter. ComfyUI blocks its event loop while it pulls a
+# checkpoint off disk — a 20GB model from a platter is minutes of silence with
+# the socket wide open — so a short read timeout throws away hosts that were
+# only cold-starting. Waiting costs little: the race runs several hosts at
+# once, so a slow one never holds up a fast one.
+COMFY_CONNECT = 15      # kernel-level; a dead host is dead in 15s
+COMFY_STALL = 180       # silence while a big model loads is not a failure
+COMFY_INFO_TOTAL = 600  # backstop against a host that dribbles forever
+COMFY_SUBMIT = 120      # /prompt from a host mid-load answers late, not never
 
 _TTS_MIME = {
     ".flac": "audio/flac",
@@ -4901,13 +4942,20 @@ async def comfy_object_info(session, host):
     hit = _COMFY_INFO_CACHE.get(host)
     if hit and time.time() - hit[1] < _COMFY_INFO_TTL:
         return hit[0]
+    started = time.time()
     try:
         r = await session.get(
             _host_url(host, "/object_info"),
-            # A full ComfyUI node index runs to several megabytes (6.1 MB and
-            # 16.3s on a measured host), so this needs a generous ceiling —
-            # a short timeout here reads downstream as "no known TTS node".
-            timeout=aiohttp.ClientTimeout(total=90),
+            # A flat `total` punishes slow-but-working hosts: the node index
+            # runs to several megabytes (6.1 MB / 16.3s on one measured host,
+            # 9.4 MB on another), so a host trickling it down a thin link gets
+            # killed mid-download even though nothing is wrong. Time the phases
+            # instead — connect quickly, then only give up if the data actually
+            # *stops* — with a long backstop against a host that dribbles
+            # forever.
+            timeout=aiohttp.ClientTimeout(total=COMFY_INFO_TOTAL,
+                                          sock_connect=COMFY_CONNECT,
+                                          sock_read=COMFY_STALL),
         )
         status = r.status
         if status != 200:
@@ -4917,6 +4965,20 @@ async def comfy_object_info(session, host):
         await r.release()
     except _TtsError:
         raise
+    except asyncio.TimeoutError:
+        # Say which kind, so nobody has to ask whether we couldn't reach it or
+        # merely ran out of patience. A host that drops SYNs rather than
+        # refusing them looks identical to a slow one until you time the
+        # phases: no connection at all is unreachable, mid-download is not.
+        took = time.time() - started
+        if took < COMFY_CONNECT + 1:
+            raise ComfyUnreachable(
+                f"no TCP connection within {COMFY_CONNECT}s (packets dropped, not refused)")
+        raise _TtsError(
+            f"object_info stalled after {took:.0f}s — connected, but silent for "
+            f"{COMFY_STALL}s (wedged, or still loading something enormous)")
+    except (aiohttp.ClientConnectorError, OSError) as e:
+        raise ComfyUnreachable(str(e) or type(e).__name__)
     except Exception as e:
         raise _TtsError(str(e) or type(e).__name__)
     if not isinstance(info, dict):
@@ -5224,7 +5286,7 @@ async def _tts_collect(session, host, prompt_id, timeout=180):
                                timeout=timeout, poll=2, view_timeout=60)
 
 
-def _find_tts_hosts(target_host=None):
+def _find_tts_hosts(target_host=None, model_filter=None):
     """ComfyUI hosts that can generate TTS, best-first.
 
     TTS is a *node* feature, not a model-file feature: a host with a Qwen3TTS
@@ -5247,7 +5309,8 @@ def _find_tts_hosts(target_host=None):
     hosts = [s.get("server") for s in load_servers()
              if s.get("service") == "comfyui" and s.get("server")]
     marks = load_marks()
-    last = get_last(TTS_KEY)
+    tkey = tts_key(model_filter)
+    last = get_last(tkey)
     last_host = last[0] if last and last[0] else None
     now = time.time()
     # The persisted survey outlives the process, so after one sweep the handful
@@ -5265,9 +5328,13 @@ def _find_tts_hosts(target_host=None):
             if row and now - (row.get("checked") or 0) <= NODE_SURVEY_TTL:
                 known, node = True, row.get("spec")
         known_nodeless = known and node is None
-        tier = capability_tier(h, TTS_KEY, marks, last_host, extra_bad=known_nodeless)
+        tier = capability_tier(h, tkey, marks, last_host, extra_bad=known_nodeless)
         if known and node is not None:
-            within = 0
+            # a host whose surveyed node matches what was asked for goes first
+            if model_filter and not model_query_match(node.get("class", ""), model_filter):
+                within = 3
+            else:
+                within = 0
         elif _host_has_class(h, _AUDIO_CLASSES):
             within = 1
         else:
@@ -5300,7 +5367,10 @@ def _find_video_hosts(target_host=None):
              if s.get("service") == "comfyui" and s.get("server")
              and _host_has_class(s.get("server"), _VIDEO_CLASSES)]
     bad, good = load_bad(), load_good()
-    hosts.sort(key=lambda h: 0 if f"{h} {VIDEO_KEY}" in good else (1 if f"{h} {VIDEO_KEY}" not in bad else 2))
+    marks = load_marks()
+    _vlast = get_last(VIDEO_KEY)
+    hosts.sort(key=lambda h: capability_tier(h, VIDEO_KEY, marks,
+                                             _vlast[0] if _vlast else None))
     last = get_last(VIDEO_KEY)
     if last and last[0]:
         hosts = [last[0]] + [h for h in hosts if h != last[0]]
@@ -5373,44 +5443,97 @@ def _video_job_new(job):
 
 
 async def _run_video_job(session, jid):
+    """Race the job onto a host, then wait it out.
+
+    Video used to pick one host when the request came in and fail the whole job
+    if that host said no — no race, no verdicts, no second candidate. It goes
+    through the same engine as everything else now: submitting is the success
+    boundary, a render failure retires the model and re-races, and every
+    outcome is recorded as a verdict.
+    """
     job = _VIDEO_JOBS.get(jid)
     if not job:
         return
     job["status"] = "in_progress"
     _video_job_save()
-    host = job["host"]
-    model_path = job["model"]
     label = f"video: {job.get('prompt', '')[:40]}"
-    t0 = time.time()
-    await broadcast_activity(host, label, "trying", label)
-    try:
-        prompt_id = await _submit_video_workflow(session, host, model_path, job)
-        if not prompt_id:
-            raise _VideoError("failed to submit workflow to host")
-        job["comfyui_prompt_id"] = prompt_id
-        job["status"] = "in_progress"
-        _video_job_save()
-        async with _waiting_worker(f"video: {job.get('prompt', '')[:60]}", host, "rendering"):
-            content, filename = await _poll_video_result(session, host, prompt_id, job)
-        content_path = os.path.join(VIDEO_JOBS_DIR, f"{jid}.bin")
-        os.makedirs(VIDEO_JOBS_DIR, exist_ok=True)
-        with open(content_path, "wb") as f:
-            f.write(content)
-        job["content_path"] = content_path
-        job["filename"] = filename
-        job["status"] = "completed"
-        job["unsigned_urls"] = [f"/v1/videos/{jid}/content"]
-    except (_VideoError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+    vkey = video_key(job.get("model_filter"))
+    hosts = _find_video_hosts(job.get("target_host"))
+    if not hosts:
         job["status"] = "failed"
-        job["error"] = str(e) or type(e).__name__
-        log.warning(f"video: {host}: {job['error']}")
-        add_bad(host, VIDEO_KEY)
-        await broadcast_activity(host, label, "failed", f"{label}: {job['error']}", duration=time.time() - t0)
+        job["error"] = "no video-capable hosts available"
         _video_job_save()
         return
-    add_good(host, VIDEO_KEY)
-    set_last(VIDEO_KEY, host, model_path)
-    await broadcast_activity(host, label, "done", label, duration=time.time() - t0)
+    errors = []
+
+    async def attempt(host, wid, done):
+        await broadcast_activity(host, vkey, "trying", f"trying: {host} for {label}", wid=wid)
+        t0 = time.time()
+        try:
+            prompt_id, plan = await _submit_video_workflow(session, host, job)
+        except (ComfyError, _VideoError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            err = str(e) or type(e).__name__
+            errors.append(f"{host}: {err}")
+            await broadcast_activity(host, vkey, "failed",
+                f"failure: {host} for {label} - {err}", duration=time.time() - t0, wid=wid)
+            if isinstance(e, (ComfyUnsuitable, _VideoError)):
+                return unsuitable(err)
+            if isinstance(e, ComfyUnreachable):
+                return unreachable_host(err)
+            if isinstance(e, asyncio.TimeoutError):
+                return timed_out(err)
+            if isinstance(e, (aiohttp.ClientError, OSError)):
+                return unreachable_host(err)
+            return failed(err)
+        await broadcast_activity(host, vkey, "connected", f"success: {host} for {label}",
+                                 duration=time.time() - t0, wid=wid, rmodel=plan.get("model"))
+        return accepted((host, prompt_id, plan))
+
+    tried_hosts, bad_models = set(), set()
+    for _round in range(EDIT_RENDER_ATTEMPTS):
+        pool = [h for h in hosts if h not in tried_hosts]
+        if not pool:
+            break
+        job["exclude_models"] = sorted(bad_models)
+        result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey, label=label)
+        if not result or stopped:
+            break
+        host, prompt_id, plan = result
+        tried_hosts.add(host)
+        job["host"] = host
+        job["model"] = plan.get("model")
+        job["comfyui_prompt_id"] = prompt_id
+        _video_job_save()
+        try:
+            async with _waiting_worker(label, host, "rendering"):
+                content, filename = await _poll_video_result(session, host, prompt_id, job)
+        except (_VideoError, ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            outcome = render_verdict(e)
+            record_verdict(host, vkey, outcome)
+            err = str(e) or type(e).__name__
+            errors.append(f"{host}: {err} [{plan.get('family')} {plan.get('model')}]")
+            log.warning(f"video: {host}: took the job then failed to render: {err}")
+            await broadcast_activity(host, vkey, "failed",
+                f"failure: {host} for {label} - render: {err}")
+            if outcome.verdict == V_UNSUITABLE and plan.get("model"):
+                bad_models.add(plan["model"])
+                tried_hosts.discard(host)
+            continue
+
+        os.makedirs(VIDEO_JOBS_DIR, exist_ok=True)
+        content_path = os.path.join(VIDEO_JOBS_DIR, f"{jid}.bin")
+        with open(content_path, "wb") as f:
+            f.write(content)
+        job.update({"content_path": content_path, "filename": filename,
+                    "status": "completed",
+                    "unsigned_urls": [f"/v1/videos/{jid}/content"]})
+        _video_job_save()
+        return
+
+    reasons = collections.Counter(e.split(": ", 1)[1] if ": " in e else e for e in errors)
+    job["status"] = "failed"
+    job["error"] = ("; ".join(f"{c}x {r}" for r, c in reasons.most_common())
+                    or "no host accepted the job")
     _video_job_save()
 
 
@@ -5429,6 +5552,59 @@ def _pick_video_model(host, model_filter=None):
             if model_filter and not model_query_match(m, model_filter):
                 continue
             return m
+    return None
+
+
+_video_families_cache = None
+
+
+def load_video_families():
+    global _video_families_cache
+    if _video_families_cache is not None:
+        return _video_families_cache
+    out = []
+    try:
+        with open(NODE_CLASSIFIER_FILE, encoding="utf-8") as f:
+            out = (json.load(f).get("video") or [])
+    except Exception as e:
+        log.warning(f"node-classifier: failed to load video families: {e}")
+    _video_families_cache = out
+    return out
+
+
+def _video_plan(info, model_filter=None, exclude=()):
+    """Pick a video model on this host from its *loader enums*.
+
+    The cached model list is every file a host will admit to having, VAEs and
+    text encoders included — which is how a job ended up trying to render with
+    `minimax_h3_video_vae_fp16.safetensors` as the diffusion model. The loader
+    enums say what can actually be loaded as what.
+    """
+    for fam in load_video_families():
+        if any(nd not in info for nd in (fam.get("needs") or [])):
+            continue
+        loader = fam.get("loader", "UNETLoader")
+        if loader not in info:
+            continue
+        field = "ckpt_name" if loader == "CheckpointLoaderSimple" else "unet_name"
+        rx = re.compile(fam["model"])
+        cands = [m for m in _enum_options(info, loader, field)
+                 if rx.search(m) and m not in exclude]
+        if model_filter:
+            cands = [m for m in cands if model_query_match(m, model_filter)]
+        if not cands:
+            continue
+        clip = _pick(_enum_options(info, "CLIPLoader", "clip_name"), *_hints(fam.get("clip")))
+        vae = _pick(_enum_options(info, "VAELoader", "vae_name"), *_hints(fam.get("vae")))
+        if fam.get("clip") and not clip:
+            continue
+        if fam.get("vae") and not vae:
+            continue
+        if fam.get("clip_type") and fam["clip_type"] not in _enum_options(info, "CLIPLoader", "type"):
+            continue
+        return {"family": fam["name"], "loader": loader, "clip": clip, "vae": vae,
+                "clip_type": fam.get("clip_type"),
+                "model": sorted(cands, key=_match_rank(model_filter))[0]}
     return None
 
 
@@ -5462,7 +5638,7 @@ async def _get_object_info(session, host):
     return None
 
 
-def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed):
+def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed, info=None, plan=None):
     """Text-to-video graph for LTX-2.x diffusion models. Wiring:
     DiffusionModelLoader -> MODEL/CLIP/VAE, CLIPLoader -> CLIP, CLIPTextEncode,
     LTXVConditioning -> pos/neg conditioning + latent, EmptyLTXVLatentVideo,
@@ -5474,8 +5650,29 @@ def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, s
     def add(nid, cls, inputs):
         workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
 
-    add(1, "DiffusionModelLoader", {"unet_name": model_path})
-    add(2, "CLIPLoader", {"clip_name": "gemma-2-9b-gguf.safetensors", "type": "gemma"})
+    plan = plan or {}
+    info = info or {}
+    loader = plan.get("loader") or ("CheckpointLoaderSimple" if "CheckpointLoaderSimple" in info else "UNETLoader")
+    clip = plan.get("clip") or _pick(_enum_options(info, "CLIPLoader", "clip_name"), r"(?i)t5xxl", r"(?i)umt5")
+    ctype = plan.get("clip_type") or "ltxv"
+    if not clip:
+        raise _VideoError("host has no LTX text encoder")
+    saver, saver_inputs = _video_save_node(info, params.get("fps", 25))
+    if not saver:
+        raise _VideoError("host has no usable video save node")
+    if loader == "CheckpointLoaderSimple":
+        add(1, "CheckpointLoaderSimple", {"ckpt_name": model_path})
+    else:
+        add(1, "UNETLoader", {"unet_name": model_path, "weight_dtype": "default"})
+    vae_name = plan.get("vae")
+    if vae_name:
+        add(14, "VAELoader", {"vae_name": vae_name})
+        VAE = [14, 0]
+    elif loader == "CheckpointLoaderSimple":
+        VAE = [1, 2]     # a real checkpoint does carry one
+    else:
+        raise _VideoError("host has no LTX VAE")
+    add(2, "CLIPLoader", {"clip_name": clip, "type": ctype})
     add(3, "CLIPTextEncode", {"clip": [2, 0], "text": prompt})
     add(4, "CLIPTextEncode", {"clip": [2, 0], "text": ""})
     add(5, "LTXVConditioning", {
@@ -5495,39 +5692,101 @@ def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, s
         "noise": [10, 0], "guider": [9, 0], "sampler": [8, 0],
         "sigmas": [7, 0], "latent_image": [6, 0],
     })
-    add(12, "VAEDecode", {"samples": [11, 0], "vae": [1, 2]})
-    add(13, "SaveVideo", {"filename_prefix": "dyva_video", "images": [12, 0]})
+    add(12, "VAEDecode", {"samples": [11, 0], "vae": VAE})
+    add(13, saver, dict(saver_inputs, images=[12, 0]))
     return workflow
 
 
-def _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed):
-    """Text-to-video graph for Wan 2.x diffusion models. Wiring:
-    UNETLoader -> MODEL, CLIPLoader(umt5) -> CLIP, CLIPTextEncode,
-    EmptyHunyuanLatentVideo -> latent, ModelSamplingSD3 optional,
-    VideoLinearCFGGuidance -> model, KSampler -> latent, VAEDecode -> images,
-    SaveVideo."""
+def _video_save_node(info, fps=16):
+    """(class, inputs-without-images) for writing a video on this host.
+
+    SaveVideo wants a VIDEO and a `codec` that ComfyUI supplies as a dynamic
+    combo with no inline options — nothing we can fill — so prefer
+    VHS_VideoCombine, whose format enum is right there in the schema. It files
+    its output under "gifs", which COMFY_VIDEO already collects.
+    """
+    if "VHS_VideoCombine" in info:
+        opts = _enum_options(info, "VHS_VideoCombine", "format")
+        fmt = (_pick(opts, r"video/h264-mp4", r"video/.*mp4", r"^video/")
+               or (opts[0] if opts else "video/h264-mp4"))
+        return "VHS_VideoCombine", {
+            "frame_rate": float(fps), "loop_count": 0,
+            "filename_prefix": "dyva_video", "format": fmt,
+            "pingpong": False, "save_output": True,
+        }
+    if "SaveWEBM" in info and _enum_options(info, "SaveWEBM", "codec"):
+        return "SaveWEBM", {"filename_prefix": "dyva_video",
+                            "codec": _enum_options(info, "SaveWEBM", "codec")[0],
+                            "fps": float(fps), "crf": 32.0}
+    if "SaveAnimatedWEBP" in info and _enum_options(info, "SaveAnimatedWEBP", "method"):
+        return "SaveAnimatedWEBP", {
+            "filename_prefix": "dyva_video", "fps": float(fps), "lossless": False,
+            "quality": 80, "method": _enum_options(info, "SaveAnimatedWEBP", "method")[0]}
+    return None, None
+
+
+def _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed, info=None, plan=None):
+    """Wan 2.x video graph, text-to-video or image-to-video.
+
+    WanImageToVideo replaces the empty-latent stage and hands back re-encoded
+    conditioning plus the latent, so one graph covers both: omit `start_image`
+    and it behaves exactly like the text-only path.
+
+    Everything is resolved against the host's own loader enums. The previous
+    version hardcoded the umt5 encoder and took the VAE from `[1, 2]` — but
+    node 1 is UNETLoader, whose only output is MODEL, so the VAE was always
+    None and every render died in VAEDecode.
+    """
+    info = info or {}
     prompt = params.get("prompt", "")
     workflow = {}
     def add(nid, cls, inputs):
         workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
 
+    plan = plan or {}
+    clip = plan.get("clip") or _pick(_enum_options(info, "CLIPLoader", "clip_name"), r"(?i)umt5")
+    vae = plan.get("vae") or _pick(_enum_options(info, "VAELoader", "vae_name"), r"(?i)wan.*vae")
+    if not clip or not vae:
+        raise _VideoError("host has no Wan text encoder or VAE")
+    saver, saver_inputs = _video_save_node(info, params.get("fps", 16))
+    if not saver:
+        raise _VideoError("host has no usable video save node")
+
     add(1, "UNETLoader", {"unet_name": model_path, "weight_dtype": "default"})
-    add(2, "CLIPLoader", {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"})
+    add(2, "CLIPLoader", {"clip_name": clip, "type": "wan"})
     add(3, "CLIPTextEncode", {"clip": [2, 0], "text": prompt})
-    add(4, "CLIPTextEncode", {"clip": [2, 0], "text": ""})
-    add(5, "EmptyHunyuanLatentVideo", {
-        "width": width, "height": height, "length": length, "batch_size": 1,
-    })
-    add(6, "VideoLinearCFGGuidance", {
-        "model": [1, 0], "min_cfg": 1.0,
-    })
+    add(4, "CLIPTextEncode", {"clip": [2, 0], "text": params.get("negative_prompt", "")})
+    add(10, "VAELoader", {"vae_name": vae})
+
+    # Wan 2.2 ships i2v and t2v weights with different conditioning shapes. An
+    # i2v model wants WanImageToVideo either way — start_image is optional
+    # there, so it also covers "no picture, just a prompt".
+    start = params.get("start_image")
+    use_i2v = "WanImageToVideo" in info and (start or re.search(r"(?i)i2v", model_path or ""))
+    if use_i2v:
+        i2v_inputs = {
+            "positive": [3, 0], "negative": [4, 0], "vae": [10, 0],
+            "width": width, "height": height, "length": length, "batch_size": 1,
+        }
+        if start:
+            add(11, "LoadImage", {"image": start})
+            i2v_inputs["start_image"] = [11, 0]
+        add(5, "WanImageToVideo", i2v_inputs)
+        POS, NEG, LATENT = [5, 0], [5, 1], [5, 2]
+    else:
+        add(5, "EmptyHunyuanLatentVideo", {
+            "width": width, "height": height, "length": length, "batch_size": 1,
+        })
+        POS, NEG, LATENT = [3, 0], [4, 0], [5, 0]
+
+    add(6, "VideoLinearCFGGuidance", {"model": [1, 0], "min_cfg": 1.0})
     add(7, "KSampler", {
-        "model": [6, 0], "positive": [3, 0], "negative": [4, 0],
-        "latent_image": [5, 0], "seed": seed, "steps": steps, "cfg": cfg,
+        "model": [6, 0], "positive": POS, "negative": NEG,
+        "latent_image": LATENT, "seed": seed, "steps": steps, "cfg": cfg,
         "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
     })
-    add(8, "VAEDecode", {"samples": [7, 0], "vae": [1, 2]})
-    add(9, "SaveVideo", {"filename_prefix": "dyva_video", "images": [8, 0]})
+    add(8, "VAEDecode", {"samples": [7, 0], "vae": [10, 0]})
+    add(9, saver, dict(saver_inputs, images=[8, 0]))
     return workflow
 
 
@@ -5554,7 +5813,7 @@ def _build_mochi_workflow(params, model_path, steps, cfg, width, height, length,
     return workflow
 
 
-async def _submit_video_workflow(session, host, model_path, job):
+async def _submit_video_workflow(session, host, job):
     """Build and submit a text-to-video ComfyUI workflow for the model. Returns
     the ComfyUI prompt_id, or None on submission failure. The builder is chosen
     by the model's family (wan/ltx/mochi); unrecognized families fail cleanly
@@ -5570,21 +5829,39 @@ async def _submit_video_workflow(session, host, model_path, job):
         import random
         seed = random.randint(0, 2**31 - 1)
 
-    family = _detect_video_family(model_path)
+    # The builders need the host's own file lists; hardcoding names is how the
+    # Wan graph ended up referring to an encoder and a VAE that may not exist.
+    info = await comfy_object_info(session, host)
+
+    # A start image has to live on the host before LoadImage can name it.
+    if job.get("start_image_b64") and "start_image" not in params:
+        try:
+            raw = base64.b64decode(job["start_image_b64"])
+            params["start_image"] = await comfy_upload_image(
+                session, host, raw, job.get("start_image_name") or "start.png")
+        except Exception as e:
+            log.warning(f"video: {host}: start image upload failed: {e}")
+
+    # The model is chosen here, from what the host can actually load — the
+    # name carried on the job is only a hint.
+    plan = _video_plan(info, job.get("model_filter") or None,
+                       exclude=set(job.get("exclude_models") or ()))
+    if not plan:
+        raise _VideoError("no usable video model on this host")
+    model_path = plan["model"]
+    family = plan["family"]
     if family == "wan":
-        workflow = _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed)
+        workflow = _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed,
+                                       info, plan)
     elif family == "ltx":
-        workflow = _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed)
+        workflow = _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed,
+                                       info, plan)
     elif family == "mochi":
         workflow = _build_mochi_workflow(params, model_path, steps, cfg, width, height, length, seed)
     else:
         raise _VideoError(f"unsupported video model family for {model_path!r}")
 
-    try:
-        return await comfy_submit(session, host, workflow)
-    except ComfyError as e:
-        log.warning(f"video: {host}: {e}")
-        return None
+    return await comfy_submit(session, host, workflow), plan
 
 
 async def _poll_video_result(session, host, prompt_id, job):
@@ -5653,6 +5930,7 @@ async def handle_videos_post(request):
             {"error": "no ComfyUI hosts with a video-capable model available"}, status=503)
 
     model_filter = body.get("model") or ""
+    # kept as a hint; the actual model is resolved per host against its loaders
     # pick the best host that actually has a matching video model
     chosen_host = None
     chosen_model = None
@@ -5668,13 +5946,38 @@ async def handle_videos_post(request):
 
     params = dict(body)
     params["prompt"] = prompt_text
+    # A start image turns this into image-to-video. Kept as bytes on the job,
+    # not in params, because it has to be uploaded to whichever host wins.
+    start = body.get("image") or body.get("start_image")
+    if isinstance(start, str) and start.strip():
+        blob = start.split(",", 1)[1] if start.startswith("data:") else start
+        try:
+            params.pop("image", None)
+            params.pop("start_image", None)
+            job_start = base64.b64decode(blob)
+        except Exception:
+            return web.json_response({"error": "'image' is not valid base64"}, status=400)
+    else:
+        job_start = None
+    # `resolution: "832x480"` is the friendly spelling; the builders want
+    # width/height. Accepting one and reading the other is how these two
+    # controls came to do nothing at all.
+    res = str(body.get("resolution") or "").strip()
+    m = re.match(r"^(\d+)\s*[x\u00d7]\s*(\d+)$", res)
+    if m:
+        params.setdefault("width", int(m.group(1)))
+        params.setdefault("height", int(m.group(2)))
     job = {
         "id": None,
         "status": "pending",
         "host": chosen_host,
         "model": chosen_model,
+        "model_filter": model_filter,
+        "target_host": request.query.get("host") or None,
         "prompt": prompt_text,
         "params": params,
+        "start_image_b64": base64.b64encode(job_start).decode() if job_start else None,
+        "start_image_name": str(body.get("image_name") or "start.png"),
         "created": time.time(),
         "unsigned_urls": [],
     }
@@ -5871,7 +6174,11 @@ async def handle_tts_speech(request):
     else:
         voice = voice.strip()
 
-    hosts = _find_tts_hosts(request.query.get("host"))
+    # Reputation is keyed by the voice model asked for, so a host written off
+    # for one TTS node isn't written off for all of them.
+    tkey = tts_key(str(body.get("model") or "").strip() or None)
+    hosts = _find_tts_hosts(request.query.get("host"),
+                            str(body.get("model") or "").strip() or None)
     if not hosts:
         return web.json_response({"error": "no ComfyUI hosts available for tts"}, status=503)
 
@@ -5887,7 +6194,7 @@ async def handle_tts_speech(request):
     # whether the request was for tokens or for audio.
     # The race only has to get the job accepted somewhere.
     async def attempt(host, wid, done):
-        await broadcast_activity(host, TTS_KEY, "trying",
+        await broadcast_activity(host, tkey, "trying",
             f"trying: {host} for {label}", wid=wid)
         start = time.time()
         try:
@@ -5896,21 +6203,23 @@ async def handle_tts_speech(request):
             err = str(e) or type(e).__name__
             dur = time.time() - start
             errors_list.append(f"{host}: {err}")
-            await broadcast_activity(host, TTS_KEY, "failed",
+            await broadcast_activity(host, tkey, "failed",
                 f"failure: {host} for {label} - {err}", duration=dur, wid=wid)
             if isinstance(e, _TtsUnsuitable):
                 return unsuitable(err)
+            if isinstance(e, ComfyUnreachable):
+                return unreachable_host(err)
             if isinstance(e, asyncio.TimeoutError):
                 return timed_out(err)
             if isinstance(e, (aiohttp.ClientError, OSError)):
                 return unreachable_host(err)
             return failed(err)
         dur = time.time() - start
-        await broadcast_activity(host, TTS_KEY, "connected",
+        await broadcast_activity(host, tkey, "connected",
             f"success: {host} for {label}", duration=dur, wid=wid, rmodel=node)
         return accepted((host, prompt_id, node))
 
-    result, stopped, tried, tally = await _race_hosts(hosts, attempt, TTS_KEY)
+    result, stopped, tried, tally = await _race_hosts(hosts, attempt, tkey)
 
     if result:
         host, prompt_id, node = result
@@ -5923,7 +6232,7 @@ async def handle_tts_speech(request):
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
             log.warning(f"tts: {host}: accepted the job then failed to render: {err}")
-            await broadcast_activity(host, TTS_KEY, "failed",
+            await broadcast_activity(host, tkey, "failed",
                 f"failure: {host} for {label} - render: {err}")
             return web.json_response(
                 {"error": f"tts: {host} accepted the job but did not render it: {err}"},
@@ -6055,7 +6364,11 @@ async def handle_audio_voices(request):
 #   reference - Flux Kontext: no multi-image input node, so each reference is
 #               LoadImage -> FluxKontextImageScale -> VAEEncode -> ReferenceLatent,
 #               chained through the conditioning.
-EDIT_KEY = "edit/*"      # the unfiltered case; see edit_key()
+# No wildcard in the key: add_bad()/add_good() run it through canon_pattern(),
+# which strips a trailing "*", so marks written under "edit/*" landed in the
+# table as "edit/" and were then looked up as "edit/*" — never matching. Hosts
+# stayed unranked forever and got retried no matter how often they failed.
+EDIT_KEY = "edit"        # the unfiltered case; see edit_key()
 
 
 def edit_key(model_filter=None):
@@ -6071,7 +6384,11 @@ def edit_key(model_filter=None):
 # Editing runs a full diffusion sample on someone else's GPU, often a queued
 # one. Ten minutes is not generous, it's realistic.
 EDIT_RENDER_TIMEOUT = 900
-EDIT_RENDER_ATTEMPTS = 3
+# Each attempt races only until the *first host accepts*, so a round that dies
+# in the render has cost two or three hosts out of hundreds. Three rounds gave
+# up after ~8 candidates with 60 still untried; the point of the retry is to
+# work through the bad pairings, so give it room.
+EDIT_RENDER_ATTEMPTS = 8
 # "Match source" means the same shape, not the same pixel count. Diffusion
 # models want dimensions on a grid (64 is the safe common denominator) and fall
 # over on very large inputs, so a phone photo gets scaled down, on aspect, to
@@ -6109,7 +6426,7 @@ def render_verdict(err):
     if isinstance(err, asyncio.TimeoutError):
         return timed_out(str(err) or "timeout")
     text = str(err) or type(err).__name__
-    if isinstance(err, (aiohttp.ClientError, OSError)):
+    if isinstance(err, (ComfyUnreachable, aiohttp.ClientError, OSError)):
         return unreachable_host(text)
     if _RENDER_UNSUITABLE.search(text):
         return unsuitable(text)
@@ -6680,6 +6997,8 @@ async def handle_image_edit(request):
                 duration=time.time() - t0, wid=wid)
             if isinstance(e, ComfyUnsuitable):
                 return unsuitable(err)
+            if isinstance(e, ComfyUnreachable):
+                return unreachable_host(err)
             if isinstance(e, asyncio.TimeoutError):
                 return timed_out(err)
             if isinstance(e, (aiohttp.ClientError, OSError)):

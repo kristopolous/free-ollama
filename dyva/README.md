@@ -42,13 +42,18 @@ All of these run and exit; none of them start the server.
 
 Every host+key pair dyva has tried carries a state — `good`, `maybe_good`, or
 `bad` — in `~/.cache/free-ollama/host-status.db`. The key is usually a model
-name. The non-chat capabilities use sentinels — `__tts__`, `__video__`,
-`__music__`, and `__unreachable__` (host-wide, so a dead host isn't re-probed
-once per model) — except **image editing, which is keyed per model**:
-`edit/flux2`, `edit/qwen`, `edit/*` when nothing was named. A host that can't
-run Flux.2 may be perfectly good at Qwen-Image-Edit, so one bucket for all of
-them condemned hosts far too broadly. The key is the query you searched with,
-canonicalised, so `flux*2`, `flux-2` and `FLUX.2` all share one record.
+name. The non-chat capabilities use `__video__`, `__music__`, and `__unreachable__`
+(host-wide, so a dead host isn't re-probed once per model). **Speech and image
+editing are keyed per model** — `tts`, `tts/vibevoice`, `edit`, `edit/flux2`,
+`edit/qwen` — because a host that can't run Flux.2 may be perfectly good at
+Qwen-Image-Edit, and one bucket for all of them condemned hosts far too
+broadly. The key is the query you searched with, canonicalised, so `flux*2`,
+`flux-2` and `FLUX.2` all share one record.
+
+Note the absence of a `*` in the unfiltered form: reputation keys pass through
+`canon_pattern()`, which strips a trailing `*`, so a key like `edit/*` would be
+*written* as `edit/` and *read* as `edit/*` — marks that never match, and hosts
+that are retried no matter how often they fail.
 
 ```bash
 dyva --hosts                      # counts per state

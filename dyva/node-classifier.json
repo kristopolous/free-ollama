@@ -323,5 +323,70 @@
       "cfg": 1.0,
       "steps": 20
     }
+  ],
+  "video": [
+    {
+      "name": "wan",
+      "loader": "UNETLoader",
+      "model": "(?i)wan",
+      "clip": [
+        "(?i)umt5"
+      ],
+      "clip_type": "wan",
+      "vae": [
+        "(?i)wan.*vae",
+        "(?i)wan"
+      ],
+      "needs": [
+        "EmptyHunyuanLatentVideo",
+        "VideoLinearCFGGuidance",
+        "KSampler",
+        "VAEDecode",
+        "CLIPTextEncode",
+        "CLIPLoader",
+        "VAELoader"
+      ]
+    },
+    {
+      "name": "ltx",
+      "loader": "CheckpointLoaderSimple",
+      "model": "(?i)ltx",
+      "clip": [
+        "(?i)t5xxl",
+        "(?i)umt5"
+      ],
+      "clip_type": "ltxv",
+      "vae": [],
+      "needs": [
+        "EmptyLTXVLatentVideo",
+        "LTXVConditioning",
+        "LTXVScheduler",
+        "KSamplerSelect",
+        "CFGGuider",
+        "RandomNoise",
+        "SamplerCustomAdvanced",
+        "VAEDecode",
+        "CLIPTextEncode",
+        "CLIPLoader"
+      ]
+    },
+    {
+      "name": "mochi",
+      "loader": "UNETLoader",
+      "model": "(?i)mochi",
+      "clip": [
+        "(?i)t5xxl"
+      ],
+      "clip_type": "mochi",
+      "vae": [
+        "(?i)mochi.*vae"
+      ],
+      "needs": [
+        "EmptyMochiLatentVideo",
+        "KSampler",
+        "VAEDecode",
+        "CLIPTextEncode"
+      ]
+    }
   ]
 }

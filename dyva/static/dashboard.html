@@ -153,8 +153,19 @@ a{color:var(--text-muted)}
 .header img{flex-shrink:0}
 .activity-btn{margin-left:auto;background:var(--surface);color:var(--text-muted);border:none;border-radius:var(--r-md);padding:var(--sp-3) var(--sp-5);font-size:var(--fs-md);cursor:pointer;flex-shrink:0}
 .activity-btn:hover{color:var(--text-2);background:var(--accent-bg)}
-.activity-pop{display:none;position:absolute;top:calc(100% + var(--sp-3));right:0;width:min(520px,calc(100vw - 24px));max-height:min(60vh,480px);overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);z-index:120;padding:var(--sp-4) 14px}
-.activity-pop.open{display:block}
+.activity-pop{display:none;position:absolute;top:calc(100% + var(--sp-3));right:0;width:min(520px,calc(100vw - 24px));max-height:min(60vh,480px);overflow:hidden;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);z-index:120;padding:var(--sp-4) 14px}
+.activity-pop.open{display:flex;flex-direction:column}
+/* What's running, above what has happened: the feed says what the proxy did,
+   these say what it is doing. Three across, two on a narrow popup. */
+.ap-workers{flex-shrink:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0;padding-bottom:var(--sp-3);border-bottom:1px solid var(--border)}
+@media (max-width:520px){.ap-workers{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.ap-worker{min-width:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-sunken);padding:var(--sp-2) var(--sp-3)}
+.ap-worker .apw-model{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ /* two lines: the key, then status and elapsed sharing the second */
+.ap-worker .apw-row{display:flex;align-items:baseline;gap:var(--sp-2);margin-top:1px}
+.ap-worker .apw-meta{flex:1 1 80%;min-width:0;font-size:var(--fs-2xs);color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ap-worker .apw-meta.phase{color:var(--accent)}
+.ap-worker .apw-age{flex:0 0 20%;text-align:right;white-space:nowrap;font-size:var(--fs-2xs);color:var(--text-faint);font-variant-numeric:tabular-nums}
 .ap-head{font-size:var(--fs-xl);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:var(--sp-3);display:flex;align-items:center}
 .header-text h1{font-family:var(--font-display);font-weight:400;font-size:var(--fs-h1);margin-bottom:2px}
 .header-text .sub{color:var(--text-muted);font-size:var(--fs-md)}
@@ -188,7 +199,8 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 .model-count{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap}
 .modellist .model-item{cursor:pointer;transition:background .1s;overflow-wrap:anywhere}
 .modellist .model-item:hover{background:var(--accent-bg)}
-.host-name{font-family:var(--font-mono);font-size:var(--fs-sm);flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.host-name{font-family:var(--font-mono);font-size:var(--fs-sm);flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:none}
+a.host-name:hover{color:var(--accent);text-decoration:underline}
 .host-checked{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap;font-size:var(--fs-xs)}
 .host-model{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-dim);max-width:50%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skip-link{opacity:0;color:var(--accent);font-size:var(--fs-xs);text-decoration:underline;margin:0 var(--sp-3);flex-shrink:0;transition:opacity .1s}
@@ -459,17 +471,35 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
 .mp-actions.joined .tool-menu .mp-tool{border-radius:var(--r-md) 0 0 var(--r-md)}
 .mp-actions.joined #docToggle{border-radius:0 var(--r-md) var(--r-md) 0;box-shadow:inset 1px 0 0 var(--bg-sunken)}
 /* combined "N matching servers" count + advance-to-next-server control */
-.chat-advance{flex-shrink:0;background:var(--accent-bg);color:var(--accent);border:1px solid var(--border-strong);border-left:none;border-radius:0 var(--r-md) var(--r-md) 0;min-height:var(--ctl-h);display:flex;align-items:center;gap:.4em;cursor:pointer;font-size:var(--fs-md);font-family:var(--font-mono);line-height:1;padding:.5rem .8em}
+.chat-advance{flex-shrink:0;background:var(--accent-bg);color:var(--accent);border:1px solid var(--border-strong);border-left:none;border-radius:0 var(--r-md) var(--r-md) 0;min-height:var(--ctl-h);display:flex;align-items:center;gap:.4em;font-size:var(--fs-md);font-family:var(--font-mono);line-height:1;padding:.5rem .8em}
 .chat-advance.empty{color:var(--text-dim);background:var(--bg-inset)}
-.chat-advance:hover{color:var(--text-hi);background:var(--btn-bg)}
-.chat-advance:disabled{opacity:.5;cursor:default}
-.chat-advance #chatModelCount{min-width:1.6em;text-align:center}
-.chat-advance .adv-arrow{display:flex;align-items:center;opacity:.8}
-.chat-advance .adv-arrow svg{width:15px;height:15px}
+#chatModelCount{min-width:1.6em;text-align:center;justify-content:center}
+/* Edit mode wants a different balance from generate: the model name is the
+   long field and the sampler/negative prompt are gone, so the two rows read
+      [ edit model 2/3 ][ seed 1/3 ]
+      [ width 1/3 ][ height 1/3 ][ match source 1/3 ]
+   The fields live in two containers, so flatten those with display:contents
+   and lay everything out on one six-column grid, ordering explicitly. */
+body.img-edit .img-main{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));column-gap:var(--sp-4);row-gap:var(--sp-3);align-items:start}
+body.img-edit .img-main > *{grid-column:1/-1;order:6}
+body.img-edit .img-params,
+body.img-edit .img-dims{display:contents}
+body.img-edit .img-main > .mode-toggle{order:0;justify-self:start}
+body.img-edit .img-params > .field.edit-only{grid-column:span 4;order:1}
+body.img-edit .img-dims > .field:nth-child(3){grid-column:span 2;order:2}
+body.img-edit .img-dims > .field:nth-child(1){grid-column:span 2;order:3}
+body.img-edit .img-dims > .field:nth-child(2){grid-column:span 2;order:4}
+body.img-edit .img-dims > .inline-check{grid-column:span 2;order:5;align-self:center;margin:0}
+body.img-edit .img-main > #editRefField{order:7}
+body.img-edit .img-main > .img-advanced{order:8}
+body.img-edit .img-main > #imgGenerate{order:9;justify-self:start}
+body.img-edit .img-main > #imgResult{order:10}
+/* the log scrolls, not the whole popup */
+#activityList{flex:1 1 auto;min-height:0;overflow-y:auto}
 /* tool toggle sharing the model-selector row */
 .mp-tool{flex-shrink:0;background:var(--accent-bg);color:var(--accent);border:none;border-radius:var(--r-md);min-width:var(--ctl-h);height:var(--ctl-h);padding:.5rem;display:flex;align-items:center;justify-content:center;cursor:pointer}
 .mp-tool:hover{color:var(--text-hi);background:var(--btn-bg)}
-.mp-tool:focus-visible,.chat-advance:focus-visible{outline:2px solid var(--border-focus);outline-offset:1px}
+.mp-tool:focus-visible{outline:2px solid var(--border-focus);outline-offset:1px}
 .mp-tool.active{color:var(--accent-bright);background:var(--accent-bg-active)}
 .mp-tool svg{width:18px;height:18px}
 /* wrench pull-down: opens upward with a caret pointing down at the wrench */
@@ -557,7 +587,7 @@ body.img-edit .generate-only{display:none!important}
 body.img-edit.match-src .img-dims .field:nth-child(-n+2){opacity:.45}
 /* its own row across the width/height/seed grid, since it governs them */
 .img-dims .inline-check{grid-column:1/-1;margin:0}
-.drop{border:1px dashed var(--border-hover);border-radius:var(--r-lg);background:var(--bg-sunken);padding:var(--sp-5);text-align:center;cursor:pointer}
+.drop{border:1px dashed var(--border-hover);border-radius:var(--r-lg);background:var(--bg-sunken);padding:var(--sp-6) var(--sp-5);min-height:5.5rem;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;cursor:pointer}
 .drop.over{border-color:var(--border-accent);background:var(--accent-bg)}
 /* while a gallery card is in flight, show where it can go */
 body.dragging-image #editDrop{border-color:var(--border-accent)}
@@ -574,6 +604,15 @@ body.dragging-image .hist-item{cursor:grabbing}
 .mini-search:focus{outline:none;border-color:var(--border-focus)}
 .mini-search::placeholder{color:var(--text-faint)}
 #imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:var(--sp-3)}
+/* prompt and start image side by side: an image-to-video job is both */
+.vid-prompt-row{display:grid;grid-template-columns:2fr 1fr;gap:var(--sp-4);align-items:start}
+@media (max-width:640px){.vid-prompt-row{grid-template-columns:1fr}}
+.vid-prompt-row .drop{min-height:0;padding:var(--sp-4)}
+.img-pager{display:flex;align-items:center;justify-content:center;gap:var(--sp-3);margin-top:var(--sp-4)}
+.pager-btn{background:var(--surface);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);min-width:2rem;padding:2px var(--sp-3);font-size:var(--fs-lg);line-height:1.4;cursor:pointer}
+.pager-btn:hover:not(:disabled){background:var(--accent-bg);color:var(--text)}
+.pager-btn:disabled{opacity:.35;cursor:default}
+.pager-info{font-size:var(--fs-xs);color:var(--text-dim);font-variant-numeric:tabular-nums;white-space:nowrap}
 .media-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--sp-2);margin-top:var(--sp-3)}
 /* Speech clips go three to a row rather than auto-filling at 200px: the wider
    card gives the text label and the host/node line room before they ellipsize.
@@ -620,6 +659,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾</button>
 <div id="activityPop" class="activity-pop">
 <div class="ap-head">Activity <span id="pauseBtn" style="font-size:var(--fs-2xl);font-weight:normal;cursor:pointer;color:var(--text-dim);margin-left:auto;border:1px solid var(--text-dim);border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></div>
+<div id="activityWorkers" class="ap-workers" style="display:none"></div>
 <div id="activityList"></div>
 </div>
 </div>
@@ -638,8 +678,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <h2>Models</h2>
 <div class="card-inner">
 <div class="host-tabs">
-<button type="button" class="htab active" data-mpane="text">Text</button>
-<button type="button" class="htab" data-mpane="image">Image</button>
+<button type="button" class="htab active" data-mpane="text" title="Text models">📖<span class="htab-count" id="cnt-mtext"></span></button>
+<button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
@@ -704,7 +744,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button id="chatMenuBtn" class="chat-menu-btn" title="Chat history">☰</button>
 <div class="model-field">
 <input id="chatModel" type="text" value="*" placeholder="model (* = anything)" autocomplete="off" spellcheck="false">
-<button id="chatNextBtn" class="chat-advance" title="matching servers — click to try the next server"><span id="chatModelCount">-</span><span class="adv-arrow"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></span></button>
+<span id="chatModelCount" class="chat-advance" title="matching servers">-</span>
 </div>
 <div class="mp-actions">
 <div class="tool-menu">
@@ -845,6 +885,11 @@ __SD_MODELS__
 <div class="img-side">
  <div class="img-side-title">Recent <input id="imgSearch" class="mini-search" type="text" placeholder="filter model / prompt…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="imgRecentFilter"></div>
 <div id="imgHistory"></div>
+<div id="imgPager" class="img-pager" style="display:none">
+  <button type="button" id="imgPrev" class="pager-btn" title="Newer">&#8249;</button>
+  <span id="imgPageInfo" class="pager-info"></span>
+  <button type="button" id="imgNext" class="pager-btn" title="Older">&#8250;</button>
+</div>
 </div>
 </div>
 </div>
@@ -915,17 +960,27 @@ __SD_MODELS__
 <input id="vidResolution" type="text" placeholder="832x480" autocomplete="off">
 </div>
 <div class="field">
-<label for="vidDuration">Duration (s)</label>
-<input id="vidDuration" type="number" min="1" max="60" placeholder="default">
+<label for="vidFrames">Frames</label>
+<input id="vidFrames" type="number" min="1" max="600" step="1" placeholder="25" title="Video length is counted in frames, not seconds">
 </div>
 <div class="field">
-<label for="vidSeed">Seed</label>
-<input id="vidSeed" type="number" value="-1" title="-1 = random">
+<label for="vidSteps">Steps</label>
+<input id="vidSteps" type="number" min="1" max="150" step="1" placeholder="20">
 </div>
 </div>
+<div class="vid-prompt-row">
 <div class="field">
 <label for="vidPrompt">Prompt</label>
 <textarea id="vidPrompt" rows="3" placeholder="a paper boat drifting down a rain gutter, slow motion"></textarea>
+</div>
+<div class="field">
+<label for="vidStartFile">Start image <small class="setting-help">optional</small></label>
+<div id="vidDrop" class="drop">
+  <input id="vidStartFile" type="file" accept="image/*" hidden>
+  <span class="drop-hint">drop an image, or click</span>
+  <div id="vidThumb" class="drop-thumbs"></div>
+</div>
+</div>
 </div>
 <button id="vidGenerate">Generate</button>
 <div id="vidResult" class="media-result"></div>
@@ -1103,6 +1158,23 @@ function matchModel(name,pattern){
   }
   return n.indexOf(p)>=0;
 }
+// The tab labels are icons now, so the count carries the meaning: how many
+// models in that pane match the current filter. The words live in title=.
+function updateModelPaneCounts(q){
+  [['modelList','cnt-mtext','Text models'],
+   ['modelListImage','cnt-mimage','Image models']].forEach(function(t){
+    var list=document.getElementById(t[0]);
+    if(!list)return;
+    var rows=list.querySelectorAll('.model-item'),hit=0;
+    for(var i=0;i<rows.length;i++){
+      if(matchModel(rows[i].getAttribute('data-name'),q||''))hit++;
+    }
+    var el=document.getElementById(t[1]);
+    if(el)el.textContent=hit;
+    var btn=el&&el.parentNode;
+    if(btn)btn.title=hit+' '+t[2].toLowerCase()+(q?' matching \u201c'+q+'\u201d':'');
+  });
+}
 function filterModels(){
   var q=document.getElementById('modelFilter').value.trim();
   // Narrowing the filter until the selected model is no longer listed clears
@@ -1114,6 +1186,7 @@ function filterModels(){
   }
   refreshUseBtn();
   document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=matchModel(el.getAttribute('data-name'),q)?'':'none'});
+  updateModelPaneCounts(q);
   // the same query re-renders the Hosts card panes from the full arrays, so it
   // searches the whole list and the "... and N more" count matches the results
   if(typeof renderHostPanes==='function')renderHostPanes();
@@ -1167,10 +1240,22 @@ function renderModels(servers){
   var lt=document.getElementById('modelList');lt.innerHTML='';lt.appendChild(fT);
   var li=document.getElementById('modelListImage');li.innerHTML='';li.appendChild(fI);
   filterModels();
+  updateModelPaneCounts(document.getElementById('modelFilter').value.trim());
+}
+// A host is an address; listing one without letting you open it is a waste of
+// a link. rel=noreferrer because these are strangers' boxes.
+function hostLink(host){
+  var a=document.createElement('a');
+  a.className='host-name';
+  a.textContent=host;a.title='open '+host;
+  a.href=/^https?:\/\//.test(host)?host:('http://'+host);
+  a.target='_blank';a.rel='noopener noreferrer';
+  a.addEventListener('click',function(ev){ev.stopPropagation()});
+  return a;
 }
 function hostRow(host,model,skipHref){
   var d=document.createElement('div');d.className='model-item';
-  var h=document.createElement('span');h.className='host-name';h.textContent=host;h.title=host;d.appendChild(h);
+  d.appendChild(hostLink(host));
   if(skipHref){var a=document.createElement('a');a.className='skip-link';a.href=skipHref;a.textContent='skip';d.appendChild(a)}
   var mm=document.createElement('span');mm.className='host-model';mm.textContent=model||'(any)';mm.title=model||'(any)';d.appendChild(mm);
   return d;
@@ -1221,8 +1306,37 @@ function agoText(secs){
 // snapshot rebuilds the cards from scratch, which would otherwise throw the
 // button's "stopping…" state away a fraction of a second after the click.
 var _stopping={};
+// The Activity popup gets the same snapshot in miniature: you can watch the
+// feed and see what is in flight without switching panes.
+function renderActivityWorkers(arr){
+  var box=document.getElementById('activityWorkers');
+  if(!box)return;
+  if(!arr.length){box.style.display='none';box.innerHTML='';return}
+  box.style.display='grid';
+  box.innerHTML='';
+  arr.forEach(function(w){
+    var card=document.createElement('div');card.className='ap-worker';
+    var m=document.createElement('div');m.className='apw-model';
+    m.textContent=w.model||'';m.title=w.model||'';
+    var meta=document.createElement('div');meta.className='apw-meta';
+    if(w.phase){
+      meta.classList.add('phase');
+      meta.textContent=w.phase+(w.host?' '+String(w.host).replace(/^https?:\/\//,''):'');
+    }else{
+      meta.textContent='checked '+w.checked+(w.total?' / '+w.total:'');
+    }
+    meta.title=meta.textContent;
+    var age=document.createElement('div');age.className='apw-age';
+    age.textContent=agoText(w.age||0);
+    var row=document.createElement('div');row.className='apw-row';
+    row.appendChild(meta);row.appendChild(age);
+    card.appendChild(m);card.appendChild(row);
+    box.appendChild(card);
+  });
+}
 function renderWorkers(workers){
   var c=document.getElementById('workersList'),arr=workers||[];
+  renderActivityWorkers(arr);
   // Forget wids that are gone from the snapshot — that worker stopped.
   var live={};arr.forEach(function(w){live[w.wid]=1});
   Object.keys(_stopping).forEach(function(k){if(!live[k])delete _stopping[k]});
@@ -1363,7 +1477,7 @@ document.getElementById('serverroom').addEventListener('click',function(e){
   var card=document.getElementById('hostCard');card.style.display='';
   document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';
   var list=document.getElementById('hostList');list.innerHTML='';
-  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';var s=document.createElement('span');s.className='host-name';s.textContent=h;s.title=h;d.appendChild(s);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)});
+  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';d.appendChild(hostLink(h));var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)});
 });
 loadDashboard();
 </script>
@@ -1669,7 +1783,7 @@ function makeSpeakBtn(getText,msgEl){
     // Same status the Speech tab shows: the race can take a while, and a
     // button that just dims tells you nothing about what it's waiting on.
     showSnack('finding a TTS host\u2026');
-    activeMediaStatus['__tts__']=snackStatus;
+    activeMediaStatus['tts']=snackStatus;
     try{
       var r=await fetch('v1/audio/speech',{method:'POST',
         headers:{'Content-Type':'application/json'},body:JSON.stringify({input:text})});
@@ -1698,7 +1812,7 @@ function makeSpeakBtn(getText,msgEl){
     }catch(ex){b.title='failed: '+ex.message}
     finally{
       b.disabled=false;b.classList.remove('busy');
-      delete activeMediaStatus['__tts__'];hideSnack();
+      delete activeMediaStatus['tts'];hideSnack();
     }
   });
   return b;
@@ -1829,18 +1943,23 @@ var activeStatus=null;   // in-view generation's status line (the SSE feed write
 var activeImgStatus=null;
 // Capability jobs return one opaque response, so the only way to tell "still
 // looking" from "a host took the job" is the activity stream. Keyed by the
-// sentinel the server broadcasts as `model` (__tts__, __edit__, ...).
+// capability key the server broadcasts as `model` (tts, tts/<name>, edit/<name>).
 var activeMediaStatus={};
 function paintMediaStatus(d){
-  var el=activeMediaStatus[d.model];
+  // The server keys per model now — "tts" or "tts/vibevoice" — so match the
+  // capability, not the exact key.
+  var k=String(d.model||''),el=activeMediaStatus[k]||activeMediaStatus[k.split('/')[0]];
   if(!el)return;
+  var host=(d.host||'').replace(/^https?:\/\//,'');
   if(d.status==='connected'){
     // the host accepted the job — from here it is rendering, not searching
-    var host=(d.host||'').replace(/^https?:\/\//,''),m=ranWith(d);
+    var m=ranWith(d);
     var tail=m?('generating with '+m+'\u2026'):'generating\u2026';
-    el.textContent=host?('found '+host+' \u2014 '+tail):tail;
-  }else if(d.status==='failed'){
-    el.textContent='that host failed \u2014 trying another\u2026';
+    el.textContent=host?('found '+host+', '+tail):tail;
+  }else if(d.status==='trying'&&host){
+    // name the host being tried rather than narrating the one that just failed:
+    // the next 'trying' arrives immediately after a failure anyway
+    el.textContent='trying '+host+'\u2026';
   }
 }
 // The model that actually ran, if the server told us. `model` on an activity
@@ -2040,45 +2159,24 @@ function afterLoadChat(id){
 }
 document.getElementById('chatNew').addEventListener('click',newChat);
 var modelCountTimer=null;
+// A read-out, not a control: moving to the next host is /next.
 function updateModelCount(){
   var el=document.getElementById('chatModelCount');
-  var btn=document.getElementById('chatNextBtn');
   var q=document.getElementById('chatModel').value.trim();
-  if(!q){el.textContent='-';if(btn){btn.classList.add('empty');btn.title='matching servers — click to try the next server';}return;}
+  if(!q){el.textContent='-';el.classList.add('empty');el.title='matching servers';return;}
   if(modelCountTimer)clearTimeout(modelCountTimer);
   modelCountTimer=setTimeout(function(){
     fetch('dashboard/server-count?q='+encodeURIComponent(q),{cache:'no-store'})
       .then(function(r){return r.json()})
       .then(function(d){
         el.textContent=String(d.servers);
-        if(btn){
-          btn.classList.toggle('empty',d.servers===0);
-          btn.title=d.servers+' matching server'+(d.servers===1?'':'s')+' — click to try the next server';
-        }
+        el.classList.toggle('empty',d.servers===0);
+        el.title=d.servers+' matching server'+(d.servers===1?'':'s')+' — use /next to move to another';
       })
       .catch(function(){el.textContent='?';});
   },200);
 }
 document.getElementById('chatModel').addEventListener('input',updateModelCount);
-document.getElementById('chatNextBtn').addEventListener('click',function(e){
-  e.preventDefault();
-  var model=document.getElementById('chatModel').value.trim();
-  if(!model)return;
-  this.disabled=true;
-  fetch('next-host?model='+encodeURIComponent(model),{cache:'no-store',headers:{'Accept':'application/json'}})
-    .then(function(r){return r.json()})
-    .then(function(d){
-      var from=d.from||{};
-      var to=d.to||{};
-      var txt='moving from '+(from.host||'?')+' '+(from.model||'')+' to '+(to.host||'?')+' '+(to.model||'');
-      var wrap=document.createElement('div');wrap.className='msg system';
-      wrap.style.cssText='padding:.4em .8em;font-size:.85em;opacity:.7;text-align:center;font-style:italic';
-      var body=document.createElement('div');body.className='body';body.textContent=txt;
-      wrap.appendChild(body);chatLog.appendChild(wrap);scrollChat(true);
-      setTimeout(function(){location.reload()},600);
-    })
-    .catch(function(){location.reload()});
-});
 updateModelCount();
 renderSidebar();
 
@@ -3559,7 +3657,7 @@ async function generateSpeech(){
   btn.disabled=true;
   out.innerHTML='';
   showSnack('finding a TTS host\u2026');
-  activeMediaStatus['__tts__']=snackStatus;
+  activeMediaStatus['tts']=snackStatus;
   try{
     var r=await fetch('v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){_mediaError(out,await _errText(r));return}
@@ -3587,7 +3685,7 @@ async function generateSpeech(){
                   host:provHost,node:provNode,ts:Date.now(),
                   url:clip?'v1/audio/clips/'+clip:url});
   }catch(ex){_mediaError(out,ex.message)}
-  finally{btn.disabled=false;delete activeMediaStatus['__tts__'];hideSnack()}
+  finally{btn.disabled=false;delete activeMediaStatus['tts'];hideSnack()}
 }
 document.getElementById('ttsGenerate').addEventListener('click',generateSpeech);
 
@@ -3703,15 +3801,58 @@ function loadTtsHistory(){
 // ---- video ---------------------------------------------------------------
 // Async: POST returns 202 + an id, then poll until completed/failed.
 var _vidPoll=null;
+var _vidStart=null;
+(function(){
+  var drop=document.getElementById('vidDrop'),input=document.getElementById('vidStartFile');
+  if(!drop)return;
+  function show(){
+    var box=document.getElementById('vidThumb');box.innerHTML='';
+    var hint=drop.querySelector('.drop-hint');
+    if(!_vidStart){if(hint)hint.textContent='drop an image, or click';return}
+    if(hint)hint.textContent=_vidStart.name;
+    var d=document.createElement('div');d.className='drop-thumb';
+    var im=document.createElement('img');im.src=URL.createObjectURL(_vidStart);d.appendChild(im);
+    var x=document.createElement('span');x.className='x';x.textContent='\u2715';
+    x.addEventListener('click',function(ev){ev.stopPropagation();_vidStart=null;show()});
+    d.appendChild(x);box.appendChild(d);
+  }
+  function take(f){if(f&&f.type.indexOf('image/')===0){_vidStart=f;show()}}
+  drop.addEventListener('click',function(){input.click()});
+  input.addEventListener('change',function(){take(input.files[0]);input.value=''});
+  ['dragenter','dragover'].forEach(function(e){drop.addEventListener(e,function(ev){ev.preventDefault();drop.classList.add('over')})});
+  ['dragleave','drop'].forEach(function(e){drop.addEventListener(e,function(ev){ev.preventDefault();drop.classList.remove('over')})});
+  drop.addEventListener('drop',function(ev){
+    var dt=ev.dataTransfer;if(!dt)return;
+    if(dt.files&&dt.files.length)return take(dt.files[0]);
+    var file=dt.getData('application/x-dyva-image');
+    if(file)fetch('sdapi/v1/images/'+encodeURIComponent(file)).then(function(r){return r.blob()})
+      .then(function(b){take(new File([b],file,{type:b.type||'image/png'}))}).catch(function(){});
+  });
+})();
+function _fileToB64(f){
+  return new Promise(function(res,rej){
+    var r=new FileReader();
+    r.onload=function(){res(String(r.result).split(',')[1]||'')};
+    r.onerror=rej;r.readAsDataURL(f);
+  });
+}
 async function generateVideo(){
   var btn=document.getElementById('vidGenerate'),out=document.getElementById('vidResult');
   var prompt=document.getElementById('vidPrompt').value.trim();
   if(!prompt){_mediaError(out,'a prompt is required');return}
   var body={prompt:prompt};
   var m=document.getElementById('vidModel').value.trim();if(m)body.model=m;
-  var res=document.getElementById('vidResolution').value.trim();if(res)body.resolution=res;
-  var dur=parseInt(document.getElementById('vidDuration').value,10);if(!isNaN(dur)&&dur>0)body.duration=dur;
-  var seed=parseInt(document.getElementById('vidSeed').value,10);if(!isNaN(seed)&&seed>=0)body.seed=seed;
+  // These have to be the names the workflow builders read — `duration` and
+  // `resolution` were being sent and silently ignored.
+  var res=document.getElementById('vidResolution').value.trim();
+  var wh=/^(\d+)\s*[x\u00d7]\s*(\d+)$/.exec(res);
+  if(wh){body.width=parseInt(wh[1],10);body.height=parseInt(wh[2],10)}
+  else if(res)body.resolution=res;   // let the server complain about the shape
+  var fr=parseInt(document.getElementById('vidFrames').value,10);
+  if(!isNaN(fr)&&fr>0)body.length=fr;
+  var st2=parseInt(document.getElementById('vidSteps').value,10);
+  if(!isNaN(st2)&&st2>0)body.steps=st2;
+  if(_vidStart){body.image=await _fileToB64(_vidStart);body.image_name=_vidStart.name}
   if(_vidPoll){clearTimeout(_vidPoll);_vidPoll=null}
   btn.disabled=true;
   var st=_mediaStatus(out,'submitting…');
@@ -3885,14 +4026,41 @@ function loadImgHistory(){
     filterImgHistory();
   }).catch(function(){});
 }
+// Filter first, then page the survivors — so a search reads as "24 of the
+// matches", not "the matches among these 24".
+var IMG_PAGE_SIZE=24,_imgPage=0;
 function filterImgHistory(){
   var q=document.getElementById('imgSearch').value.toLowerCase();
   var rows=document.querySelectorAll('#imgHistory .hist-item');
+  var matched=[];
   for(var i=0;i<rows.length;i++){
-    rows[i].style.display=(!q||rows[i].textContent.toLowerCase().indexOf(q)>=0)?'':'none';
+    if(!q||rows[i].textContent.toLowerCase().indexOf(q)>=0)matched.push(rows[i]);
+    else rows[i].style.display='none';
+  }
+  var pages=Math.max(1,Math.ceil(matched.length/IMG_PAGE_SIZE));
+  if(_imgPage>pages-1)_imgPage=pages-1;
+  if(_imgPage<0)_imgPage=0;
+  var from=_imgPage*IMG_PAGE_SIZE,to=from+IMG_PAGE_SIZE;
+  matched.forEach(function(el,i){el.style.display=(i>=from&&i<to)?'':'none'});
+  var pager=document.getElementById('imgPager');
+  if(pager){
+    pager.style.display=matched.length>IMG_PAGE_SIZE?'flex':'none';
+    document.getElementById('imgPageInfo').textContent=
+      matched.length?((from+1)+'\u2013'+Math.min(to,matched.length)+' of '+matched.length):'none';
+    document.getElementById('imgPrev').disabled=_imgPage<=0;
+    document.getElementById('imgNext').disabled=_imgPage>=pages-1;
   }
 }
-document.getElementById('imgSearch').addEventListener('input',filterImgHistory);
+function imgPageBy(d){
+  _imgPage+=d;
+  filterImgHistory();
+  var g=document.getElementById('imgHistory');
+  if(g&&g.scrollIntoView)g.scrollIntoView({block:'nearest'});
+}
+document.getElementById('imgPrev').addEventListener('click',function(){imgPageBy(-1)});
+document.getElementById('imgNext').addEventListener('click',function(){imgPageBy(1)});
+// a new search starts from the top of the results, not wherever you were
+document.getElementById('imgSearch').addEventListener('input',function(){_imgPage=0;filterImgHistory()});
 var lightbox=document.createElement('div');
 lightbox.id='lightbox';
 lightbox.innerHTML='<img alt=""><div class="cap"></div>';
