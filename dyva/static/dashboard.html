@@ -614,7 +614,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <img src="dyva.avif" alt="" width="56" height="56">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none"> 🐞  v__DYVA_VERSION__</a> </span>&middot; <a title="docs" href="docs/" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none">📚</a></p>
+<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a title="docs" href="docs/" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
+</p>
 </div>
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾</button>
 <div id="activityPop" class="activity-pop">
@@ -1665,12 +1666,19 @@ function makeSpeakBtn(getText,msgEl){
     var text=clipForSpeech(speakableText(getText()));
     if(!text){b.title='nothing to speak';return}
     b.disabled=true;b.classList.add('busy');b.title='generating\u2026';
+    // Same status the Speech tab shows: the race can take a while, and a
+    // button that just dims tells you nothing about what it's waiting on.
+    showSnack('finding a TTS host\u2026');
+    activeMediaStatus['__tts__']=snackStatus;
     try{
       var r=await fetch('v1/audio/speech',{method:'POST',
         headers:{'Content-Type':'application/json'},body:JSON.stringify({input:text})});
       if(!r.ok){
         var m='HTTP '+r.status;try{var j=await r.json();m=j.error||m}catch(e){}
-        b.title='failed: '+m;return;
+        b.title='failed: '+m;
+        showSnack(m.slice(0,140),false);
+        setTimeout(hideSnack,6000);
+        return;
       }
       var file=r.headers.get('X-Dyva-File')||'';
       var blob=await r.blob();
@@ -1688,7 +1696,10 @@ function makeSpeakBtn(getText,msgEl){
                     host:host,node:node,ts:Date.now(),url:src});
       b.title='Speak this reply';
     }catch(ex){b.title='failed: '+ex.message}
-    finally{b.disabled=false;b.classList.remove('busy')}
+    finally{
+      b.disabled=false;b.classList.remove('busy');
+      delete activeMediaStatus['__tts__'];hideSnack();
+    }
   });
   return b;
 }
@@ -2353,22 +2364,26 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
             if(fl.length){
               fl.forEach(function(f){urls.push('sdapi/v1/images/'+f)});
               results.push({text:'Images generated successfully:\n'+fl.map(function(f){return 'sdapi/v1/images/'+f}).join('\n'),md:fl.map(function(f){return '![generated image](sdapi/v1/images/'+f+')'}).join('\n\n')});
-            }else results.push({text:'Error: image service returned no images'});
+            }else results.push({text:'Error: image service returned no images',
+                                md:'`\u26a0 generate_image: the host returned no images`'});
           }else{
             var em='HTTP '+r2.status;
             try{var je=await r2.json();em=je.error||em}catch(e){}
-            results.push({text:'Error generating image: '+em});
+            results.push({text:'Error generating image: '+em,
+                          md:'`\u26a0 generate_image: '+String(em).replace(/`/g,"'")+'`'});
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Error generating image: '+ex.message});
+          results.push({text:'Error generating image: '+ex.message,
+                        md:'`\u26a0 generate_image: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
       }else if(fn.name==='edit_image'){
         setStatus('editing image\u2026');
         try{
           var src=lastEditableImage();
           if(!src){
-            results.push({text:'Error: there is no image in this conversation to edit. Ask the user to attach one, or generate one first with generate_image.'});
+            results.push({text:'Error: there is no image in this conversation to edit. Ask the user to attach one, or generate one first with generate_image.',
+                          md:'`\u26a0 edit_image: no image in this conversation to edit`'});
           }else{
             var blob=await _editSourceBlob(src);
             var efd=new FormData();
@@ -2388,16 +2403,19 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                 results.push({text:'Image edited successfully:\n'+ef.map(function(f){return 'sdapi/v1/images/'+f}).join('\n'),
                               md:ef.map(function(f){return '![edited image](sdapi/v1/images/'+f+')'}).join('\n\n')});
                 loadImgHistory();
-              }else results.push({text:'Error: edit returned no image'});
+              }else results.push({text:'Error: edit returned no image',
+                                 md:'`\u26a0 edit_image: the host returned no image`'});
             }else{
               var em4='HTTP '+r4.status;
               try{var je4=await r4.json();em4=je4.error||em4}catch(e){}
-              results.push({text:'Error editing image: '+em4});
+              results.push({text:'Error editing image: '+em4,
+                            md:'`\u26a0 edit_image: '+String(em4).replace(/`/g,"'")+'`'});
             }
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Error editing image: '+ex.message});
+          results.push({text:'Error editing image: '+ex.message,
+                        md:'`\u26a0 edit_image: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
       }else if(fn.name==='generate_speech'){
         setStatus('finding a TTS host\u2026');
@@ -2440,7 +2458,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
             }else{
               var sm='HTTP '+r3.status;
               try{var js=await r3.json();sm=js.error||sm}catch(e){}
-              results.push({text:'Error generating speech: '+sm});
+              results.push({text:'Error generating speech: '+sm,
+                            md:'`\u26a0 generate_speech: '+String(sm).replace(/`/g,"'")+'`'});
             }
           }
         }catch(ex){
