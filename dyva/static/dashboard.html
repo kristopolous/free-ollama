@@ -234,6 +234,14 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg .actions .act:hover{background:var(--accent-bg-active)}
 .msg .editbox{width:100%;min-height:3em;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:.5em;font-size:var(--fs-md);font-family:var(--font-mono);outline:none;resize:vertical}
 .msg.user .role{color:var(--accent)}
+/* speak button: sits left of the ASSISTANT label, quiet until hovered */
+.speak-btn{flex-shrink:0;order:-1;background:none;border:none;padding:0;margin:0 .1em 0 0;color:var(--text-faint);cursor:pointer;display:flex;align-items:center;line-height:0}
+.speak-btn:hover{color:var(--accent)}
+.speak-btn[disabled]{opacity:.5;cursor:default}
+.speak-btn.busy{color:var(--accent);animation:speakpulse 1s ease-in-out infinite}
+.speak-btn svg{width:12px;height:12px}
+@keyframes speakpulse{50%{opacity:.35}}
+.msg .speak-out{margin-top:var(--sp-2);max-width:420px}
 .msg-time{margin-left:auto;color:var(--text-faint);font-size:var(--fs-2xs);letter-spacing:0;text-transform:none;font-weight:400;flex-shrink:0}
 .msg .body{background:var(--surface);border-radius:var(--r-lg);padding:.7em;font-size:var(--fs-lg);overflow-wrap:anywhere;line-height:var(--line-body)}
 .msg .body .error{color:var(--err)}
@@ -497,6 +505,22 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 @media(max-width:640px){.media-row-3,.media-row-4{grid-template-columns:1fr 1fr}}
 .media-result{margin-top:14px}
 .media-result audio{width:100%;margin-top:10px}
+.audio-embed{margin:var(--sp-3) 0;max-width:420px}
+.audio-embed .audio-cap{font-size:var(--fs-xs);color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.audio-embed .player{margin-top:0}
+/* Native <audio controls> renders with the browser's own chrome and can't be
+   restyled portably, so the player is built from the site's tokens instead. */
+.player{display:flex;align-items:center;gap:var(--sp-3);margin-top:var(--sp-2);padding:var(--sp-2) var(--sp-3);background:var(--bg-sunken);border:1px solid var(--border);border-radius:var(--r-md)}
+.player audio{display:none}
+.player-btn{flex-shrink:0;width:26px;height:26px;padding:0;border:none;border-radius:50%;background:var(--accent-bg);color:var(--accent-bright);font-size:.7rem;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.player-btn:hover{background:var(--accent-bg-hover)}
+.player.playing .player-btn{background:var(--accent-bg-active)}
+/* 4px track, but padded to a 18px hit area via background-clip so it stays
+   grabbable — including on the phone. */
+.player-bar{flex:1;min-width:0;height:4px;padding:7px 0;box-sizing:content-box;background:var(--field-bg);background-clip:content-box;border-radius:2px;cursor:pointer}
+.player-bar:hover{background:var(--border-hover);background-clip:content-box}
+.player-fill{height:100%;width:0;background:var(--accent);border-radius:2px;pointer-events:none}
+.player-time{flex-shrink:0;min-width:3.4em;text-align:right;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-dim);font-variant-numeric:tabular-nums}
 .media-result video{max-width:100%;border-radius:var(--r-lg);border:1px solid var(--border);margin-top:10px;background:#000}
 .media-result .status{color:var(--text-dim);font-size:var(--fs-md)}
 .media-result .error{color:var(--err);font-size:var(--fs-md)}
@@ -513,6 +537,28 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 #media{max-width:none}
 .img-layout{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}
 .img-main{flex:1 1 460px;min-width:0;max-width:640px}
+.mode-toggle{display:inline-flex;gap:2px;padding:2px;margin-bottom:var(--sp-4);background:var(--bg-sunken);border:1px solid var(--border);border-radius:var(--r-md)}
+.mode-btn{border:none;background:none;color:var(--text-muted);font-size:var(--fs-md);padding:var(--sp-2) var(--sp-5);border-radius:calc(var(--r-md) - 2px);cursor:pointer}
+.mode-btn:hover{color:var(--text-2)}
+.mode-btn.active{background:var(--surface);color:var(--text)}
+/* Edit-only controls are hidden outright in generate mode rather than disabled:
+   an edit model takes a prompt plus references, not a negative prompt. */
+.edit-only{display:none!important}
+body.img-edit .edit-only{display:revert!important}
+body.img-edit .generate-only{display:none!important}
+.hint{color:var(--text-faint);font-weight:normal}
+.inline-check{display:flex;align-items:center;gap:.5em;margin-bottom:var(--sp-3);font-size:var(--fs-md);color:var(--text-2);cursor:pointer}
+.inline-check input{width:auto;margin:0;accent-color:var(--accent);cursor:pointer}
+.inline-check small{color:var(--text-faint);font-family:var(--font-mono);font-size:var(--fs-2xs);margin-left:.3em}
+body.img-edit.match-src .img-dims .field:not(:last-child){opacity:.45}
+.inline-check.edit-only{margin-top:-2px}
+.drop{border:1px dashed var(--border-hover);border-radius:var(--r-lg);background:var(--bg-sunken);padding:var(--sp-5);text-align:center;cursor:pointer}
+.drop.over{border-color:var(--border-accent);background:var(--accent-bg)}
+.drop-hint{color:var(--text-dim);font-size:var(--fs-md)}
+.drop-thumbs{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-3);justify-content:center}
+.drop-thumb{position:relative;width:64px;height:64px;border-radius:var(--r-md);overflow:hidden;border:1px solid var(--border)}
+.drop-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.drop-thumb .x{position:absolute;top:0;right:0;background:var(--scrim-strong);color:var(--text-2);font-size:var(--fs-2xs);line-height:1;padding:2px 4px;cursor:pointer}
 .img-side{flex:1 1 300px;min-width:260px}
 .img-side-title{font-size:var(--fs-xl);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:10px;display:flex;align-items:center;gap:var(--sp-3)}
 .mini-search{background:var(--bg-sunken-alt);border:1px solid var(--border);color:var(--text-2);font-size:var(--fs-xs);padding:3px var(--sp-3);border-radius:var(--r-md);width:180px;margin-left:auto;text-transform:none;letter-spacing:0}
@@ -520,12 +566,22 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .mini-search::placeholder{color:var(--text-faint)}
 #imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:var(--sp-3)}
 .media-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--sp-2);margin-top:var(--sp-3)}
+/* Speech clips go three to a row rather than auto-filling at 200px: the wider
+   card gives the text label and the host/node line room before they ellipsize.
+   minmax(0,...) so a long unbroken filename can't blow the column out. */
+#ttsGallery{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media (max-width:760px){#ttsGallery{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:460px){#ttsGallery{grid-template-columns:minmax(0,1fr)}}
 .tts-item{position:relative;border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-2);background:var(--bg-sunken-alt)}
-.tts-item audio{width:100%;height:36px;margin-top:var(--sp-2);display:block}
+.tts-item .player{width:100%}
 /* Text first, controls under it, so the remove button gets the usual top-right
    corner instead of being squeezed into whatever gap the player leaves. The
    padding keeps the label from running under the X. */
-.tts-item .tts-text{font-size:var(--fs-2xs);color:var(--text-3);padding-right:18px;min-height:1.2em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tts-item .tts-text{font-size:1rem;line-height:1.3;color:var(--text-2);padding-right:1.25rem;min-height:1.3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tts-item .tts-host{font-size:.7rem;line-height:1.5;font-family:var(--font-mono);color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tts-item .tts-meta{font-size:.7rem;line-height:1.5;color:var(--text-dim);display:flex;gap:var(--sp-3);align-items:baseline}
+.tts-item .tts-model{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tts-item .tts-time{margin-left:auto;flex-shrink:0;font-variant-numeric:tabular-nums}
 .tts-item .tts-prov{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-dim);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #ttsResult .tts-prov{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--text-dim);margin-top:var(--sp-2)}
 .hist-item{position:relative;display:flex;gap:10px;align-items:center;cursor:zoom-in;border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-2);background:var(--bg-sunken-alt)}
@@ -645,7 +701,8 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <button id="chatTools" class="mp-tool" title="Tools" aria-haspopup="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></button>
 <div id="toolsPop" class="tools-pop">
 <div class="tools-pop-title">Tools</div>
-<label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Let the model create images on request</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Let the model create and edit images on request</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Let the model speak dialog out loud</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Let the model write &amp; edit documents in a side panel</small></span></label>
 </div>
 </div>
@@ -687,15 +744,24 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 <div class="media-pane" id="mediapane-image">
 <div class="img-layout">
 <div class="img-main">
+<div class="mode-toggle" id="imgMode" role="tablist">
+  <button type="button" class="mode-btn active" data-mode="generate" role="tab">Generate</button>
+  <button type="button" class="mode-btn" data-mode="edit" role="tab">Edit</button>
+</div>
 <div class="img-params">
-<div class="field">
+<div class="field generate-only">
 <label for="sdModel">SD Model</label>
 <input id="sdModel" type="text" list="sdModels" placeholder="type or select an SD model..." autocomplete="off">
 <datalist id="sdModels">
 __SD_MODELS__
 </datalist>
 </div>
-<div class="field">
+<div class="field edit-only">
+<label for="editModel">Edit model</label>
+<input id="editModel" type="text" list="editModels" placeholder="loading edit models&hellip;" autocomplete="off">
+<datalist id="editModels"></datalist>
+</div>
+<div class="field generate-only">
 <label for="imgSampler">Sampler</label>
 <select id="imgSampler">
 <option>Euler</option>
@@ -727,11 +793,12 @@ __SD_MODELS__
 <input id="imgSeed" type="number" value="-1" title="-1 = random">
 </div>
 </div>
+<label class="inline-check edit-only" for="editMatchSource"><input type="checkbox" id="editMatchSource" checked><span>Match source resolution <small id="editSrcDims"></small></span></label>
 <div class="field">
 <label for="posPrompt">Positive prompt</label>
 <textarea id="posPrompt" rows="3" placeholder="a cyberpunk city at night, neon lights..."></textarea>
 </div>
-<div class="field">
+<div class="field generate-only">
 <label for="negPrompt">Negative prompt</label>
 <textarea id="negPrompt" rows="2" placeholder="blurry, low quality, watermark"></textarea>
 </div>
@@ -747,12 +814,20 @@ __SD_MODELS__
 <input id="imgCfg" type="range" min="1" max="30" step="0.5" value="7">
 <span class="val" id="imgCfgVal">7</span>
 </div>
-<div class="slider-row">
+<div class="slider-row generate-only">
 <label for="imgBatch">Batch size</label>
 <input id="imgBatch" type="range" min="1" max="4" value="1">
 <span class="val" id="imgBatchVal">1</span>
 </div>
 </details>
+<div class="field edit-only" id="editRefField">
+<label for="editFiles">Reference images</label>
+<div id="editDrop" class="drop">
+  <input id="editFiles" type="file" accept="image/*" multiple hidden>
+  <span class="drop-hint">drop images here, or click to choose</span>
+  <div id="editThumbs" class="drop-thumbs"></div>
+</div>
+</div>
 <button id="imgGenerate">Generate</button>
 <div id="imgResult"></div>
 </div>
@@ -939,7 +1014,7 @@ evtSource.onmessage=function(e){try{if(paused)return;var d=JSON.parse(e.data);if
   // replays its whole backlog; those are historical and already reflected in the
   // fresh data loadDashboard() just fetched, so refetching for them is redundant
   // (that was the 2nd dashboard-data hit on load). Live events have a ~now time.
-  if((d.status==='connected'||d.status==='failed')&&d.time&&(Date.now()/1e3-d.time)<5)refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);var c=document.getElementById('activityList');
+  if((d.status==='connected'||d.status==='failed')&&d.time&&(Date.now()/1e3-d.time)<5)refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);paintMediaStatus(d);var c=document.getElementById('activityList');
   // An event carrying an id owns one line for the life of the request: reuse
   // that line so a fan-out resolves in place instead of stacking a row per host.
   var p=d.id?_actLines[d.id]:null;var fresh=!p;
@@ -1225,6 +1300,13 @@ function showSnack(msg,spin){
   snackbar.classList.add('show');
 }
 function hideSnack(){snackbar.classList.remove('show')}
+// Image jobs report progress through the snackbar rather than a line wedged
+// under the button: same affordance as the initial "Loading…". Shaped like an
+// element so the activity-stream painters can keep writing to .textContent.
+var snackStatus={
+  get textContent(){return snackbar.querySelector('.snack-msg').textContent},
+  set textContent(v){showSnack(v)}
+};
 function loadDashboard(){
   Promise.all([
     fetch('dashboard-models').then(function(r){return r.json()}),
@@ -1527,11 +1609,83 @@ function _doDownloadChat(c){
   document.body.appendChild(a);a.click();a.remove();
   setTimeout(function(){URL.revokeObjectURL(a.href)},0);
 }
+// What a message sounds like: prose only. Thinking already lives outside
+// `content` (it's in _meta.think), so this only has to shed markdown,
+// code blocks and link/image plumbing.
+function speakableText(md){
+  var t=String(md||'');
+  t=t.replace(/<think>[\s\S]*?<\/think>/gi,' ');
+  t=t.replace(/```[\s\S]*?```/g,' ');
+  t=t.replace(/`([^`]*)`/g,'$1');
+  t=t.replace(/!\[[^\]]*\]\([^)]*\)/g,' ');
+  t=t.replace(/\[([^\]]*)\]\([^)]*\)/g,'$1');
+  t=t.replace(/^\s{0,3}#{1,6}\s+/gm,'');
+  t=t.replace(/^\s*([-*+]|\d+\.)\s+/gm,'');
+  t=t.replace(/<[^>]+>/g,' ');
+  t=t.replace(/[*_~>|]/g,'');
+  return t.replace(/\s+/g,' ').trim();
+}
+var SPEAK_MAX=600;
+// Cut at a sentence end if there's a reasonable one, else at a word.
+function clipForSpeech(t,max){
+  max=max||SPEAK_MAX;
+  if(t.length<=max)return t;
+  var cut=t.slice(0,max);
+  var brk=Math.max(cut.lastIndexOf('. '),cut.lastIndexOf('! '),cut.lastIndexOf('? '));
+  if(brk<max*0.4)brk=cut.lastIndexOf(' ');
+  return (brk>0?cut.slice(0,brk+1):cut).trim();
+}
+var SPEAKER_SVG='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>';
+function makeSpeakBtn(getText,msgEl){
+  var b=document.createElement('button');
+  b.type='button';b.className='speak-btn';b.title='Speak this reply';
+  b.setAttribute('aria-label','Speak this reply');
+  b.innerHTML=SPEAKER_SVG;
+  b.addEventListener('click',async function(ev){
+    ev.stopPropagation();
+    if(b.disabled)return;
+    var text=clipForSpeech(speakableText(getText()));
+    if(!text){b.title='nothing to speak';return}
+    b.disabled=true;b.classList.add('busy');b.title='generating\u2026';
+    try{
+      var r=await fetch('v1/audio/speech',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({input:text})});
+      if(!r.ok){
+        var m='HTTP '+r.status;try{var j=await r.json();m=j.error||m}catch(e){}
+        b.title='failed: '+m;return;
+      }
+      var file=r.headers.get('X-Dyva-File')||'';
+      var blob=await r.blob();
+      var src=file?'v1/audio/clips/'+file:URL.createObjectURL(blob);
+      var host=r.headers.get('X-Dyva-Host')||'',node=r.headers.get('X-Dyva-Node')||'';
+      if(msgEl){
+        var old=msgEl.querySelector('.speak-out');
+        if(old)old.parentNode.removeChild(old);
+        var wrap=document.createElement('div');wrap.className='speak-out';
+        wrap.appendChild(_mediaPlayer(src));
+        msgEl.appendChild(wrap);
+        var au=wrap.querySelector('audio');if(au)au.play().catch(function(){});
+      }
+      _ttsRemember({text:text.slice(0,200),voice:'default',model:'reply',
+                    host:host,node:node,ts:Date.now(),url:src});
+      b.title='Speak this reply';
+    }catch(ex){b.title='failed: '+ex.message}
+    finally{b.disabled=false;b.classList.remove('busy')}
+  });
+  return b;
+}
 function addMsg(role,text,index){
   var d=document.createElement('div');d.className='msg '+role;
   var r=document.createElement('div');r.className='role';
   var lbl=document.createElement('span');lbl.className='role-label';lbl.textContent=role==='user'?'You':'Assistant';
   r.appendChild(lbl);
+  if(role==='assistant'&&index!==undefined){
+    // read from the record, not the captured string, so it reflects edits
+    r.appendChild(makeSpeakBtn(function(){
+      var m=currentChat.messages[index];
+      return (m&&m.content)||text;
+    },d));
+  }
   var b=document.createElement('div');b.className='body';
   if(role==='assistant'){
     var _mt=index!==undefined?currentChat.messages[index]:null;
@@ -1609,6 +1763,31 @@ function mdRender(text){
   });
   return out;
 }
+// A speech clip arrives in the transcript as an ordinary markdown link, so it
+// survives being saved and reloaded. Upgrade those links to the themed player
+// wherever they appear — chat bubbles, notes and documents all set innerHTML
+// through different paths, so watch the document rather than patch each one.
+function upgradeAudioLinks(root){
+  var sel='a[href^="v1/audio/clips/"]:not([data-audio-up])';
+  Array.prototype.forEach.call((root||document).querySelectorAll(sel),function(a){
+    a.setAttribute('data-audio-up','1');
+    var wrap=document.createElement('div');
+    wrap.className='audio-embed';
+    var cap=document.createElement('div');
+    cap.className='audio-cap';
+    cap.textContent=a.textContent||'spoken audio';
+    wrap.appendChild(cap);
+    wrap.appendChild(_mediaPlayer(a.getAttribute('href')));
+    if(a.parentNode)a.parentNode.replaceChild(wrap,a);
+  });
+}
+if(window.MutationObserver){
+  new MutationObserver(function(muts){
+    for(var i=0;i<muts.length;i++){
+      if(muts[i].addedNodes&&muts[i].addedNodes.length){upgradeAudioLinks(document);break}
+    }
+  }).observe(document.body,{childList:true,subtree:true});
+}
 var renderTimer=null;
 // Each in-flight generation is tracked per conversation so you can switch
 // chats (and start new generations) while others keep running in the
@@ -1619,6 +1798,21 @@ function genOf(id){return gens[String(id)]}
 var _paintGen=null;      // the in-view generation currently scheduled to paint
 var activeStatus=null;   // in-view generation's status line (the SSE feed writes here)
 var activeImgStatus=null;
+// Capability jobs return one opaque response, so the only way to tell "still
+// looking" from "a host took the job" is the activity stream. Keyed by the
+// sentinel the server broadcasts as `model` (__tts__, __edit__, ...).
+var activeMediaStatus={};
+function paintMediaStatus(d){
+  var el=activeMediaStatus[d.model];
+  if(!el)return;
+  if(d.status==='connected'){
+    // the host accepted the job — from here it is rendering, not searching
+    var host=(d.host||'').replace(/^https?:\/\//,'');
+    el.textContent=host?'found '+host+' \u2014 generating\u2026':'generating\u2026';
+  }else if(d.status==='failed'){
+    el.textContent='that host failed \u2014 trying another\u2026';
+  }
+}
 function paintGenStatus(el,d){
   if(!el)return;
   if(d.status==='connected')el.textContent='generating\u2026';
@@ -2127,6 +2321,86 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           if(ac.signal.aborted)return;
           results.push({text:'Error generating image: '+ex.message});
         }
+      }else if(fn.name==='edit_image'){
+        setStatus('editing image\u2026');
+        try{
+          var src=lastEditableImage();
+          if(!src){
+            results.push({text:'Error: there is no image in this conversation to edit. Ask the user to attach one, or generate one first with generate_image.'});
+          }else{
+            var blob=await _editSourceBlob(src);
+            var efd=new FormData();
+            efd.append('prompt',String(args.prompt||'').trim().slice(0,2000));
+            efd.append('match_source','1');
+            efd.append('image',blob,src.name||'source.png');
+            var r4=await fetch('v1/images/edits',{method:'POST',body:efd,signal:ac.signal});
+            if(r4.ok){
+              var j4=await r4.json();
+              var ef=j4._dyva_files||[];
+              if(ef.length){
+                ef.forEach(function(f){urls.push('sdapi/v1/images/'+f)});
+                results.push({text:'Image edited successfully:\n'+ef.map(function(f){return 'sdapi/v1/images/'+f}).join('\n'),
+                              md:ef.map(function(f){return '![edited image](sdapi/v1/images/'+f+')'}).join('\n\n')});
+                loadImgHistory();
+              }else results.push({text:'Error: edit returned no image'});
+            }else{
+              var em4='HTTP '+r4.status;
+              try{var je4=await r4.json();em4=je4.error||em4}catch(e){}
+              results.push({text:'Error editing image: '+em4});
+            }
+          }
+        }catch(ex){
+          if(ac.signal.aborted)return;
+          results.push({text:'Error editing image: '+ex.message});
+        }
+      }else if(fn.name==='generate_speech'){
+        setStatus('finding a TTS host\u2026');
+        try{
+          var sb={input:String(args.text||'').trim()};
+          // Models ignore or misread length instructions, so the cap is
+          // enforced here rather than hoped for. Cut at a sentence boundary
+          // when there is one, otherwise at a word.
+          if(sb.input.length>TTS_TOOL_MAX){
+            var cut=sb.input.slice(0,TTS_TOOL_MAX);
+            var brk=Math.max(cut.lastIndexOf('. '),cut.lastIndexOf('! '),cut.lastIndexOf('? '),
+                             cut.lastIndexOf('.\n'),cut.lastIndexOf('\u2014 '));
+            if(brk<TTS_TOOL_MAX*0.4){brk=cut.lastIndexOf(' ')}
+            sb.input=(brk>0?cut.slice(0,brk+1):cut).trim();
+            sb._trimmed=true;
+          }
+          if(args.voice)sb.voice=String(args.voice).trim();
+          if(!sb.input){results.push({text:'Error: no text to speak'})}
+          else{
+            var trimmed=sb._trimmed;delete sb._trimmed;
+            var r3=await fetch('v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sb),signal:ac.signal});
+            sb._trimmed=trimmed;
+            if(r3.ok){
+              // the clip is saved server-side and referenced by URL: a stored
+              // conversation can hold a link, but not the audio bytes
+              var file=r3.headers.get('X-Dyva-File')||'';
+              await r3.blob();
+              if(file){
+                var curl='v1/audio/clips/'+file;
+                urls.push(curl);
+                _ttsRemember({text:sb.input.slice(0,200),voice:sb.voice||'default',
+                              model:'chat',host:r3.headers.get('X-Dyva-Host')||'',
+                              node:r3.headers.get('X-Dyva-Node')||'',
+                              ts:Date.now(),url:curl});
+                results.push({text:(sb._trimmed
+                    ? 'Spoken, but the text was too long and only the first part was voiced. Tell the user. Clip: '
+                    : 'Spoken successfully: ')+curl,
+                              md:'['+sb.input.slice(0,90).replace(/[\[\]]/g,'')+']('+curl+')'});
+              }else results.push({text:'Error: speech produced no clip'});
+            }else{
+              var sm='HTTP '+r3.status;
+              try{var js=await r3.json();sm=js.error||sm}catch(e){}
+              results.push({text:'Error generating speech: '+sm});
+            }
+          }
+        }catch(ex){
+          if(ac.signal.aborted)return;
+          results.push({text:'Error generating speech: '+ex.message});
+        }
       }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'
                ||fn.name==='replace_in_document'||fn.name==='search_document'){
         var dverb={create_document:'making',edit_document:'rewriting',rename_document:'renaming',
@@ -2378,6 +2652,38 @@ function recallPrompt(dir,e){
 }
 
 var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}};
+var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit the image already in this conversation \u2014 the one the user just uploaded, or the last one generated \u2014 by describing the change. Use for "make it night", "put a hat on the dog", "remove the background". Do NOT specify which image: the most recent one is used automatically. Edits are incremental, so each call builds on the previous result.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'}},required:['prompt']}}};
+// The image to edit is known deterministically, so the model never picks it:
+// walk back through the conversation and take whichever came last, a generated
+// image or one the user attached.
+function lastEditableImage(){
+  var msgs=(currentChat&&currentChat.messages)||[];
+  for(var i=msgs.length-1;i>=0;i--){
+    var m=msgs[i];if(!m)continue;
+    if(m.role==='user'&&m.files&&m.files.length){
+      for(var k=m.files.length-1;k>=0;k--){
+        var f=m.files[k];
+        if(f&&f.type&&f.type.indexOf('image/')===0&&f.dataUrl)
+          return {dataUrl:f.dataUrl,name:f.name||'upload.png'};
+      }
+    }
+    if(typeof m.content==='string'){
+      var hits=m.content.match(/sdapi\/v1\/images\/[\w.\-]+/g);
+      if(hits&&hits.length)return {url:hits[hits.length-1],name:'source.png'};
+    }
+  }
+  return null;
+}
+async function _editSourceBlob(src){
+  if(src.dataUrl){
+    var r=await fetch(src.dataUrl);return await r.blob();
+  }
+  var r2=await fetch(src.url);
+  if(!r2.ok)throw new Error('could not read the source image');
+  return await r2.blob();
+}
+var TTS_TOOL_MAX=600;   // hard ceiling on what the chat tool will speak
+var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'}},required:['text']}}};
 var DOC_TOOLS=[
   {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
   {type:'function',function:{name:'edit_document',description:'Replace the ENTIRE contents of an existing document. Only for a wholesale rewrite — to change part of one, use replace_in_document instead. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
@@ -2389,16 +2695,19 @@ var chatToolsBtn=document.getElementById('chatTools');
 var toolsPop=document.getElementById('toolsPop');
 var toolImageChk=document.getElementById('toolImage');
 var toolDocsChk=document.getElementById('toolDocs');
-var toolsOn=false,docsOn=false;
+var toolSpeechChk=document.getElementById('toolSpeech');
+var toolsOn=false,docsOn=false,speechOn=false;
 try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
 try{docsOn=localStorage.getItem('dyva_tools_docs')==='1'}catch(e){}
-function anyToolsOn(){return toolsOn||docsOn}
-function buildTools(){var t=[];if(toolsOn)t.push(IMG_TOOL);if(docsOn)t=t.concat(DOC_TOOLS);return t}
+try{speechOn=localStorage.getItem('dyva_tools_speech')==='1'}catch(e){}
+function anyToolsOn(){return toolsOn||docsOn||speechOn}
+function buildTools(){var t=[];if(toolsOn)t.push(IMG_TOOL,EDIT_TOOL);if(speechOn)t.push(SPEECH_TOOL);if(docsOn)t=t.concat(DOC_TOOLS);return t}
 // wrench stays lit whenever any tool is enabled
 function paintTools(){
   chatToolsBtn.classList.toggle('active',anyToolsOn());
   toolImageChk.checked=toolsOn;
   if(toolDocsChk)toolDocsChk.checked=docsOn;
+  if(toolSpeechChk)toolSpeechChk.checked=speechOn;
   chatToolsBtn.title=anyToolsOn()?'Tools on':'Tools';
 }
 chatToolsBtn.addEventListener('click',function(e){
@@ -2409,6 +2718,11 @@ toolsPop.addEventListener('click',function(e){e.stopPropagation()});
 toolImageChk.addEventListener('change',function(){
   toolsOn=this.checked;
   try{localStorage.setItem('dyva_tools',toolsOn?'1':'0')}catch(e){}
+  paintTools();
+});
+if(toolSpeechChk)toolSpeechChk.addEventListener('change',function(){
+  speechOn=this.checked;
+  try{localStorage.setItem('dyva_tools_speech',speechOn?'1':'0')}catch(e){}
   paintTools();
 });
 if(toolDocsChk)toolDocsChk.addEventListener('change',function(){
@@ -2852,7 +3166,137 @@ bindSlider('imgBatch','imgBatchVal');
   d.addEventListener('toggle',function(){try{localStorage.setItem('dyva_imgadv',d.open?'1':'0')}catch(e){}});
 })();
 
+// ---- Generate / Edit ----------------------------------------------------
+// Two genuinely different jobs: classic text-to-image (A1111 sdapi, plus a
+// ComfyUI fallback) versus prompt-driven editing against an edit model
+// (Qwen-Image-Edit, Flux Kontext, ...), which takes zero or more references.
+// img2img is deliberately not offered — nobody uses it any more.
+var _imgMode='generate',_editFiles=[];
+var _editModelsLoaded=false;
+function loadEditModels(){
+  if(_editModelsLoaded)return;_editModelsLoaded=true;
+  fetch('v1/images/edit-models',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+    var dl=document.getElementById('editModels'),rows=j.data||[];
+    dl.innerHTML='';
+    rows.forEach(function(o){
+      var opt=document.createElement('option');
+      opt.value=o.id;
+      opt.label=o.count+' host'+(o.count===1?'':'s');
+      dl.appendChild(opt);
+    });
+    document.getElementById('editModel').placeholder=rows.length
+      ? rows.length+' edit models \u2014 blank picks per host'
+      : 'no edit models found';
+  }).catch(function(){_editModelsLoaded=false;
+    document.getElementById('editModel').placeholder='type an edit model name\u2026'});
+}
+function setImgMode(m){
+  _imgMode=m;
+  document.body.classList.toggle('img-edit',m==='edit');
+  if(m==='edit')loadEditModels();
+  Array.prototype.forEach.call(document.querySelectorAll('#imgMode .mode-btn'),function(b){
+    b.classList.toggle('active',b.dataset.mode===m);
+  });
+  document.getElementById('imgGenerate').textContent=(m==='edit'?'Edit':'Generate');
+}
+Array.prototype.forEach.call(document.querySelectorAll('#imgMode .mode-btn'),function(b){
+  b.addEventListener('click',function(){setImgMode(b.dataset.mode)});
+});
+(function(){
+  var chk=document.getElementById('editMatchSource');
+  if(!chk)return;
+  // width/height only apply when the source isn't setting the shape
+  function paint(){document.body.classList.toggle('match-src',chk.checked)}
+  chk.addEventListener('change',paint);paint();
+})();
+
+function _renderEditThumbs(){
+  var box=document.getElementById('editThumbs');box.innerHTML='';
+  _editFiles.forEach(function(f,i){
+    var d=document.createElement('div');d.className='drop-thumb';
+    var img=document.createElement('img');img.src=URL.createObjectURL(f);img.alt=f.name;
+    var x=document.createElement('span');x.className='x';x.textContent='\u2715';x.title='Remove';
+    x.addEventListener('click',function(ev){ev.stopPropagation();_editFiles.splice(i,1);_renderEditThumbs()});
+    d.appendChild(img);d.appendChild(x);box.appendChild(d);
+  });
+  // Show the first reference's true size, so nobody has to go and look it up.
+  var dims=document.getElementById('editSrcDims');
+  if(dims){
+    dims.textContent='';
+    if(_editFiles.length){
+      var probe=new Image();
+      probe.onload=function(){
+        dims.textContent=probe.naturalWidth+'\u00d7'+probe.naturalHeight;
+        URL.revokeObjectURL(probe.src);
+      };
+      probe.onerror=function(){URL.revokeObjectURL(probe.src)};
+      probe.src=URL.createObjectURL(_editFiles[0]);
+    }
+  }
+  var hint=document.querySelector('#editDrop .drop-hint');
+  if(hint)hint.textContent=_editFiles.length
+    ? _editFiles.length+' image'+(_editFiles.length===1?'':'s')+' \u2014 click to add more'
+    : 'drop images here, or click to choose';
+}
+(function(){
+  var drop=document.getElementById('editDrop'),input=document.getElementById('editFiles');
+  if(!drop)return;
+  function add(list){
+    Array.prototype.forEach.call(list,function(f){if(f.type.indexOf('image/')===0)_editFiles.push(f)});
+    _renderEditThumbs();
+  }
+  drop.addEventListener('click',function(){input.click()});
+  input.addEventListener('change',function(){add(input.files);input.value=''});
+  ['dragenter','dragover'].forEach(function(e){
+    drop.addEventListener(e,function(ev){ev.preventDefault();drop.classList.add('over')})});
+  ['dragleave','drop'].forEach(function(e){
+    drop.addEventListener(e,function(ev){ev.preventDefault();drop.classList.remove('over')})});
+  drop.addEventListener('drop',function(ev){if(ev.dataTransfer)add(ev.dataTransfer.files)});
+})();
+
+async function editImage(){
+  var btn=document.getElementById('imgGenerate'),result=document.getElementById('imgResult');
+  var prompt=document.getElementById('posPrompt').value.trim();
+  if(!prompt){result.innerHTML='<div class="error">a prompt is required</div>';return}
+  // multipart, so the files go up as bytes rather than base64 in JSON
+  var fd=new FormData();
+  fd.append('prompt',prompt);
+  var m=document.getElementById('editModel').value.trim();if(m)fd.append('model',m);
+  var seed=parseInt(document.getElementById('imgSeed').value);
+  fd.append('seed',isNaN(seed)?-1:seed);
+  fd.append('steps',document.getElementById('imgSteps').value);
+  fd.append('cfg_scale',document.getElementById('imgCfg').value);
+  fd.append('width',document.getElementById('imgWidth').value);
+  fd.append('height',document.getElementById('imgHeight').value);
+  var msChk=document.getElementById('editMatchSource');
+  fd.append('match_source',(msChk&&msChk.checked)?'1':'0');
+  _editFiles.forEach(function(f){fd.append('image',f,f.name)});
+  btn.disabled=true;result.innerHTML='';
+  showSnack('finding an edit host\u2026');
+  var st=snackStatus;activeImgStatus=st;
+  try{
+    var resp=await fetch('v1/images/edits',{method:'POST',body:fd});
+    if(!resp.ok){
+      var msg='HTTP '+resp.status;
+      try{var j=await resp.json();msg=j.error||msg}catch(e){}
+      result.innerHTML='<div class="error">Error: '+msg+'</div>';return;
+    }
+    var d=await resp.json();
+    var data=d.data||[];
+    if(!data.length){result.innerHTML='<div class="error">No image returned</div>';return}
+    result.innerHTML='';
+    data.forEach(function(o){
+      var img=document.createElement('img');
+      img.src='data:image/png;base64,'+o.b64_json;
+      result.appendChild(img);
+    });
+    loadImgHistory();
+  }catch(ex){result.innerHTML='<div class="error">Error: '+ex.message+'</div>'}
+  finally{btn.disabled=false;if(activeImgStatus===st)activeImgStatus=null;hideSnack()}
+}
+
 async function generateImage(){
+  if(_imgMode==='edit')return editImage();
   var btn=document.getElementById('imgGenerate');
   var result=document.getElementById('imgResult');
   var seed=parseInt(document.getElementById('imgSeed').value);
@@ -2871,11 +3315,8 @@ async function generateImage(){
   };
   btn.disabled=true;
   result.innerHTML='';
-  var st=document.createElement('div');
-  st.className='chat-status';
-  st.textContent='finding a server\u2026';
-  result.appendChild(st);
-  activeImgStatus=st;
+  showSnack('finding a server\u2026');
+  var st=snackStatus;activeImgStatus=st;
   try{
     var resp=await fetch('sdapi/v1/txt2img',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!resp.ok){
@@ -2895,7 +3336,7 @@ async function generateImage(){
     });
     loadImgHistory();
   }catch(ex){result.innerHTML='<div class="error">Error: '+ex.message+'</div>';}
-  finally{btn.disabled=false;if(activeImgStatus===st)activeImgStatus=null;}
+  finally{btn.disabled=false;if(activeImgStatus===st)activeImgStatus=null;hideSnack();}
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
 
@@ -2907,6 +3348,7 @@ var _imgHistoryLoaded=false;
 //   video  POST /v1/videos -> poll GET /v1/videos/{id} -> GET .../content
 //   music  no endpoint yet — see the note in that pane
 var _mediaPane='image',_ttsVoicesLoaded=false,_musicLoaded=false;
+var _ttsVoicesRetried=false;
 function showMediaPane(name){
   _mediaPane=name;
   document.querySelectorAll('[data-mediapane]').forEach(function(b){
@@ -2969,7 +3411,9 @@ async function generateSpeech(){
   var v=document.getElementById('ttsVoice').value.trim();if(v)body.voice=v;
   var m=document.getElementById('ttsModel').value.trim();if(m)body.model=m;
   btn.disabled=true;
-  _mediaStatus(out,'finding a TTS host…');
+  out.innerHTML='';
+  showSnack('finding a TTS host\u2026');
+  activeMediaStatus['__tts__']=snackStatus;
   try{
     var r=await fetch('v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!r.ok){_mediaError(out,await _errText(r));return}
@@ -2981,7 +3425,7 @@ async function generateSpeech(){
     var provHost=r.headers.get('X-Dyva-Host')||'';
     var provNode=r.headers.get('X-Dyva-Node')||'';
     out.innerHTML='';
-    var au=document.createElement('audio');au.controls=true;au.src=url;out.appendChild(au);
+    out.appendChild(_mediaPlayer(url));
     if(provHost){
       var pv=document.createElement('div');pv.className='tts-prov';
       pv.textContent=provHost+(provNode?' · '+provNode:'');
@@ -2992,17 +3436,75 @@ async function generateSpeech(){
     a.textContent='download';
     out.appendChild(a);
     // save to local history for gallery
-    var hist=JSON.parse(localStorage.getItem('dyva_tts_history')||'[]');
-    hist.unshift({text:text.slice(0,200),voice:v||'default',model:m||'auto',
-                  host:provHost,node:provNode,ts:Date.now(),url:url});
-    hist=hist.slice(0,50); // keep last 50
-    localStorage.setItem('dyva_tts_history',JSON.stringify(hist));
-    loadTtsHistory();
+    var clip=r.headers.get('X-Dyva-File')||'';
+    _ttsRemember({text:text.slice(0,200),voice:v||'default',model:m||'auto',
+                  host:provHost,node:provNode,ts:Date.now(),
+                  url:clip?'v1/audio/clips/'+clip:url});
   }catch(ex){_mediaError(out,ex.message)}
-  finally{btn.disabled=false}
+  finally{btn.disabled=false;delete activeMediaStatus['__tts__'];hideSnack()}
 }
 document.getElementById('ttsGenerate').addEventListener('click',generateSpeech);
 
+// A themed audio player. Native controls can't be styled portably, so this
+// drives a hidden <audio> and paints its own transport from the site's tokens.
+function _mediaPlayer(src){
+  var wrap=document.createElement('div');wrap.className='player';
+  var au=document.createElement('audio');au.src=src;au.preload='metadata';
+  var btn=document.createElement('button');btn.type='button';btn.className='player-btn';
+  btn.textContent='\u25B6';btn.setAttribute('aria-label','Play');
+  var bar=document.createElement('div');bar.className='player-bar';
+  bar.setAttribute('role','slider');bar.setAttribute('aria-label','Seek');
+  var fill=document.createElement('div');fill.className='player-fill';bar.appendChild(fill);
+  var time=document.createElement('span');time.className='player-time';time.textContent='0:00';
+  function fmt(v){
+    if(!isFinite(v)||v<0)return '0:00';
+    v=Math.floor(v);return Math.floor(v/60)+':'+String(v%60).padStart(2,'0');
+  }
+  btn.addEventListener('click',function(){au.paused?au.play():au.pause()});
+  au.addEventListener('play',function(){
+    // one clip at a time — otherwise the gallery turns into a chorus
+    Array.prototype.forEach.call(document.querySelectorAll('.player audio'),function(o){
+      if(o!==au&&!o.paused)o.pause();
+    });
+    btn.textContent='\u275A\u275A';btn.setAttribute('aria-label','Pause');wrap.classList.add('playing');
+  });
+  au.addEventListener('pause',function(){
+    btn.textContent='\u25B6';btn.setAttribute('aria-label','Play');wrap.classList.remove('playing');
+  });
+  au.addEventListener('loadedmetadata',function(){time.textContent=fmt(au.duration)});
+  au.addEventListener('timeupdate',function(){
+    if(isFinite(au.duration)&&au.duration>0)fill.style.width=(au.currentTime/au.duration*100)+'%';
+    time.textContent=fmt(au.currentTime);
+  });
+  au.addEventListener('ended',function(){fill.style.width='0%';time.textContent=fmt(au.duration)});
+  bar.addEventListener('click',function(ev){
+    var r=bar.getBoundingClientRect();
+    if(!r.width||!isFinite(au.duration))return;
+    au.currentTime=Math.min(1,Math.max(0,(ev.clientX-r.left)/r.width))*au.duration;
+  });
+  wrap.appendChild(au);wrap.appendChild(btn);wrap.appendChild(bar);wrap.appendChild(time);
+  return wrap;
+}
+// Every path that produces speech records it here — the Speech tab and the
+// chat's generate_speech tool both land in the same gallery.
+function _ttsRemember(e){
+  var hist=[];
+  try{hist=JSON.parse(localStorage.getItem('dyva_tts_history')||'[]')}catch(ex){}
+  hist.unshift(e);
+  hist=hist.slice(0,50);
+  try{localStorage.setItem('dyva_tts_history',JSON.stringify(hist))}catch(ex){}
+  if(document.getElementById('ttsGallery'))loadTtsHistory();
+}
+// Compact stamp for the gallery cards: time of day for today's clips, a short
+// date for older ones — the full value is on the title attribute.
+function _ttsWhen(ms){
+  if(!ms)return '';
+  var d=new Date(ms),now=new Date();
+  var sameDay=d.toDateString()===now.toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+    : d.toLocaleDateString([],{month:'short',day:'numeric'});
+}
 function loadTtsHistory(){
   var hist=JSON.parse(localStorage.getItem('dyva_tts_history')||'[]');
   var el=document.getElementById('ttsGallery');
@@ -3010,10 +3512,7 @@ function loadTtsHistory(){
   hist.forEach(function(e){
     var item=document.createElement('div');
     item.className='tts-item';
-    var au=document.createElement('audio');
-    au.controls=true;
-    au.src=e.url;
-    au.preload='none';
+    var au=_mediaPlayer(e.url);
     var t=document.createElement('div');
     t.className='tts-text';
     t.textContent=(e.voice&&e.voice!=='default'?e.voice+': ':'')+e.text;
@@ -3029,15 +3528,27 @@ function loadTtsHistory(){
       localStorage.setItem('dyva_tts_history',JSON.stringify(h));
       loadTtsHistory();
     });
+    // text / host / model+timestamp / player, per format.txt
     item.appendChild(t);
+    var h=document.createElement('div');
+    h.className='tts-host';
+    h.textContent=e.host||'';
+    h.title=e.host||'';
+    item.appendChild(h);
+    var meta=document.createElement('div');
+    meta.className='tts-meta';
+    var mo=document.createElement('span');
+    mo.className='tts-model';
+    // the node that actually produced it, not the model hint that was requested
+    mo.textContent=e.node||e.model||'';
+    mo.title=mo.textContent;
+    var ts=document.createElement('span');
+    ts.className='tts-time';
+    ts.textContent=_ttsWhen(e.ts);
+    if(e.ts)ts.title=new Date(e.ts).toLocaleString();
+    meta.appendChild(mo);meta.appendChild(ts);
+    item.appendChild(meta);
     item.appendChild(au);
-    if(e.host){
-      var pv=document.createElement('div');
-      pv.className='tts-prov';
-      pv.textContent=e.host+(e.node?' \u00b7 '+e.node:'');
-      pv.title=e.host+(e.node?' \u2014 '+e.node:'');
-      item.appendChild(pv);
-    }
     item.appendChild(del);
     el.appendChild(item);
   });
@@ -3148,7 +3659,7 @@ async function generateMusic(){
           if(j.status==='completed'){
             out.innerHTML='';
             var src='v1/music/'+encodeURIComponent(job.id)+'/content';
-            var au=document.createElement('audio');au.controls=true;au.src=src;out.appendChild(au);
+            out.appendChild(_mediaPlayer(src));
             var cap=document.createElement('div');cap.className='status';
             cap.textContent=(j.family||'')+(j.model?' · '+j.model:'')+(j.host?' · '+j.host:'');
             out.appendChild(cap);

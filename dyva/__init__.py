@@ -9,7 +9,9 @@ import csv
 import json
 import hashlib
 import logging
+import math
 import os
+import random
 import re
 import subprocess
 import sys
@@ -84,6 +86,10 @@ UNREACHABLE_KEY = "\x00unreachable"
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 IMG_DIR = os.path.join(CACHE_DIR, "images")
+# Generated speech kept on disk so a chat transcript can reference it by URL —
+# the response body is raw bytes, which a saved conversation can't hold.
+AUDIO_DIR = os.path.join(CACHE_DIR, "audio")
+AUDIO_KEEP = 200
 IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
 THUMB_DIR = os.path.join(IMG_DIR, "thumbs")
 CHATS_FILE = os.path.join(CACHE_DIR, "chats.json")   # legacy blob, migrated into CHATS_DB
@@ -900,6 +906,17 @@ def _get_db():
             "host TEXT NOT NULL, model TEXT NOT NULL, state TEXT NOT NULL, "
             "last_good TEXT, failure_streak INTEGER NOT NULL DEFAULT 0, "
             "PRIMARY KEY(host, model))")
+        # What custom nodes a host actually exposes, per capability. Probing
+        # this means pulling a multi-megabyte /object_info, so the answer is
+        # worth keeping: it makes the voice list instant instead of a live
+        # sweep, and it tells host ranking which handful of hosts out of
+        # hundreds can do speech at all. `node` NULL means "surveyed, has
+        # none" — a real finding, not a gap.
+        _status_db.execute(
+            "CREATE TABLE IF NOT EXISTS host_nodes("
+            "host TEXT NOT NULL, capability TEXT NOT NULL, node TEXT, "
+            "voices TEXT, spec TEXT, checked REAL NOT NULL, "
+            "PRIMARY KEY(host, capability))")
         _status_db.commit()
         if need_migrate:
             _migrate_status_from_txt()
@@ -1026,6 +1043,55 @@ def mark_unreachable(host):
         " ON CONFLICT(host,model) DO UPDATE SET state='bad', failure_streak=failure_streak+1",
         (host, UNREACHABLE_KEY))
     db.commit()
+
+
+NODE_SURVEY_TTL = 24 * 3600
+
+
+def save_node_survey(host, capability, spec, voices=None):
+    """Record what a host exposes for a capability. spec=None means surveyed
+    and found nothing, which is itself worth remembering."""
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_nodes(host,capability,node,voices,spec,checked)"
+        " VALUES(?,?,?,?,?,?)"
+        " ON CONFLICT(host,capability) DO UPDATE SET"
+        " node=excluded.node, voices=excluded.voices, spec=excluded.spec,"
+        " checked=excluded.checked",
+        (host, capability, (spec or {}).get("class"),
+         json.dumps(voices or []), json.dumps(spec) if spec else None,
+         time.time()))
+    db.commit()
+
+
+def load_node_survey(capability):
+    """{host: {"node":..., "voices":[...], "spec":{...}, "checked":ts}}"""
+    out = {}
+    for host, node, voices, spec, checked in _get_db().execute(
+            "SELECT host, node, voices, spec, checked FROM host_nodes"
+            " WHERE capability=?", (capability,)):
+        try:
+            out[host] = {"node": node, "voices": json.loads(voices or "[]"),
+                         "spec": json.loads(spec) if spec else None,
+                         "checked": checked}
+        except Exception:
+            continue
+    return out
+
+
+def node_survey_for(host, capability, ttl=NODE_SURVEY_TTL):
+    """A single host's stored survey, or None if absent or stale."""
+    row = _get_db().execute(
+        "SELECT node, voices, spec, checked FROM host_nodes"
+        " WHERE host=? AND capability=?", (host, capability)).fetchone()
+    if not row or time.time() - (row[3] or 0) > ttl:
+        return None
+    try:
+        return {"node": row[0], "voices": json.loads(row[1] or "[]"),
+                "spec": json.loads(row[2]) if row[2] else None,
+                "checked": row[3]}
+    except Exception:
+        return None
 
 
 def load_unreachable():
@@ -1654,7 +1720,64 @@ def _curlify(method, url, json_body):
         logging.debug(f"curlify failed: {e}")
 
 
-async def _race_hosts(entries, attempt, key, job_wid=None, workers=None):
+# ---- What a capability reports back about one host -----------------------
+# The engine hands out hosts and the job judges them; a bool can't carry the
+# distinction the reputation store (and the survey behind it) actually wants.
+# "This host has no TTS node" is a structural fact about what is installed out
+# there; "this host timed out" is churn. Both used to become add_bad().
+V_ACCEPTED = "accepted"        # it worked — take the result
+V_UNSUITABLE = "unsuitable"    # structurally can't do this; still won't in an hour
+V_UNREACHABLE = "unreachable"  # dead at the connection level, for every capability
+V_FAILED = "failed"            # transient: refused, errored, bad response
+V_TIMEOUT = "timeout"          # transient: accepted the connection, never answered
+V_SKIP = "skip"                # inconclusive — move on, record nothing
+
+Outcome = collections.namedtuple("Outcome", "verdict result extra detail")
+
+
+def accepted(result, extra=""):
+    """`extra` is the concrete thing that worked (chat's resolved model name),
+    stored alongside the host as the sticky last-success."""
+    return Outcome(V_ACCEPTED, result, extra, None)
+
+
+def unsuitable(detail=None):
+    return Outcome(V_UNSUITABLE, None, "", detail)
+
+
+def unreachable_host(detail=None):
+    return Outcome(V_UNREACHABLE, None, "", detail)
+
+
+def failed(detail=None):
+    return Outcome(V_FAILED, None, "", detail)
+
+
+def timed_out(detail=None):
+    return Outcome(V_TIMEOUT, None, "", detail)
+
+
+def skip(detail=None):
+    return Outcome(V_SKIP, None, "", detail)
+
+
+def record_verdict(host, key, outcome):
+    """The one place a race turns a verdict into reputation."""
+    v = outcome.verdict
+    if v == V_ACCEPTED:
+        add_good(host, key)
+        set_last(key, host, outcome.extra or "")
+    elif v == V_UNREACHABLE:
+        # host-wide, so it isn't re-probed as "unknown" for every other key...
+        mark_unreachable(host)
+        add_bad(host, key)          # ...plus the per-key mark, so looking at
+    elif v in (V_UNSUITABLE, V_FAILED, V_TIMEOUT):   # this key shows who failed it
+        add_bad(host, key)
+    # V_SKIP records nothing on purpose
+
+
+async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
+                      label=None):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -1664,14 +1787,19 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None):
     collection. `attempt` supplies only the part that differs per capability.
 
       entries - candidate items, best-first; passed to `attempt` untouched
-      attempt - async fn(item, wid, done) -> result, where a falsy result means
-                "this host didn't work, move to the next"
+      attempt - async fn(item, wid, done) -> Outcome. The job decides what
+                "worked" means; the engine only reads the verdict.
       key     - the reputation/worker key: a model name, or a __capability__
                 sentinel like __tts__
+      host_of - pulls the host out of an entry (default: the entry is the host)
+      label   - what the /workers view calls this job (default: the key). The
+                reputation key and the human label are not the same thing —
+                txt2img wants the prompt there, not "__a1111__".
 
-    Returns (result, stopped, tried). `tried` is how many hosts were actually
-    attempted, which is what a failure message should quote — it is not
-    len(entries), since the pool stops early on success.
+    Returns (result, stopped, tried, tally). `tried` is how many hosts were
+    actually attempted — not len(entries), since the pool stops early on
+    success — and `tally` counts the verdicts, which is what a failure message
+    should quote.
     """
     done = asyncio.Event()
     result_queue = asyncio.Queue()
@@ -1679,6 +1807,8 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None):
     iter_lock = asyncio.Lock()
     stopped = False
     tried = 0
+    tally = collections.Counter()
+    host_of = host_of or (lambda item: item)
 
     async def worker():
         nonlocal tried
@@ -1691,9 +1821,13 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None):
                 tried += 1
             await _worker_checked(wwid)
             wid = asyncio.current_task().get_name()
-            res = await attempt(item, wid, done)
-            if res:
-                await result_queue.put(res)
+            outcome = await attempt(item, wid, done)
+            if outcome is None:
+                outcome = skip()
+            tally[outcome.verdict] += 1
+            record_verdict(host_of(item), key, outcome)
+            if outcome.verdict == V_ACCEPTED:
+                await result_queue.put(outcome.result)
                 done.set()
                 return
 
@@ -1710,7 +1844,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None):
         _workers[job_wid]["stop"] = _stop
         wwid = job_wid
     else:
-        wwid = await _register_worker(key, len(entries), _stop)
+        wwid = await _register_worker(label or key, len(entries), _stop)
     n = min(workers or WORKER_COUNT, len(entries)) or 1
     tasks = [asyncio.create_task(worker()) for _ in range(n)]
     _tasks_holder[:] = tasks
@@ -1733,7 +1867,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None):
         if job_wid is None:
             await _unregister_worker(wwid)
 
-    return result, stopped, tried
+    return result, stopped, tried, tally
 
 
 async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None):
@@ -1755,22 +1889,16 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         # untested ones get probed first, caps refreshed only if needed
         trusted = prio < 0
         if not trusted and not await probe_host(session, host):
-            # Host-wide mark so it isn't re-probed for every other model...
-            mark_unreachable(host)
-            # ...plus a mark against the model actually being asked for, so
-            # looking at that model shows the hosts that failed it. The
-            # sentinel row carries no model name and is invisible per-model.
-            add_bad(host, model)
             await broadcast_activity(host, model, "failed",
                 f"unreachable: {host}")
-            return None
+            return unreachable_host("probe failed")
         if not trusted and caps and caps != {"completion"}:
             await refresh_host_caps(session, host)
 
         if "vision" in (caps or []) and not _known_has(host, full, "vision"):
             sees = await trial_balloon(session, host, full, model)
             if sees is None:
-                return None
+                return skip("trial balloon inconclusive")
             if sees:
                 mark_vision(host, full)
                 set_last(model, host, full)
@@ -1780,7 +1908,9 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 mark_no_vision(host, full)
                 await broadcast_activity(host, model, "failed",
                     f"trial balloon: {full} has no vision", wid=wid)
-                return None
+                # No reputation mark: vision-ness lives in known-hosts.json, and
+                # the model itself is fine — just not for this request.
+                return skip("no vision")
 
         start = time.time()
         tag = f"{host} {full}"
@@ -1793,10 +1923,10 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             )
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             dur = time.time() - start
-            add_bad(host, model)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-            return None
+            return (timed_out(type(e).__name__) if isinstance(e, asyncio.TimeoutError)
+                    else failed(type(e).__name__))
 
         if resp.status != 200:
             dur = time.time() - start
@@ -1810,10 +1940,9 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 pass
             await resp.release()
             resp = None
-            add_bad(host, model)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - status {code}", duration=dur, wid=wid)
-            return None
+            return failed(f"status {code}")
 
         if not do_stream:
             try:
@@ -1824,45 +1953,40 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 resp = None
                 await broadcast_activity(host, model, "failed",
                     f"failure: {host} for {model} - timeout", duration=dur, wid=wid)
-                return None
+                return skip("read timeout")
             except json.JSONDecodeError:
                 dur = time.time() - start
                 await resp.release()
                 resp = None
-                add_bad(host, model)
                 await broadcast_activity(host, model, "failed",
                     f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-                return None
+                return failed("bad response")
             await resp.release()
             if "error" in data:
                 dur = time.time() - start
-                add_bad(host, model)
                 await _collect_err(f"{host}: {data['error']}")
                 await broadcast_activity(host, model, "failed",
                     f"failure: {host} for {model} - error: {data['error']}", duration=dur, wid=wid)
-                return None
+                return failed(str(data["error"]))
             dur = time.time() - start
             log.debug(f"  \u2713 {tag}")
-            set_last(model, host, full)
-            add_good(host, model)
             await broadcast_activity(host, model, "connected",
                 f"success: {host} for {model}", duration=dur, wid=wid)
-            return ("ok", host, full, data)
+            return accepted(("ok", host, full, data), extra=full)
 
         try:
             first_line = await resp.content.readline()
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
             await resp.release()
             resp = None
-            return None
+            return skip("stream read failed")
         if not first_line or not first_line.strip():
             dur = time.time() - start
             await resp.release()
             resp = None
-            add_bad(host, model)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - empty response", duration=dur, wid=wid)
-            return None
+            return failed("empty response")
 
         try:
             first = json.loads(first_line)
@@ -1870,34 +1994,31 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             dur = time.time() - start
             await resp.release()
             resp = None
-            add_bad(host, model)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-            return None
+            return failed("bad response")
 
         if "error" in first:
             dur = time.time() - start
             await resp.release()
             resp = None
-            add_bad(host, model)
             await _collect_err(f"{host}: {first['error']}")
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - error: {first['error']}", duration=dur, wid=wid)
-            return None
+            return failed(str(first["error"]))
 
         if done.is_set():
             await resp.release()
-            return None
+            return skip("another host won")
 
         dur = time.time() - start
         log.debug(f"  \u2713 {tag}")
-        set_last(model, host, full)
-        add_good(host, model)
         await broadcast_activity(host, model, "connected",
             f"success: {host} for {model}", duration=dur, wid=wid)
-        return ("ok_stream", host, full, resp, first_line, first)
+        return accepted(("ok_stream", host, full, resp, first_line, first), extra=full)
 
-    result, stopped, _tried = await _race_hosts(servers, attempt, model, job_wid=job_wid)
+    result, stopped, _tried, _tally = await _race_hosts(
+        servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1])
     return result, errors, stopped
 
 
@@ -4193,77 +4314,59 @@ async def handle_txt2img(request):
     hosts.sort(key=lambda h: capability_tier(
         h, IMG_KEY, marks, _last_img[0] if _last_img else None))
 
-    async def _race(host_list):
-        done = asyncio.Event()
-        result_queue = asyncio.Queue()
-        host_iter = iter(host_list)
-        iter_lock = asyncio.Lock()
+    wkey = f"{activity_label} (image)"
 
-        async def worker():
-            while not done.is_set():
-                async with iter_lock:
-                    try:
-                        host = next(host_iter)
-                    except StopIteration:
-                        return
-                await _worker_checked(wwid)
-                await broadcast_activity(host, activity_label, "trying",
-                    f"txt2img: {activity_label}")
-                try:
-                    t0 = time.time()
-                    ov = overrides.get(host)
-                    payload = (
-                        {**body, "override_settings": ov,
-                         "override_settings_restore_afterwards": True}
-                        if ov else body
-                    )
-                    async with session.post(
-                        _host_url(host, "/sdapi/v1/txt2img"), json=payload,
-                        timeout=aiohttp.ClientTimeout(total=TIMEOUT),
-                    ) as r:
-                        if r.status == 200:
-                            data = await r.json()
-                            set_last(IMG_KEY, host, "")
-                            add_good(host, IMG_KEY)
-                            await broadcast_activity(host, activity_label, "connected",
-                                f"txt2img ✓", duration=time.time() - t0)
-                            data["_dyva_host"] = host
-                            await result_queue.put(data)
-                            done.set()
-                            return
-                        add_bad(host, IMG_KEY)
-                        await broadcast_activity(host, activity_label, "failed",
-                            f"txt2img: HTTP {r.status}")
-                except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
-                    add_bad(host, IMG_KEY)
-                    await broadcast_activity(host, activity_label, "failed",
-                        f"txt2img: {type(_e).__name__}")
-
-        wkey = f"{activity_label} (image)"
-        _tasks_holder = []
-
-        def _stop():
-            done.set()
-            for t in _tasks_holder:
-                t.cancel()
-
-        wwid = await _register_worker(wkey, len(host_list), _stop)
-        tasks = [asyncio.create_task(worker()) for _ in range(min(WORKER_COUNT, len(host_list)))]
-        _tasks_holder[:] = tasks
+    async def a1111_attempt(host, wid, done):
+        t0 = time.time()
+        await broadcast_activity(host, activity_label, "trying",
+            f"txt2img: {activity_label}", wid=wid)
+        ov = overrides.get(host)
+        payload = ({**body, "override_settings": ov,
+                    "override_settings_restore_afterwards": True} if ov else body)
         try:
-            while True:
-                try:
-                    return result_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    if all(t.done() for t in tasks):
-                        return None
-                await asyncio.sleep(0.1)
-        finally:
-            done.set()
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await _unregister_worker(wwid)
+            async with session.post(
+                _host_url(host, "/sdapi/v1/txt2img"), json=payload,
+                timeout=aiohttp.ClientTimeout(total=TIMEOUT),
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    await broadcast_activity(host, activity_label, "connected",
+                        "txt2img \u2713", duration=time.time() - t0, wid=wid)
+                    data["_dyva_host"] = host
+                    return accepted(data)
+                await broadcast_activity(host, activity_label, "failed",
+                    f"txt2img: HTTP {r.status}", wid=wid)
+                return failed(f"HTTP {r.status}")
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
+            await broadcast_activity(host, activity_label, "failed",
+                f"txt2img: {type(_e).__name__}", wid=wid)
+            return (timed_out(type(_e).__name__) if isinstance(_e, asyncio.TimeoutError)
+                    else unreachable_host(type(_e).__name__))
+
+    async def comfy_attempt(host, wid, done):
+        t0 = time.time()
+        await broadcast_activity(host, activity_label, "trying",
+            f"txt2img (comfy): {activity_label}", wid=wid)
+        data = await _txt2img_comfyui(session, host, body, model_filter)
+        if data:
+            await broadcast_activity(host, activity_label, "connected",
+                "txt2img (comfy) \u2713", duration=time.time() - t0, wid=wid)
+            data["_dyva_host"] = host
+            return accepted(data)
+        await broadcast_activity(host, activity_label, "failed",
+            "txt2img (comfy): no response", wid=wid)
+        return failed("no response")
+
+    async def _race(host_list, attempt, workers=None):
+        if not host_list:
+            return None
+        result, _stopped, _tried, _tally = await _race_hosts(
+            host_list, attempt, IMG_KEY, workers=workers, label=wkey)
+        return result
+
+    def _deliver(data):
+        _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
+        return web.json_response(data)
 
     # A host-wide unreachable mark (dead at the connection level) must exclude a
     # host from image routing too — it's stored under a sentinel "model", so the
@@ -4273,22 +4376,17 @@ async def handle_txt2img(request):
     def _img_bad(h):
         return h in _un or f"{h} {IMG_KEY}" in _bad
 
-    # Phase 1: try good + untested hosts (skip known-bad and unreachable)
-    live_hosts = [h for h in hosts if not _img_bad(h)]
-    data = await _race(live_hosts)
+    # Phase 1: good + untested hosts (skip known-bad and unreachable)
+    data = await _race([h for h in hosts if not _img_bad(h)], a1111_attempt)
     if data:
-        _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
-        return web.json_response(data)
+        return _deliver(data)
 
-    # Phase 2: exhausted — try previously bad / unreachable hosts (recovery path)
-    bad_hosts = [h for h in hosts if _img_bad(h)]
-    if bad_hosts:
-        data = await _race(bad_hosts)
-        if data:
-            _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
-            return web.json_response(data)
+    # Phase 2: exhausted — retry the previously bad / unreachable (recovery path)
+    data = await _race([h for h in hosts if _img_bad(h)], a1111_attempt)
+    if data:
+        return _deliver(data)
 
-    # Phase 3: try comfyui hosts
+    # Phase 3: comfyui hosts
     comfy_candidates = [s for s in servers if s.get("service") == "comfyui"]
     if model_filter:
         comfy_candidates = [
@@ -4297,75 +4395,134 @@ async def handle_txt2img(request):
                    for m in s.get("models", []))
         ]
     comfy_hosts = [s.get("server") for s in comfy_candidates if not _img_bad(s.get("server"))]
-    if comfy_hosts:
-        async def _race_comfy(host_list):
-            done = asyncio.Event()
-            result_queue = asyncio.Queue()
-            host_iter = iter(host_list)
-            iter_lock = asyncio.Lock()
-
-            async def worker():
-                while not done.is_set():
-                    async with iter_lock:
-                        try:
-                            host = next(host_iter)
-                        except StopIteration:
-                            return
-                    await _worker_checked(wwid)
-                    await broadcast_activity(host, activity_label, "trying",
-                        f"txt2img (comfy): {activity_label}")
-                    t0 = time.time()
-                    data = await _txt2img_comfyui(session, host, body, model_filter)
-                    if data:
-                        set_last(IMG_KEY, host, "")
-                        add_good(host, IMG_KEY)
-                        await broadcast_activity(host, activity_label, "connected",
-                            f"txt2img (comfy) ✓", duration=time.time() - t0)
-                        data["_dyva_host"] = host
-                        await result_queue.put(data)
-                        done.set()
-                        return
-                    add_bad(host, IMG_KEY)
-                    await broadcast_activity(host, activity_label, "failed",
-                        f"txt2img (comfy): no response")
-
-            wkey = f"{activity_label} (image)"
-            _tasks_holder = []
-
-            def _stop():
-                done.set()
-                for t in _tasks_holder:
-                    t.cancel()
-
-            wwid = await _register_worker(wkey, len(host_list), _stop)
-            tasks = [asyncio.create_task(worker()) for _ in range(min(3, len(host_list)))]
-            _tasks_holder[:] = tasks
-            try:
-                while True:
-                    try:
-                        return result_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        if all(t.done() for t in tasks):
-                            return None
-                    await asyncio.sleep(0.1)
-            finally:
-                done.set()
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                await _unregister_worker(wwid)
-
-        data = await _race_comfy(comfy_hosts)
-        if data:
-            _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
-            return web.json_response(data)
+    data = await _race(comfy_hosts, comfy_attempt, workers=3)
+    if data:
+        return _deliver(data)
 
     return web.json_response({"error": "all image-gen hosts failed"}, status=502)
 
 
-async def _txt2img_comfyui(session, host, body, model_filter=None):
-    import uuid as uuid_mod
+# ---- The ComfyUI job pipeline, shared by every media capability ----------
+# tts, music, video and the comfyui txt2img fallback all do the same three
+# things: POST /prompt, poll /history until the graph produces an artifact of
+# the kind they care about, then pull the bytes from /view. That loop existed
+# in four copies, and every bug found in it lived in exactly one of them.
+class ComfyError(Exception):
+    """Transient: the host was down, refused, or misbehaved."""
 
+
+class ComfyUnsuitable(ComfyError):
+    """Structural: this host cannot run this graph, and still won't later."""
+
+
+# ComfyUI's structural refusals, as they appear in a /prompt rejection body.
+_COMFY_STRUCTURAL = re.compile(r"prompt_outputs_failed_validation|missing_node_type"
+                               r"|required_input_missing|return_type_mismatch")
+
+# What "an artifact" means per capability. VHS and friends file video under
+# several keys, so this is a tuple rather than a single name.
+COMFY_AUDIO = ("audio",)
+COMFY_IMAGES = ("images",)
+COMFY_VIDEO = ("gifs", "videos")
+
+
+async def comfy_submit(session, host, workflow, timeout=30):
+    """Hand a graph to a host. Returns its prompt_id.
+
+    Returning an id is the success boundary for host selection: the failures
+    that actually happen out there — offline, repurposed, missing custom nodes —
+    all surface here within a second or so. Whatever the render does afterwards
+    is a fact about the render, not about the host we picked.
+    """
+    try:
+        r = await session.post(
+            _host_url(host, "/prompt"),
+            json={"prompt": workflow, "client_id": str(uuid.uuid4())},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        )
+        if r.status != 200:
+            body = await r.text()
+            await r.release()
+            detail = _comfy_prompt_error(body, workflow)
+            if _COMFY_STRUCTURAL.search(body):
+                raise ComfyUnsuitable(f"prompt rejected: {detail}")
+            raise ComfyError(f"prompt rejected: {detail}")
+        data = await r.json(content_type=None)
+        await r.release()
+    except ComfyError:
+        raise
+    except Exception as e:
+        raise ComfyError(str(e) or type(e).__name__)
+    prompt_id = (data or {}).get("prompt_id")
+    if not prompt_id:
+        raise ComfyError("no prompt_id")
+    return prompt_id
+
+
+async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
+                        poll=2, view_timeout=60):
+    """Wait out a job the host already accepted; return (bytes, filename).
+
+    Deliberately not part of the race: by here the host is chosen and marked,
+    so a slow or broken render is reported to the caller without re-litigating
+    host selection.
+    """
+    label = kinds[0]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        await asyncio.sleep(poll)
+        try:
+            r = await session.get(
+                _host_url(host, f"/history/{prompt_id}"),
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if r.status != 200:
+                await r.release()
+                continue
+            hist = await r.json(content_type=None)
+            await r.release()
+        except Exception:
+            continue
+        entry = (hist or {}).get(prompt_id)
+        if not entry:
+            continue
+
+        files = []
+        for out in (entry.get("outputs") or {}).values():
+            for k in kinds:
+                files.extend(out.get(k) or [])
+        if files:
+            af = files[0]
+            try:
+                v = await session.get(
+                    _host_url(host, "/view"),
+                    params={"filename": af.get("filename"),
+                            "subfolder": af.get("subfolder", ""),
+                            "type": af.get("type", "output")},
+                    timeout=aiohttp.ClientTimeout(total=view_timeout),
+                )
+                if v.status != 200:
+                    await v.release()
+                    raise ComfyError(f"view HTTP {v.status}")
+                raw = await v.read()
+                await v.release()
+            except ComfyError:
+                raise
+            except Exception as e:
+                raise ComfyError(str(e) or type(e).__name__)
+            return raw, af.get("filename") or f"output.{label}"
+
+        status = entry.get("status") or {}
+        if status.get("status_str") == "error":
+            msgs = [str(m) for m in (status.get("messages") or [])]
+            detail = "; ".join(msgs)[:200]
+            raise ComfyError(f"execution error{': ' + detail if detail else ''}")
+        if status.get("completed"):
+            raise ComfyError(f"the graph finished but saved no {label}")
+    raise ComfyError(f"timeout waiting for {label}")
+
+
+async def _txt2img_comfyui(session, host, body, model_filter=None):
     try:
         checkpoints_resp = await session.get(
             _host_url(host, "/models/checkpoints"),
@@ -4413,69 +4570,16 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
         "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": "dyva_output", "images": ["6", 0]}},
     }
 
-    client_id = str(uuid_mod.uuid4())
     try:
-        prompt_resp = await session.post(
-            _host_url(host, "/prompt"),
-            json={"prompt": workflow, "client_id": client_id},
-            timeout=aiohttp.ClientTimeout(total=30),
-        )
-        if prompt_resp.status != 200:
-            await prompt_resp.release()
-            return None
-        prompt_data = await prompt_resp.json()
-        await prompt_resp.release()
-        prompt_id = prompt_data.get("prompt_id")
-        if not prompt_id:
-            return None
-    except Exception:
+        prompt_id = await comfy_submit(session, host, workflow)
+        raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
+                                       timeout=120, poll=2, view_timeout=30)
+    except ComfyError as e:
+        log.debug(f"txt2img: {host}: {e}")
         return None
-
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        await asyncio.sleep(2)
-        try:
-            hist_resp = await session.get(
-                _host_url(host, f"/history/{prompt_id}"),
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-            if hist_resp.status != 200:
-                await hist_resp.release()
-                continue
-            hist = await hist_resp.json()
-            await hist_resp.release()
-        except Exception:
-            continue
-        entry = hist.get(prompt_id)
-        if not entry:
-            continue
-        if entry.get("status", {}).get("completed"):
-            outputs = entry.get("outputs", {})
-            for node_id, out in outputs.items():
-                images = out.get("images", [])
-                for img in images:
-                    try:
-                        view_resp = await session.get(
-                            _host_url(host, "/view"),
-                            params={"filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": img.get("type", "output")},
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        )
-                        if view_resp.status == 200:
-                            raw = await view_resp.read()
-                            await view_resp.release()
-                            import base64
-                            b64 = base64.b64encode(raw).decode()
-                            return {"images": [b64], "_dyva_model": ckpt,
-                                    "_dyva_seed": seed, "parameters": "{}",
-                                    "info": json.dumps({"prompt": body})}
-                        await view_resp.release()
-                    except Exception:
-                        pass
-            break
-        if entry.get("status", {}).get("status_str") == "error":
-            break
-
-    return None
+    return {"images": [base64.b64encode(raw).decode()], "_dyva_model": ckpt,
+            "_dyva_seed": seed, "parameters": "{}",
+            "info": json.dumps({"prompt": body})}
 
 
 COMFYUI_KEY = "__comfyui__"
@@ -4635,6 +4739,18 @@ def load_node_classifier():
     return compiled
 
 
+def _tts_voices_of(node_class, info, fam):
+    """The voice options a node advertises, for the stored survey."""
+    voice_field = fam.get("voice")
+    if not voice_field:
+        return []
+    required = (((info.get(node_class) or {}).get("input") or {}).get("required")) or {}
+    entry = required.get(voice_field)
+    if isinstance(entry, list) and entry and isinstance(entry[0], list):
+        return [v for v in entry[0] if isinstance(v, str)]
+    return []
+
+
 def _tts_node_family(node_class):
     """Return the surveyed TTS-family spec whose name-pattern matches a node
     class name, or None if the node isn't a recognized (popular) TTS node."""
@@ -4648,8 +4764,8 @@ _TTS_NODE_CACHE = {}
 _TTS_NODE_CACHE_TTL = 300
 # Full /object_info per host, shared by node detection and workflow building so
 # a single speech request doesn't fetch the (large) schema three times.
-_TTS_INFO_CACHE = {}
-_TTS_INFO_CACHE_TTL = 300
+_COMFY_INFO_CACHE = {}
+_COMFY_INFO_TTL = 300
 
 _TTS_MIME = {
     ".flac": "audio/flac",
@@ -4661,17 +4777,22 @@ _TTS_MIME = {
 }
 
 
-class _TtsError(Exception):
-    pass
+# TTS speaks the shared pipeline's error vocabulary; the aliases keep the
+# existing except-clauses readable at the call sites.
+_TtsError = ComfyError
+_TtsUnsuitable = ComfyUnsuitable
 
 
-async def _tts_object_info(session, host):
+async def comfy_object_info(session, host):
     """Fetch (and briefly cache) a ComfyUI host's full /object_info.
+
+    Shared by every ComfyUI capability — the payload runs to several megabytes,
+    so it is fetched once per host and reused.
 
     Raises _TtsError when the host can't be reached or answers badly, so
     callers can report *that* instead of mislabeling it "no known TTS node"."""
-    hit = _TTS_INFO_CACHE.get(host)
-    if hit and time.time() - hit[1] < _TTS_INFO_CACHE_TTL:
+    hit = _COMFY_INFO_CACHE.get(host)
+    if hit and time.time() - hit[1] < _COMFY_INFO_TTL:
         return hit[0]
     try:
         r = await session.get(
@@ -4693,7 +4814,7 @@ async def _tts_object_info(session, host):
         raise _TtsError(str(e) or type(e).__name__)
     if not isinstance(info, dict):
         raise _TtsError("object_info: unexpected response")
-    _TTS_INFO_CACHE[host] = (info, time.time())
+    _COMFY_INFO_CACHE[host] = (info, time.time())
     return info
 
 
@@ -4801,8 +4922,14 @@ async def _tts_node_for(session, host, info=None):
     hit = _TTS_NODE_CACHE.get(host)
     if hit and time.time() - hit[1] < _TTS_NODE_CACHE_TTL:
         return hit[0]
+    # A survey from a previous run (or a previous process) is as good as a
+    # probe and costs nothing — /object_info is megabytes.
+    stored = node_survey_for(host, TTS_KEY)
+    if stored is not None and info is None:
+        _TTS_NODE_CACHE[host] = (stored["spec"], time.time())
+        return stored["spec"]
     if info is None:
-        info = await _tts_object_info(session, host)
+        info = await comfy_object_info(session, host)
 
     # family priority wins over host node order (QwenTTS before Generic TTS)
     for fam in load_node_classifier():
@@ -4818,8 +4945,10 @@ async def _tts_node_for(session, host, info=None):
                 "lang": fam["lang"],
             }
             _TTS_NODE_CACHE[host] = (spec, time.time())
+            save_node_survey(host, TTS_KEY, spec, _tts_voices_of(node_class, info, fam))
             return spec
     _TTS_NODE_CACHE[host] = (None, time.time())
+    save_node_survey(host, TTS_KEY, None)
     return None
 
 
@@ -4948,90 +5077,44 @@ def _comfy_prompt_error(body, graph=None):
     return "; ".join(parts)[:300]
 
 
-async def _tts_comfyui(session, host, input_text, voice=None):
-    import uuid as uuid_mod
+async def _tts_submit(session, host, input_text, voice=None):
+    """Get a job onto a host. Returns (prompt_id, node_class).
 
+    This is where host selection ends. A returned prompt_id means the host
+    accepted the work — that is what "this host is good" means for a ComfyUI
+    media capability, because the failures that actually happen (offline,
+    repurposed, missing nodes) all surface here, in about a second. What the
+    render then does is a fact about the render, not about the host we picked.
+    """
     spec = await _tts_node_for(session, host)
     if not spec:
-        raise _TtsError("no known TTS node")
-    host_info = await _tts_object_info(session, host)
+        raise _TtsUnsuitable("no known TTS node")
+    host_info = await comfy_object_info(session, host)
     if spec["class"] not in host_info:
-        raise _TtsError(f"node {spec['class']} vanished from object_info")
+        raise _TtsUnsuitable(f"node {spec['class']} vanished from object_info")
 
     schema = {spec["class"]: host_info[spec["class"]]}
     workflow = _tts_workflow(spec, schema, input_text, voice, host_info)
-    client_id = str(uuid_mod.uuid4())
-    try:
-        prompt_resp = await session.post(
-            _host_url(host, "/prompt"),
-            json={"prompt": workflow, "client_id": client_id},
-            timeout=aiohttp.ClientTimeout(total=30),
-        )
-        if prompt_resp.status != 200:
-            body = await prompt_resp.text()
-            await prompt_resp.release()
-            raise _TtsError(f"prompt rejected: {_comfy_prompt_error(body, workflow)}")
-        prompt_data = await prompt_resp.json(content_type=None)
-        await prompt_resp.release()
-    except _TtsError:
-        raise
-    except Exception as e:
-        raise _TtsError(str(e))
-    prompt_id = prompt_data.get("prompt_id")
-    if not prompt_id:
-        raise _TtsError("no prompt_id")
+    return await comfy_submit(session, host, workflow), spec["class"]
 
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        await asyncio.sleep(2)
-        try:
-            hist_resp = await session.get(
-                _host_url(host, f"/history/{prompt_id}"),
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-            if hist_resp.status != 200:
-                await hist_resp.release()
-                continue
-            hist = await hist_resp.json(content_type=None)
-            await hist_resp.release()
-        except Exception:
-            continue
-        entry = hist.get(prompt_id)
-        if not entry:
-            continue
-        audio_files = []
-        for out in (entry.get("outputs") or {}).values():
-            audio_files.extend(out.get("audio") or [])
-        if audio_files:
-            af = audio_files[0]
-            try:
-                view_resp = await session.get(
-                    _host_url(host, "/view"),
-                    params={
-                        "filename": af.get("filename"),
-                        "subfolder": af.get("subfolder", ""),
-                        "type": af.get("type", "output"),
-                    },
-                    timeout=aiohttp.ClientTimeout(total=60),
-                )
-                if view_resp.status != 200:
-                    await view_resp.release()
-                    raise _TtsError(f"view HTTP {view_resp.status}")
-                raw = await view_resp.read()
-                await view_resp.release()
-            except _TtsError:
-                raise
-            except Exception as e:
-                raise _TtsError(str(e))
-            return raw, af.get("filename") or "tts.flac", spec["class"]
-        status = entry.get("status") or {}
-        if status.get("status_str") == "error":
-            msgs = [str(m) for m in (status.get("messages") or [])]
-            detail = "; ".join(msgs)[:200]
-            raise _TtsError(f"execution error{': ' + detail if detail else ''}")
-        if status.get("completed"):
-            break
-    raise _TtsError("timeout waiting for audio")
+
+# UnifiedTTSTextNode chunks long text at 400 chars and renders the chunks
+# *sequentially* (batch_size defaults to 0). So render time scales with length,
+# and a fixed ceiling turns a long paragraph into "timeout waiting for audio"
+# on a host that was working perfectly well.
+TTS_CHUNK_CHARS = 400
+TTS_SECONDS_PER_CHUNK = 60
+TTS_MAX_CHARS = 4000
+
+
+def _tts_render_budget(text):
+    chunks = max(1, math.ceil(len(text or "") / TTS_CHUNK_CHARS))
+    return min(900, 60 + chunks * TTS_SECONDS_PER_CHUNK)
+
+
+async def _tts_collect(session, host, prompt_id, timeout=180):
+    return await comfy_collect(session, host, prompt_id, COMFY_AUDIO,
+                               timeout=timeout, poll=2, view_timeout=60)
 
 
 def _find_tts_hosts(target_host=None):
@@ -5060,13 +5143,23 @@ def _find_tts_hosts(target_host=None):
     last = get_last(TTS_KEY)
     last_host = last[0] if last and last[0] else None
     now = time.time()
+    # The persisted survey outlives the process, so after one sweep the handful
+    # of hosts that actually have a TTS node are known from a cold start
+    # instead of being rediscovered by probing hundreds of hosts.
+    survey = load_node_survey(TTS_KEY)
 
     def rank(h):
         hit = _TTS_NODE_CACHE.get(h)
         fresh = bool(hit) and now - hit[1] < _TTS_NODE_CACHE_TTL
-        known_nodeless = fresh and hit[0] is None
+        node = hit[0] if fresh else None
+        known = fresh
+        if not known:
+            row = survey.get(h)
+            if row and now - (row.get("checked") or 0) <= NODE_SURVEY_TTL:
+                known, node = True, row.get("spec")
+        known_nodeless = known and node is None
         tier = capability_tier(h, TTS_KEY, marks, last_host, extra_bad=known_nodeless)
-        if fresh and hit[0] is not None:
+        if known and node is not None:
             within = 0
         elif _host_has_class(h, _AUDIO_CLASSES):
             within = 1
@@ -5358,8 +5451,6 @@ async def _submit_video_workflow(session, host, model_path, job):
     the ComfyUI prompt_id, or None on submission failure. The builder is chosen
     by the model's family (wan/ltx/mochi); unrecognized families fail cleanly
     rather than sending a garbage graph."""
-    import uuid as uuid_mod
-
     params = job.get("params") or {}
     steps = int(params.get("steps", 20))
     cfg = float(params.get("cfg", 6.0))
@@ -5381,68 +5472,21 @@ async def _submit_video_workflow(session, host, model_path, job):
     else:
         raise _VideoError(f"unsupported video model family for {model_path!r}")
 
-    client_id = str(uuid_mod.uuid4())
     try:
-        p = await session.post(
-            _host_url(host, "/prompt"),
-            json={"prompt": workflow, "client_id": client_id},
-            timeout=aiohttp.ClientTimeout(total=30),
-        )
-        if p.status != 200:
-            await p.release()
-            return None
-        data = await p.json()
-        await p.release()
-        return data.get("prompt_id")
-    except Exception:
+        return await comfy_submit(session, host, workflow)
+    except ComfyError as e:
+        log.warning(f"video: {host}: {e}")
         return None
 
 
 async def _poll_video_result(session, host, prompt_id, job):
     """Poll ComfyUI /history/{prompt_id} until the video is saved; return
     (bytes, filename)."""
-    deadline = time.time() + 600
-    while time.time() < deadline:
-        await asyncio.sleep(3)
-        try:
-            r = await session.get(
-                _host_url(host, f"/history/{prompt_id}"),
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-            if r.status != 200:
-                await r.release()
-                continue
-            hist = await r.json()
-            await r.release()
-        except Exception:
-            continue
-        entry = hist.get(prompt_id)
-        if not entry:
-            continue
-        status = entry.get("status", {})
-        if status.get("status_str") == "error":
-            msgs = [str(m) for m in (status.get("messages") or [])]
-            raise _VideoError("execution error" + (": " + "; ".join(msgs)[:200] if msgs else ""))
-        if status.get("completed"):
-            outputs = entry.get("outputs", {})
-            for node_id, out in outputs.items():
-                vids = out.get("gifs") or out.get("videos") or []
-                for vid in vids:
-                    try:
-                        vr = await session.get(
-                            _host_url(host, "/view"),
-                            params={"filename": vid["filename"], "subfolder": vid.get("subfolder", ""), "type": vid.get("type", "output")},
-                            timeout=aiohttp.ClientTimeout(total=60),
-                        )
-                        if vr.status == 200:
-                            raw = await vr.read()
-                            await vr.release()
-                            return raw, vid["filename"]
-                        await vr.release()
-                    except Exception:
-                        pass
-            raise _VideoError("saved video not found in outputs")
-    raise _VideoError("timeout waiting for video")
+    try:
+        return await comfy_collect(session, host, prompt_id, COMFY_VIDEO,
+                                   timeout=600, poll=3, view_timeout=60)
+    except ComfyError as e:
+        raise _VideoError(str(e))
 
 
 async def handle_videos_post(request):
@@ -5617,6 +5661,52 @@ async def handle_videos_content(request):
     return web.Response(body=body, content_type=content_type)
 
 
+def _save_audio_clip(raw, filename):
+    """Store a generated clip and return the name it is served under."""
+    try:
+        os.makedirs(AUDIO_DIR, exist_ok=True)
+        ext = os.path.splitext(filename or "")[1].lower() or ".flac"
+        if ext not in _TTS_MIME:
+            ext = ".flac"
+        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}{ext}"
+        with open(os.path.join(AUDIO_DIR, name), "wb") as f:
+            f.write(raw)
+        clips = sorted(os.listdir(AUDIO_DIR))
+        for old in clips[:-AUDIO_KEEP]:
+            try:
+                os.remove(os.path.join(AUDIO_DIR, old))
+            except OSError:
+                pass
+        return name
+    except Exception as e:
+        log.warning(f"tts: could not save clip: {e}")
+        return None
+
+
+async def handle_audio_clip(request):
+    """
+    Fetch a generated speech clip
+    ---
+    tags: [Audio]
+    summary: GET /v1/audio/clips/{name} — a clip produced by /v1/audio/speech
+    responses:
+      '200':
+        description: Audio bytes
+      '404':
+        description: No such clip
+    """
+    name = os.path.basename(request.match_info.get("name", ""))
+    path = os.path.join(AUDIO_DIR, name)
+    if not name or not os.path.isfile(path):
+        return web.json_response({"error": "no such clip"}, status=404)
+    with open(path, "rb") as f:
+        body = f.read()
+    ext = os.path.splitext(name)[1].lower()
+    return web.Response(body=body,
+                        content_type=_TTS_MIME.get(ext, "application/octet-stream"),
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def handle_tts_speech(request):
     """
     OpenAI-compatible text-to-speech
@@ -5659,6 +5749,14 @@ async def handle_tts_speech(request):
     input_text = str(body.get("input") or "").strip()
     if not input_text:
         return web.json_response({"error": "'input' is required"}, status=400)
+    if len(input_text) > TTS_MAX_CHARS:
+        # Fail fast and legibly rather than after minutes of chunked rendering.
+        return web.json_response(
+            {"error": f"'input' is {len(input_text)} characters; the limit is "
+                      f"{TTS_MAX_CHARS}. Speech is rendered in {TTS_CHUNK_CHARS}-character "
+                      f"chunks, one after another, so long passages take minutes. "
+                      f"Send a shorter passage."},
+            status=400)
     voice = body.get("voice")
     if not isinstance(voice, str) or not voice.strip():
         voice = None
@@ -5679,43 +5777,65 @@ async def handle_tts_speech(request):
     # list, first success wins, and the same activity vocabulary
     # (trying/failure/success naming the host) so the feed reads identically
     # whether the request was for tokens or for audio.
+    # The race only has to get the job accepted somewhere.
     async def attempt(host, wid, done):
         await broadcast_activity(host, TTS_KEY, "trying",
             f"trying: {host} for {label}", wid=wid)
         start = time.time()
         try:
-            raw, filename, node = await _tts_comfyui(session, host, input_text, voice)
+            prompt_id, node = await _tts_submit(session, host, input_text, voice)
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
             dur = time.time() - start
-            add_bad(host, TTS_KEY)
             errors_list.append(f"{host}: {err}")
             await broadcast_activity(host, TTS_KEY, "failed",
                 f"failure: {host} for {label} - {err}", duration=dur, wid=wid)
-            return None
+            if isinstance(e, _TtsUnsuitable):
+                return unsuitable(err)
+            if isinstance(e, asyncio.TimeoutError):
+                return timed_out(err)
+            if isinstance(e, (aiohttp.ClientError, OSError)):
+                return unreachable_host(err)
+            return failed(err)
         dur = time.time() - start
-        add_good(host, TTS_KEY)
-        set_last(TTS_KEY, host, "")
         await broadcast_activity(host, TTS_KEY, "connected",
             f"success: {host} for {label}", duration=dur, wid=wid)
-        return host, raw, filename, node
+        return accepted((host, prompt_id, node))
 
-    result, stopped, tried = await _race_hosts(hosts, attempt, TTS_KEY)
+    result, stopped, tried, tally = await _race_hosts(hosts, attempt, TTS_KEY)
 
     if result:
-        host, raw, filename, node = result
+        host, prompt_id, node = result
+        # Rendering happens after the race: the host is already chosen and
+        # already marked good, so a slow render can't un-choose it.
+        try:
+            raw, filename = await _tts_collect(
+                session, host, prompt_id, timeout=_tts_render_budget(input_text))
+        except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            err = str(e) or type(e).__name__
+            log.warning(f"tts: {host}: accepted the job then failed to render: {err}")
+            await broadcast_activity(host, TTS_KEY, "failed",
+                f"failure: {host} for {label} - render: {err}")
+            return web.json_response(
+                {"error": f"tts: {host} accepted the job but did not render it: {err}"},
+                status=502)
         ext = os.path.splitext(filename)[1].lower()
         # Provenance travels with the audio: which host spoke and which node did
         # it. The body is raw bytes, so headers are the only place to put it —
         # and they have to be exposed explicitly to be readable cross-origin.
+        clip = _save_audio_clip(raw, filename)
+        headers = {
+            "X-Dyva-Host": host,
+            "X-Dyva-Node": node,
+            "Access-Control-Expose-Headers": "X-Dyva-Host, X-Dyva-Node, X-Dyva-File",
+        }
+        if clip:
+            # a stable URL, so a chat transcript can keep the audio
+            headers["X-Dyva-File"] = clip
         return web.Response(
             body=raw,
             content_type=_TTS_MIME.get(ext, "application/octet-stream"),
-            headers={
-                "X-Dyva-Host": host,
-                "X-Dyva-Node": node,
-                "Access-Control-Expose-Headers": "X-Dyva-Host, X-Dyva-Node",
-            })
+            headers=headers)
     if stopped:
         return web.json_response({"error": "tts stopped"}, status=499)
 
@@ -5724,8 +5844,10 @@ async def handle_tts_speech(request):
     # N identical lines are no more informative than one with a count.
     reasons = collections.Counter(e.split(": ", 1)[1] if ": " in e else e for e in errors_list)
     detail = "; ".join(f"{c}x {r}" for r, c in reasons.most_common()) or "no hosts tried"
+    verdicts = ", ".join(f"{c} {v}" for v, c in tally.most_common())
     return web.json_response(
-        {"error": f"tts failed on {tried} host{'' if tried == 1 else 's'}: {detail}"},
+        {"error": f"tts failed on {tried} host{'' if tried == 1 else 's'} "
+                  f"({verdicts}): {detail}"},
         status=502)
 
 
@@ -5734,13 +5856,24 @@ async def handle_audio_voices(request):
     List available TTS voices/nodes across hosts
     ---
     tags: [Audio]
-    summary: GET /v1/audio/voices — probe discovered ComfyUI hosts for TTS nodes and their voices
+    summary: GET /v1/audio/voices — TTS nodes and voices per host, from the stored survey
+    description: |
+      Answers from the persisted node survey in `host-status.db`, so it returns
+      immediately instead of pulling a multi-megabyte `/object_info` from every
+      candidate host. Hosts that have never been surveyed are probed in the
+      background and appear on a later call; `?refresh=1` waits for that sweep
+      instead of returning what is already known.
     parameters:
       - in: query
         name: host
         schema:
           type: string
         description: Target a specific ComfyUI host (ip:port)
+      - in: query
+        name: refresh
+        schema:
+          type: boolean
+        description: Re-probe now and wait, instead of answering from the survey
     responses:
       '200':
         description: Voice catalogue
@@ -5756,45 +5889,575 @@ async def handle_audio_voices(request):
     if not hosts:
         return web.json_response({"error": "no ComfyUI hosts available"}, status=503)
 
-    async def probe(host):
-        found = []
-        try:
-            info = await _tts_object_info(session, host)
-        except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError):
-            return host, found
-        seen = set()
-        for fam in load_node_classifier():
-            for node_class in info:
-                if node_class in seen:
-                    continue
-                if not any(r.search(node_class) for r in fam["regs"]):
-                    continue
-                seen.add(node_class)
-                required = ((info[node_class].get("input") or {}).get("required")) or {}
-                voices = []
-                voice_field = fam["voice"]
-                entry = required.get(voice_field) if voice_field else None
-                if isinstance(entry, list) and isinstance(entry[0], list):
-                    voices = [v for v in entry[0] if isinstance(v, str)]
-                found.append({"node": node_class, "voices": voices})
-        return host, found
+    force = request.query.get("refresh") in ("1", "true", "yes")
 
-    results = await asyncio.gather(*(probe(h) for h in hosts), return_exceptions=True)
-    voices, details = [], []
-    seen = set()
-    for res in results:
-        if not isinstance(res, tuple):
+    async def probe(host):
+        """Survey one host. _tts_node_for writes the result through to
+        host_nodes, so this records the node the speech path would actually
+        pick — the voice list and the routing can't disagree."""
+        try:
+            info = await comfy_object_info(session, host)
+        except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError):
+            return
+        await _tts_node_for(session, host, info)
+
+    survey = load_node_survey(TTS_KEY)
+    stale = [h for h in hosts
+             if force or h not in survey
+             or time.time() - (survey[h].get("checked") or 0) > NODE_SURVEY_TTL]
+
+    if force or (stale and not survey):
+        # Nothing useful to show yet (or an explicit refresh) — wait for it.
+        await asyncio.gather(*(probe(h) for h in stale), return_exceptions=True)
+        survey = load_node_survey(TTS_KEY)
+    elif stale:
+        # Answer from what we know and fill the gaps behind the response, so the
+        # voice box populates immediately and improves on the next load.
+        async def _fill():
+            for h in stale:
+                try:
+                    await probe(h)
+                except Exception:
+                    pass
+        asyncio.create_task(_fill())
+
+    voices, details, seen = [], [], set()
+    for host in hosts:
+        row = survey.get(host)
+        if not row or not row.get("node"):
             continue
-        host, nodes = res
-        if not nodes:
+        details.append({"host": host,
+                        "nodes": [{"node": row["node"], "voices": row.get("voices") or []}],
+                        "checked": row.get("checked")})
+        for v in row.get("voices") or []:
+            if v not in seen:
+                seen.add(v)
+                voices.append(v)
+    return web.json_response({"voices": voices, "hosts": details,
+                              "surveying": len(stale) if not force else 0})
+
+
+# ---- Image editing ------------------------------------------------------
+# Distinct from txt2img: an edit model takes a prompt plus zero or more
+# reference images ("put the feather cap on the dog", dog.jpg, cap.jpg).
+# Two node shapes cover what is actually deployed:
+#   encode    - Qwen-Image-Edit: images go straight into
+#               TextEncodeQwenImageEditPlus(clip, prompt, vae, image1..3)
+#   reference - Flux Kontext: no multi-image input node, so each reference is
+#               LoadImage -> FluxKontextImageScale -> VAEEncode -> ReferenceLatent,
+#               chained through the conditioning.
+EDIT_KEY = "__edit__"
+_edit_classifier_cache = None
+
+
+def load_edit_families():
+    global _edit_classifier_cache
+    if _edit_classifier_cache is not None:
+        return _edit_classifier_cache
+    out = []
+    try:
+        with open(NODE_CLASSIFIER_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        for spec in (raw.get("edit") or []):
+            fam = dict(spec)
+            fam["regs"] = [re.compile(x) for x in (spec.get("patterns") or [])]
+            out.append(fam)
+    except Exception as e:
+        log.warning(f"node-classifier: failed to load edit families: {e}")
+    _edit_classifier_cache = out
+    return out
+
+
+async def comfy_upload_image(session, host, data, filename):
+    """Put an image on a host so a graph can reference it.
+
+    ComfyUI's LoadImage takes a filename from the host's own input directory —
+    there is no way to hand a graph raw pixels — so every reference image must
+    be uploaded first. Returns the name LoadImage should use.
+    """
+    form = aiohttp.FormData()
+    form.add_field("image", data, filename=filename,
+                   content_type="application/octet-stream")
+    form.add_field("type", "input")
+    form.add_field("overwrite", "true")
+    try:
+        r = await session.post(_host_url(host, "/upload/image"), data=form,
+                               timeout=aiohttp.ClientTimeout(total=60))
+        body = await r.text()
+        status = r.status
+        await r.release()
+    except Exception as e:
+        raise ComfyError(f"upload failed: {e or type(e).__name__}")
+    if status != 200:
+        raise ComfyError(f"upload HTTP {status}: {body[:120]}")
+    try:
+        got = json.loads(body)
+    except Exception:
+        raise ComfyError("upload: unparseable response")
+    name = got.get("name")
+    if not name:
+        raise ComfyError("upload: no name in response")
+    sub = got.get("subfolder") or ""
+    return f"{sub}/{name}" if sub else name
+
+
+def _enum_options(info, node, field):
+    entry = (((info.get(node) or {}).get("input") or {}).get("required") or {}).get(field)
+    if isinstance(entry, list) and entry and isinstance(entry[0], list):
+        return [x for x in entry[0] if isinstance(x, str)]
+    return []
+
+
+def _match_rank(needle):
+    """Order candidates so the closest name to what the user typed wins:
+    an exact file-stem match, then a prefix, then anything containing it,
+    shortest first (a bare model beats a lora or a long variant)."""
+    n = (needle or "").lower()
+
+    def key(option):
+        base = option.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        stem = os.path.splitext(base)[0]
+        if not n:
+            return (3, len(base), base)
+        if stem == n:
+            return (0, len(base), base)
+        if base.startswith(n) or stem.startswith(n):
+            return (1, len(base), base)
+        return (2, len(base), base)
+    return key
+
+
+def _pick(options, *patterns):
+    """First option matching any pattern, in pattern order."""
+    for pat in patterns:
+        if not pat:
             continue
-        details.append({"host": host, "nodes": nodes})
-        for n in nodes:
-            for v in n["voices"]:
-                if v not in seen:
-                    seen.add(v)
-                    voices.append(v)
-    return web.json_response({"voices": voices, "hosts": details})
+        rx = re.compile(pat)
+        for o in options:
+            if rx.search(o):
+                return o
+    return None
+
+
+def _edit_plan(info, model_filter=None):
+    """Decide how to drive an edit on this host, or None if it can't.
+
+    Everything is resolved against the host's live loader enums — those are the
+    authoritative list of what is on disk — so a plan is only returned when
+    every file the graph needs actually exists there.
+    """
+    ckpts = _enum_options(info, "CheckpointLoaderSimple", "ckpt_name")
+    unets = _enum_options(info, "UNETLoader", "unet_name")
+    clips = _enum_options(info, "CLIPLoader", "clip_name")
+    vaes = _enum_options(info, "VAELoader", "vae_name")
+    clip_types = _enum_options(info, "CLIPLoader", "type")
+    dual_types = _enum_options(info, "DualCLIPLoader", "type")
+
+    for fam in load_edit_families():
+        encode = next((k for k in info if any(r.search(k) for r in fam["regs"])), None)
+        if not encode:
+            continue
+        for need in ("KSampler", "VAEDecode", "SaveImage", "LoadImage"):
+            if need not in info:
+                break
+        else:
+            # What the user typed *narrows within* a family; it never overrides
+            # it. "flux" must not pick a Flux checkpoint and then drive it with
+            # Qwen's encoder, CLIP and VAE — so a candidate has to satisfy both
+            # the family's own pattern and the user's text. Matching is
+            # match_model(), the same partial/glob rule the rest of dyva uses,
+            # so "flux" finds every Flux variant on the host.
+            fam_rx = re.compile(fam["model"]) if fam.get("model") else None
+
+            def candidates(options):
+                out = [o for o in options if not fam_rx or fam_rx.search(o)]
+                if model_filter:
+                    out = [o for o in out if match_model(o, model_filter)]
+                return sorted(out, key=_match_rank(model_filter))
+
+            unet = next(iter(candidates(unets)), None)
+            ckpt = next(iter(candidates(ckpts)), None)
+            if unet:
+                clip1 = _pick(clips, fam.get("clip"))
+                clip2 = _pick(clips, fam.get("clip2")) if fam.get("clip2") else None
+                vae = _pick(vaes, fam.get("vae")) or (vaes[0] if vaes else None)
+                if not clip1 or not vae:
+                    continue
+                if fam.get("clip2"):
+                    if not clip2 or fam.get("clip_type") not in dual_types:
+                        continue
+                elif fam.get("clip_type") not in clip_types:
+                    continue
+                loader = {"kind": "split", "unet": unet, "clip": clip1,
+                          "clip2": clip2, "vae": vae,
+                          "clip_type": fam.get("clip_type")}
+            elif ckpt:
+                loader = {"kind": "checkpoint", "ckpt": ckpt}
+            else:
+                continue
+            return {"family": fam, "encode": encode, "loader": loader,
+                    "model": unet or ckpt}
+    return None
+
+
+def _edit_workflow(plan, prompt, image_names, params=None):
+    """Build the edit graph. `image_names` are already uploaded to the host."""
+    params = params or {}
+    fam = plan["family"]
+    loader = plan["loader"]
+    g = {}
+
+    if loader["kind"] == "checkpoint":
+        g["1"] = {"class_type": "CheckpointLoaderSimple",
+                  "inputs": {"ckpt_name": loader["ckpt"]}}
+        MODEL, CLIP, VAE = ["1", 0], ["1", 1], ["1", 2]
+    else:
+        g["1"] = {"class_type": "UNETLoader",
+                  "inputs": {"unet_name": loader["unet"], "weight_dtype": "default"}}
+        if loader.get("clip2"):
+            g["2"] = {"class_type": "DualCLIPLoader",
+                      "inputs": {"clip_name1": loader["clip"],
+                                 "clip_name2": loader["clip2"],
+                                 "type": loader["clip_type"]}}
+        else:
+            g["2"] = {"class_type": "CLIPLoader",
+                      "inputs": {"clip_name": loader["clip"],
+                                 "type": loader["clip_type"]}}
+        g["3"] = {"class_type": "VAELoader", "inputs": {"vae_name": loader["vae"]}}
+        MODEL, CLIP, VAE = ["1", 0], ["2", 0], ["3", 0]
+
+    # LoadImage per reference
+    img_nodes = []
+    for i, name in enumerate(image_names):
+        nid = f"10{i}"
+        g[nid] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        img_nodes.append([nid, 0])
+
+    width = int(params.get("width", 1024))
+    height = int(params.get("height", 1024))
+    steps = int(params.get("steps", fam.get("steps", 20)))
+    cfg = float(params.get("cfg_scale", fam.get("cfg", 2.5)))
+    seed = int(params.get("seed", -1))
+    if seed == -1:
+        seed = random.randint(0, 2**31 - 1)
+    sampler = params.get("sampler_name", "euler")
+
+    if fam.get("style") == "encode":
+        slots = fam.get("images") or []
+        pos_in = {"clip": CLIP, "prompt": prompt, "vae": VAE}
+        for slot, ref in zip(slots, img_nodes):
+            pos_in[slot] = ref
+        g["200"] = {"class_type": plan["encode"], "inputs": pos_in}
+        g["201"] = {"class_type": plan["encode"],
+                    "inputs": {"clip": CLIP, "prompt": "", "vae": VAE}}
+        POS, NEG = ["200", 0], ["201", 0]
+        scaled_latent = None
+    else:
+        # reference style: chain a ReferenceLatent per scaled, encoded image
+        g["200"] = {"class_type": "CLIPTextEncode",
+                    "inputs": {"clip": CLIP, "text": prompt}}
+        g["201"] = {"class_type": "CLIPTextEncode",
+                    "inputs": {"clip": CLIP, "text": ""}}
+        cond = ["200", 0]
+        scaled_latent = None
+        for i, ref in enumerate(img_nodes):
+            sid, eid, rid = f"30{i}", f"31{i}", f"32{i}"
+            g[sid] = {"class_type": fam.get("scale", "FluxKontextImageScale"),
+                      "inputs": {"image": ref}}
+            g[eid] = {"class_type": "VAEEncode",
+                      "inputs": {"pixels": [sid, 0], "vae": VAE}}
+            g[rid] = {"class_type": plan["encode"],
+                      "inputs": {"conditioning": cond, "latent": [eid, 0]}}
+            cond = [rid, 0]
+            if scaled_latent is None:
+                scaled_latent = [eid, 0]
+        gnode = fam.get("guidance_node")
+        if gnode:
+            g["400"] = {"class_type": gnode,
+                        "inputs": {"conditioning": cond,
+                                   "guidance": float(fam.get("guidance", 2.5))}}
+            cond = ["400", 0]
+        POS, NEG = cond, ["201", 0]
+
+    # Where the sampler starts, and therefore the output's shape.
+    #   match_source (default): start from the first reference, so the result
+    #     keeps its proportions. Nobody should have to look up their cat's
+    #     aspect ratio to avoid a stretched cat.
+    #   otherwise: an empty latent at the requested width/height.
+    match_source = params.get("match_source", True)
+    if isinstance(match_source, str):
+        match_source = match_source.lower() not in ("0", "false", "no", "")
+    if img_nodes and match_source:
+        if scaled_latent is not None:
+            # already encoded for the reference chain — reuse it so the latent
+            # and the conditioning describe the same pixels
+            LATENT = scaled_latent
+        else:
+            g["500"] = {"class_type": "VAEEncode",
+                        "inputs": {"pixels": img_nodes[0], "vae": VAE}}
+            LATENT = ["500", 0]
+    else:
+        g["500"] = {"class_type": "EmptySD3LatentImage",
+                    "inputs": {"width": width, "height": height, "batch_size": 1}}
+        LATENT = ["500", 0]
+
+    g["600"] = {"class_type": "KSampler", "inputs": {
+        "model": MODEL, "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": sampler, "scheduler": "simple",
+        "positive": POS, "negative": NEG, "latent_image": LATENT,
+        "denoise": float(params.get("denoise", 1.0))}}
+    g["700"] = {"class_type": "VAEDecode",
+                "inputs": {"samples": ["600", 0], "vae": VAE}}
+    g["800"] = {"class_type": "SaveImage",
+                "inputs": {"images": ["700", 0], "filename_prefix": "dyva/edit"}}
+    return g
+
+
+def _host_edit_models(host, model_filter=None):
+    """A host's cached edit-class models, optionally narrowed to a query."""
+    out = []
+    for s in load_servers():
+        if s.get("server") != host:
+            continue
+        for m in s.get("models") or []:
+            if classify_model(m) != "edit":
+                continue
+            if model_filter and not match_model(m, model_filter):
+                continue
+            out.append(m)
+    return out
+
+
+def _find_edit_hosts(target_host=None, model_filter=None):
+    """ComfyUI hosts that might run an edit model, best-first — same tiering as
+    everything else, keyed on __edit__.
+
+    When a model is named, hosts whose cached model list actually contains a
+    match come first. Without that, asking for "flux" would race whichever
+    hosts happened to rank highest, most of which don't have one, and every
+    attempt would come back unsuitable before reaching a host that does."""
+    if target_host:
+        return [target_host] if any(x.get("service") == "comfyui"
+                                    for x in load_servers()
+                                    if x.get("server") == target_host) else []
+    hosts = [x.get("server") for x in load_servers()
+             if x.get("service") == "comfyui" and x.get("server")]
+    marks = load_marks()
+    last = get_last(EDIT_KEY)
+    last_host = last[0] if last and last[0] else None
+
+    def rank(h):
+        tier = capability_tier(h, EDIT_KEY, marks, last_host)
+        if model_filter:
+            has = 0 if _host_edit_models(h, model_filter) else 1
+        else:
+            has = 0 if _host_has_class(h, {"edit"}) else 1
+        return (has, tier) if model_filter else (tier, has)
+
+    hosts.sort(key=rank)
+    return hosts
+
+
+async def _edit_read_request(request):
+    """Accept OpenAI's image-edit shape in either transport.
+
+    multipart is what the OpenAI clients send (`image` repeated, or `image[]`);
+    JSON with base64 / data: URLs is what a browser fetch finds easier. Returns
+    (prompt, [(filename, bytes)], model, params).
+    """
+    images, params = [], {}
+    ctype = (request.headers.get("Content-Type") or "").lower()
+    if ctype.startswith("multipart/"):
+        reader = await request.multipart()
+        prompt = model = None
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            name = part.name or ""
+            if name in ("image", "image[]", "images", "images[]"):
+                data = await part.read(decode=False)
+                if data:
+                    images.append((part.filename or f"dyva-{len(images)}.png", data))
+            elif name == "prompt":
+                prompt = (await part.text()).strip()
+            elif name == "model":
+                model = (await part.text()).strip()
+            else:
+                params[name] = (await part.text()).strip()
+        return prompt, images, model, params
+
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    raw = body.get("image") or body.get("images") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    for i, item in enumerate(raw):
+        if not isinstance(item, str):
+            continue
+        blob = item.split(",", 1)[1] if item.startswith("data:") else item
+        try:
+            images.append((f"dyva-{i}.png", base64.b64decode(blob)))
+        except Exception:
+            raise ValueError(f"image[{i}] is not valid base64")
+    for k in ("width", "height", "steps", "cfg_scale", "seed", "sampler_name",
+              "denoise", "match_source"):
+        if k in body:
+            params[k] = body[k]
+    return prompt, images, str(body.get("model") or "").strip() or None, params
+
+
+async def handle_edit_models(request):
+    """
+    List available image-edit models
+    ---
+    tags: [Image]
+    summary: GET /v1/images/edit-models — edit-class models across discovered ComfyUI hosts
+    description: |
+      Edit models are a different population from SD checkpoints: these are the
+      files the model classifier tags `edit` (Qwen-Image-Edit, Flux Kontext,
+      Flux.2, Boogu, HunyuanImage, HiDream-O1/E1), served by ComfyUI hosts.
+      Sorted by how many hosts carry each, commonest first.
+    responses:
+      '200':
+        description: List of edit models
+    """
+    seen = {}
+    for s in load_servers():
+        if s.get("service") != "comfyui":
+            continue
+        host = s.get("server", "")
+        for m in s.get("models", []):
+            if classify_model(m) != "edit":
+                continue
+            # the file name is what a user types; the full path is host-specific
+            name = m.replace("\\", "/").rsplit("/", 1)[-1]
+            if not name:
+                continue
+            row = seen.setdefault(name, {"id": name, "hosts": [], "count": 0})
+            row["count"] += 1
+            if host and host not in row["hosts"]:
+                row["hosts"].append(host)
+    return web.json_response({
+        "object": "list",
+        "data": sorted(seen.values(), key=lambda x: (-x["count"], x["id"])),
+    })
+
+
+async def handle_image_edit(request):
+    """
+    Edit images with a prompt
+    ---
+    tags: [Image]
+    summary: POST /v1/images/edits — prompt-driven image editing on ComfyUI hosts
+    description: |
+      Takes a prompt and **zero or more** reference images and races the job
+      across discovered ComfyUI hosts running an edit model (Qwen-Image-Edit,
+      Flux Kontext, Flux.2, ...). Distinct from `/sdapi/v1/txt2img`, which is
+      classic text-to-image; with no images this still runs, as a plain
+      generation on the edit model.
+
+      Accepts OpenAI's `/v1/images/edits` multipart shape (`prompt`, repeated
+      `image`, `model`) or a JSON body with base64 / `data:` URLs in `image`.
+      Reference images are uploaded to the chosen host before the graph is
+      submitted, because ComfyUI's LoadImage reads from the host's own input
+      directory.
+    responses:
+      '200':
+        description: OpenAI image response — {"created": ..., "data": [{"b64_json": ...}]}
+      '400':
+        description: Missing prompt or unreadable image
+      '502':
+        description: All hosts failed
+      '503':
+        description: No available hosts
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        prompt, images, model_filter, params = await _edit_read_request(request)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception:
+        return web.json_response({"error": "unreadable request body"}, status=400)
+    if not prompt:
+        return web.json_response({"error": "'prompt' is required"}, status=400)
+
+    hosts = _find_edit_hosts(request.query.get("host"), model_filter)
+    if not hosts:
+        return web.json_response({"error": "no ComfyUI hosts available"}, status=503)
+
+    session = request.app["session"]
+    snippet = prompt[:60] + ("..." if len(prompt) > 60 else "")
+    label = f"edit: {snippet}"
+    errors = []
+
+    async def attempt(host, wid, done):
+        await broadcast_activity(host, EDIT_KEY, "trying",
+            f"trying: {host} for {label}", wid=wid)
+        t0 = time.time()
+        try:
+            info = await comfy_object_info(session, host)
+            plan = _edit_plan(info, model_filter)
+            if not plan:
+                raise ComfyUnsuitable("no edit model on this host"
+                                      + (f" matching {model_filter!r}" if model_filter else ""))
+            # Uploads are per-host, so they can only happen once a host is chosen.
+            names = [await comfy_upload_image(session, host, data, fn)
+                     for fn, data in images]
+            workflow = _edit_workflow(plan, prompt, names, params)
+            prompt_id = await comfy_submit(session, host, workflow)
+        except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            err = str(e) or type(e).__name__
+            errors.append(f"{host}: {err}")
+            await broadcast_activity(host, EDIT_KEY, "failed",
+                f"failure: {host} for {label} - {err}",
+                duration=time.time() - t0, wid=wid)
+            if isinstance(e, ComfyUnsuitable):
+                return unsuitable(err)
+            if isinstance(e, asyncio.TimeoutError):
+                return timed_out(err)
+            if isinstance(e, (aiohttp.ClientError, OSError)):
+                return unreachable_host(err)
+            return failed(err)
+        await broadcast_activity(host, EDIT_KEY, "connected",
+            f"success: {host} for {label}", duration=time.time() - t0, wid=wid)
+        return accepted((host, prompt_id, plan["model"]))
+
+    result, stopped, tried, tally = await _race_hosts(hosts, attempt, EDIT_KEY, label=label)
+
+    if result:
+        host, prompt_id, model_used = result
+        try:
+            raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
+                                           timeout=300, poll=2, view_timeout=60)
+        except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            err = str(e) or type(e).__name__
+            await broadcast_activity(host, EDIT_KEY, "failed",
+                f"failure: {host} for {label} - render: {err}")
+            return web.json_response(
+                {"error": f"edit: {host} accepted the job but did not render it: {err}"},
+                status=502)
+        b64 = base64.b64encode(raw).decode()
+        stored = {"images": [b64], "_dyva_model": model_used}
+        _save_image_history(stored, {"prompt": prompt}, host, model_used)
+        # The saved filenames matter to callers: an edited image becomes the
+        # source for the next incremental edit, and needs a stable URL.
+        return web.json_response({"created": int(time.time()),
+                                  "data": [{"b64_json": b64}],
+                                  "_dyva_files": stored.get("_dyva_files") or [],
+                                  "model": model_used, "host": host})
+    if stopped:
+        return web.json_response({"error": "edit stopped"}, status=499)
+
+    reasons = collections.Counter(e.split(": ", 1)[1] if ": " in e else e for e in errors)
+    detail = "; ".join(f"{c}x {r}" for r, c in reasons.most_common()) or "no hosts tried"
+    verdicts = ", ".join(f"{c} {v}" for v, c in tally.most_common())
+    return web.json_response(
+        {"error": f"edit failed on {tried} host{'' if tried == 1 else 's'} "
+                  f"({verdicts}): {detail}"}, status=502)
+
 
 
 # ---- Music generation (ACE-Step, MiniMax Music 3, and anything shaped like
@@ -6074,48 +6737,14 @@ def _music_job_new(job):
 
 async def _poll_comfy_audio(session, host, prompt_id, timeout=900):
     """Poll /history until the graph saves audio; return (bytes, filename)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        await asyncio.sleep(3)
-        try:
-            r = await session.get(_host_url(host, f"/history/{prompt_id}"),
-                                  timeout=aiohttp.ClientTimeout(total=30))
-            if r.status != 200:
-                await r.release()
-                continue
-            hist = await r.json()
-            await r.release()
-        except Exception:
-            continue
-        entry = hist.get(prompt_id)
-        if not entry:
-            continue
-        status = entry.get("status", {})
-        if status.get("status_str") == "error":
-            msgs = [str(m) for m in (status.get("messages") or [])]
-            raise _MusicError("execution error" + (": " + "; ".join(msgs)[:200] if msgs else ""))
-        if status.get("completed"):
-            for _nid, out in (entry.get("outputs") or {}).items():
-                for af in (out.get("audio") or []):
-                    try:
-                        ar = await session.get(
-                            _host_url(host, "/view"),
-                            params={"filename": af["filename"], "subfolder": af.get("subfolder", ""),
-                                    "type": af.get("type", "output")},
-                            timeout=aiohttp.ClientTimeout(total=120))
-                        if ar.status == 200:
-                            raw = await ar.read()
-                            await ar.release()
-                            return raw, af["filename"]
-                        await ar.release()
-                    except Exception:
-                        pass
-            raise _MusicError("the graph finished but saved no audio")
-    raise _MusicError("timeout waiting for audio")
+    try:
+        return await comfy_collect(session, host, prompt_id, COMFY_AUDIO,
+                                   timeout=timeout, poll=3, view_timeout=120)
+    except ComfyError as e:
+        raise _MusicError(str(e))
 
 
 async def _run_music_job(session, jid):
-    import uuid as uuid_mod
     job = _MUSIC_JOBS.get(jid)
     if not job:
         return
@@ -6150,14 +6779,12 @@ async def _run_music_job(session, jid):
             job["model"] = model_ref
             _music_job_save()
             await broadcast_activity(host, label, "trying", label)
-            r = await session.post(_host_url(host, "/prompt"),
-                                   json={"prompt": graph, "client_id": str(uuid_mod.uuid4())},
-                                   timeout=aiohttp.ClientTimeout(total=30))
-            body = await r.json(content_type=None)
-            await r.release()
-            pid = (body or {}).get("prompt_id")
-            if not pid:
-                errors.append(f"{host}: host rejected the graph")
+            try:
+                pid = await comfy_submit(session, host, graph)
+            except ComfyError as e:
+                # The reason the host said no is worth keeping — "rejected the
+                # graph" hid whether the nodes were missing or it was just down.
+                errors.append(f"{host}: {e}")
                 host = None
                 continue
             job["comfyui_prompt_id"] = pid
@@ -6468,7 +7095,11 @@ def make_app():
     swagger.add_get("/sdapi/v1/images/thumb/{name}", handle_image_thumb)
     swagger.add_get("/sdapi/v1/images/{name}", handle_image_file)
     swagger.add_post("/v1/audio/speech", handle_tts_speech)
+    # plain router: multipart bodies aren't swagger-validatable
+    app.router.add_post("/v1/images/edits", handle_image_edit)
+    swagger.add_get("/v1/images/edit-models", handle_edit_models)
     swagger.add_get("/v1/audio/voices", handle_audio_voices)
+    app.router.add_get("/v1/audio/clips/{name}", handle_audio_clip)
     swagger.add_get("/v1/music/models", handle_music_models)
     # Registered on the plain router (not swagger) so path params and the
     # sendBeacon POST body aren't subject to swagger request validation.

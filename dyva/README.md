@@ -109,9 +109,11 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `GET` | `/api/activity` | SSE stream of real-time proxy activity (also mirrored to stderr) |
 | `GET` | `/v1/models` | OpenAI-compatible model listing |
 | `POST` | `/sdapi/v1/txt2img` | Text-to-image (A1111 + ComfyUI fallback) |
+| `POST` | `/v1/images/edits` | OpenAI-compatible image editing (prompt + 0..N reference images) |
 | `GET` | `/sdapi/v1/sd-models` | List discovered SD models |
 | `POST` | `/v1/audio/speech` | OpenAI-compatible text-to-speech (ComfyUI TTS nodes) |
 | `GET` | `/v1/audio/voices` | List TTS voices/nodes across discovered hosts |
+| `GET` | `/v1/audio/clips/{name}` | Fetch a previously generated speech clip |
 | `GET` | `/sdapi/v1/images` | Metadata for recently generated images (last 100) |
 | `GET` | `/sdapi/v1/images/{name}` | Fetch a generated image file |
 | `*` | `/comfyui/{path}` | ComfyUI pass-through proxy |
@@ -202,6 +204,52 @@ Returns raw PNG bytes. All parameters are keyword-only:
 | `seed` | `-1` | Seed (-1 = random) |
 | `host` | `"127.0.0.1"` | dyva proxy host |
 | `port` | `11434` | dyva proxy port |
+
+### Image Editing
+
+Distinct from text-to-image: an **edit** model takes a prompt plus *zero or
+more* reference images — `{"put the feather cap on the dog", dog.jpg,
+cap.jpg}`. `POST /v1/images/edits` speaks OpenAI's image-edit shape and races
+it across ComfyUI hosts running an edit model. (img2img is not offered; nobody
+uses it any more.)
+
+```bash
+# multipart, as the OpenAI clients send it
+curl -X POST http://localhost:11434/v1/images/edits \
+  -F prompt="put the feather cap on the dog" \
+  -F image=@dog.jpg -F image=@feather-cap.jpg
+
+# or JSON with base64 / data: URLs
+curl -X POST http://localhost:11434/v1/images/edits \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "a dog in a feathered cap", "image": ["<base64>"]}'
+```
+
+Returns `{"created": ..., "data": [{"b64_json": ...}], "model": ..., "host": ...}`.
+
+**Reference images are uploaded to the chosen host first.** ComfyUI's
+`LoadImage` reads a filename from the host's own input directory — there is no
+way to hand a graph raw pixels — so each image goes to `POST /upload/image` on
+whichever host won the race, and the graph references what comes back.
+
+Two node shapes cover what is actually deployed, declared in
+[`node-classifier.json`](node-classifier.json) under `edit`:
+
+| family | how references get in |
+|---|---|
+| Qwen-Image-Edit | native multi-image: `TextEncodeQwenImageEditPlus(clip, prompt, vae, image1..3)` |
+| Flux Kontext / Flux.2 | no multi-image node — each reference is `LoadImage → FluxKontextImageScale → VAEEncode → ReferenceLatent`, chained through the conditioning, then `FluxGuidance` |
+
+Which model, CLIP and VAE to load is resolved against the host's **live loader
+enums** (`CheckpointLoaderSimple`, `UNETLoader`, `CLIPLoader`/`DualCLIPLoader`,
+`VAELoader`) — the authoritative list of what is on that host's disk — so a
+host is only accepted when every file the graph needs actually exists there.
+With no reference images the same graph runs as a plain generation on the edit
+model.
+
+The dashboard's Image tab has a **Generate / Edit** toggle; in Edit mode the
+negative prompt is hidden (edit models don't take one) and a drop zone accepts
+reference images.
 
 ### ComfyUI Pass-Through
 
@@ -294,14 +342,55 @@ These report what *actually* ran, which is not the same as the `model` you
 asked for — that's only a hint.
 
 `GET /v1/audio/voices` returns what TTS nodes exist per host and their voice
-options (`{"voices": [...], "hosts": [{"host": ..., "nodes": [...]}]}`), sharing
-the same cached `/object_info` as the speech path.
+options (`{"voices": [...], "hosts": [...], "surveying": n}`). It answers from
+a **stored survey**, not a live sweep: the `host_nodes` table in
+`host-status.db` records, per host, which TTS node was found and what voices it
+advertises. Probing that means pulling a multi-megabyte `/object_info` from
+every candidate, which is why the list used to take a while to appear.
 
-If speech fails, the error names how many hosts were actually tried and groups
-the reasons — `tts failed on 12 hosts: 9x no known TTS node; 3x timeout` — and
+Hosts that have never been surveyed are probed in the background and show up on
+the next call; `surveying` says how many are still outstanding. `?refresh=1`
+re-probes and waits instead. A row with a null node means "surveyed, has no TTS
+node" — a finding, not a gap, and one that keeps hundreds of hosts out of the
+speech race. Entries are re-surveyed after a day.
+
+The survey also feeds host ranking, so once it has run, dyva knows from a cold
+start which handful of hosts out of several hundred can do speech at all.
+
+Host selection ends the moment a host returns a `prompt_id`: that acceptance is
+what marks the host good, and the render is waited out afterwards, outside the
+race. A host that took the job and then rendered slowly is not a host-selection
+failure and is no longer marked as one.
+
+Each attempt reports a verdict rather than a bool — `accepted`, `unsuitable`
+(structurally can't run this graph), `unreachable`, `failed`, or `timeout` — and
+the engine turns that into the reputation mark. `unsuitable` and `failed` used
+to be the same `add_bad`, which lost the distinction between "this host has no
+TTS node" and "this host was down".
+
+If speech fails, the error names how many hosts were tried, the verdict tally,
+and the grouped reasons — `tts failed on 12 hosts (9 unsuitable, 3 timeout):
+9x no known TTS node; 3x timeout` — and
 ComfyUI's rejection envelope is parsed rather than truncated, so you get
 `ElevenLabsTextToSpeech: required_input_missing: voice` instead of a clipped
 blob of JSON.
+
+### Chat Tools
+
+The chat's wrench menu enables tools the model can call. Each is independent
+and remembered across sessions:
+
+| Tool | What the model can do |
+|------|------------------------|
+| **Image generation** | `generate_image` — render a picture from a description |
+| **Speech** | `generate_speech` — speak a line of dialog out loud |
+| **Documents** | create/edit/rename/search/replace documents in a side panel |
+
+`generate_speech` goes through `/v1/audio/speech` like everything else, but the
+clip is also written to disk and referenced in the transcript by URL
+(`/v1/audio/clips/{name}`) — a saved conversation can hold a link, not audio
+bytes. The last 200 clips are kept. In the transcript the link is upgraded to
+the same themed player the Speech tab uses.
 
 ## Settings
 

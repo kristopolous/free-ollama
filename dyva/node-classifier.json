@@ -242,5 +242,58 @@
       "seconds": null,
       "ckpt": "(?i)music|song"
     }
+  ],
+  "edit": [
+    {
+      "name": "QwenImageEditPlus",
+      "style": "encode",
+      "patterns": [
+        "^TextEncodeQwenImageEditPlus$"
+      ],
+      "images": [
+        "image1",
+        "image2",
+        "image3"
+      ],
+      "model": "(?i)qwen.*image.*edit",
+      "clip": "(?i)qwen.*(2[._]5|vl)",
+      "vae": "(?i)qwen.*vae",
+      "clip_type": "qwen_image",
+      "cfg": 2.5,
+      "steps": 20
+    },
+    {
+      "name": "QwenImageEdit",
+      "style": "encode",
+      "patterns": [
+        "^TextEncodeQwenImageEdit$"
+      ],
+      "images": [
+        "image"
+      ],
+      "model": "(?i)qwen.*image.*edit",
+      "clip": "(?i)qwen.*(2[._]5|vl)",
+      "vae": "(?i)qwen.*vae",
+      "clip_type": "qwen_image",
+      "cfg": 2.5,
+      "steps": 20
+    },
+    {
+      "name": "FluxKontext",
+      "style": "reference",
+      "patterns": [
+        "^ReferenceLatent$"
+      ],
+      "scale": "FluxKontextImageScale",
+      "guidance_node": "FluxGuidance",
+      "guidance": 2.5,
+      "model": "(?i)kontext|flux[-_ ]?2|boogu|hunyuanimage|hidream[-_ ]?[oe]\\d",
+      "clip": "(?i)clip_l",
+      "clip2": "(?i)t5xxl|t5[-_]v1",
+      "vae": "(?i)^ae\\.|flux.*vae",
+      "clip_type": "flux",
+      "cfg": 1.0,
+      "steps": 20
+    }
   ]
 }

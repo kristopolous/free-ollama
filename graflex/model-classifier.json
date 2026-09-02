@@ -6,7 +6,11 @@
     "clip_"
   ],
   "edit": [
-    "(FLUX|flux|Qwen-Rapid|edit)"
+    "(FLUX|flux|Qwen-Rapid|edit)",
+    "(?i)boogu",
+    "(?i)hunyuanimage",
+    "(?i)hidream[-_ ]?[oe]\\d",
+    "(?i)hidream.*(edit|instruct)"
   ],
   "video": [
     "(_i2v_|Ref2VA|FL2VA|wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
