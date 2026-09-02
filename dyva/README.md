@@ -42,29 +42,36 @@ All of these run and exit; none of them start the server.
 
 Every host+key pair dyva has tried carries a state — `good`, `maybe_good`, or
 `bad` — in `~/.cache/free-ollama/host-status.db`. The key is usually a model
-name, but the non-chat capabilities use sentinels: `__tts__`, `__video__`,
-`__music__`, and `__unreachable__` (a host-wide mark, so a dead host isn't
-re-probed once per model).
+name. The non-chat capabilities use sentinels — `__tts__`, `__video__`,
+`__music__`, and `__unreachable__` (host-wide, so a dead host isn't re-probed
+once per model) — except **image editing, which is keyed per model**:
+`edit/flux2`, `edit/qwen`, `edit/*` when nothing was named. A host that can't
+run Flux.2 may be perfectly good at Qwen-Image-Edit, so one bucket for all of
+them condemned hosts far too broadly. The key is the query you searched with,
+canonicalised, so `flux*2`, `flux-2` and `FLUX.2` all share one record.
 
 ```bash
-dyva --hosts                    # counts per state
-dyva --hosts list bad           # which keys are marked bad, and how many hosts each
-dyva --hosts del bad            # same listing — deletes nothing
-dyva --hosts del bad __tts__    # clear just that key
+dyva --hosts                      # counts per state
+dyva --hosts bad                  # which keys are marked bad, and how many hosts each
+dyva --hosts bad __tts__          # the hosts carrying that mark
+dyva --hosts bad __tts__ del      # clear them
+dyva --hosts bad/__tts__ del      # same thing, if you prefer it joined
 ```
 
-`del` always takes a key. There is deliberately no "clear the whole state"
-form: every mark cost a real probe of a real host, so reputation is expensive
-to rebuild and too easy to throw away by accident. The bare `del <state>` is a
-survey that shows you what you'd be discarding:
+Arguments narrow left to right and **the verb comes last**, so reading is the
+default: `--hosts bad` shows you the bad ones rather than needing a word in
+front of them. `del` always needs a named key — there is deliberately no way to
+clear a whole state at once, because reputation is expensive to rebuild (every
+mark cost a real probe of a real host). The bare `--hosts bad` is the survey
+that shows what you'd be discarding:
 
 ```
-285 host marks in 'bad', across 7 keys:
+122 host marks in 'bad', across 10 keys:
 
-  __tts__             231
+  __tts__              32
+  __edit__             23
   qwen3.6:27b          20
-  kimi                 11
-  __unreachable__       4
+  __unreachable__       8
 ```
 
 Clearing a key leaves those hosts unranked, so they get retried on the next

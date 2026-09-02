@@ -256,8 +256,14 @@
         "image3"
       ],
       "model": "(?i)qwen.*image.*edit",
-      "clip": "(?i)qwen.*(2[._]5|vl)",
-      "vae": "(?i)qwen.*vae",
+      "clip": [
+        "(?i)qwen[-_. ]?2[-_. ]?5[-_. ]?vl",
+        "(?i)qwen.*vl"
+      ],
+      "vae": [
+        "(?i)qwen[-_. ]?image[-_. ]?vae",
+        "(?i)qwen.*vae"
+      ],
       "clip_type": "qwen_image",
       "cfg": 2.5,
       "steps": 20
@@ -272,10 +278,32 @@
         "image"
       ],
       "model": "(?i)qwen.*image.*edit",
-      "clip": "(?i)qwen.*(2[._]5|vl)",
-      "vae": "(?i)qwen.*vae",
+      "clip": [
+        "(?i)qwen[-_. ]?2[-_. ]?5[-_. ]?vl",
+        "(?i)qwen.*vl"
+      ],
+      "vae": [
+        "(?i)qwen[-_. ]?image[-_. ]?vae",
+        "(?i)qwen.*vae"
+      ],
       "clip_type": "qwen_image",
       "cfg": 2.5,
+      "steps": 20
+    },
+    {
+      "name": "Flux2",
+      "style": "reference",
+      "patterns": [
+        "^ReferenceLatent$"
+      ],
+      "scale": "FluxKontextImageScale",
+      "guidance_node": "FluxGuidance",
+      "guidance": 2.5,
+      "model": "(?i)flux[-_. ]?2|klein",
+      "clip": "(?i)mistral.*flux2|flux2.*mistral",
+      "vae": "(?i)flux[-_.]?2[-_.]?vae",
+      "clip_type": "flux2",
+      "cfg": 1.0,
       "steps": 20
     },
     {
@@ -287,10 +315,10 @@
       "scale": "FluxKontextImageScale",
       "guidance_node": "FluxGuidance",
       "guidance": 2.5,
-      "model": "(?i)kontext|flux[-_ ]?2|boogu|hunyuanimage|hidream[-_ ]?[oe]\\d",
+      "model": "(?i)kontext",
       "clip": "(?i)clip_l",
-      "clip2": "(?i)t5xxl|t5[-_]v1",
-      "vae": "(?i)^ae\\.|flux.*vae",
+      "clip2": "(?i)t5xxl",
+      "vae": "(?i)(^|[/\\\\])ae\\.",
       "clip_type": "flux",
       "cfg": 1.0,
       "steps": 20

@@ -443,10 +443,11 @@ def _key_label(key):
 
 def _hosts_usage():
     print("usage:", file=sys.stderr)
-    print("  dyva --hosts                     summary of the host reputation table", file=sys.stderr)
-    print("  dyva --hosts list [STATE]        hosts per key, optionally one state", file=sys.stderr)
-    print("  dyva --hosts del STATE           show the keys marked STATE (deletes nothing)", file=sys.stderr)
-    print("  dyva --hosts del STATE KEY...    clear those marks", file=sys.stderr)
+    print("  dyva --hosts                  summary of the host reputation table", file=sys.stderr)
+    print("  dyva --hosts STATE            the keys marked STATE", file=sys.stderr)
+    print("  dyva --hosts STATE KEY        the hosts carrying that mark", file=sys.stderr)
+    print("  dyva --hosts STATE KEY del    clear those marks", file=sys.stderr)
+    print("                                STATE/KEY works too, e.g. bad/__tts__", file=sys.stderr)
     print(f"\n  STATE is one of: {', '.join(_STATES)}", file=sys.stderr)
 
 
@@ -472,94 +473,121 @@ def _print_key_table(rows):
 def hosts_cli(argv):
     """Handle `--hosts ...`: inspect and prune the host reputation table.
 
-    Deleting is deliberately two-step. `del bad` never clears the whole state —
-    it prints the keys and their host counts so you can see what you would be
-    throwing away, and you then name the key. Reputation is expensive to rebuild
-    (every mark cost a real probe of a real host), so an unqualified "delete all
-    the bad ones" is too easy to type by accident.
-    """
-    argv = [str(a) for a in argv]
-    cmd = argv[0].lower() if argv else "summary"
+    The arguments narrow, left to right, and the verb comes last:
 
-    if cmd in ("summary", "list"):
-        state = None
-        if len(argv) > 1:
-            state = _STATE_ALIASES.get(argv[1].lower(), argv[1].lower())
-            if state not in _STATES:
-                print(f"unknown state '{argv[1]}' (expected {', '.join(_STATES)})", file=sys.stderr)
-                return 1
-        db = _get_db()
-        totals = dict(db.execute("SELECT state, COUNT(*) FROM host_status GROUP BY state").fetchall())
+        --hosts                     every state, with counts
+        --hosts bad                 the keys marked bad
+        --hosts bad __tts__         the hosts carrying that mark
+        --hosts bad __tts__ del     clear them
+
+    Reading is the default, so `--hosts bad` shows you the bad ones rather than
+    needing a word in front. Deleting still needs a named key: reputation is
+    expensive to rebuild — every mark cost a real probe of a real host — so
+    there is deliberately no way to clear a whole state at once.
+    """
+    words = [str(a) for a in argv]
+    if words and words[0].lower() in ("list", "show"):
+        words = words[1:]          # tolerated, from the older syntax
+    # `bad/__edit__` reads more directly than `bad __edit__`; split it only when
+    # the leading segment really is a state, since a model key may contain a
+    # slash of its own (library/llama3).
+    if words and "/" in words[0]:
+        head, rest = words[0].split("/", 1)
+        if _STATE_ALIASES.get(head.lower(), head.lower()) in _STATES and rest:
+            words = [head, rest] + words[1:]
+    doing = None
+    if words and words[-1].lower() in ("del", "delete", "clear", "rm"):
+        doing, words = "del", words[:-1]
+    elif words and words[0].lower() in ("del", "delete", "clear", "rm"):
+        # the old verb-first form still works rather than doing something
+        # surprising with what follows
+        doing, words = "del", words[1:]
+
+    state = None
+    if words:
+        state = _STATE_ALIASES.get(words[0].lower(), words[0].lower())
+        if state not in _STATES:
+            print(f"unknown state '{words[0]}' (expected {', '.join(_STATES)})", file=sys.stderr)
+            _hosts_usage()
+            return 1
+        words = words[1:]
+
+    db = _get_db()
+
+    # --hosts : every state, counts only
+    if state is None:
+        if doing:
+            print("a state is required to delete", file=sys.stderr)
+            _hosts_usage()
+            return 1
+        totals = dict(db.execute(
+            "SELECT state, COUNT(*) FROM host_status GROUP BY state").fetchall())
         if not totals:
             print("host reputation table is empty")
             return 0
         for st in _STATES:
-            if state and st != state:
-                continue
-            n = totals.get(st, 0)
-            print(f"{st}: {n} host/key mark{'' if n == 1 else 's'}")
-            if n and (state or cmd == "list"):
-                _print_key_table(_hosts_counts(st))
+            print(f"{st}:")
+            print(f"    {totals.get(st, 0)}")
+        return 0
+
+    rows = _hosts_counts(state)
+    if not rows:
+        print(f"no hosts marked '{state}'")
+        return 0
+
+    # --hosts <state> : the keys in that state
+    if not words:
+        total = sum(c for _, c in rows)
+        print(f"{total} host mark{'' if total == 1 else 's'} in '{state}', "
+              f"across {len(rows)} key{'' if len(rows) == 1 else 's'}:\n")
+        _print_key_table(rows)
+        if doing:
+            # they asked to delete and got a listing, so say why
+            print(f"\nName a key to clear — 'del' alone deletes nothing:")
+            print(f"  dyva --hosts {state} {_key_label(rows[0][0])} del")
+        return 0
+
+    # resolve what was typed against the keys actually present, so the
+    # printable alias for the NUL-bearing sentinel round-trips
+    present = {k: c for k, c in rows}
+    by_label = {_key_label(k).lower(): k for k in present}
+    resolved, unknown = [], []
+    for want in words:
+        if want in present:
+            resolved.append(want)
+        elif want.lower() in by_label:
+            resolved.append(by_label[want.lower()])
+        else:
+            unknown.append(want)
+    if unknown:
+        print(f"not marked '{state}': {', '.join(unknown)}", file=sys.stderr)
+        print(f"known keys: {', '.join(_key_label(k) for k, _ in rows)}", file=sys.stderr)
+        return 1
+
+    # --hosts <state> <key> : who carries it
+    if not doing:
+        for key in resolved:
+            hosts = [h for (h,) in db.execute(
+                "SELECT host FROM host_status WHERE state=? AND model=? ORDER BY host",
+                (state, key))]
+            print(f"{_key_label(key)}: {len(hosts)} host{'' if len(hosts) == 1 else 's'} "
+                  f"marked '{state}'")
+            for h in hosts:
+                print(f"  {h}")
             print()
         return 0
 
-    if cmd in ("del", "delete", "clear", "rm"):
-        if len(argv) < 2:
-            print("a state is required", file=sys.stderr)
-            _hosts_usage()
-            return 1
-        state = _STATE_ALIASES.get(argv[1].lower(), argv[1].lower())
-        if state not in _STATES:
-            print(f"unknown state '{argv[1]}' (expected {', '.join(_STATES)})", file=sys.stderr)
-            return 1
-
-        rows = _hosts_counts(state)
-        if not rows:
-            print(f"no hosts marked '{state}'")
-            return 0
-
-        keys = argv[2:]
-        if not keys:
-            total = sum(c for _, c in rows)
-            print(f"{total} host mark{'' if total == 1 else 's'} in '{state}', "
-                  f"across {len(rows)} key{'' if len(rows) == 1 else 's'}:\n")
-            _print_key_table(rows)
-            print(f"\nName a key to clear it — '{argv[0]} {argv[1]}' on its own deletes nothing:")
-            print(f"  dyva --hosts del {state} {_key_label(rows[0][0])}")
-            return 0
-
-        # Resolve what the user typed against the keys actually present, so the
-        # printable alias for the NUL-bearing sentinel round-trips.
-        present = {k: c for k, c in rows}
-        by_label = {_key_label(k).lower(): k for k in present}
-        resolved, unknown = [], []
-        for want in keys:
-            if want in present:
-                resolved.append(want)
-            elif want.lower() in by_label:
-                resolved.append(by_label[want.lower()])
-            else:
-                unknown.append(want)
-        if unknown:
-            print(f"not marked '{state}': {', '.join(unknown)}", file=sys.stderr)
-            print(f"known keys: {', '.join(_key_label(k) for k, _ in rows)}", file=sys.stderr)
-            return 1
-
-        db = _get_db()
-        cleared = 0
-        for key in resolved:
-            cur = db.execute("DELETE FROM host_status WHERE state=? AND model=?", (state, key))
-            cleared += cur.rowcount
-            print(f"cleared {cur.rowcount} '{state}' mark{'' if cur.rowcount == 1 else 's'} "
-                  f"for {_key_label(key)}")
-        db.commit()
-        if cleared:
-            print("\nThose hosts are now unranked and will be retried on the next request.")
-        return 0
-
-    print(f"unknown --hosts command '{cmd}' (expected 'list' or 'del')", file=sys.stderr)
-    _hosts_usage()
-    return 1
+    # --hosts <state> <key> del
+    cleared = 0
+    for key in resolved:
+        cur = db.execute("DELETE FROM host_status WHERE state=? AND model=?", (state, key))
+        cleared += cur.rowcount
+        print(f"cleared {cur.rowcount} '{state}' mark{'' if cur.rowcount == 1 else 's'} "
+              f"for {_key_label(key)}")
+    db.commit()
+    if cleared:
+        print("\nThose hosts are now unranked and will be retried on the next request.")
+    return 0
 
 
 def _apply_source_mapping(row, mapping):
@@ -4485,6 +4513,29 @@ async def comfy_submit(session, host, workflow, timeout=30):
     return prompt_id
 
 
+def _comfy_error_detail(status):
+    """Everything the host told us about a failure, for the log.
+
+    The one-line version is what a user sees; this is what you need when the
+    one line is "shapes cannot be multiplied" and the question is which two
+    tensors, from which nodes.
+    """
+    out = []
+    for m in (status.get("messages") or []):
+        if not (isinstance(m, (list, tuple)) and len(m) >= 2 and m[0] == "execution_error"):
+            continue
+        p = m[1] if isinstance(m[1], dict) else {}
+        out.append(f"node {p.get('node_id')} ({p.get('node_type')}): "
+                   f"{p.get('exception_type')}: {p.get('exception_message')}")
+        inputs = p.get("current_inputs") or {}
+        for k, v in inputs.items():
+            out.append(f"    input {k} = {str(v)[:160]}")
+        tb = p.get("traceback") or []
+        for line in [str(x).rstrip() for x in tb][-6:]:
+            out.append(f"    {line}")
+    return "\n".join(out)
+
+
 def _comfy_status_error(status):
     """Pull the real reason out of a failed /history entry.
 
@@ -4501,10 +4552,12 @@ def _comfy_status_error(status):
         if event == "execution_interrupted":
             return "interrupted (queue cleared or cancelled on the host)"
         if event == "execution_error":
-            node = payload.get("node_type") or payload.get("node_id") or "?"
+            node = payload.get("node_type") or "?"
+            nid = payload.get("node_id")
             exc = (payload.get("exception_message")
                    or payload.get("exception_type") or "execution error")
-            return f"{node}: {exc}"[:300]
+            where = f"{node}#{nid}" if nid else node
+            return f"{where}: {exc}"[:300]
     # nothing recognisable — name the events we did see, which is still more
     # use than the first 200 characters of a JSON dump
     events = [m[0] for m in (status.get("messages") or [])
@@ -4567,6 +4620,9 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
 
         status = entry.get("status") or {}
         if status.get("status_str") == "error":
+            detail = _comfy_error_detail(status)
+            if detail:
+                log.warning(f"comfy {host} prompt {prompt_id} failed:\n{detail}")
             raise ComfyError(_comfy_status_error(status))
         if status.get("completed"):
             raise ComfyError(f"the graph finished but saved no {label}")
@@ -5370,7 +5426,7 @@ def _pick_video_model(host, model_filter=None):
         for m in s.get("models") or []:
             if classify_model(m) not in _VIDEO_CLASSES:
                 continue
-            if model_filter and not match_model(m, model_filter):
+            if model_filter and not model_query_match(m, model_filter):
                 continue
             return m
     return None
@@ -5999,10 +6055,65 @@ async def handle_audio_voices(request):
 #   reference - Flux Kontext: no multi-image input node, so each reference is
 #               LoadImage -> FluxKontextImageScale -> VAEEncode -> ReferenceLatent,
 #               chained through the conditioning.
-EDIT_KEY = "__edit__"
+EDIT_KEY = "edit/*"      # the unfiltered case; see edit_key()
+
+
+def edit_key(model_filter=None):
+    """Reputation key for an edit request — per model, not one bucket.
+
+    A host that can't run flux2 may be perfectly good at qwen-image-edit, so a
+    single __edit__ sentinel condemned hosts far too broadly. The key is the
+    query you searched with, canonicalised so flux*2, flux-2 and FLUX.2 all
+    share one record: edit/flux2, and edit/* when nothing was named.
+    """
+    q = _sep_insensitive((model_filter or "").replace("*", "").replace("?", ""))
+    return f"edit/{q}" if q else EDIT_KEY
 # Editing runs a full diffusion sample on someone else's GPU, often a queued
 # one. Ten minutes is not generous, it's realistic.
 EDIT_RENDER_TIMEOUT = 900
+EDIT_RENDER_ATTEMPTS = 3
+# "Match source" means the same shape, not the same pixel count. Diffusion
+# models want dimensions on a grid (64 is the safe common denominator) and fall
+# over on very large inputs, so a phone photo gets scaled down, on aspect, to
+# something they'll accept.
+EDIT_MAX_MP = 3.0
+EDIT_ROUND = 64
+
+
+def fit_dims(w, h, max_mp=EDIT_MAX_MP, step=EDIT_ROUND):
+    """Largest on-aspect size within `max_mp` megapixels, snapped to `step`.
+    Only ever shrinks — a small source stays small."""
+    try:
+        w, h = int(w), int(h)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    scale = min(1.0, math.sqrt((max_mp * 1e6) / float(w * h)))
+    nw = max(step, int(round(w * scale / step)) * step)
+    nh = max(step, int(round(h * scale / step)) * step)
+    return nw, nh
+
+# A render failure is a verdict about the host, not just about this request.
+# These say the host can't run this graph at all — a different prompt would
+# fail the same way — so the engine should hand the job to someone else.
+_RENDER_UNSUITABLE = re.compile(
+    r"(?i)VAE is invalid|shapes cannot be multiplied|size mismatch"
+    r"|not found|no such file|missing|out of memory|CUDA error"
+    r"|has no attribute|unexpected key")
+
+
+def render_verdict(err):
+    """Turn an exception from the render phase into a verdict, so a host that
+    took the job and then couldn't do it stops looking like a good host."""
+    if isinstance(err, asyncio.TimeoutError):
+        return timed_out(str(err) or "timeout")
+    text = str(err) or type(err).__name__
+    if isinstance(err, (aiohttp.ClientError, OSError)):
+        return unreachable_host(text)
+    if _RENDER_UNSUITABLE.search(text):
+        return unsuitable(text)
+    return failed(text)
 _edit_classifier_cache = None
 
 
@@ -6068,19 +6179,54 @@ def _match_rank(needle):
     """Order candidates so the closest name to what the user typed wins:
     an exact file-stem match, then a prefix, then anything containing it,
     shortest first (a bare model beats a lora or a long variant)."""
-    n = (needle or "").lower()
+    n = _sep_insensitive((needle or "").replace("*", "").replace("?", ""))
 
     def key(option):
         base = option.replace("\\", "/").rsplit("/", 1)[-1].lower()
-        stem = os.path.splitext(base)[0]
+        flat = _sep_insensitive(os.path.splitext(base)[0])
         if not n:
             return (3, len(base), base)
-        if stem == n:
+        if flat == n:
             return (0, len(base), base)
-        if base.startswith(n) or stem.startswith(n):
+        if flat.startswith(n):
             return (1, len(base), base)
         return (2, len(base), base)
     return key
+
+
+_SEPS_RE = re.compile(r"[.\-_ ]+")
+
+
+def _sep_insensitive(v):
+    """Model names spell the same thing every which way — flux.2, flux-2,
+    flux 2, flux2 — so separators shouldn't decide a match."""
+    return _SEPS_RE.sub("", (v or "").lower())
+
+
+def model_query_match(name, query):
+    """match_model, but blind to separators. Globs still work: `flux*2` matches
+    flux2-dev and flux-2-klein, and so does the literal `flux.2`."""
+    if not (query or "").strip():
+        return True
+    # Try the name as written first, so wildcards keep their exact meaning
+    # (`flux?2` still wants one character between them) ...
+    if match_model(name, query):
+        return True
+    # ... then again with separators removed, so flux.2 / flux-2 / flux 2 all
+    # find flux2-dev.
+    n, q = _sep_insensitive(name), _sep_insensitive(query)
+    if not q:
+        return True
+    if any(c in q for c in "*?["):
+        return fnmatch.fnmatch(n, f"*{q}*")
+    return q in n
+
+
+def _hints(v):
+    """A family hint may be one pattern or several in priority order."""
+    if isinstance(v, list):
+        return [x for x in v if x]
+    return [v] if v else []
 
 
 def _pick(options, *patterns):
@@ -6095,7 +6241,7 @@ def _pick(options, *patterns):
     return None
 
 
-def _edit_plan(info, model_filter=None):
+def _edit_plan(info, model_filter=None, exclude=()):
     """Decide how to drive an edit on this host, or None if it can't.
 
     Everything is resolved against the host's live loader enums — those are the
@@ -6127,30 +6273,46 @@ def _edit_plan(info, model_filter=None):
 
             def candidates(options):
                 out = [o for o in options if not fam_rx or fam_rx.search(o)]
+                if exclude:
+                    out = [o for o in out if o not in exclude]
                 if model_filter:
-                    out = [o for o in out if match_model(o, model_filter)]
+                    out = [o for o in out if model_query_match(o, model_filter)]
                 return sorted(out, key=_match_rank(model_filter))
 
             unet = next(iter(candidates(unets)), None)
             ckpt = next(iter(candidates(ckpts)), None)
-            if unet:
-                clip1 = _pick(clips, fam.get("clip"))
-                clip2 = _pick(clips, fam.get("clip2")) if fam.get("clip2") else None
-                vae = _pick(vaes, fam.get("vae")) or (vaes[0] if vaes else None)
-                if not clip1 or not vae:
-                    continue
-                if fam.get("clip2"):
-                    if not clip2 or fam.get("clip_type") not in dual_types:
-                        continue
-                elif fam.get("clip_type") not in clip_types:
-                    continue
-                loader = {"kind": "split", "unet": unet, "clip": clip1,
-                          "clip2": clip2, "vae": vae,
-                          "clip_type": fam.get("clip_type")}
-            elif ckpt:
-                loader = {"kind": "checkpoint", "ckpt": ckpt}
-            else:
+            if not unet and not ckpt:
                 continue
+
+            # Resolve the text encoder and VAE the same way whichever loader
+            # holds the transformer. These edit models are never all-in-one
+            # checkpoints — CheckpointLoaderSimple hands back a null CLIP and a
+            # null VAE for them, and you only find out minutes into the render
+            # ("clip input is invalid: None"). So if the family names a text
+            # encoder or a VAE and the host hasn't got it, the host can't run
+            # this graph. Say so now instead of burning someone's GPU.
+            clip1 = _pick(clips, *_hints(fam.get("clip"))) if fam.get("clip") else None
+            clip2 = _pick(clips, *_hints(fam.get("clip2"))) if fam.get("clip2") else None
+            vae = _pick(vaes, *_hints(fam.get("vae"))) if fam.get("vae") else None
+            if fam.get("clip") and not clip1:
+                continue
+            if fam.get("clip2") and not clip2:
+                continue
+            if fam.get("vae") and not vae:
+                continue
+            if fam.get("clip_type"):
+                needed = dual_types if fam.get("clip2") else clip_types
+                if fam["clip_type"] not in needed:
+                    continue
+
+            loader = {"clip": clip1, "clip2": clip2, "vae": vae,
+                      "clip_type": fam.get("clip_type")}
+            if unet:
+                loader["kind"] = "unet"
+                loader["unet"] = unet
+            else:
+                loader["kind"] = "checkpoint"
+                loader["ckpt"] = ckpt
             return {"family": fam, "encode": encode, "loader": loader,
                     "model": unet or ckpt}
     return None
@@ -6170,6 +6332,11 @@ def _edit_workflow(plan, prompt, image_names, params=None):
     else:
         g["1"] = {"class_type": "UNETLoader",
                   "inputs": {"unet_name": loader["unet"], "weight_dtype": "default"}}
+        MODEL, CLIP, VAE = ["1", 0], None, None
+
+    # An explicitly-resolved encoder or VAE always wins over whatever the
+    # checkpoint may or may not contain.
+    if loader.get("clip"):
         if loader.get("clip2"):
             g["2"] = {"class_type": "DualCLIPLoader",
                       "inputs": {"clip_name1": loader["clip"],
@@ -6179,8 +6346,12 @@ def _edit_workflow(plan, prompt, image_names, params=None):
             g["2"] = {"class_type": "CLIPLoader",
                       "inputs": {"clip_name": loader["clip"],
                                  "type": loader["clip_type"]}}
+        CLIP = ["2", 0]
+    if loader.get("vae"):
         g["3"] = {"class_type": "VAELoader", "inputs": {"vae_name": loader["vae"]}}
-        MODEL, CLIP, VAE = ["1", 0], ["2", 0], ["3", 0]
+        VAE = ["3", 0]
+    if CLIP is None or VAE is None:
+        raise ComfyUnsuitable("no text encoder or VAE available for this model")
 
     # LoadImage per reference
     img_nodes = []
@@ -6245,12 +6416,30 @@ def _edit_workflow(plan, prompt, image_names, params=None):
         match_source = match_source.lower() not in ("0", "false", "no", "")
     if img_nodes and match_source:
         if scaled_latent is not None:
-            # already encoded for the reference chain — reuse it so the latent
-            # and the conditioning describe the same pixels
+            # already encoded for the reference chain — FluxKontextImageScale
+            # has snapped it to a size the model likes, so reuse that
             LATENT = scaled_latent
         else:
+            # Nothing has constrained the source yet. Keep the aspect ratio but
+            # bring it onto the grid and under the pixel budget: a 40MP photo
+            # straight into VAEEncode is how you get a host to yell at you.
+            src = img_nodes[0]
+            fitted = fit_dims(params.get("source_width"), params.get("source_height"))
+            if fitted:
+                g["490"] = {"class_type": "ImageScale",
+                            "inputs": {"image": src, "upscale_method": "lanczos",
+                                       "width": fitted[0], "height": fitted[1],
+                                       "crop": "disabled"}}
+                src = ["490", 0]
+            elif "ImageScaleToTotalPixels" in (host_info or {}):
+                # no dimensions from the caller — let the host work it out
+                g["490"] = {"class_type": "ImageScaleToTotalPixels",
+                            "inputs": {"image": src, "upscale_method": "lanczos",
+                                       "megapixels": EDIT_MAX_MP,
+                                       "resolution_steps": EDIT_ROUND}}
+                src = ["490", 0]
             g["500"] = {"class_type": "VAEEncode",
-                        "inputs": {"pixels": img_nodes[0], "vae": VAE}}
+                        "inputs": {"pixels": src, "vae": VAE}}
             LATENT = ["500", 0]
     else:
         g["500"] = {"class_type": "EmptySD3LatentImage",
@@ -6284,6 +6473,21 @@ def _host_edit_models(host, model_filter=None):
     return out
 
 
+def _plan_summary(plan):
+    """The rig a plan actually assembled, short enough for an error line."""
+    L = plan.get("loader") or {}
+    base = lambda v: (v or "").replace("\\", "/").rsplit("/", 1)[-1]
+    parts = [plan.get("family", {}).get("name", "?"), base(plan.get("model"))]
+    clip = base(L.get("clip"))
+    if L.get("clip2"):
+        clip += "+" + base(L["clip2"])
+    if clip:
+        parts.append(f"clip[{L.get('clip_type', '?')}] {clip}")
+    if L.get("vae"):
+        parts.append(f"vae {base(L['vae'])}")
+    return " | ".join(p for p in parts if p)
+
+
 def _find_edit_hosts(target_host=None, model_filter=None):
     """ComfyUI hosts that might run an edit model, best-first — same tiering as
     everything else, keyed on __edit__.
@@ -6299,11 +6503,12 @@ def _find_edit_hosts(target_host=None, model_filter=None):
     hosts = [x.get("server") for x in load_servers()
              if x.get("service") == "comfyui" and x.get("server")]
     marks = load_marks()
-    last = get_last(EDIT_KEY)
+    ekey = edit_key(model_filter)
+    last = get_last(ekey)
     last_host = last[0] if last and last[0] else None
 
     def rank(h):
-        tier = capability_tier(h, EDIT_KEY, marks, last_host)
+        tier = capability_tier(h, ekey, marks, last_host)
         if model_filter:
             has = 0 if _host_edit_models(h, model_filter) else 1
         else:
@@ -6357,7 +6562,7 @@ async def _edit_read_request(request):
         except Exception:
             raise ValueError(f"image[{i}] is not valid base64")
     for k in ("width", "height", "steps", "cfg_scale", "seed", "sampler_name",
-              "denoise", "match_source"):
+              "denoise", "match_source", "source_width", "source_height"):
         if k in body:
             params[k] = body[k]
     return prompt, images, str(body.get("model") or "").strip() or None, params
@@ -6440,6 +6645,9 @@ async def handle_image_edit(request):
     if not prompt:
         return web.json_response({"error": "'prompt' is required"}, status=400)
 
+    # Reputation is keyed by what was asked for, so a host written off for one
+    # model isn't written off for another.
+    ekey = edit_key(model_filter)
     hosts = _find_edit_hosts(request.query.get("host"), model_filter)
     if not hosts:
         return web.json_response({"error": "no ComfyUI hosts available"}, status=503)
@@ -6450,12 +6658,12 @@ async def handle_image_edit(request):
     errors = []
 
     async def attempt(host, wid, done):
-        await broadcast_activity(host, EDIT_KEY, "trying",
+        await broadcast_activity(host, ekey, "trying",
             f"trying: {host} for {label}", wid=wid)
         t0 = time.time()
         try:
             info = await comfy_object_info(session, host)
-            plan = _edit_plan(info, model_filter)
+            plan = _edit_plan(info, model_filter, exclude=bad_models)
             if not plan:
                 raise ComfyUnsuitable("no edit model on this host"
                                       + (f" matching {model_filter!r}" if model_filter else ""))
@@ -6467,7 +6675,7 @@ async def handle_image_edit(request):
         except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
             errors.append(f"{host}: {err}")
-            await broadcast_activity(host, EDIT_KEY, "failed",
+            await broadcast_activity(host, ekey, "failed",
                 f"failure: {host} for {label} - {err}",
                 duration=time.time() - t0, wid=wid)
             if isinstance(e, ComfyUnsuitable):
@@ -6477,36 +6685,67 @@ async def handle_image_edit(request):
             if isinstance(e, (aiohttp.ClientError, OSError)):
                 return unreachable_host(err)
             return failed(err)
-        await broadcast_activity(host, EDIT_KEY, "connected",
+        await broadcast_activity(host, ekey, "connected",
             f"success: {host} for {label}", duration=time.time() - t0, wid=wid,
             rmodel=plan["model"])
-        return accepted((host, prompt_id, plan["model"]))
+        return accepted((host, prompt_id, plan, workflow))
 
-    result, stopped, tried, tally = await _race_hosts(hosts, attempt, EDIT_KEY, label=label)
-
-    if result:
-        host, prompt_id, model_used = result
+    # Submitting is where host *selection* ends, but a host can still turn out
+    # to be no good once it starts rendering. When it does, that's a verdict
+    # like any other: record it, drop the host, and hand the job to the next
+    # one — rather than failing the whole request on one bad box.
+    tried_hosts, bad_models, tried = set(), set(), 0
+    tally = collections.Counter()
+    stopped = False
+    for _round in range(EDIT_RENDER_ATTEMPTS):
+        pool = [h for h in hosts if h not in tried_hosts]
+        if not pool:
+            break
+        result, stopped, n_tried, round_tally = await _race_hosts(
+            pool, attempt, ekey, label=label)
+        tried += n_tried
+        tally.update(round_tally)
+        if not result or stopped:
+            break
+        host, prompt_id, plan, workflow = result
+        model_used = plan["model"]
+        tried_hosts.add(host)
         try:
             async with _waiting_worker(label, host, "editing"):
                 raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
                                                timeout=EDIT_RENDER_TIMEOUT,
                                                poll=2, view_timeout=90)
         except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            outcome = render_verdict(e)
+            record_verdict(host, ekey, outcome)
+            tally[outcome.verdict] += 1
             err = str(e) or type(e).__name__
-            await broadcast_activity(host, EDIT_KEY, "failed",
-                f"failure: {host} for {label} - render: {err}")
-            return web.json_response(
-                {"error": f"edit: {host} accepted the job but did not render it: {err}"},
-                status=502)
+            # Which files were paired is the first thing you need to know when
+            # a render fails on shapes — the message alone can't tell you.
+            rig = _plan_summary(plan)
+            errors.append(f"{host}: {err} [{rig}]")
+            # A shape mismatch says this *model* can't be driven the way we
+            # drove it — the host may well have another that can, so retire the
+            # model and let the host back into the pool rather than writing off
+            # a box that might be fine.
+            if outcome.verdict == V_UNSUITABLE and plan.get("model"):
+                bad_models.add(plan["model"])
+                tried_hosts.discard(host)
+            log.warning(f"edit: {host}: took the job then failed to render: {err}\n"
+                        f"  plan: {rig}\n"
+                        f"  graph: {json.dumps(workflow)[:2000]}")
+            await broadcast_activity(host, ekey, "failed",
+                f"failure: {host} for {label} - render: {err} [{rig}]")
+            continue
+
         b64 = base64.b64encode(raw).decode()
         stored = {"images": [b64], "_dyva_model": model_used}
         _save_image_history(stored, {"prompt": prompt}, host, model_used)
-        # The saved filenames matter to callers: an edited image becomes the
-        # source for the next incremental edit, and needs a stable URL.
         return web.json_response({"created": int(time.time()),
                                   "data": [{"b64_json": b64}],
                                   "_dyva_files": stored.get("_dyva_files") or [],
                                   "model": model_used, "host": host})
+
     if stopped:
         return web.json_response({"error": "edit stopped"}, status=499)
 
@@ -7209,11 +7448,11 @@ def main():
     parser.add_argument("--source", nargs="+", metavar=("CMD"),
                         help="manage additional host sources: '--source list' or '--source add <url>' "
                              "(the url returns a JSON list of source definitions, same as the dashboard's add-by-URL)")
-    parser.add_argument("--hosts", nargs="*", metavar="CMD",
-                        help="inspect or prune the host reputation table: '--hosts' for a summary, "
-                             "'--hosts list [STATE]' for the per-key breakdown, '--hosts del STATE' to "
-                             "see what is marked STATE, and '--hosts del STATE KEY' to clear one key "
-                             "(e.g. '--hosts del bad __tts__')")
+    parser.add_argument("--hosts", nargs="*", metavar="ARG",
+                        help="inspect or prune the host reputation table; arguments narrow left to "
+                             "right and the verb comes last: '--hosts' for a summary, '--hosts bad' "
+                             "for the keys marked bad, '--hosts bad __tts__' for the hosts carrying "
+                             "that mark, and '--hosts bad __tts__ del' to clear them")
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
