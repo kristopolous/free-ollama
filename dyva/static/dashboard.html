@@ -205,6 +205,7 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 .worker-card .worker-model{font-family:var(--font-mono);font-size:var(--fs-md);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .worker-card .worker-ago{font-size:var(--fs-2xs);color:var(--text-faint)}
 .worker-card .worker-meta{font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap}
+.worker-card .worker-meta.worker-phase{color:var(--accent);font-family:var(--font-mono);font-size:var(--fs-2xs)}
 .worker-stop{background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);padding:4px 10px;font-size:var(--fs-sm);cursor:pointer}
 .worker-stop:hover{background:var(--accent-bg-active);color:var(--text)}
 .worker-stop[disabled]{opacity:.6;cursor:default;font-style:italic}
@@ -484,7 +485,7 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
 .tool-opt .tool-txt small{color:var(--text-dim);font-size:var(--fs-2xs);margin-top:1px}
 .field{margin-bottom:var(--sp-4)}
 .img-params{display:grid;grid-template-columns:2.2fr 1fr;gap:var(--sp-4);margin-bottom:var(--sp-4)}
-.img-dims{display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--sp-4);margin-bottom:var(--sp-4)}
+.img-dims{display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--sp-4);row-gap:var(--sp-2);margin-bottom:var(--sp-4)}
 .slider-row{display:grid;grid-template-columns:180px 1fr 56px;gap:10px;align-items:center;margin-bottom:var(--sp-4)}
 .slider-row label{display:flex;justify-content:space-between;margin:0}
 .slider-row .val{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--accent);text-align:right}
@@ -538,20 +539,21 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .img-layout{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}
 .img-main{flex:1 1 460px;min-width:0;max-width:640px}
 .mode-toggle{display:inline-flex;gap:2px;padding:2px;margin-bottom:var(--sp-4);background:var(--bg-sunken);border:1px solid var(--border);border-radius:var(--r-md)}
-.mode-btn{border:none;background:none;color:var(--text-muted);font-size:var(--fs-md);padding:var(--sp-2) var(--sp-5);border-radius:calc(var(--r-md) - 2px);cursor:pointer}
-.mode-btn:hover{color:var(--text-2)}
-.mode-btn.active{background:var(--surface);color:var(--text)}
+.mode-btn{border:none;border-bottom:2px solid transparent;background:none;color:var(--text-muted);font-size:var(--fs-md);padding:var(--sp-2) var(--sp-5);border-radius:calc(var(--r-md) - 2px);cursor:pointer;transition:color var(--dur),border-color var(--dur),background var(--dur)}
+.mode-btn:hover{color:var(--text-2);border-bottom-color:var(--border-hover)}
+.mode-btn.active{background:var(--surface);color:var(--text);border-bottom-color:var(--border-accent)}
 /* Edit-only controls are hidden outright in generate mode rather than disabled:
    an edit model takes a prompt plus references, not a negative prompt. */
 .edit-only{display:none!important}
 body.img-edit .edit-only{display:revert!important}
 body.img-edit .generate-only{display:none!important}
 .hint{color:var(--text-faint);font-weight:normal}
-.inline-check{display:flex;align-items:center;gap:.5em;margin-bottom:var(--sp-3);font-size:var(--fs-md);color:var(--text-2);cursor:pointer}
-.inline-check input{width:auto;margin:0;accent-color:var(--accent);cursor:pointer}
+.inline-check{display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-3);font-size:var(--fs-md);color:var(--text-2);cursor:pointer}
+.inline-check input{width:auto;flex-shrink:0;margin:0 var(--sp-1) 0 0;accent-color:var(--accent);cursor:pointer}
 .inline-check small{color:var(--text-faint);font-family:var(--font-mono);font-size:var(--fs-2xs);margin-left:.3em}
-body.img-edit.match-src .img-dims .field:not(:last-child){opacity:.45}
-.inline-check.edit-only{margin-top:-2px}
+body.img-edit.match-src .img-dims .field:nth-child(-n+2){opacity:.45}
+/* its own row across the width/height/seed grid, since it governs them */
+.img-dims .inline-check{grid-column:1/-1;margin:0}
 .drop{border:1px dashed var(--border-hover);border-radius:var(--r-lg);background:var(--bg-sunken);padding:var(--sp-5);text-align:center;cursor:pointer}
 .drop.over{border-color:var(--border-accent);background:var(--accent-bg)}
 .drop-hint{color:var(--text-dim);font-size:var(--fs-md)}
@@ -792,8 +794,8 @@ __SD_MODELS__
 <label for="imgSeed">Seed</label>
 <input id="imgSeed" type="number" value="-1" title="-1 = random">
 </div>
-</div>
 <label class="inline-check edit-only" for="editMatchSource"><input type="checkbox" id="editMatchSource" checked><span>Match source resolution <small id="editSrcDims"></small></span></label>
+</div>
 <div class="field">
 <label for="posPrompt">Positive prompt</label>
 <textarea id="posPrompt" rows="3" placeholder="a cyberpunk city at night, neon lights..."></textarea>
@@ -1217,7 +1219,7 @@ function renderWorkers(workers){
   Object.keys(_stopping).forEach(function(k){if(!live[k])delete _stopping[k]});
   _setCount('cnt-workers',arr.length);
   c.innerHTML='';
-  if(!arr.length){c.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">None racing right now</div>';return}
+  if(!arr.length){c.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">Nothing running right now</div>';return}
   arr.forEach(function(w){
     var card=document.createElement('div');card.className='worker-card';
     var top=document.createElement('div');top.className='worker-title';
@@ -1225,8 +1227,16 @@ function renderWorkers(workers){
     var ago=document.createElement('span');ago.className='worker-ago';ago.textContent='started '+agoText(w.age||0)+' ago';top.appendChild(ago);
     card.appendChild(top);
     var body=document.createElement('div');body.className='worker-meta';
-    body.textContent='checked '+w.checked+(w.total?' / '+w.total:'');
+    // A race reports how many hosts it has tried; a job that already has a
+    // host is waiting on it, so say what it's doing and where.
+    if(w.phase){
+      body.textContent=w.phase+(w.host?' on '+String(w.host).replace(/^https?:\/\//,''):'');
+      body.classList.add('worker-phase');
+    }else{
+      body.textContent='checked '+w.checked+(w.total?' / '+w.total:'');
+    }
     card.appendChild(body);
+    if(w.phase){card.appendChild(document.createElement('span'));c.appendChild(card);return}
     var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
     // A stop isn't instant — the race has to unwind and the in-flight upstream
     // request has to be cancelled — so the button latches into "stopping…"
@@ -1807,15 +1817,28 @@ function paintMediaStatus(d){
   if(!el)return;
   if(d.status==='connected'){
     // the host accepted the job — from here it is rendering, not searching
-    var host=(d.host||'').replace(/^https?:\/\//,'');
-    el.textContent=host?'found '+host+' \u2014 generating\u2026':'generating\u2026';
+    var host=(d.host||'').replace(/^https?:\/\//,''),m=ranWith(d);
+    var tail=m?('generating with '+m+'\u2026'):'generating\u2026';
+    el.textContent=host?('found '+host+' \u2014 '+tail):tail;
   }else if(d.status==='failed'){
     el.textContent='that host failed \u2014 trying another\u2026';
   }
 }
+// The model that actually ran, if the server told us. `model` on an activity
+// event is only the routing key — a query pattern, a prompt label, or a
+// __capability__ sentinel — so it isn't a name worth showing.
+function ranWith(d){
+  var m=d&&d.rmodel;
+  if(!m)return '';
+  m=String(m).replace(/\\/g,'/').split('/').pop();
+  return m.length>48?m.slice(0,47)+'\u2026':m;
+}
 function paintGenStatus(el,d){
   if(!el)return;
-  if(d.status==='connected')el.textContent='generating\u2026';
+  if(d.status==='connected'){
+    var m=ranWith(d);
+    el.textContent=m?('generating with '+m+'\u2026'):'generating\u2026';
+  }
   else if(d.status==='trying'||d.status==='failed')el.textContent=d.message;
 }
 // looping placeholder animation shown inside the bubble until the first tokens
@@ -3192,6 +3215,7 @@ function loadEditModels(){
 }
 function setImgMode(m){
   _imgMode=m;
+  try{localStorage.setItem('dyva_imgmode',m)}catch(e){}
   document.body.classList.toggle('img-edit',m==='edit');
   if(m==='edit')loadEditModels();
   Array.prototype.forEach.call(document.querySelectorAll('#imgMode .mode-btn'),function(b){
@@ -3200,7 +3224,11 @@ function setImgMode(m){
   document.getElementById('imgGenerate').textContent=(m==='edit'?'Edit':'Generate');
 }
 Array.prototype.forEach.call(document.querySelectorAll('#imgMode .mode-btn'),function(b){
-  b.addEventListener('click',function(){setImgMode(b.dataset.mode)});
+  b.addEventListener('click',function(){
+    var want='media/image/'+b.dataset.mode;
+    if(location.hash==='#'+want)setImgMode(b.dataset.mode);
+    else location.hash=want;
+  });
 });
 (function(){
   var chk=document.getElementById('editMatchSource');
@@ -3365,7 +3393,13 @@ function showMediaPane(name){
   if(name==='music'&&!_musicLoaded)loadMusicModels();
 }
 document.querySelectorAll('[data-mediapane]').forEach(function(b){
-  b.addEventListener('click',function(){showMediaPane(b.getAttribute('data-mediapane'))});
+  b.addEventListener('click',function(){
+    var p=b.getAttribute('data-mediapane');
+    var want='media/'+p+(p==='image'&&_imgMode==='edit'?'/edit':'');
+    // an unchanged hash fires no hashchange, so render directly in that case
+    if(location.hash==='#'+want)showMediaPane(p);
+    else location.hash=want;
+  });
 });
 function _mediaStatus(el,text){
   el.innerHTML='';
@@ -3766,7 +3800,7 @@ chatLog.addEventListener('click',function(e){
   });
 });
 
-function activateTab(name,chatId,pane){
+function activateTab(name,chatId,pane,mode){
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
   document.body.classList.toggle('chat',name==='chat');
@@ -3787,7 +3821,13 @@ function activateTab(name,chatId,pane){
   if(name==='media'){
     var want=pane;
     if(!want){try{want=localStorage.getItem('dyva_mediapane')}catch(e){}}
-    showMediaPane(/^(image|music|speech|video)$/.test(want||'')?want:'image');
+    want=/^(image|music|speech|video)$/.test(want||'')?want:'image';
+    showMediaPane(want);
+    if(want==='image'){
+      var m=mode;
+      if(!m){try{m=localStorage.getItem('dyva_imgmode')}catch(e){}}
+      setImgMode(m==='edit'?'edit':'generate');
+    }
   }
 }
 // Admin password: when set on the server, the settings endpoints 403 unless the
@@ -4026,15 +4066,19 @@ function tabFromHash(){
   var h=location.hash.replace(/^#/,'');
   if(h.indexOf('chat/')===0)return{tab:'chat',chatId:h.slice(5)};
   if(h==='image')return{tab:'media'};        // legacy bookmark
-  if(h.indexOf('media/')===0)return{tab:'media',pane:h.slice(6)};
+  if(h.indexOf('media/')===0){
+    // media/<pane>[/<mode>] — e.g. media/speech, media/image/edit
+    var seg=h.slice(6).split('/');
+    return{tab:'media',pane:seg[0],mode:seg[1]};
+  }
   if(h==='serverroom'||h==='chat'||h==='media'||h==='settings')return{tab:h};
   return{tab:'serverroom'};
 }
 document.querySelectorAll('.tab').forEach(function(t){
   t.addEventListener('click',function(){location.hash=t.getAttribute('data-tab');});
 });
-window.addEventListener('hashchange',function(){var h=tabFromHash();activateTab(h.tab,h.chatId,h.pane);});
-var init=tabFromHash();activateTab(init.tab,init.chatId,init.pane);
+window.addEventListener('hashchange',function(){var h=tabFromHash();activateTab(h.tab,h.chatId,h.pane,h.mode);});
+var init=tabFromHash();activateTab(init.tab,init.chatId,init.pane,init.mode);
 tryResume();
 </script>
 </body>

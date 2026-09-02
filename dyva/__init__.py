@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import base64
 import collections
+import contextlib
 import datetime
 import fnmatch
 import csv
@@ -628,6 +629,8 @@ def _worker_snapshot():
             "age": round(now - w["started"], 1),
             "checked": w["checked"],
             "total": w["total"],
+            "phase": w.get("phase"),
+            "host": w.get("host"),
         })
     out.sort(key=lambda w: w["started"])
     return out
@@ -657,7 +660,7 @@ async def _remove_worker_listener(q):
             _worker_queues.remove(q)
 
 
-async def _register_worker(model, total, stop):
+async def _register_worker(model, total, stop, phase=None, host=None):
     wid = _new_wid()
     if len(_workers) >= _WORKERS_MAX:
         _workers.pop(next(iter(_workers)))
@@ -668,6 +671,8 @@ async def _register_worker(model, total, stop):
         "checked": 0,
         "total": total,
         "stop": stop,
+        "phase": phase,
+        "host": host,
     }
     await _broadcast_workers()
     return wid
@@ -680,6 +685,19 @@ async def _worker_checked(wid):
         await _broadcast_workers()
 
 
+@contextlib.asynccontextmanager
+async def _waiting_worker(label, host, phase="rendering"):
+    """Show a job in the workers view while we wait on a host that already took
+    it. The race registers a worker for *finding* a host; without this the job
+    vanishes from the view for the whole render, which is the part that
+    actually takes minutes."""
+    wid = await _register_worker(label, 1, lambda: None, phase=phase, host=host)
+    try:
+        yield wid
+    finally:
+        await _unregister_worker(wid)
+
+
 async def _unregister_worker(wid):
     if wid in _workers:
         _workers.pop(wid, None)
@@ -687,7 +705,8 @@ async def _unregister_worker(wid):
 
 
 
-async def broadcast_activity(host, model, status, message, duration=None, wid=None, aid=None):
+async def broadcast_activity(host, model, status, message, duration=None, wid=None, aid=None,
+                             rmodel=None):
     """Publish one activity event.
 
     `aid` gives the event a stable identity: the dashboard replaces the existing
@@ -697,6 +716,10 @@ async def broadcast_activity(host, model, status, message, duration=None, wid=No
     entry = {'host': host, 'model': model, 'status': status, 'message': message, 'time': time.time()}
     if aid is not None:
         entry['id'] = aid
+    if rmodel:
+        # what actually ran, as opposed to `model`, which is the routing key
+        # (a query pattern, a prompt label, or a __capability__ sentinel)
+        entry['rmodel'] = rmodel
     if duration is not None:
         entry['duration'] = round(duration, 2)
     # Mirror to stderr so the server log carries the same narrative as the
@@ -1971,7 +1994,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             dur = time.time() - start
             log.debug(f"  \u2713 {tag}")
             await broadcast_activity(host, model, "connected",
-                f"success: {host} for {model}", duration=dur, wid=wid)
+                f"success: {host} for {model}", duration=dur, wid=wid, rmodel=full)
             return accepted(("ok", host, full, data), extra=full)
 
         try:
@@ -2014,7 +2037,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         dur = time.time() - start
         log.debug(f"  \u2713 {tag}")
         await broadcast_activity(host, model, "connected",
-            f"success: {host} for {model}", duration=dur, wid=wid)
+            f"success: {host} for {model}", duration=dur, wid=wid, rmodel=full)
         return accepted(("ok_stream", host, full, resp, first_line, first), extra=full)
 
     result, stopped, _tried, _tally = await _race_hosts(
@@ -4331,7 +4354,9 @@ async def handle_txt2img(request):
                 if r.status == 200:
                     data = await r.json()
                     await broadcast_activity(host, activity_label, "connected",
-                        "txt2img \u2713", duration=time.time() - t0, wid=wid)
+                        "txt2img \u2713", duration=time.time() - t0, wid=wid,
+                        rmodel=(ov or {}).get("sd_model_checkpoint")
+                               or _resolve_sd_model(data, body))
                     data["_dyva_host"] = host
                     return accepted(data)
                 await broadcast_activity(host, activity_label, "failed",
@@ -4350,7 +4375,8 @@ async def handle_txt2img(request):
         data = await _txt2img_comfyui(session, host, body, model_filter)
         if data:
             await broadcast_activity(host, activity_label, "connected",
-                "txt2img (comfy) \u2713", duration=time.time() - t0, wid=wid)
+                "txt2img (comfy) \u2713", duration=time.time() - t0, wid=wid,
+                rmodel=data.get("_dyva_model"))
             data["_dyva_host"] = host
             return accepted(data)
         await broadcast_activity(host, activity_label, "failed",
@@ -4459,6 +4485,33 @@ async def comfy_submit(session, host, workflow, timeout=30):
     return prompt_id
 
 
+def _comfy_status_error(status):
+    """Pull the real reason out of a failed /history entry.
+
+    `status.messages` is the whole event log — execution_start,
+    execution_cached, then eventually execution_error — so joining and
+    truncating it reports the beginning of a successful run and throws away the
+    part that says what went wrong.
+    """
+    for m in (status.get("messages") or []):
+        if not (isinstance(m, (list, tuple)) and len(m) >= 2):
+            continue
+        event = m[0]
+        payload = m[1] if isinstance(m[1], dict) else {}
+        if event == "execution_interrupted":
+            return "interrupted (queue cleared or cancelled on the host)"
+        if event == "execution_error":
+            node = payload.get("node_type") or payload.get("node_id") or "?"
+            exc = (payload.get("exception_message")
+                   or payload.get("exception_type") or "execution error")
+            return f"{node}: {exc}"[:300]
+    # nothing recognisable — name the events we did see, which is still more
+    # use than the first 200 characters of a JSON dump
+    events = [m[0] for m in (status.get("messages") or [])
+              if isinstance(m, (list, tuple)) and m]
+    return ("no execution_error in " + ", ".join(events[-4:])) if events else "execution error"
+
+
 async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
                         poll=2, view_timeout=60):
     """Wait out a job the host already accepted; return (bytes, filename).
@@ -4514,9 +4567,7 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
 
         status = entry.get("status") or {}
         if status.get("status_str") == "error":
-            msgs = [str(m) for m in (status.get("messages") or [])]
-            detail = "; ".join(msgs)[:200]
-            raise ComfyError(f"execution error{': ' + detail if detail else ''}")
+            raise ComfyError(_comfy_status_error(status))
         if status.get("completed"):
             raise ComfyError(f"the graph finished but saved no {label}")
     raise ComfyError(f"timeout waiting for {label}")
@@ -5283,7 +5334,8 @@ async def _run_video_job(session, jid):
         job["comfyui_prompt_id"] = prompt_id
         job["status"] = "in_progress"
         _video_job_save()
-        content, filename = await _poll_video_result(session, host, prompt_id, job)
+        async with _waiting_worker(f"video: {job.get('prompt', '')[:60]}", host, "rendering"):
+            content, filename = await _poll_video_result(session, host, prompt_id, job)
         content_path = os.path.join(VIDEO_JOBS_DIR, f"{jid}.bin")
         os.makedirs(VIDEO_JOBS_DIR, exist_ok=True)
         with open(content_path, "wb") as f:
@@ -5799,7 +5851,7 @@ async def handle_tts_speech(request):
             return failed(err)
         dur = time.time() - start
         await broadcast_activity(host, TTS_KEY, "connected",
-            f"success: {host} for {label}", duration=dur, wid=wid)
+            f"success: {host} for {label}", duration=dur, wid=wid, rmodel=node)
         return accepted((host, prompt_id, node))
 
     result, stopped, tried, tally = await _race_hosts(hosts, attempt, TTS_KEY)
@@ -5809,8 +5861,9 @@ async def handle_tts_speech(request):
         # Rendering happens after the race: the host is already chosen and
         # already marked good, so a slow render can't un-choose it.
         try:
-            raw, filename = await _tts_collect(
-                session, host, prompt_id, timeout=_tts_render_budget(input_text))
+            async with _waiting_worker(label, host, "speaking"):
+                raw, filename = await _tts_collect(
+                    session, host, prompt_id, timeout=_tts_render_budget(input_text))
         except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
             log.warning(f"tts: {host}: accepted the job then failed to render: {err}")
@@ -5947,6 +6000,9 @@ async def handle_audio_voices(request):
 #               LoadImage -> FluxKontextImageScale -> VAEEncode -> ReferenceLatent,
 #               chained through the conditioning.
 EDIT_KEY = "__edit__"
+# Editing runs a full diffusion sample on someone else's GPU, often a queued
+# one. Ten minutes is not generous, it's realistic.
+EDIT_RENDER_TIMEOUT = 900
 _edit_classifier_cache = None
 
 
@@ -6422,7 +6478,8 @@ async def handle_image_edit(request):
                 return unreachable_host(err)
             return failed(err)
         await broadcast_activity(host, EDIT_KEY, "connected",
-            f"success: {host} for {label}", duration=time.time() - t0, wid=wid)
+            f"success: {host} for {label}", duration=time.time() - t0, wid=wid,
+            rmodel=plan["model"])
         return accepted((host, prompt_id, plan["model"]))
 
     result, stopped, tried, tally = await _race_hosts(hosts, attempt, EDIT_KEY, label=label)
@@ -6430,8 +6487,10 @@ async def handle_image_edit(request):
     if result:
         host, prompt_id, model_used = result
         try:
-            raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
-                                           timeout=300, poll=2, view_timeout=60)
+            async with _waiting_worker(label, host, "editing"):
+                raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
+                                               timeout=EDIT_RENDER_TIMEOUT,
+                                               poll=2, view_timeout=90)
         except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
             await broadcast_activity(host, EDIT_KEY, "failed",
@@ -6789,7 +6848,8 @@ async def _run_music_job(session, jid):
                 continue
             job["comfyui_prompt_id"] = pid
             _music_job_save()
-            content, filename = await _poll_comfy_audio(session, host, pid)
+            async with _waiting_worker(label, host, "composing"):
+                content, filename = await _poll_comfy_audio(session, host, pid)
             os.makedirs(MUSIC_JOBS_DIR, exist_ok=True)
             content_path = os.path.join(MUSIC_JOBS_DIR, f"{jid}.bin")
             with open(content_path, "wb") as f:
