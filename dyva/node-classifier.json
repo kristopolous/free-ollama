@@ -224,31 +224,52 @@
   ],
   "music": [
     {
-      "name": "AceStep",
+      "name": "AceStep1.5",
       "encode": [
-        "^TextEncodeAceStepAudio"
+        "^TextEncodeAceStepAudio1\\.5$"
       ],
       "latent": [
-        "^EmptyAceStepLatentAudio"
+        "^EmptyAceStep1\\.5LatentAudio$"
       ],
       "style": "tags",
       "lyrics": "lyrics",
       "seconds": "seconds",
-      "ckpt": "(?i)ace.?step"
+      "enc_seconds": "duration",
+      "ckpt": "(?i)ace.?step",
+      "note": "1.5 carries the length on the encode node as `duration` AND on the latent as `seconds`; they have to agree or the sampler and the conditioning disagree about how long the song is."
+    },
+    {
+      "name": "AceStep",
+      "encode": [
+        "^TextEncodeAceStepAudio$"
+      ],
+      "latent": [
+        "^EmptyAceStepLatentAudio$"
+      ],
+      "style": "tags",
+      "lyrics": "lyrics",
+      "seconds": "seconds",
+      "ckpt": "(?i)ace.?step",
+      "note": "Anchored so it cannot claim the 1.5 nodes, which take different inputs."
     },
     {
       "name": "MiniMaxMusic3",
       "encode": [
-        "(?i)minimax.*music.*3?.*encode",
-        "(?i)textencode.*minimax.*music"
+        "^MiniMaxMusic3TextEncode$"
       ],
       "latent": [
-        "(?i)empty.*minimax.*music.*latent"
+        "^EmptyMiniMaxMusic3LatentAudio$"
       ],
       "style": "caption",
       "lyrics": "lyrics",
-      "seconds": "max_duration",
-      "ckpt": "(?i)minimax.*music"
+      "seconds": "seconds",
+      "enc_seconds": "max_duration",
+      "unet": "(?i)minimax.?music3.*dit",
+      "clip": "(?i)minimax.?music3.*text.?encoder",
+      "clip_type": "(?i)minimax|music",
+      "vae": "(?i)minimax.?music3.*dav",
+      "ckpt": "(?i)minimax.?music",
+      "note": "Ships as three separate files (diffusion_models/, text_encoders/, vae/) rather than one checkpoint, so it needs the loader trio. Class names verified against the published node reference; the CLIPLoader type value is resolved from the host's own enum."
     },
     {
       "name": "Generic",

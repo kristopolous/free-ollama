@@ -8211,7 +8211,15 @@ def load_music_families():
                 ckpt = re.compile(".")
             fams.append({"name": spec.get("name", "Generic"), "encode": enc, "latent": lat,
                          "ckpt": ckpt, "style": spec.get("style"),
-                         "lyrics": spec.get("lyrics"), "seconds": spec.get("seconds")})
+                         "lyrics": spec.get("lyrics"), "seconds": spec.get("seconds"),
+                         # some families state the length twice — once on the
+                         # encode node, once on the latent — and the two have
+                         # to agree
+                         "enc_seconds": spec.get("enc_seconds"),
+                         # families that ship as separate files rather than one
+                         # checkpoint name their pieces instead
+                         "unet": spec.get("unet"), "clip": spec.get("clip"),
+                         "clip_type": spec.get("clip_type"), "vae": spec.get("vae")})
     _music_families_cache = fams
     return fams
 
@@ -8279,10 +8287,53 @@ def _wire_node(info, cls, node_id, graph, links, overrides=None):
     return graph[node_id]
 
 
+def _music_parts(info, fam, graph, links):
+    """Wire a family that ships as separate files: a diffusion model, a text
+    encoder and a VAE, each loaded by the generic loader for its kind.
+
+    Everything is resolved against the host's own enums, so a plan only exists
+    when every file the graph needs is actually on that host — the same rule
+    the image-edit path uses, and for the same reason: a missing piece
+    otherwise surfaces minutes later as "clip input is invalid: None".
+    """
+    def pick(node, field, pattern):
+        if not pattern:
+            return None
+        rx = re.compile(pattern)
+        return next((o for o in _enum_options(info, node, field) if rx.search(o)), None)
+
+    unet = pick("UNETLoader", "unet_name", fam.get("unet"))
+    clip = pick("CLIPLoader", "clip_name", fam.get("clip"))
+    vae = pick("VAELoader", "vae_name", fam.get("vae"))
+    if not (unet and clip and vae):
+        return None
+    ctype = None
+    if fam.get("clip_type"):
+        # the enum value is the host's to declare, not ours to guess
+        ctype = pick("CLIPLoader", "type", fam["clip_type"])
+        if not ctype:
+            return None
+    graph["1"] = {"class_type": "UNETLoader",
+                  "inputs": {"unet_name": unet, "weight_dtype": "default"}}
+    graph["1c"] = {"class_type": "CLIPLoader",
+                   "inputs": dict({"clip_name": clip}, **({"type": ctype} if ctype else {}))}
+    graph["1v"] = {"class_type": "VAELoader", "inputs": {"vae_name": vae}}
+    links["MODEL"] = ["1", 0]
+    links["CLIP"] = ["1c", 0]
+    links["VAE"] = ["1v", 0]
+    return unet
+
+
 def _music_loader(info, fam, graph, links):
-    """Wire whatever loads the model. Prefer a plain checkpoint whose filename
-    matches the family (ACE-Step ships as one .safetensors); otherwise take a
-    family-specific loader node, which is how the multi-file families load."""
+    """Wire whatever loads the model. A family that names its own pieces is
+    loaded from those; otherwise prefer a plain checkpoint whose filename
+    matches the family (ACE-Step ships as one .safetensors), and failing that a
+    family-specific loader node."""
+    if fam.get("unet") or fam.get("clip") or fam.get("vae"):
+        got = _music_parts(info, fam, graph, links)
+        if got:
+            return got
+        raise _MusicError(f"host is missing part of the {fam['name']} rig")
     req = _oi_required(info, "CheckpointLoaderSimple")
     entry = req.get("ckpt_name")
     names = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else []
@@ -8319,6 +8370,17 @@ def _build_music_workflow(info, fam, enc_cls, lat_cls, style, lyrics, seconds, s
     if f_lyrics:
         pos[f_lyrics] = lyrics or ""
         neg[f_lyrics] = ""
+    # ACE-Step 1.5 (`duration`) and MiniMax Music 3 (`max_duration`) both carry
+    # the length on the encode node as well as the latent. Left at its default
+    # the conditioning describes a two-minute song while the latent holds
+    # however long you asked for.
+    enc_secs = fam.get("enc_seconds")
+    if enc_secs and enc_secs in enc_req:
+        pos[enc_secs] = seconds
+        neg[enc_secs] = seconds
+    if "seed" in enc_req:
+        pos["seed"] = seed
+        neg["seed"] = seed
     _wire_node(info, enc_cls, "2", graph, links, pos)
     _wire_node(info, enc_cls, "3", graph, links, neg)
     links["CONDITIONING"] = ["2", 0]
@@ -8348,10 +8410,10 @@ def _build_music_workflow(info, fam, enc_cls, lat_cls, style, lyrics, seconds, s
     _wire_node(info, dec, "6", graph, links)
     links["AUDIO"] = ["6", 0]
 
-    save = next((c for c in ("SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced")
-                 if c in (info or {})), None)
+    # shared with speech, so music gets the preview-node treatment too
+    save = _tts_save_node(info or {})
     if not save:
-        raise _MusicError("host has no SaveAudio node")
+        raise _MusicError("host has no audio-save node")
     _wire_node(info, save, "7", graph, links, {"filename_prefix": "dyva/music"})
     return graph, model_ref
 
