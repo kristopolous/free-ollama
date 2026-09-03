@@ -280,30 +280,36 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.note .note-text strong{color:var(--text);font-weight:500}
 .msg.note .note-text blockquote{border-left:2px solid var(--border-strong);margin:.3em 0;padding:0 .6em;color:var(--text-3)}
 .msg.note .note-text h4{margin:1.25rem 0 .3em;font-size:inherit;font-weight:500;letter-spacing:.05em;text-transform:uppercase;color:#fff}
-.msg.note .note-text table{border-collapse:collapse;margin:.4em 0;font-size:var(--fs-sm)}
-.msg.note .note-text th,.msg.note .note-text td{text-align:left;padding:.25em 1.1em .25em 0;white-space:nowrap;vertical-align:top}
-.msg.note .note-text th:last-child,.msg.note .note-text td:last-child{padding-right:0;white-space:normal}
-.msg.note .note-text th{color:var(--text-3);font-weight:500;font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border-strong);padding-bottom:.35em}
-.msg.note .note-text td{border-bottom:1px solid var(--border)}
-/* On a phone four columns is one column too many: `about` gets whatever is
-   left and turns into a vertical wall of single letters. Below 640px the row
-   stops being a row — name on its own line, kind and source together
-   underneath it, description last — which is the same information in the
-   order you actually read it. */
-@media (max-width:640px){
-  .msg.note .note-text table,
-  .msg.note .note-text tbody,
-  .msg.note .note-text tr{display:block;width:100%}
-  .msg.note .note-text thead{display:none}
-  .msg.note .note-text tr{border:1px solid var(--border);border-radius:var(--r-md);padding:.45em .6em;margin:.4em 0}
-  .msg.note .note-text td{display:block;border:none;padding:0;white-space:normal;overflow-wrap:anywhere}
-  .msg.note .note-text td:first-child{font-family:var(--font-mono);font-size:var(--fs-sm)}
-  .msg.note .note-text td:nth-child(2),
-  .msg.note .note-text td:nth-child(3){display:inline;font-size:var(--fs-2xs);color:var(--text-dim)}
-  .msg.note .note-text td:nth-child(2)::after{content:' \00b7 '}
-  .msg.note .note-text td:last-child{margin-top:.15em;font-size:var(--fs-2xs);color:var(--text-faint)}
-  .msg.note .note-text td:last-child:empty{display:none}
-}
+/* One file per card: a 64px square on the left, name and provenance beside
+   it, description underneath. object-fit:cover so a wide or tall image is
+   cropped to the square rather than squeezed into it. */
+.msg.note .note-text .asset-card{display:flex;gap:var(--sp-3);align-items:flex-start;border:1px solid var(--border);border-radius:var(--r-md);padding:.5em;margin:.4em 0;max-width:44rem}
+.msg.note .note-text .asset-thumb{flex:0 0 auto;width:64px;height:64px;border-radius:var(--r-md);object-fit:cover;background:var(--bg-inset);border:1px solid var(--border)}
+.msg.note .note-text .asset-thumb-missing{object-fit:contain;opacity:.55;padding:2px}
+.msg.note .note-text .asset-glyph{display:flex;align-items:center;justify-content:center;font-size:1.4rem;color:var(--text-faint)}
+.msg.note .note-text .asset-text{min-width:0;flex:1 1 auto}
+.msg.note .note-text .asset-name{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text);overflow-wrap:anywhere}
+.msg.note .note-text .asset-meta{font-size:var(--fs-2xs);color:var(--text-dim);overflow-wrap:anywhere}
+.msg.note .note-text .asset-about{margin-top:.2em;font-size:var(--fs-xs);color:var(--text-3);line-height:var(--line-body);overflow-wrap:anywhere}
+/* Not a table at all: four columns squeezed the description into a vertical
+   wall of letters on a phone, and stacking turned out to read better on every
+   width. Each file is a block — name on its own line, kind and source
+   underneath, description last — which is the order you actually read it in.
+   The header row goes away because the styling already says what each line
+   is. */
+.msg.note .note-text table,
+.msg.note .note-text tbody,
+.msg.note .note-text tr{display:block;width:100%}
+.msg.note .note-text table{max-width:44rem;margin:.5em 0}
+.msg.note .note-text thead{display:none}
+.msg.note .note-text tr{border:1px solid var(--border);border-radius:var(--r-md);padding:.45em .6em;margin:.4em 0}
+.msg.note .note-text td{display:block;border:none;padding:0;white-space:normal;overflow-wrap:anywhere}
+.msg.note .note-text td:first-child{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text)}
+.msg.note .note-text td:nth-child(2),
+.msg.note .note-text td:nth-child(3){display:inline;font-size:var(--fs-2xs);color:var(--text-dim)}
+.msg.note .note-text td:nth-child(2)::after{content:' \00b7 '}
+.msg.note .note-text td:last-child{margin-top:.15em;font-size:var(--fs-2xs);color:var(--text-faint)}
+.msg.note .note-text td:last-child:empty{display:none}
 .msg.note.working .body{border-left-color:var(--border-strong);font-style:italic}
 .msg.note.err .body{border-left-color:var(--err);color:var(--err)}
 .msg.assistant .body pre{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:.6em;overflow-x:auto;white-space:pre;margin:.6em 0}
@@ -355,6 +361,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg .files img{max-width:160px;max-height:160px;border-radius:var(--r-md);border:1px solid var(--border)}
 .msg .body p img{max-width:min(360px,100%);border-radius:var(--r-lg);display:block;margin:var(--sp-2) 0}
 .msg .files img,.msg .body img{cursor:zoom-in}
+.msg img.img-missing{max-width:128px;max-height:128px;object-fit:contain;opacity:.6;cursor:default}
 .msg .file-chip{display:inline-block;background:var(--a-900);border:1px solid var(--border);border-radius:var(--r-md);padding:3px var(--sp-3);font-size:var(--fs-xs);color:var(--accent);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid var(--border-strong);background:var(--bg-sunken-alt);border-radius:var(--r-sm);padding:.25em .65em}
@@ -1649,6 +1656,18 @@ chatLog.addEventListener('scroll',function(){
   if(_autoScrolling)return;
   _stickBottom=chatAtBottom();
 });
+// A generated image can be gone by the time you scroll back to it — the image
+// history rolls over, or the file was cleaned up. Image load errors do not
+// bubble, so this listens in the capture phase: one handler covers every image
+// the chat renders now or later, whichever code path put it there.
+chatLog.addEventListener('error',function(e){
+  var im=e.target;
+  if(!im||im.tagName!=='IMG'||im.getAttribute('data-missing'))return;
+  im.setAttribute('data-missing','1');   // the fallback failing must not loop
+  im.src=ASSET_FALLBACK_IMG;
+  im.classList.add('img-missing');
+  im.title='this image is no longer available';
+},true);
 // 3. Content keeps growing *after* the scroll: images decode, the audio and
 //    video players swap in, highlight.js and KaTeX reflow, the think block
 //    expands. None of that fires a scroll event, so the view is left short of
@@ -2446,6 +2465,25 @@ var SLASH_COMMANDS=[
 // from the asset list, since neither is worth losing the chat over. In-page
 // anchors are left alone. rel=noreferrer because the hosts are strangers'
 // boxes.
+// A generated image can be gone by the time you list it — the history rolls
+// over at IMG_HISTORY_MAX, or the file was cleaned up. A broken-image icon
+// reads as "the dashboard is broken"; this reads as "that one's gone".
+// DOMPurify strips inline handlers, so the fallback is bound after render.
+var ASSET_FALLBACK_IMG='https://9ol.es/dyva/confused.avif';
+function _thumbFallbacks(el){
+  Array.prototype.forEach.call(el.querySelectorAll('img.asset-thumb'),function(im){
+    var swapped=false;
+    function miss(){
+      if(swapped)return;        // the fallback itself failing must not loop
+      swapped=true;
+      im.src=ASSET_FALLBACK_IMG;
+      im.className='asset-thumb asset-thumb-missing';
+      im.title='this file is no longer available';
+    }
+    im.addEventListener('error',miss);
+    if(im.complete&&im.naturalWidth===0)miss();   // a cached failure beats the listener
+  });
+}
 function _extLinks(el){
   Array.prototype.forEach.call(el.querySelectorAll('a[href]'),function(a){
     var href=a.getAttribute('href')||'';
@@ -2495,17 +2533,30 @@ function chatSummaryMd(){
                  +(wanted&&wanted!=='*'?(' \u00b7 asking for `'+wanted+'`'):''));
   var alist=assetsOf(currentChat);
   out.push('#### files');
-  if(!alist.length)out.push('> *(none)*');
-  else{
-    out.push('| name | kind | source | about |');
-    out.push('|---|---|---|---|');
-    for(i=0;i<alist.length;i++){
-      var a=alist[i];
-      // linked when there is something to link to, plain otherwise
-      var where=(a.src||'')+(a.host?(' \u00b7 ['+a.host+'](http://'+a.host.replace(/^https?:\/\//,'')+')'):'');
-      out.push('| '+(a.url?('['+a.name+']('+a.url+')'):a.name)+' | '+a.kind
-               +' | '+where+' | '+(a.desc||'')+' |');
+  if(!alist.length){out.push('> *(none)*');return out.join('\n')}
+  out.push('');   // marked wants a blank line before an HTML block
+  // Hand-built HTML rather than a markdown table: a thumbnail beside the name
+  // is the point, and a table column can't hold one without the other columns
+  // collapsing. marked passes inline HTML through and DOMPurify keeps it safe.
+  for(i=0;i<alist.length;i++){
+    var a=alist[i],src=assetThumb(currentChat,a);
+    var thumb=src
+      ? '<img class="asset-thumb" src="'+escHtml(src)+'" alt="">'
+      : '<span class="asset-thumb asset-glyph">'+(_ASSET_GLYPH[a.kind]||'\u25a6')+'</span>';
+    var nm=escHtml(a.name);
+    var name=a.url
+      ? '<a href="'+escHtml(a.url)+'" target="_blank" rel="noopener noreferrer">'+nm+'</a>'
+      : nm;
+    var meta=escHtml(a.kind)+(a.src?' \u00b7 '+escHtml(a.src):'');
+    if(a.host){
+      var h=a.host.replace(/^https?:\/\//,'');
+      meta+=' \u00b7 <a href="http://'+escHtml(h)+'" target="_blank" rel="noopener noreferrer">'+escHtml(h)+'</a>';
     }
+    out.push('<div class="asset-card">'+thumb
+             +'<div class="asset-text"><div class="asset-name">'+name+'</div>'
+             +'<div class="asset-meta">'+meta+'</div>'
+             +(a.desc?'<div class="asset-about">'+escHtml(a.desc)+'</div>':'')
+             +'</div></div>');
   }
   return out.join('\n');
 }
@@ -2587,14 +2638,14 @@ function handleSlashCommand(text){
     var b=document.createElement('div');b.className='body';
     var lbl=document.createElement('span');lbl.className='note-cmd';lbl.textContent='/'+cmd;
     var t=document.createElement('div');t.className='note-text';t.innerHTML=mdRender(msg);
-    _extLinks(t);
+    _extLinks(t);_thumbFallbacks(t);
     b.appendChild(lbl);b.appendChild(t);d.appendChild(b);
     chatLog.appendChild(d);scrollChat();
     highlightBlocks(t);
     return {set:function(msg2,kind2){
       d.className='msg note'+(kind2?' '+kind2:'');
       t.innerHTML=mdRender(msg2);
-      _extLinks(t);
+      _extLinks(t);_thumbFallbacks(t);
       highlightBlocks(t);
       scrollChat();
     }};
@@ -3372,6 +3423,22 @@ async function assetBlob(chat,a){
     }
   }
   throw new Error('the file for '+a.name+' is no longer in this conversation');
+}
+// Images can show themselves; a clip or a video gets a glyph rather than a
+// broken <img>, since their URLs are not images.
+var _ASSET_GLYPH={audio:'\u266a',video:'\u25b6',file:'\u25a6'};
+function assetThumb(chat,a){
+  if(a.kind==='image'){
+    if(a.url)return a.url;
+    if(a.aid){
+      var msgs=(chat&&chat.messages)||[];
+      for(var i=msgs.length-1;i>=0;i--){
+        var fs=(msgs[i]&&msgs[i].files)||[];
+        for(var k=0;k<fs.length;k++)if(fs[k].aid===a.aid&&fs[k].dataUrl)return fs[k].dataUrl;
+      }
+    }
+  }
+  return '';
 }
 function assetListText(chat){
   var list=assetsOf(chat);
