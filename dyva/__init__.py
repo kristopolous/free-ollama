@@ -138,6 +138,10 @@ _AUDIO_CLASSES = {"audio", "music", "t2a"}
 
 # Async ComfyUI video-generation jobs (OpenRouter /v1/videos compatible).
 VIDEO_KEY = "video"      # no wildcard: canon_pattern() eats a trailing "*"
+# Video is the slowest thing here: seconds per frame, plus however long the
+# host's queue is. Half an hour is patience, not a leak — the wait happens
+# after the race, on a host that has already accepted the work.
+VIDEO_RENDER_TIMEOUT = 1800
 
 
 def video_key(model_filter=None):
@@ -716,6 +720,14 @@ async def _worker_checked(wid):
     if w:
         w["checked"] += 1
         await _broadcast_workers()
+
+
+def _set_worker_phase(wid, phase):
+    """Update a waiting job's phase in place — "queued #3" while it sits in the
+    host's queue, "rendering" once it starts."""
+    w = _workers.get(wid)
+    if w:
+        w["phase"] = phase
 
 
 @contextlib.asynccontextmanager
@@ -4512,6 +4524,12 @@ async def comfy_submit(session, host, workflow, timeout=None):
             body = await r.text()
             await r.release()
             detail = _comfy_prompt_error(body, workflow)
+            # The one-liner is what a user sees; the whole envelope carries
+            # extra_info (exception type, traceback) and is the only way to
+            # tell a graph mistake from a host-side one.
+            log.warning(f"comfy {host} rejected the prompt: {detail}\n"
+                        f"  body: {body[:1500]}\n"
+                        f"  graph: {json.dumps(workflow)[:1500]}")
             if _COMFY_STRUCTURAL.search(body):
                 raise ComfyUnsuitable(f"prompt rejected: {detail}")
             raise ComfyError(f"prompt rejected: {detail}")
@@ -4579,8 +4597,30 @@ def _comfy_status_error(status):
     return ("no execution_error in " + ", ".join(events[-4:])) if events else "execution error"
 
 
+async def comfy_queue_state(session, host, prompt_id):
+    """Where a submitted prompt sits: "running", a queue position, or None if
+    the host has no idea what we're talking about."""
+    try:
+        r = await session.get(_host_url(host, "/queue"),
+                              timeout=aiohttp.ClientTimeout(total=20))
+        if r.status != 200:
+            await r.release()
+            return "unknown"
+        q = await r.json(content_type=None)
+        await r.release()
+    except Exception:
+        return "unknown"
+    for item in (q.get("queue_running") or []):
+        if isinstance(item, (list, tuple)) and len(item) > 1 and item[1] == prompt_id:
+            return "running"
+    for i, item in enumerate(q.get("queue_pending") or []):
+        if isinstance(item, (list, tuple)) and len(item) > 1 and item[1] == prompt_id:
+            return f"queued #{i + 1}"
+    return None
+
+
 async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
-                        poll=2, view_timeout=60):
+                        poll=2, view_timeout=60, on_status=None):
     """Wait out a job the host already accepted; return (bytes, filename).
 
     Deliberately not part of the race: by here the host is chosen and marked,
@@ -4589,6 +4629,13 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
     """
     label = kinds[0]
     deadline = time.time() + timeout
+    # A job can vanish: the host restarts, the queue is cleared, or it quietly
+    # drops the prompt. History never gains an entry and the queue never had
+    # one, so polling for the full timeout tells you nothing for half an hour.
+    # Check the queue when history is silent, and give up once the host has
+    # twice denied knowing about it.
+    missing = 0
+    checked_at = 0.0
     while time.time() < deadline:
         await asyncio.sleep(poll)
         try:
@@ -4605,7 +4652,22 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
             continue
         entry = (hist or {}).get(prompt_id)
         if not entry:
+            now = time.time()
+            if now - checked_at >= max(15, poll * 5):
+                checked_at = now
+                where = await comfy_queue_state(session, host, prompt_id)
+                if where is None:
+                    missing += 1
+                    if missing >= 2:
+                        raise ComfyError(
+                            "the host dropped the job — not in its queue and no "
+                            "history entry (restarted, or the queue was cleared)")
+                else:
+                    missing = 0
+                    if on_status and where != "unknown":
+                        on_status(where)
             continue
+        missing = 0
 
         files = []
         for out in (entry.get("outputs") or {}).values():
@@ -5242,7 +5304,10 @@ def _comfy_prompt_error(body, graph=None):
         err = data.get("error") or {}
         msg = err.get("message") if isinstance(err, dict) else str(err)
         detail = err.get("details") if isinstance(err, dict) else ""
-        parts.append(": ".join(x for x in (msg, detail) if x) or body[:200])
+        extra = (err.get("extra_info") or {}) if isinstance(err, dict) else {}
+        exc = extra.get("exception_type") or ""
+        bits = [x for x in (msg, exc, detail) if x]
+        parts.append(": ".join(bits) or body[:200])
     return "; ".join(parts)[:300]
 
 
@@ -5505,8 +5570,10 @@ async def _run_video_job(session, jid):
         job["comfyui_prompt_id"] = prompt_id
         _video_job_save()
         try:
-            async with _waiting_worker(label, host, "rendering"):
-                content, filename = await _poll_video_result(session, host, prompt_id, job)
+            async with _waiting_worker(label, host, "rendering") as _wid:
+                content, filename = await _poll_video_result(
+                    session, host, prompt_id, job,
+                    on_status=lambda w: _set_worker_phase(_wid, w))
         except (_VideoError, ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             outcome = render_verdict(e)
             record_verdict(host, vkey, outcome)
@@ -5648,7 +5715,17 @@ def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, s
     prompt = params.get("prompt", "")
     workflow = {}
     def add(nid, cls, inputs):
-        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
+        # Node ids are strings in the graph, so a link has to name a string
+        # too. Passing [8, 0] made ComfyUI look up the integer 8 in a
+        # string-keyed dict and raise during validation — reported as the
+        # deeply unhelpful "exception_during_validation: 8".
+        fixed = {}
+        for k, v in inputs.items():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int):
+                fixed[k] = [str(v[0]), v[1]]
+            else:
+                fixed[k] = v
+        workflow[str(nid)] = {"class_type": cls, "inputs": fixed}
 
     plan = plan or {}
     info = info or {}
@@ -5741,7 +5818,17 @@ def _build_wan_workflow(params, model_path, steps, cfg, width, height, length, s
     prompt = params.get("prompt", "")
     workflow = {}
     def add(nid, cls, inputs):
-        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
+        # Node ids are strings in the graph, so a link has to name a string
+        # too. Passing [8, 0] made ComfyUI look up the integer 8 in a
+        # string-keyed dict and raise during validation — reported as the
+        # deeply unhelpful "exception_during_validation: 8".
+        fixed = {}
+        for k, v in inputs.items():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int):
+                fixed[k] = [str(v[0]), v[1]]
+            else:
+                fixed[k] = v
+        workflow[str(nid)] = {"class_type": cls, "inputs": fixed}
 
     plan = plan or {}
     clip = plan.get("clip") or _pick(_enum_options(info, "CLIPLoader", "clip_name"), r"(?i)umt5")
@@ -5795,7 +5882,17 @@ def _build_mochi_workflow(params, model_path, steps, cfg, width, height, length,
     prompt = params.get("prompt", "")
     workflow = {}
     def add(nid, cls, inputs):
-        workflow[str(nid)] = {"class_type": cls, "inputs": inputs}
+        # Node ids are strings in the graph, so a link has to name a string
+        # too. Passing [8, 0] made ComfyUI look up the integer 8 in a
+        # string-keyed dict and raise during validation — reported as the
+        # deeply unhelpful "exception_during_validation: 8".
+        fixed = {}
+        for k, v in inputs.items():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int):
+                fixed[k] = [str(v[0]), v[1]]
+            else:
+                fixed[k] = v
+        workflow[str(nid)] = {"class_type": cls, "inputs": fixed}
 
     add(1, "MochiModelLoader", {"model": model_path})
     add(2, "CLIPLoader", {"clip_name": "t5xxl_fp8_e4m3fn.safetensors", "type": "sd3"})
@@ -5864,12 +5961,20 @@ async def _submit_video_workflow(session, host, job):
     return await comfy_submit(session, host, workflow), plan
 
 
-async def _poll_video_result(session, host, prompt_id, job):
+async def _poll_video_result(session, host, prompt_id, job, on_status=None):
     """Poll ComfyUI /history/{prompt_id} until the video is saved; return
-    (bytes, filename)."""
+    (bytes, filename).
+
+    The clock has to cover queueing as well as rendering: the host took the job
+    but may be working through other people's first, and a few seconds per
+    frame is normal. Waiting costs nothing here — the host was already chosen,
+    so nothing else is blocked on it — whereas giving up early throws away a
+    render that was going to finish.
+    """
     try:
         return await comfy_collect(session, host, prompt_id, COMFY_VIDEO,
-                                   timeout=600, poll=3, view_timeout=60)
+                                   timeout=VIDEO_RENDER_TIMEOUT, poll=3,
+                                   view_timeout=120, on_status=on_status)
     except ComfyError as e:
         raise _VideoError(str(e))
 
@@ -5987,6 +6092,60 @@ async def handle_videos_post(request):
     _video_job_save()
     asyncio.get_event_loop().create_task(_run_video_job(request.app["session"], jid))
     return web.json_response({"id": jid, "polling_url": job["polling_url"], "status": "pending"}, status=202)
+
+
+async def handle_videos_list(request):
+    """
+    Recent video jobs
+    ---
+    tags: [Video]
+    summary: GET /v1/videos — the recent job list, newest first
+    description: |
+      Metadata only; the bytes are at `/v1/videos/{id}/content`. Completed jobs
+      first-class, but in-flight and failed ones are listed too so the gallery
+      can show what is cooking and what went wrong.
+    responses:
+      '200':
+        description: Job list
+    """
+    out = []
+    for jid, job in _VIDEO_JOBS.items():
+        out.append({
+            "id": jid,
+            "status": job.get("status"),
+            "prompt": job.get("prompt") or "",
+            "model": job.get("model") or "",
+            "host": job.get("host") or "",
+            "created": job.get("created"),
+            "error": job.get("error"),
+            "frames": (job.get("params") or {}).get("length"),
+            "has_start_image": bool(job.get("start_image_b64")),
+            "content_url": (f"/v1/videos/{jid}/content"
+                            if job.get("content_path") else None),
+        })
+    out.sort(key=lambda j: j.get("created") or 0, reverse=True)
+    return web.json_response(out)
+
+
+async def handle_videos_delete(request):
+    """
+    Delete a video job
+    ---
+    tags: [Video]
+    summary: GET /v1/videos/{id}/delete — remove a job and its file
+    responses:
+      '200':
+        description: Deleted
+    """
+    jid = request.match_info.get("id", "")
+    job = _VIDEO_JOBS.pop(jid, None)
+    if job and job.get("content_path"):
+        try:
+            os.remove(job["content_path"])
+        except OSError:
+            pass
+    _video_job_save()
+    return web.json_response({"deleted": bool(job)})
 
 
 async def handle_videos_get(request):
@@ -6219,28 +6378,43 @@ async def handle_tts_speech(request):
             f"success: {host} for {label}", duration=dur, wid=wid, rmodel=node)
         return accepted((host, prompt_id, node))
 
-    result, stopped, tried, tally = await _race_hosts(hosts, attempt, tkey)
-
-    if result:
+    # A host that accepts the prompt and then can't render it is a verdict like
+    # any other — record it, drop it, and hand the job to the next one, rather
+    # than failing the request on one bad node. (Edit and video already did
+    # this; speech was the last one that gave up after a single attempt.)
+    tried_hosts, tried = set(), 0
+    tally = collections.Counter()
+    stopped = False
+    for _round in range(EDIT_RENDER_ATTEMPTS):
+        pool = [h for h in hosts if h not in tried_hosts]
+        if not pool:
+            break
+        result, stopped, n_tried, round_tally = await _race_hosts(pool, attempt, tkey)
+        tried += n_tried
+        tally.update(round_tally)
+        if not result or stopped:
+            break
         host, prompt_id, node = result
-        # Rendering happens after the race: the host is already chosen and
-        # already marked good, so a slow render can't un-choose it.
+        tried_hosts.add(host)
         try:
             async with _waiting_worker(label, host, "speaking"):
                 raw, filename = await _tts_collect(
                     session, host, prompt_id, timeout=_tts_render_budget(input_text))
-        except (_TtsError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            outcome = render_verdict(e)
+            record_verdict(host, tkey, outcome)
+            tally[outcome.verdict] += 1
             err = str(e) or type(e).__name__
-            log.warning(f"tts: {host}: accepted the job then failed to render: {err}")
+            errors_list.append(f"{host}: {err} [{node}]")
+            log.warning(f"tts: {host}: took the job then failed to render: {err} [{node}]")
             await broadcast_activity(host, tkey, "failed",
                 f"failure: {host} for {label} - render: {err}")
-            return web.json_response(
-                {"error": f"tts: {host} accepted the job but did not render it: {err}"},
-                status=502)
-        ext = os.path.splitext(filename)[1].lower()
-        # Provenance travels with the audio: which host spoke and which node did
-        # it. The body is raw bytes, so headers are the only place to put it —
-        # and they have to be exposed explicitly to be readable cross-origin.
+            # The node is what failed, not necessarily the host — but we only
+            # detect one node per host, so forget the detection and let the
+            # next probe pick differently.
+            _TTS_NODE_CACHE.pop(host, None)
+            continue
+
         clip = _save_audio_clip(raw, filename)
         headers = {
             "X-Dyva-Host": host,
@@ -6248,18 +6422,15 @@ async def handle_tts_speech(request):
             "Access-Control-Expose-Headers": "X-Dyva-Host, X-Dyva-Node, X-Dyva-File",
         }
         if clip:
-            # a stable URL, so a chat transcript can keep the audio
             headers["X-Dyva-File"] = clip
-        return web.Response(
-            body=raw,
-            content_type=_TTS_MIME.get(ext, "application/octet-stream"),
-            headers=headers)
+        ext = os.path.splitext(filename)[1].lower()
+        return web.Response(body=raw,
+                            content_type=_TTS_MIME.get(ext, "application/octet-stream"),
+                            headers=headers)
+
     if stopped:
         return web.json_response({"error": "tts stopped"}, status=499)
 
-    # Quote what was actually attempted, and collapse repeated reasons: a
-    # mismatch between "tried N hosts" and a list of M reasons is confusing, and
-    # N identical lines are no more informative than one with a count.
     reasons = collections.Counter(e.split(": ", 1)[1] if ": " in e else e for e in errors_list)
     detail = "; ".join(f"{c}x {r}" for r, c in reasons.most_common()) or "no hosts tried"
     verdicts = ", ".join(f"{c} {v}" for v, c in tally.most_common())
@@ -7728,6 +7899,8 @@ def make_app():
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
     app.router.add_post("/v1/videos", handle_videos_post)
+    app.router.add_get("/v1/videos", handle_videos_list)
+    app.router.add_get("/v1/videos/{id}/delete", handle_videos_delete)
     app.router.add_get("/v1/videos/{id}", handle_videos_get)
     app.router.add_get("/v1/videos/{id}/content", handle_videos_content)
     app.router.add_post("/v1/music", handle_music_post)

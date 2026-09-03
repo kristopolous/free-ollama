@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import sqlite3
 import sys
 import time
 
@@ -150,6 +151,165 @@ def _save_json_atomic(path, data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
+
+
+# ---- Storage -------------------------------------------------------------
+# These lists grew past what a JSON blob can carry: 59k notworking records is
+# 14 MB, and the check loop rewrote the whole file after *every* host, which is
+# 0.18s of parse-and-serialise per result and quadratic overall. Worse, the
+# fetch path wrote hosts.json non-atomically, so a reader (or a Ctrl-C) during
+# the write saw a truncated file.
+#
+# SQLite fixes both: one upsert per result instead of a full rewrite, and no
+# torn reads. The whole original record is kept in `data` so nothing is lost;
+# the columns are just the ones worth querying.
+_DBS = {}
+
+
+def _db_file(name):
+    return os.path.join(CACHE_DIR, f"{name or 'image-gen'}.db")
+
+
+def _db(name):
+    db = _DBS.get(name)
+    if db is not None:
+        return db
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    db = sqlite3.connect(_db_file(name), check_same_thread=False)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("CREATE TABLE IF NOT EXISTS hosts("
+               "host TEXT PRIMARY KEY, service TEXT, data TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS working("
+               "host TEXT PRIMARY KEY, service TEXT, checked TEXT, data TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS notworking("
+               "host TEXT PRIMARY KEY, service TEXT, reason TEXT, result TEXT,"
+               " checked TEXT, data TEXT NOT NULL)")
+    db.commit()
+    _DBS[name] = db
+    _migrate_json(name, db)
+    return db
+
+
+def _migrate_json(name, db):
+    """Import the old JSON files once, then move them aside.
+
+    Renamed rather than deleted: they are months of survey data, and the point
+    of the exercise is to stop losing it to truncated writes."""
+    for table, suffix in (("hosts", "hosts"), ("working", "working"),
+                          ("notworking", "notworking")):
+        path = _cache_file(name, suffix)
+        if not os.path.exists(path):
+            continue
+        if db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+            continue        # already has rows; don't re-import
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            log.warning(f"{path}: could not import ({e}) — left in place")
+            continue
+        rows = raw.values() if isinstance(raw, dict) else raw
+        n = 0
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            h = _entry_host(r)
+            if not h:
+                continue
+            _store_put(db, table, h, r)
+            n += 1
+        db.commit()
+        os.replace(path, path + ".imported")
+        log.info(f"migrated {n} rows from {os.path.basename(path)} into {name}.db")
+
+
+def _store_put(db, table, host, rec):
+    j = json.dumps(rec)
+    if table == "hosts":
+        db.execute("INSERT INTO hosts(host,service,data) VALUES(?,?,?)"
+                   " ON CONFLICT(host) DO UPDATE SET service=excluded.service,"
+                   " data=excluded.data",
+                   (host, rec.get("service"), j))
+    elif table == "working":
+        db.execute("INSERT INTO working(host,service,checked,data) VALUES(?,?,?,?)"
+                   " ON CONFLICT(host) DO UPDATE SET service=excluded.service,"
+                   " checked=excluded.checked, data=excluded.data",
+                   (host, rec.get("service"), rec.get("checked"), j))
+    else:
+        db.execute("INSERT INTO notworking(host,service,reason,result,checked,data)"
+                   " VALUES(?,?,?,?,?,?)"
+                   " ON CONFLICT(host) DO UPDATE SET service=excluded.service,"
+                   " reason=excluded.reason, result=excluded.result,"
+                   " checked=excluded.checked, data=excluded.data",
+                   (host, rec.get("service"), rec.get("reason"),
+                    rec.get("result"), rec.get("checked"), j))
+
+
+def store_put(name, table, rec):
+    """One record in, one row written — no whole-file rewrite."""
+    h = _entry_host(rec)
+    if not h:
+        return
+    db = _db(name)
+    _store_put(db, table, h, rec)
+    db.commit()
+
+
+def store_all(name, table):
+    """Every record in a table, as the dicts the rest of the code expects."""
+    out = []
+    for (j,) in _db(name).execute(f"SELECT data FROM {table}"):
+        try:
+            out.append(json.loads(j))
+        except Exception:
+            continue
+    return out
+
+
+def store_hosts_add(name, rows):
+    """Bulk-add seed hosts, skipping ones already known. Returns how many were new."""
+    db = _db(name)
+    have = {h for (h,) in db.execute("SELECT host FROM hosts")}
+    fresh = []
+    for r in rows:
+        h = _entry_host(r)
+        if not h or h in have:
+            continue
+        have.add(h)
+        fresh.append(r)
+        _store_put(db, "hosts", h, r)
+    db.commit()
+    return fresh
+
+
+def store_done_hosts(name, include_notworking=True, error_only=False):
+    """Hosts already checked — a query instead of loading two files and
+    building a set over tens of thousands of records."""
+    db = _db(name)
+    done = {h for (h,) in db.execute("SELECT host FROM working")}
+    if include_notworking:
+        if error_only:
+            done |= {h for (h,) in db.execute(
+                "SELECT host FROM notworking WHERE result='error'")}
+        else:
+            done |= {h for (h,) in db.execute("SELECT host FROM notworking")}
+    return done
+
+
+def store_count(name, table):
+    return _db(name).execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def store_delete(name, table, host):
+    db = _db(name)
+    db.execute(f"DELETE FROM {table} WHERE host=?", (host,))
+    db.commit()
+
+
+def store_export(name, table, path):
+    """Write a table back out as JSON, for anything that still wants a file."""
+    _save_json_atomic(path, store_all(name, table))
 
 
 def _entry_host(entry):
@@ -925,7 +1085,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             random.shuffle(country_list)
             random.shuffle(port_list)
 
-        pool = _load_json(hosts_file)
+        pool = store_all(name, "hosts")
         seen = {_entry_host(h) for h in pool}
         combos = [(c, p) for p in port_list for c in country_list]
         total_reqs = len(combos) * SHODAN_PAGES
@@ -1027,7 +1187,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             random.shuffle(port_list)
             random.shuffle(server_list)
 
-        pool = _load_json(hosts_file)
+        pool = store_all(name, "hosts")
         index = {_entry_host(h): h for h in pool}
         seen = set(index)
         # Resolve the base FOFA query/queries. A service may define several
@@ -1127,7 +1287,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         return
 
     # print(f"Loading {hosts_file}")
-    existing = _load_json(hosts_file)
+    existing = store_all(name, "hosts")
     index = {_entry_host(h): h for h in existing}
     seen = set(index)
     for h in hosts:
@@ -1139,8 +1299,8 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         elif h.get("fid") and not index[key].get("fid"):
             index[key]["fid"] = h["fid"]
 
-    _save_json(hosts_file, existing)
-    log.info(f"fetch: {len(hosts)} new hosts, {len(existing)} total in seed list")
+    store_hosts_add(name, hosts)
+    log.info(f"fetch: {len(hosts)} new hosts, {store_count(name, 'hosts')} total in seed list")
 
 
 # Stable, highly-available endpoints used only to decide whether WE have
@@ -1181,7 +1341,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
 
-    hosts = _load_json(hosts_file)
+    hosts = store_all(name, "hosts")
     if not service and hosts:
         service = hosts[0].get("service", "")
     # No service filter: these caches are already per-service (the file name is
@@ -1192,28 +1352,13 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         log.warning(f"check: no {service or '?'} hosts - run fetch first")
         return
 
-    existing_working = _load_json(working_file)
-    existing_notworking_raw = _load_json(notworking_file)
-    if isinstance(existing_notworking_raw, dict):
-        existing_notworking = existing_notworking_raw
-    elif isinstance(existing_notworking_raw, list):
-        existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
-    else:
-        existing_notworking = {}
+    existing_working = store_all(name, "working")
     done = set()
     if not check_all:
-        # Keyed by host alone, not service@host: the working/notworking files are
-        # already per-service caches, and a probe may *re-label* the service it
-        # found (an ollama-shaped host with no /api/version is recorded as
-        # "sglang"). Keying on the recorded service made those hosts never match
-        # the "ollama" entry in hosts.json, so they were re-probed on every run
-        # and appended to working.json again each time.
-        if check_new:
-            done = {_entry_host(h) for h in existing_working}
-            done.update(_entry_host(n) for n in existing_notworking.values())
-        else:
-            done = {_entry_host(h) for h in existing_working}
-            done.update(_entry_host(n) for n in existing_notworking.values() if n.get("result") == "error")
+        # Keyed by host alone, not service@host: these caches are already
+        # per-service, and a probe may *re-label* the service it found (an
+        # ollama-shaped host with no /api/version is recorded as "sglang").
+        done = store_done_hosts(name, error_only=not check_new)
 
     to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
@@ -1232,15 +1377,13 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             log.info(f"check: skipping {resumed} hosts already snapshot in session {session}")
     if not to_check:
         log.info(f"check: all {len(hosts)} hosts already have model data")
-        existing_working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
-        _save_json_atomic(working_file, existing_working)
         return
 
     log.info(f"check: {len(to_check)} to check ({len(done)} already done)")
-    await _check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working)
+    await _check_hosts(to_check, service, name, check_timeout, workers, existing_working)
 
 
-async def _check_hosts(hosts, service, working_file, notworking_file, check_timeout=60, workers=10, existing_working=None):
+async def _check_hosts(hosts, service, name, check_timeout=60, workers=10, existing_working=None):
     """Run the worker-pool probe over an explicit list of host entries and
     record results to the working/notworking files. Shared by _check_all and
     the interleaved fetch-check pipeline (which drains a bounded batch of
@@ -1248,7 +1391,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
     from datetime import datetime, timezone
 
     if existing_working is None:
-        existing_working = _load_json(working_file)
+        existing_working = store_all(name, "working")
 
     to_check = hosts
     sem = asyncio.Semaphore(workers)
@@ -1282,17 +1425,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
             if isinstance(result, dict) and "error" not in result:
                 result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
                 result["host"] = entry["host"]
-                working = _load_json(working_file, silent=True)
-                found = False
-                for i, w in enumerate(working):
-                    if _entry_host(w) == key:
-                        working[i] = result
-                        found = True
-                        break
-                if not found:
-                    working.append(result)
-                working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
-                _save_json_atomic(working_file, working)
+                store_put(name, "working", result)
                 note = ""
                 if service == "comfyui" and not result["models"]:
                     # "0 models" is ambiguous on its own: no index at all reads
@@ -1305,12 +1438,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason or "auth required" in reason) else "unreachable"
                 nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
-                notworking = _load_json(notworking_file, silent=True)
-                if not isinstance(notworking, dict):
-                    notworking = {}
-                nkey = entry["host"]
-                notworking[nkey] = nr
-                _save_json_atomic(notworking_file, notworking)
+                store_put(name, "notworking", nr)
                 log.info(f"  {entry['host']}: {reason}")
         completed += 1
         if completed % STATS_EVERY == 0:
@@ -1346,20 +1474,10 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
 
-    existing_working = _load_json(working_file)
-    existing_notworking_raw = _load_json(notworking_file)
-    if isinstance(existing_notworking_raw, dict):
-        existing_notworking = existing_notworking_raw
-    elif isinstance(existing_notworking_raw, list):
-        existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
-    else:
-        existing_notworking = {}
-
+    existing_working = store_all(name, "working")
     # Host-keyed for the same reason as _check_all: the probe may relabel the
     # service, and a service-qualified key would then never match.
-    done = set()
-    done.update(_entry_host(h) for h in existing_working)
-    done.update(_entry_host(n) for n in existing_notworking.values())
+    done = store_done_hosts(name)
 
     to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
@@ -1375,7 +1493,7 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
     if not to_check:
         return
 
-    asyncio.run(_check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working))
+    asyncio.run(_check_hosts(to_check, service, name, check_timeout, workers, existing_working))
 
 
 async def _check_working(service, name=None, check_timeout=60, workers=10, session=None):
@@ -1392,7 +1510,7 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
 
-    working = _load_json(working_file)
+    working = store_all(name, "working")
     if not service and working:
         service = working[0].get("service", "")
     # Not filtered by service, for the same reason as _check_all: re-labelled
@@ -1446,7 +1564,7 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
 
     kept = []
     removed = 0
-    notworking = _load_json(notworking_file)
+    notworking = {_entry_host(x): x for x in store_all(name, "notworking")}
     if not isinstance(notworking, dict):
         notworking = {}
     for outcome in done:
@@ -1472,8 +1590,14 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
             log.info(f"~ {host} dead: {payload}")
 
     kept.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
-    _save_json_atomic(working_file, kept)
-    _save_json_atomic(notworking_file, notworking)
+    db = _db(name)
+    db.execute("DELETE FROM working")
+    for w in kept:
+        _store_put(db, "working", _entry_host(w), w)
+    for h, nrec in notworking.items():
+        if h:
+            _store_put(db, "notworking", h, nrec)
+    db.commit()
     refreshed = len(kept)
     log.info(f"check-working: {len(working)} rescanned, {refreshed} still working (models refreshed), {removed} pruned")
 
