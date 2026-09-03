@@ -16,9 +16,9 @@ https://github.com/user-attachments/assets/c9874c72-52ea-4060-a078-d2945add22d6
 
 "Now now now" you say, from your VC office, "what about mobile?!"
 
-Here it is. Running ON MY ACTUAL FUCKING PHONE! (*gasp*)
+Here it is. See all the tools. This interacts with all the discovered infrastructure, tool calling across dynamic hosts seamlessly. it's pretty magical...
 
-<img alt="66311" src="https://github.com/user-attachments/assets/d309c8f1-0634-48eb-96e4-18a7a7123d6e" />
+<img  alt="67098" src="https://github.com/user-attachments/assets/65660bfc-2302-4f7e-886f-a4ae6e78cabe" />
 
 
 ## CLI Options
