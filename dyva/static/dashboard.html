@@ -241,7 +241,7 @@ button:hover{background:var(--btn-bg-hover)}
 button:disabled{opacity:.5;cursor:default}
 button.stop{background:var(--btn-danger)}
 button.stop:hover{background:var(--btn-danger-hover)}
-.messages{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);height:46vh;overflow-y:auto;padding:.75em;margin-bottom:.75em}
+.messages{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);height:46vh;overflow-y:auto;overflow-anchor:none;padding:.75em;margin-bottom:.75em}
 .msg{margin-bottom:.75em}
 .msg .role{font-size:var(--fs-2xs);color:var(--text-dim);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);margin-bottom:.25em;display:flex;align-items:center;gap:.4em;position:relative}
 .msg .role .role-meta{text-transform:none;letter-spacing:0;font-family:var(--font-mono);color:var(--text-faint);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -285,6 +285,25 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.note .note-text th:last-child,.msg.note .note-text td:last-child{padding-right:0;white-space:normal}
 .msg.note .note-text th{color:var(--text-3);font-weight:500;font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border-strong);padding-bottom:.35em}
 .msg.note .note-text td{border-bottom:1px solid var(--border)}
+/* On a phone four columns is one column too many: `about` gets whatever is
+   left and turns into a vertical wall of single letters. Below 640px the row
+   stops being a row — name on its own line, kind and source together
+   underneath it, description last — which is the same information in the
+   order you actually read it. */
+@media (max-width:640px){
+  .msg.note .note-text table,
+  .msg.note .note-text tbody,
+  .msg.note .note-text tr{display:block;width:100%}
+  .msg.note .note-text thead{display:none}
+  .msg.note .note-text tr{border:1px solid var(--border);border-radius:var(--r-md);padding:.45em .6em;margin:.4em 0}
+  .msg.note .note-text td{display:block;border:none;padding:0;white-space:normal;overflow-wrap:anywhere}
+  .msg.note .note-text td:first-child{font-family:var(--font-mono);font-size:var(--fs-sm)}
+  .msg.note .note-text td:nth-child(2),
+  .msg.note .note-text td:nth-child(3){display:inline;font-size:var(--fs-2xs);color:var(--text-dim)}
+  .msg.note .note-text td:nth-child(2)::after{content:' \00b7 '}
+  .msg.note .note-text td:last-child{margin-top:.15em;font-size:var(--fs-2xs);color:var(--text-faint)}
+  .msg.note .note-text td:last-child:empty{display:none}
+}
 .msg.note.working .body{border-left-color:var(--border-strong);font-style:italic}
 .msg.note.err .body{border-left-color:var(--err);color:var(--err)}
 .msg.assistant .body pre{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:.6em;overflow-x:auto;white-space:pre;margin:.6em 0}
@@ -300,6 +319,14 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.assistant .body h1,.msg.assistant .body h2,.msg.assistant .body h3,.msg.assistant .body h4{margin:.7em 0 .3em}
 .msg.assistant .body hr{border:none;border-top:1px solid var(--border-strong);margin:.7em 0}
 .input-row{display:flex;gap:var(--sp-3);align-items:stretch;position:relative}
+.mpick-wrap{position:relative}
+.mpick-pop{display:none;position:absolute;left:0;right:0;top:calc(100% + 4px);background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:var(--sp-2);z-index:140;max-height:min(46vh,280px);overflow-y:auto;overscroll-behavior:contain}
+.mpick-pop.open{display:block}
+.mpick-opt{display:flex;align-items:baseline;gap:var(--sp-3);padding:.5em .6em;border-radius:var(--r-md);cursor:pointer}
+.mpick-opt:hover,.mpick-opt.on{background:var(--accent-bg)}
+.mpick-name{font-family:var(--font-mono);font-size:var(--fs-sm);flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.mpick-hint{flex:0 0 auto;font-size:var(--fs-2xs);color:var(--text-dim);white-space:nowrap}
+.mpick-more{padding:.4em .6em;font-size:var(--fs-2xs);color:var(--text-faint)}
 .slash-pop{position:absolute;left:0;right:0;bottom:calc(100% + 8px);background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:var(--sp-2);z-index:130;max-height:min(48vh,300px);overflow-y:auto}
 .slash-pop-title{display:flex;justify-content:space-between;gap:var(--sp-3);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);padding:2px var(--sp-2) var(--sp-2)}
 .slash-pop-title span{text-transform:none;letter-spacing:0;color:var(--text-faint)}
@@ -399,6 +426,15 @@ details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs
  .admin-pw-decoy{position:absolute !important;left:-9999px !important;top:auto !important;width:1px !important;height:1px !important;overflow:hidden !important;opacity:0 !important;pointer-events:none !important;border:none !important;padding:0 !important;margin:0 !important}
 .settings-login{padding:var(--sp-3) 0 var(--sp-1)}
 .login-row{display:flex;align-items:center;gap:10px;margin-top:var(--sp-3)}
+.selfhost{margin-top:2.5rem;padding-top:var(--sp-5);border-top:1px solid var(--border);color:var(--text-dim);font-size:var(--fs-sm)}
+.selfhost p{margin:0 0 var(--sp-2)}
+.selfhost strong{color:var(--text);font-weight:500}
+.selfhost .selfhost-lead{color:var(--text-2)}
+.selfhost ul{margin:0;padding-left:1.1em;list-style:disc}
+.selfhost li{margin:.25em 0}
+.selfhost a{color:var(--accent);text-decoration:none}
+.selfhost a:hover{text-decoration:underline}
+.selfhost code{font-family:var(--font-mono);color:var(--text-2)}
 .login-row input[type=password]{flex:1;max-width:280px;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-3);font-size:var(--fs-lg)}
 .setting-help{color:var(--text-dim);font-size:var(--fs-xs);margin-top:var(--sp-1);line-height:var(--line-body)}
 .setting-help code{background:var(--bg-inset);padding:.05em .3em;border-radius:var(--r-sm);font-size:var(--fs-2xs)}
@@ -1049,7 +1085,7 @@ __SD_MODELS__
 <div class="settings-wrap">
 <div class="card"><div class="card-inner settings-inner">
 <div id="settingsLogin" class="settings-login" style="display:none">
-<p class="setting-help">These settings are password-protected.</p>
+<p class="setting-help">These settings are protected.</p>
 <div class="login-row"><button type="button" id="loginBtn" class="settings-save">Unlock</button></div>
 <!-- Password inputs are held in <template> (inert, invisible to Chrome's autofill)
      and injected only when the Settings tab is first opened. A live <input
@@ -1057,6 +1093,15 @@ __SD_MODELS__
      and hijack #modelFilter as the "username" field. -->
 <template id="loginPwTpl"><input type="password" id="loginPw" placeholder="Admin password" spellcheck="false" autocomplete="current-password"></template>
 <div id="loginErr" class="src-error"></div>
+<div class="selfhost">
+<p class="selfhost-lead">Don't know this server's password? Don't worry!</p>
+<p>You can run your own copy of <strong>Dumpster Dyva</strong>. Here's some resources. It's free! 😊</p>
+<ul>
+<li><a href="https://github.com/kristopolous/free-ollama" target="_blank" rel="noopener noreferrer">github.com/kristopolous/free-ollama</a></li>
+<li><a href="https://pypi.org/project/dyva/" target="_blank" rel="noopener noreferrer">pypi.org/project/dyva</a></li>
+<li><code>uvx dyva</code></li>
+</ul>
+</div>
 </div>
 <div id="settingsBody">
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
@@ -1587,15 +1632,38 @@ var CHAT_STICK_PX=80;
 function chatAtBottom(){
   return chatLog.scrollHeight-chatLog.scrollTop-chatLog.clientHeight<=CHAT_STICK_PX;
 }
+// 2. Our own scrolling fires scroll events. Reading those as "the reader
+//    moved" is how the flag turned itself off mid-stream.
+var _autoScrolling=false;
 function scrollChat(force){
   // re-check position rather than trusting the last scroll event: content has
   // usually just been appended by the caller
   if(force||_stickBottom||chatAtBottom()){
     _stickBottom=true;
+    _autoScrolling=true;
     chatLog.scrollTop=chatLog.scrollHeight;
+    requestAnimationFrame(function(){_autoScrolling=false});
   }
 }
-chatLog.addEventListener('scroll',function(){_stickBottom=chatAtBottom()});
+chatLog.addEventListener('scroll',function(){
+  if(_autoScrolling)return;
+  _stickBottom=chatAtBottom();
+});
+// 3. Content keeps growing *after* the scroll: images decode, the audio and
+//    video players swap in, highlight.js and KaTeX reflow, the think block
+//    expands. None of that fires a scroll event, so the view is left short of
+//    the bottom with nothing to react to — which is what made this feel like
+//    it never worked. Watch the messages themselves instead of hoping every
+//    caller remembered to re-scroll.
+if(window.ResizeObserver&&window.MutationObserver){
+  var _chatRO=new ResizeObserver(function(){if(_stickBottom)scrollChat(true)});
+  var _watchMsg=function(nd){if(nd&&nd.nodeType===1)_chatRO.observe(nd)};
+  Array.prototype.forEach.call(chatLog.children,_watchMsg);
+  new MutationObserver(function(muts){
+    for(var i=0;i<muts.length;i++)Array.prototype.forEach.call(muts[i].addedNodes,_watchMsg);
+    if(_stickBottom)scrollChat(true);
+  }).observe(chatLog,{childList:true});
+}
 // the server's host-diagnostic marker; sending it as a message asks dyva which
 // host/model it *would* use instead of running a completion
 var DYVA_INFO_TAG='__dyva_info__';
@@ -2715,6 +2783,10 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
         try{
           var ib={prompt:String(args.prompt||'').trim().slice(0,2000)};
           if(args.negative_prompt)ib.negative_prompt=String(args.negative_prompt).trim().slice(0,1000);
+          // only forward a model the user actually asked for; models like to
+          // fill optional fields with plausible-looking nonsense
+          var gm=String(args.model||'').trim();
+          if(gm&&gm.length<80)ib.model=gm;
           var r2=await fetch('sdapi/v1/txt2img',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ib),signal:ac.signal});
           if(r2.ok){
             var j=await r2.json();
@@ -2726,7 +2798,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                 inames.push(assetAdd(ic,{name:args.name||'image',kind:'image',
                                          url:'sdapi/v1/images/'+f,
                                          desc:ib.prompt,src:'generated',
-                                         host:j.host||'',model:j._dyva_model||''}));
+                                         host:j.host||'',model:j.model||''}));
               });
               results.push({text:'Image generated and saved as '+inames.join(', ')
                                  +'. Refer to it by that name in later tool calls.',
@@ -3364,7 +3436,7 @@ function assetBackfill(chat){
 }
 var WEB_TOOL={type:'function',function:{name:'fetch_url',description:'Read the page at an explicit URL. Use it when the user gives you a link, or when you already know the exact address of something — this fetches one address, it does not search the web. The page comes back as text. If the URL points at an image it is downloaded into the conversation instead and can then be used with edit_image.',parameters:{type:'object',properties:{url:{type:'string',description:'The full URL, including http:// or https://'},name:{type:'string',description:'Only for an image URL: a short filename to save it under, e.g. "lady.jpg". Ignored for pages.'}},required:['url']}}};
 var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
-var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
+var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name. Globs work, so "flux*" matches every Flux variant.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, or combine several, by describing the change. Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image in the conversation, which is what you want for an incremental tweak. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name.'}},required:['prompt','name']}}};
 // The image to edit is known deterministically, so the model never picks it:
 // walk back through the conversation and take whichever came last, a generated
@@ -4024,6 +4096,93 @@ function fitDims(w,h){
   return [Math.max(EDIT_ROUND,Math.round(w*s/EDIT_ROUND)*EDIT_ROUND),
           Math.max(EDIT_ROUND,Math.round(h*s/EDIT_ROUND)*EDIT_ROUND)];
 }
+// ---- model picker --------------------------------------------------------
+// A native <datalist> is unusable on a phone: 600 models arrive as one
+// horizontal strip above the keyboard with no way to narrow it. This is the
+// same idea as the model filter on the Server Room page — type, and a short
+// list of matches appears underneath — but anchored to the field. The
+// datalists stay as the data source, so whatever fills them keeps working;
+// only the presentation changes.
+var MPICK_MAX=10;
+function attachPicker(inputId,listId){
+  var input=document.getElementById(inputId),dl=document.getElementById(listId);
+  if(!input||!dl)return;
+  input.removeAttribute('list');          // no native dropdown alongside ours
+  var wrap=document.createElement('div');
+  wrap.className='mpick-wrap';
+  input.parentNode.insertBefore(wrap,input);
+  wrap.appendChild(input);
+  var pop=document.createElement('div');
+  pop.className='mpick-pop';
+  wrap.appendChild(pop);
+  var rows=[],sel=-1;
+
+  function options(){
+    return Array.prototype.map.call(dl.options,function(o){
+      return {value:o.value,hint:o.label&&o.label!==o.value?o.label:''};
+    });
+  }
+  function close(){pop.classList.remove('open');sel=-1}
+  function paint(){
+    pop.innerHTML='';
+    if(!rows.length){close();return}
+    rows.forEach(function(r,i){
+      var d=document.createElement('div');
+      d.className='mpick-opt'+(i===sel?' on':'');
+      var n=document.createElement('span');n.className='mpick-name';n.textContent=r.value;
+      d.appendChild(n);
+      if(r.hint){var h=document.createElement('span');h.className='mpick-hint';h.textContent=r.hint;d.appendChild(h)}
+      // mousedown, not click: blur would tear the list down first
+      d.addEventListener('mousedown',function(e){
+        e.preventDefault();
+        input.value=r.value;close();
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+        input.dispatchEvent(new Event('change',{bubbles:true}));
+      });
+      pop.appendChild(d);
+    });
+    if(rows._more){
+      var m=document.createElement('div');m.className='mpick-more';
+      m.textContent=rows._more+' more — keep typing';
+      pop.appendChild(m);
+    }
+    pop.classList.add('open');
+  }
+  function refresh(){
+    var q=input.value.trim(),all=options();
+    var hit=q?all.filter(function(o){return matchModel(o.value,q)}):all;
+    rows=hit.slice(0,MPICK_MAX);
+    rows._more=hit.length>MPICK_MAX?(hit.length-MPICK_MAX):0;
+    sel=-1;
+    paint();
+  }
+  input.addEventListener('focus',refresh);
+  input.addEventListener('input',refresh);
+  input.addEventListener('blur',function(){setTimeout(close,120)});
+  input.addEventListener('keydown',function(e){
+    if(!pop.classList.contains('open')){
+      if(e.key==='ArrowDown'){refresh();e.preventDefault()}
+      return;
+    }
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+      e.preventDefault();
+      sel+=(e.key==='ArrowDown'?1:-1);
+      if(sel<0)sel=rows.length-1;
+      if(sel>=rows.length)sel=0;
+      paint();
+      var on=pop.querySelector('.mpick-opt.on');
+      if(on&&on.scrollIntoView)on.scrollIntoView({block:'nearest'});
+    }else if(e.key==='Enter'&&sel>=0){
+      e.preventDefault();
+      input.value=rows[sel].value;close();
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+      input.dispatchEvent(new Event('change',{bubbles:true}));
+    }else if(e.key==='Escape'){close()}
+  });
+}
+['sdModel:sdModels','editModel:editModels','vidModel:vidModels','ttsVoice:ttsVoices']
+  .forEach(function(pair){var p=pair.split(':');attachPicker(p[0],p[1])});
+
 var _editModelsLoaded=false;
 function loadEditModels(){
   if(_editModelsLoaded)return;_editModelsLoaded=true;
@@ -4784,9 +4943,29 @@ var lightbox=document.createElement('div');
 lightbox.id='lightbox';
 lightbox.innerHTML='<img alt=""><div class="cap"></div>';
 document.body.appendChild(lightbox);
-lightbox.addEventListener('click',function(){lightbox.classList.remove('open')});
+var _lbSwallowClick=false;
+lightbox.addEventListener('click',function(){
+  if(_lbSwallowClick){_lbSwallowClick=false;return}
+  lightbox.classList.remove('open');_lightboxAt=-1;_lbChatAt=-1;
+});
+// Swipe is the same step the arrow keys take. Horizontal-dominant and over
+// 45px, so a scroll-ish drag or a tap-with-wobble doesn't count.
+var _lbX=0,_lbY=0,_lbTouch=null;
+lightbox.addEventListener('touchstart',function(e){
+  if(e.touches.length!==1){_lbTouch=null;return}
+  _lbX=e.touches[0].clientX;_lbY=e.touches[0].clientY;_lbTouch=1;
+},{passive:true});
+lightbox.addEventListener('touchend',function(e){
+  if(!_lbTouch)return;
+  _lbTouch=null;
+  var t=e.changedTouches[0],dx=t.clientX-_lbX,dy=t.clientY-_lbY;
+  if(Math.abs(dx)<45||Math.abs(dx)<Math.abs(dy)*1.2)return;
+  _lbSwallowClick=true;
+  setTimeout(function(){_lbSwallowClick=false},400);   // in case no click follows
+  stepLightbox(dx<0?1:-1);                             // swipe left = next
+},{passive:true});
 document.addEventListener('keydown',function(e){
-  if(e.key==='Escape'){lightbox.classList.remove('open');_lightboxAt=-1;return}
+  if(e.key==='Escape'){lightbox.classList.remove('open');_lightboxAt=-1;_lbChatAt=-1;return}
   if(!lightbox.classList.contains('open'))return;
   if(e.key==='ArrowLeft'){e.preventDefault();stepLightbox(-1)}
   else if(e.key==='ArrowRight'){e.preventDefault();stepLightbox(1)}
@@ -4797,6 +4976,23 @@ function openLightboxSrc(src,cap){
   lightbox.classList.add('open');
 }
 var _imgEntries=[],_lightboxAt=-1;
+// A lightbox opened from a chat message walks that conversation's images
+// instead of the gallery's — swiping into an unrelated grid would be worse
+// than not swiping at all.
+var _lbMode='gallery',_lbChat=[],_lbChatAt=-1;
+function _chatImages(){
+  return Array.prototype.filter.call(chatLog.querySelectorAll('img'),function(im){
+    return im.src&&!im.closest('.rummage-wrap');
+  });
+}
+function _showChatImage(i){
+  var im=_lbChat[i];
+  if(!im)return;
+  _lbChatAt=i;
+  var a=assetForImg(im.src);
+  openLightboxSrc(im.src,(a?a.name+(a.desc?' \u00b7 '+a.desc:''):(im.alt||''))
+                        +' ('+(i+1)+'/'+_lbChat.length+')');
+}
 // Arrow keys walk the gallery as it is currently shown: filtered, in the same
 // order, across page boundaries — paging along so the grid behind stays in
 // step with what you're looking at.
@@ -4813,6 +5009,13 @@ function _visibleEntries(){
   return out;
 }
 function stepLightbox(d){
+  if(_lbMode==='chat'){
+    var j=_lbChatAt+d;
+    if(j<0||j>=_lbChat.length)return;   // stop at the ends rather than wrap
+    _showChatImage(j);
+    return;
+  }
+  if(_lightboxAt<0)return;              // opened outside the gallery: nothing to walk
   var list=_visibleEntries();
   if(!list.length)return;
   var i=_lightboxAt+d;
@@ -4824,6 +5027,7 @@ function stepLightbox(d){
   openLightbox(list[i],true);
 }
 function openLightbox(e,keepIndex){
+  _lbMode='gallery';
   var bits=[];
   if(e.prompt)bits.push(e.prompt);
   if(e.negative_prompt)bits.push('neg: '+e.negative_prompt);
@@ -4869,10 +5073,11 @@ function assetForImg(src){
 chatLog.addEventListener('click',function(e){
   var img=e.target.closest('img');
   if(!img||!img.src)return;
-  var a=assetForImg(img.src),cap;
-  if(a)cap=a.name+(a.desc?' \u00b7 '+a.desc:'');
-  else cap=img.alt||'';
-  openLightboxSrc(img.src,cap);
+  _lbMode='chat';
+  _lbChat=_chatImages();
+  var at=_lbChat.indexOf(img);
+  if(at<0){_lbChat=[img];at=0}
+  _showChatImage(at);
 });
 ['posPrompt','negPrompt'].forEach(function(id){
   document.getElementById(id).addEventListener('keydown',function(e){

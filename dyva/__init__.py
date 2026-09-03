@@ -4916,19 +4916,30 @@ async def handle_txt2img(request):
             "txt2img (comfy): no response", wid=wid)
         return failed("no response")
 
+    # Keep the tally across all three phases. "all image-gen hosts failed" told
+    # the caller nothing — not how many were tried, not whether the model
+    # filter had left nothing to try, not what went wrong.
+    tried_total = 0
+    verdict_totals = collections.Counter()
+
     async def _race(host_list, attempt, workers=None):
+        nonlocal tried_total
         if not host_list:
             return None
-        result, _stopped, _tried, _tally = await _race_hosts(
+        result, _stopped, tried, tally = await _race_hosts(
             host_list, attempt, IMG_KEY, workers=workers, label=wkey)
+        tried_total += tried
+        verdict_totals.update(tally)
         return result
 
     def _deliver(data):
         # keep the host in the payload, not just in the history file: the chat
         # records where each generated file came from
         host_used = data.pop("_dyva_host", "")
+        model_used = _resolve_sd_model(data, body) or requested_model
         _save_image_history(data, body, host_used, requested_model)
         data["host"] = host_used
+        data["model"] = model_used
         return web.json_response(data)
 
     # A host-wide unreachable mark (dead at the connection level) must exclude a
@@ -4963,7 +4974,19 @@ async def handle_txt2img(request):
     if data:
         return _deliver(data)
 
-    return web.json_response({"error": "all image-gen hosts failed"}, status=502)
+    # Nothing was even attempted: the filter matched hosts by their cached
+    # model list and then every one of them was already excluded.
+    if not tried_total:
+        return web.json_response(
+            {"error": (f"no image-gen host currently has a model matching "
+                       f"{model_filter!r}" if model_filter else
+                       "no image-gen hosts were available to try")}, status=503)
+    verdicts = ", ".join(f"{c} {v}" for v, c in verdict_totals.most_common())
+    return web.json_response(
+        {"error": f"image generation failed on {tried_total} "
+                  f"host{'' if tried_total == 1 else 's'}"
+                  + (f" with a model matching {model_filter!r}" if model_filter else "")
+                  + (f" ({verdicts})" if verdicts else "")}, status=502)
 
 
 # ---- The ComfyUI job pipeline, shared by every media capability ----------
