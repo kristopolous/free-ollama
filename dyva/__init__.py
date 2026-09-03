@@ -5185,6 +5185,10 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
                 raise
             except Exception as e:
                 raise ComfyError(str(e) or type(e).__name__)
+            # We have the bytes; the host has no reason to keep the job.
+            # Every capability collects through here, so one call covers
+            # images, edits, video, speech and music alike.
+            await comfy_forget(session, host, prompt_id)
             return raw, af.get("filename") or f"output.{label}"
 
         status = entry.get("status") or {}
@@ -5231,6 +5235,7 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
         import random
         seed = random.randint(0, 2**31 - 1)
     sampler = body.get("sampler_name", "euler")
+    out_node = comfy_image_out_for(host)
 
     workflow = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
@@ -5243,7 +5248,10 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
             "cfg": cfg, "sampler_name": sampler, "scheduler": "normal", "denoise": 1,
         }},
         "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
-        "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": "dyva_output", "images": ["6", 0]}},
+        "7": ({"class_type": "PreviewImage", "inputs": {"images": ["6", 0]}}
+              if out_node == "PreviewImage" else
+              {"class_type": "SaveImage",
+               "inputs": {"filename_prefix": "dyva_output", "images": ["6", 0]}}),
     }
 
     try:
@@ -5487,6 +5495,48 @@ _TtsError = ComfyError
 _TtsUnsuitable = ComfyUnsuitable
 
 
+# ComfyUI has no API for deleting a generated file, so the next best thing is
+# not to create a permanent one. Preview nodes write into the host's temp
+# directory instead of its output directory, and ComfyUI's own main.py calls
+# cleanup_temp() — an rmtree of that directory — both at startup and in the
+# finally block at shutdown. So the file goes away on its own, and it never
+# shows up in the host's output gallery in the meantime. Retrieval is
+# unchanged: the history entry carries type "temp" and /view is already given
+# whatever type it reports.
+def comfy_image_out(info):
+    """The node that emits the finished image: preview for choice, save to
+    fall back on. None when the host has neither."""
+    for c in ("PreviewImage", "SaveImage"):
+        if c in info:
+            return c
+    return None
+
+
+def comfy_image_out_for(host):
+    """Same answer for a host we may not have surveyed. txt2img deliberately
+    never pulls /object_info — several megabytes to draw one picture — so this
+    peeks the cache and otherwise assumes the preview node, which ships with
+    ComfyUI exactly as SaveImage does."""
+    hit = _COMFY_INFO_CACHE.get(host)
+    return comfy_image_out(hit[0]) if hit else "PreviewImage"
+
+
+async def comfy_forget(session, host, prompt_id):
+    """Drop our job from the host's history. This removes the record, not the
+    file — no core endpoint deletes output — but it takes our work out of their
+    queue view. Best-effort by design: a host that refuses is not a failure of
+    the thing the caller actually asked for."""
+    if not prompt_id:
+        return
+    try:
+        r = await session.post(_host_url(host, "/history"),
+                               json={"delete": [prompt_id]},
+                               timeout=aiohttp.ClientTimeout(total=10))
+        await r.release()
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+        log.debug(f"comfy {host}: history delete failed: {e}")
+
+
 async def comfy_object_info(session, host):
     """Fetch (and briefly cache) a ComfyUI host's full /object_info.
 
@@ -5603,7 +5653,8 @@ def _tts_save_node(host_info):
     """The node that will actually write the audio file, or None if this host
     has no audio saver at all. Defaulting to the name "SaveAudio" when it isn't
     installed just moves the failure to the host, as missing_node_type."""
-    for candidate in ("SaveAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced"):
+    for candidate in ("PreviewAudio", "SaveAudio", "SaveAudioMP3",
+                      "SaveAudioOpus", "SaveAudioAdvanced"):
         if candidate in host_info:
             return candidate
     for key in host_info:
@@ -7537,10 +7588,13 @@ def _edit_plan(info, model_filter=None, exclude=(), n_images=0):
         # a ReferenceLatent per image and take any number.
         if fam.get("style") == "encode" and n_images > len(fam.get("images") or []):
             continue
-        for need in ("KSampler", "VAEDecode", "SaveImage", "LoadImage"):
+        out_node = comfy_image_out(info)
+        for need in ("KSampler", "VAEDecode", "LoadImage"):
             if need not in info:
                 break
         else:
+            if not out_node:
+                continue
             # What the user typed *narrows within* a family; it never overrides
             # it. "flux" must not pick a Flux checkpoint and then drive it with
             # Qwen's encoder, CLIP and VAE — so a candidate has to satisfy both
@@ -7595,7 +7649,7 @@ def _edit_plan(info, model_filter=None, exclude=(), n_images=0):
                 loader["kind"] = "checkpoint"
                 loader["ckpt"] = ckpt
             return {"family": fam, "encode": encode, "loader": loader,
-                    "model": unet or ckpt}
+                    "model": unet or ckpt, "out": out_node}
     return None
 
 
@@ -7734,8 +7788,11 @@ def _edit_workflow(plan, prompt, image_names, params=None):
         "denoise": float(params.get("denoise", 1.0))}}
     g["700"] = {"class_type": "VAEDecode",
                 "inputs": {"samples": ["600", 0], "vae": VAE}}
-    g["800"] = {"class_type": "SaveImage",
-                "inputs": {"images": ["700", 0], "filename_prefix": "dyva/edit"}}
+    out_node = plan.get("out") or "SaveImage"
+    g["800"] = ({"class_type": "PreviewImage", "inputs": {"images": ["700", 0]}}
+                if out_node == "PreviewImage" else
+                {"class_type": "SaveImage",
+                 "inputs": {"images": ["700", 0], "filename_prefix": "dyva/edit"}})
     return g
 
 

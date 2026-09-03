@@ -312,6 +312,35 @@ The dashboard's Image tab has a **Generate / Edit** toggle; in Edit mode the
 negative prompt is hidden (edit models don't take one) and a drop zone accepts
 reference images.
 
+### Leaving Little Behind
+
+These are strangers' machines, and every job we run writes to their disk.
+ComfyUI has no API for deleting a generated file, so dyva does the two things
+that are actually available.
+
+**Write to temp, not output.** The graphs end in `PreviewImage` / `PreviewAudio`
+rather than `SaveImage` / `SaveAudio` wherever the host has them. Preview nodes
+write into ComfyUI's temp directory, and ComfyUI's own `main.py` calls
+`cleanup_temp()` — an `rmtree` of that directory — both at startup and in the
+`finally` block at shutdown. The file removes itself, and in the meantime it
+never appears in the host's output gallery. Retrieval is unchanged: the history
+entry reports `type: "temp"` and `/view` is already handed whatever type it
+names. A host with only the save nodes still gets those, and one with neither
+isn't a viable host at all.
+
+**Forget the job.** After the bytes are collected, `comfy_forget()` posts
+`{"delete": [prompt_id]}` to `/history`. That removes the record, not the file
+— no core endpoint deletes output — but it takes our work out of the host's
+queue view. It is best-effort: a host that refuses hasn't failed at the thing
+the caller asked for. Every capability collects through `comfy_collect()`, so
+one call covers images, edits, video, speech and music.
+
+What this does **not** solve is uploads. `/upload/image` puts each edit
+reference image into the host's `input/` directory permanently, `LoadImage`
+reads from there, and there is no preview equivalent. That is the larger
+footprint of the two and there is currently nothing to be done about it from
+the client side.
+
 ### ComfyUI Pass-Through
 
 All ComfyUI workflow endpoints are proxied under `/comfyui/`. The prefix is stripped and the request is forwarded to a discovered ComfyUI host.
