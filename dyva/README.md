@@ -395,8 +395,58 @@ and remembered across sessions:
 | Tool | What the model can do |
 |------|------------------------|
 | **Image generation** | `generate_image` — render a picture from a description |
+| **Image editing** | `edit_image` — change one picture, or combine several |
+| **Video** | `generate_video` — a few seconds of silent footage |
 | **Speech** | `generate_speech` — speak a line of dialog out loud |
+| **Ask** | `ask_user` — put one multiple-choice question to the user |
+| **Web** | `fetch_url` — read an explicit URL |
 | **Documents** | create/edit/rename/search/replace documents in a side panel |
+
+#### Assets
+
+Every file in a conversation — attached by the user or produced by a tool — is
+registered under a short name, and `list_assets` hands the model that list as
+JSON — `[{"name": "garden.jpg", "kind": "image", "source": "generated"}]`,
+oldest first — so the `name` field goes straight into the next tool call
+instead of having to be picked out of a prose line.
+This is what makes *"add this lady to the garden"* work: the model calls
+`list_assets`, sees `lady.jpg` and `garden.jpg`, and passes both to
+`edit_image` in `images`. The names are bookkeeping only and have nothing to do
+with what anything is called on disk; the point is that the model never has to
+reason about `20260903T081311Z-4f1c.png`.
+
+The media tools therefore take a `name` for what they produce
+(`{prompt: "a beautiful flowing garden", name: "garden.jpg"}`), and the tool
+result reports the name actually assigned — which may differ, since collisions
+get a `-2` suffix. `list_assets` is offered automatically whenever any media
+tool is enabled; it has no toggle of its own.
+
+#### Reading URLs
+
+`fetch_url` reads one explicit address — it is not a search engine. The page is
+rendered by the best engine installed, in this order:
+
+1. **[lightpanda](https://lightpanda.io/)** — a headless browser engine built
+   for this; it runs the page's JavaScript and emits Markdown directly
+   (`lightpanda fetch <url> --dump markdown --json`).
+2. **headless Chrome** — `--headless=new --dump-dom`, then the HTML is reduced
+   to text here.
+3. **curl** — the honest floor: it gets the bytes, tags are stripped locally.
+
+A browser engine can fail on a page curl reads fine, so the order is a real
+fallback chain and not just a preference: if the chosen engine errors, the
+fetch is retried with curl before giving up. `/v1/web/fetch` exposes the same
+thing over HTTP and reports which backend answered.
+
+A URL that turns out to be an image is downloaded into the generated-image
+store rather than rendered, so it appears in the Image gallery and becomes a
+named asset — which means a picture found on the web can go straight into
+`edit_image`.
+
+Passing more than one image narrows host selection: an encode-style edit family
+has a fixed number of image slots (`QwenImageEditPlus` takes three,
+`QwenImageEdit` one), so a host whose only edit model can't hold them all is
+skipped rather than silently rendering with the extras dropped.
 
 `generate_speech` goes through `/v1/audio/speech` like everything else, but the
 clip is also written to disk and referenced in the transcript by URL

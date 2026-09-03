@@ -244,6 +244,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .messages{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);height:46vh;overflow-y:auto;padding:.75em;margin-bottom:.75em}
 .msg{margin-bottom:.75em}
 .msg .role{font-size:var(--fs-2xs);color:var(--text-dim);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);margin-bottom:.25em;display:flex;align-items:center;gap:.4em;position:relative}
+.msg .role .role-meta{text-transform:none;letter-spacing:0;font-family:var(--font-mono);color:var(--text-faint);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msg .actions{display:inline-flex;align-items:center;gap:.15em;height:.75rem;overflow:visible;opacity:0;pointer-events:none}
 .msg:hover .actions{opacity:1;pointer-events:auto}
 .msg .actions .act{cursor:pointer;color:var(--accent);font-size:1rem;line-height:1;height:1.5rem;min-width:1.5rem;margin:-.375rem 0;padding:0 4px;border-radius:var(--r-sm);user-select:none;display:inline-flex;align-items:center;justify-content:center}
@@ -278,6 +279,12 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.note .note-text code{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-2)}
 .msg.note .note-text strong{color:var(--text);font-weight:500}
 .msg.note .note-text blockquote{border-left:2px solid var(--border-strong);margin:.3em 0;padding:0 .6em;color:var(--text-3)}
+.msg.note .note-text h4{margin:1.25rem 0 .3em;font-size:inherit;font-weight:500;letter-spacing:.05em;text-transform:uppercase;color:#fff}
+.msg.note .note-text table{border-collapse:collapse;margin:.4em 0;font-size:var(--fs-sm)}
+.msg.note .note-text th,.msg.note .note-text td{text-align:left;padding:.25em 1.1em .25em 0;white-space:nowrap;vertical-align:top}
+.msg.note .note-text th:last-child,.msg.note .note-text td:last-child{padding-right:0;white-space:normal}
+.msg.note .note-text th{color:var(--text-3);font-weight:500;font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border-strong);padding-bottom:.35em}
+.msg.note .note-text td{border-bottom:1px solid var(--border)}
 .msg.note.working .body{border-left-color:var(--border-strong);font-style:italic}
 .msg.note.err .body{border-left-color:var(--err);color:var(--err)}
 .msg.assistant .body pre{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:.6em;overflow-x:auto;white-space:pre;margin:.6em 0}
@@ -539,10 +546,21 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .media-row{display:grid;gap:var(--sp-4);margin-bottom:var(--sp-4)}
 .media-row-3{grid-template-columns:2fr 1fr 1fr}
 .media-row-4{grid-template-columns:2fr 1.2fr 1fr 1fr}
+.media-row-2{grid-template-columns:1fr 1fr}
 @media(max-width:640px){.media-row-3,.media-row-4{grid-template-columns:1fr 1fr}}
 .media-result{margin-top:14px}
 .media-result audio{width:100%;margin-top:10px}
 .audio-embed{margin:var(--sp-3) 0;max-width:420px}
+.ask-card{border:1px solid var(--border-strong);border-radius:var(--r-lg);background:var(--surface);padding:var(--sp-4) var(--sp-5);margin:var(--sp-3) 0;max-width:560px}
+.ask-q{font-size:var(--fs-lg);color:var(--text);margin-bottom:var(--sp-3)}
+.ask-opts{display:flex;flex-direction:column;gap:var(--sp-2)}
+.ask-opt{text-align:left;background:var(--bg-sunken);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);padding:var(--sp-3) var(--sp-4);font-size:var(--fs-md);cursor:pointer}
+.ask-opt:hover{background:var(--accent-bg);border-color:var(--border-accent);color:var(--text)}
+.ask-other{display:flex;gap:var(--sp-2);margin-top:var(--sp-3)}
+.ask-other input{flex:1;min-width:0}
+.ask-card.answered{opacity:.65}
+.ask-card.answered .ask-opts,.ask-card.answered .ask-other{display:none}
+.ask-answer{font-size:var(--fs-md);color:var(--accent)}
 .audio-embed .audio-cap{font-size:var(--fs-xs);color:var(--text-dim);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .audio-embed .player{margin-top:0}
 /* Native <audio controls> renders with the browser's own chrome and can't be
@@ -772,7 +790,10 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="tools-pop-title">Tools</div>
 <label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Let the model create images on request</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolImageEdit"><span class="tool-txt"><b>Image editing</b><small>Let the model change an image already in the chat</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolAsk"><span class="tool-txt"><b>Ask me</b><small>Let the model ask a multiple-choice question before answering</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Let the model make a short video (takes minutes)</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Let the model speak dialog out loud</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolWeb"><span class="tool-txt"><b>Web</b><small>Let the model read a URL you or it names</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Let the model write &amp; edit documents in a side panel</small></span></label>
 </div>
 </div>
@@ -969,22 +990,37 @@ __SD_MODELS__
 
 <div class="media-pane" id="mediapane-video" style="display:none">
 <div class="media-form">
-<div class="media-row media-row-4">
+<div class="media-row media-row-3">
 <div class="field">
 <label for="vidModel">Model <small class="setting-help">optional</small></label>
-<input id="vidModel" type="text" placeholder="first video-class model" autocomplete="off">
+<input id="vidModel" type="text" list="vidModels" placeholder="loading models&hellip;" autocomplete="off">
+<datalist id="vidModels"></datalist>
 </div>
 <div class="field">
-<label for="vidResolution">Resolution</label>
-<input id="vidResolution" type="text" placeholder="832x480" autocomplete="off">
+<label for="vidAspect">Aspect</label>
+<select id="vidAspect">
+<option value="long" selected>Long</option>
+<option value="square">Square</option>
+<option value="tall">Tall</option>
+</select>
 </div>
+<div class="field">
+<label for="vidSize">Size</label>
+<select id="vidSize">
+<option value="small">Small</option>
+<option value="medium" selected>Medium</option>
+<option value="large">Large</option>
+</select>
+</div>
+</div>
+<div class="media-row media-row-2">
 <div class="field">
 <label for="vidFrames">Frames</label>
-<input id="vidFrames" type="number" min="1" max="600" step="1" placeholder="25" title="Video length is counted in frames, not seconds">
+<input id="vidFrames" type="number" min="5" max="257" step="4" placeholder="81" title="Frames, not seconds. Snapped to what the model's temporal VAE accepts (Wan 4n+1, LTX 8n+1).">
 </div>
 <div class="field">
 <label for="vidSteps">Steps</label>
-<input id="vidSteps" type="number" min="1" max="150" step="1" placeholder="20">
+<input id="vidSteps" type="number" min="1" max="60" step="1" placeholder="20">
 </div>
 </div>
 <div class="vid-prompt-row">
@@ -1113,6 +1149,7 @@ function connectActivity(fresh){
   };
 }
 var _actLines={};  // activity id -> its line element, for in-place updates
+var ACTIVITY_LINES=500;   // the server keeps 500; showing 50 threw most of it away
 function refreshListsNow(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d)}).catch(function(){})}
 // Debounced: the activity stream replays its whole backlog on connect, and each
 // connected/failed event would otherwise trigger its own /dashboard-data fetch
@@ -1131,7 +1168,7 @@ function onActivityMessage(e){try{if(paused)return;var d=JSON.parse(e.data);if(!
   if(fresh){p=document.createElement('div');if(d.id)_actLines[d.id]=p}
   p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+d.message;
   if(fresh)c.insertBefore(p,c.firstChild);
-  while(c.children.length>50){var gone=c.lastChild;for(var k in _actLines)if(_actLines[k]===gone)delete _actLines[k];c.removeChild(gone)}}catch(ex){}}
+  while(c.children.length>ACTIVITY_LINES){var gone=c.lastChild;for(var k in _actLines)if(_actLines[k]===gone)delete _actLines[k];c.removeChild(gone)}}catch(ex){}}
 document.getElementById('activityReconnect').addEventListener('click',function(ev){
   ev.stopPropagation();
   this.disabled=true;this.textContent='connecting\u2026';
@@ -1541,8 +1578,23 @@ var chatLog=document.getElementById('chatMessages');
 // always false and would disable itself. Appending doesn't fire scroll, so the
 // flag still reflects the last thing the reader actually did.
 var _stickBottom=true;
-function chatAtBottom(){return chatLog.scrollHeight-chatLog.scrollTop-chatLog.clientHeight<=40}
-function scrollChat(force){if(force||_stickBottom){_stickBottom=true;chatLog.scrollTop=chatLog.scrollHeight}}
+// "Near the bottom" counts as being at the bottom: within 80px the view keeps
+// following new content, past that it stays put so you can read back through
+// the conversation while it's still generating. Deciding this at scroll time
+// alone wasn't enough — a token arriving grows scrollHeight, which silently
+// pushes you outside the old 40px window and the chat stops following.
+var CHAT_STICK_PX=80;
+function chatAtBottom(){
+  return chatLog.scrollHeight-chatLog.scrollTop-chatLog.clientHeight<=CHAT_STICK_PX;
+}
+function scrollChat(force){
+  // re-check position rather than trusting the last scroll event: content has
+  // usually just been appended by the caller
+  if(force||_stickBottom||chatAtBottom()){
+    _stickBottom=true;
+    chatLog.scrollTop=chatLog.scrollHeight;
+  }
+}
 chatLog.addEventListener('scroll',function(){_stickBottom=chatAtBottom()});
 // the server's host-diagnostic marker; sending it as a message asks dyva which
 // host/model it *would* use instead of running a completion
@@ -1577,6 +1629,9 @@ function serializeChat(c){
     return x;
   })};
   if(c.system)o.system=c.system;
+  if(c.assets&&c.assets.length)o.assets=c.assets.map(function(a){
+    return {name:a.name,kind:a.kind,src:a.src,desc:a.desc,ts:a.ts,url:a.url,aid:a.aid};
+  });
   if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}});
   return o;
 }
@@ -1962,7 +2017,22 @@ function mdRender(text){
 // survives being saved and reloaded. Upgrade those links to the themed player
 // wherever they appear — chat bubbles, notes and documents all set innerHTML
 // through different paths, so watch the document rather than patch each one.
+function upgradeVideoLinks(root){
+  var sel='a[href^="v1/videos/"]:not([data-video-up])';
+  Array.prototype.forEach.call((root||document).querySelectorAll(sel),function(a){
+    a.setAttribute('data-video-up','1');
+    var wrap=document.createElement('div');wrap.className='audio-embed';
+    var cap=document.createElement('div');cap.className='audio-cap';
+    cap.textContent=a.textContent||'video';
+    var v=document.createElement('video');
+    v.controls=true;v.preload='metadata';v.src=a.getAttribute('href');
+    v.style.width='100%';v.style.borderRadius='var(--r-md)';v.style.background='#000';
+    wrap.appendChild(cap);wrap.appendChild(v);
+    if(a.parentNode)a.parentNode.replaceChild(wrap,a);
+  });
+}
 function upgradeAudioLinks(root){
+  upgradeVideoLinks(root);
   var sel='a[href^="v1/audio/clips/"]:not([data-audio-up])';
   Array.prototype.forEach.call((root||document).querySelectorAll(sel),function(a){
     a.setAttribute('data-audio-up','1');
@@ -2135,7 +2205,10 @@ function editUserMsg(index){
   ta.focus();
   ta.setSelectionRange(ta.value.length,ta.value.length);
   var finished=false;
-  function done(save){
+  // Enter commits *and* regenerates: an edited question whose old answer is
+  // still sitting underneath it is the one outcome nobody wants. Blur just
+  // saves — clicking away isn't asking for a new reply.
+  function done(save,regen){
     if(finished)return;finished=true;
     var val=save?ta.value:m.content;
     if(ta.parentNode){
@@ -2145,14 +2218,18 @@ function editUserMsg(index){
     m.content=val;
     if(index===0)currentChat.title=val.replace(/\s+/g,' ').slice(0,40);
     if(save){saveCurrentChat();renderSidebar();}
+    if(save&&regen&&val.trim()&&val!==_before)regenerateFrom(index);
   }
+  var _before=m.content;
   ta.addEventListener('keydown',function(e){
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();done(true);}
+    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();done(true,true);}
     else if(e.key==='Escape'){done(false);}
   });
-  ta.addEventListener('blur',function(){done(true);});
+  ta.addEventListener('blur',function(){done(true,false);});
 }
-function retryUserMsg(index){
+// Drop everything from `index` onward and send that message again. Shared by
+// the retry button and by committing an edit.
+function regenerateFrom(index){
   if(index<0||index>=currentChat.messages.length)return;
   var m=currentChat.messages[index];
   if(m.role!=='user')return;
@@ -2160,6 +2237,15 @@ function retryUserMsg(index){
   attachments=(m.files||[]).slice();
   renderAttachments();
   currentChat.messages=currentChat.messages.slice(0,index);
+  // Assets backed by a dropped attachment go with it; the server-stored ones
+  // (generated images, clips) are still there and stay listed.
+  if(currentChat.assets&&currentChat.assets.length){
+    var live={};
+    currentChat.messages.forEach(function(mm){
+      (mm.files||[]).forEach(function(f){if(f.aid)live[f.aid]=1});
+    });
+    currentChat.assets=currentChat.assets.filter(function(a){return !a.aid||live[a.aid]});
+  }
   saveCurrentChat();
   renderMessages();
   renderSidebar();
@@ -2168,13 +2254,26 @@ function retryUserMsg(index){
   input.focus();
   sendChat();
 }
+function retryUserMsg(index){regenerateFrom(index)}
 function setAssistantLabel(el,host,fmodel,tps){
-  var s='ASSISTANT';
-  if(host)s+=' '+host;
-  if(fmodel)s+=' '+fmodel;
-  if(tps!==undefined&&tps!==null&&!isNaN(tps))s+=' '+tps+' tps';
+  // The label is uppercased by .role; a hostname and a model filename are not
+  // words, and shouting them makes them harder to read. Keep ASSISTANT in the
+  // styled label and put the machine details in their own span.
   var lbl=el.querySelector('.role-label')||el;
-  lbl.textContent=s;
+  lbl.textContent='ASSISTANT';
+  var bits=[];
+  if(fmodel)bits.push(fmodel);
+  if(host)bits.push(String(host).replace(/^https?:\/\//,''));
+  if(tps!==undefined&&tps!==null&&!isNaN(tps))bits.push(tps+' tps');
+  var meta=el.querySelector('.role-meta');
+  if(!bits.length){if(meta)meta.remove();return}
+  if(!meta){
+    meta=document.createElement('span');meta.className='role-meta';
+    if(lbl.nextSibling)lbl.parentNode.insertBefore(meta,lbl.nextSibling);
+    else lbl.parentNode.appendChild(meta);
+  }
+  meta.textContent=bits.join(' ');
+  meta.title=bits.join(' ');
 }
 function newChat(){_stickBottom=true;saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[],documents:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
 function loadChatById(id){
@@ -2191,11 +2290,12 @@ function loadChatById(id){
   if(g&&g.chat){currentChat=g.chat;afterLoadChat(String(id));return;}
   fetchChat(id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
     afterLoadChat(String(id));
   });
 }
 function afterLoadChat(id){
+  assetBackfill(currentChat);
   document.getElementById('chatModel').value=currentChat.model||'*';
   updateModelCount();
   renderMessages();
@@ -2257,12 +2357,80 @@ function stopChat(){
 var SLASH_COMMANDS=[
   {cmd:'system',   arg:'[prompt]', desc:'set or show this chat’s system prompt'},
   {cmd:'info',     arg:'',         desc:'show which host and model answered'},
+  {cmd:'next',     arg:'',         desc:'drop this model’s sticky host and move to the next one'},
   {cmd:'test',     arg:'',         desc:'probe the hosts with the quick test and cull the bogus ones'},
   {cmd:'retitle',  arg:'',         desc:'regenerate the chat title'},
   {cmd:'download', arg:'',         desc:'download this chat as JSON'},
   {cmd:'delete',   arg:'',         desc:'delete the current chat'},
+  {cmd:'list',     arg:'',         desc:'system prompt, tools, host and files for this chat'},
   {cmd:'help',     arg:'',         desc:'list these commands'}
 ];
+// Everything a note links to opens in a new tab — a host, and equally a file
+// from the asset list, since neither is worth losing the chat over. In-page
+// anchors are left alone. rel=noreferrer because the hosts are strangers'
+// boxes.
+function _extLinks(el){
+  Array.prototype.forEach.call(el.querySelectorAll('a[href]'),function(a){
+    var href=a.getAttribute('href')||'';
+    if(!href||href.charAt(0)==='#')return;
+    a.target='_blank';a.rel='noopener noreferrer';
+  });
+}
+var TOOL_LABELS=[
+  ['toolsOn','Image generation'],['imgEditOn','Image editing'],['videoOn','Video'],
+  ['speechOn','Speech'],['askOn','Ask me'],['webOn','Web'],['docsOn','Documents']
+];
+function enabledToolNames(){
+  var live={toolsOn:toolsOn,imgEditOn:imgEditOn,videoOn:videoOn,speechOn:speechOn,
+            askOn:askOn,webOn:webOn,docsOn:docsOn};
+  return TOOL_LABELS.filter(function(p){return live[p[0]]}).map(function(p){return p[1]});
+}
+// Whoever actually answered last, rather than a sticky host we would have to
+// go and ask the server about — this is a description of the conversation.
+function lastAnswerMeta(){
+  var msgs=(currentChat&&currentChat.messages)||[];
+  for(var i=msgs.length-1;i>=0;i--){
+    var m=msgs[i];
+    if(m&&m.role==='assistant'&&m._meta&&m._meta.server)return m._meta;
+  }
+  return null;
+}
+function chatSummaryMd(){
+  var out=[],i;
+  function block(title,lines){
+    out.push('#### '+title);
+    out.push('> '+(lines||'*(none)*').split('\n').join('\n> '));
+    out.push('');
+  }
+  block('system prompt',(currentChat&&currentChat.system||'').trim());
+  var tn=enabledToolNames();
+  out.push('#### tools');
+  out.push(tn.length?tn.map(function(x){return '- '+x}).join('\n'):'> *(none)*');
+  out.push('');
+  var meta=lastAnswerMeta();
+  var wanted=document.getElementById('chatModel').value.trim();
+  if(meta)
+    block('host','['+meta.server+']('+meta.server+')'
+                 +(meta.model?(' \u00b7 '+meta.model):'')
+                 +(wanted&&wanted!=='*'?(' \u00b7 asked for `'+wanted+'`'):''));
+  else
+    block('host','*nothing has answered yet*'
+                 +(wanted&&wanted!=='*'?(' \u00b7 asking for `'+wanted+'`'):''));
+  var alist=assetsOf(currentChat);
+  out.push('#### files');
+  if(!alist.length)out.push('> *(none)*');
+  else{
+    out.push('| name | kind | source |');
+    out.push('|---|---|---|');
+    for(i=0;i<alist.length;i++){
+      var a=alist[i];
+      // linked when there is something to link to, plain otherwise
+      out.push('| '+(a.url?('['+a.name+']('+a.url+')'):a.name)+' | '+a.kind
+               +' | '+(a.src||'')+(a.desc?(' \u00b7 '+a.desc):'')+' |');
+    }
+  }
+  return out.join('\n');
+}
 function slashHelpText(){
   return SLASH_COMMANDS.map(function(c){
     return '* `/'+c.cmd+(c.arg?' '+c.arg:'')+'` '+c.desc;
@@ -2341,12 +2509,14 @@ function handleSlashCommand(text){
     var b=document.createElement('div');b.className='body';
     var lbl=document.createElement('span');lbl.className='note-cmd';lbl.textContent='/'+cmd;
     var t=document.createElement('div');t.className='note-text';t.innerHTML=mdRender(msg);
+    _extLinks(t);
     b.appendChild(lbl);b.appendChild(t);d.appendChild(b);
     chatLog.appendChild(d);scrollChat();
     highlightBlocks(t);
     return {set:function(msg2,kind2){
       d.className='msg note'+(kind2?' '+kind2:'');
       t.innerHTML=mdRender(msg2);
+      _extLinks(t);
       highlightBlocks(t);
       scrollChat();
     }};
@@ -2377,10 +2547,30 @@ function handleSlashCommand(text){
     _dyvaInfo=true;
     document.getElementById('chatInput').value=DYVA_INFO_TAG;
     return false;   // fall through: send __dyva_info__ through the normal chat flow
+  }else if(cmd==='next'){
+    // Routing housekeeping, not a conversation — it shouldn't leave a You
+    // message and an assistant turn full of JSON in the transcript. Ask the
+    // endpoint directly and leave one note behind.
+    var nmodel=document.getElementById('chatModel').value.trim();
+    if(!nmodel){info('Set a model first.','err');return true}
+    var note=info('moving on\u2026');
+    fetch('next-host?model='+encodeURIComponent(nmodel),
+          {cache:'no-store',headers:{'Accept':'application/json'}})
+      .then(function(r){return r.json()})
+      .then(function(d){
+        var to=d&&d.to;
+        if(!to||!to.host){note.set('No other host has `'+nmodel+'`.','err');return}
+        var h=String(to.host).replace(/^https?:\/\//,'');
+        note.set('moving to `'+(to.model||nmodel)+'` on `'+h+'`');
+      })
+      .catch(function(e){note.set('could not switch host: '+e.message,'err')});
+    return true;
   }else if(cmd==='test'){
     _dyvaInfo=true;
     document.getElementById('chatInput').value=DYVA_INFO_TAG+':test';
     return false;   // fall through: probe the hosts and cull the bogus ones
+  }else if(cmd==='list'||cmd==='listassets'||cmd==='assets'){
+    info(chatSummaryMd());
   }else if(cmd==='help'){
     info(slashHelpText());
   }else{
@@ -2418,6 +2608,13 @@ async function sendChat(){
   currentChat.model=model;
   var userFiles=attachments.slice();
   var hasImage=userFiles.some(function(f){return (f.type||'').toLowerCase().indexOf('image/')===0});
+  // The user's own filename is the name the model will see, deduplicated
+  // against everything already in the conversation.
+  userFiles.forEach(function(f){
+    if(!f.aid)f.aid='a'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+    f.asset=assetAdd(currentChat,{name:f.name,kind:assetKindOf(f.type),
+                                  aid:f.aid,src:'uploaded by the user'});
+  });
   currentChat.messages.push({role:'user',content:text,ts:Date.now(),
     files:userFiles.length?userFiles:undefined,
     vision:hasImage?_requireVision:undefined});
@@ -2445,11 +2642,12 @@ async function sendChat(){
           var d=f.dataUrl||'';
           if((f.type||'').toLowerCase().indexOf('image/')===0){
             if(!seeing){
-              extra+='\n\n[A file "'+(f.name||'image')+'" has been included in the chat. '
-                   + 'You cannot see it, but you can act on it — edit_image works on the most recent image.]';
+              extra+='\n\n[An image named "'+(f.asset||f.name||'image')+'" has been included in the chat. '
+                   + 'You cannot see it, but you can act on it — pass that name to edit_image.]';
               return;
             }
             var i=d.indexOf('base64,');if(i>=0)imgs.push(d.slice(i+7));   // vision image
+            if(f.asset)extra+='\n\n[The image above is named "'+f.asset+'" — use that name with edit_image.]';
           }else if(fileIsText(f)){
             extra+='\n\n--- File: '+(f.name||'file')+' ---\n'+b64toText(d);  // inline text/source
           }else{
@@ -2512,8 +2710,17 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
             var j=await r2.json();
             var fl=j._dyva_files||[];
             if(fl.length){
-              fl.forEach(function(f){urls.push('sdapi/v1/images/'+f)});
-              results.push({text:'Images generated successfully:\n'+fl.map(function(f){return 'sdapi/v1/images/'+f}).join('\n'),md:fl.map(function(f){return '![generated image](sdapi/v1/images/'+f+')'}).join('\n\n')});
+              var ic=liveChat(chatId)||currentChat,inames=[];
+              fl.forEach(function(f,k){
+                urls.push('sdapi/v1/images/'+f);
+                inames.push(assetAdd(ic,{name:args.name||'image',kind:'image',
+                                         url:'sdapi/v1/images/'+f,
+                                         desc:ib.prompt,src:'generated'}));
+              });
+              results.push({text:'Image generated and saved as '+inames.join(', ')
+                                 +'. Refer to it by that name in later tool calls.',
+                            keep:'[Generated image saved as '+inames.join(', ')+'.]',
+                            md:fl.map(function(f,k){return '!['+(inames[k]||'generated image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')});
             }else results.push({text:'Error: image service returned no images',
                                 md:'`\u26a0 generate_image: the host returned no images`'});
           }else{
@@ -2527,15 +2734,141 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           results.push({text:'Error generating image: '+ex.message,
                         md:'`\u26a0 generate_image: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
+      }else if(fn.name==='fetch_url'){
+        var wurl=String(args.url||'').trim();
+        setStatus('fetching '+wurl.replace(/^https?:\/\//,'').slice(0,40)+'\u2026');
+        try{
+          var rw=await fetch('v1/web/fetch',{method:'POST',headers:{'Content-Type':'application/json'},
+                                             body:JSON.stringify({url:wurl}),signal:ac.signal});
+          if(!rw.ok){
+            var wm='HTTP '+rw.status;try{var jw=await rw.json();wm=jw.error||wm}catch(e){}
+            results.push({text:'Error fetching '+wurl+': '+wm,
+                          md:'`\u26a0 fetch_url: '+String(wm).replace(/`/g,"'")+'`'});
+          }else{
+            var jw2=await rw.json();
+            if(jw2.kind==='image'){
+              // a picture off the web is just another asset
+              var wu='sdapi/v1/images/'+jw2.file;
+              urls.push(wu);
+              var wname=assetAdd(liveChat(chatId)||currentChat,
+                                 {name:args.name||wurl.split('/').pop()||'image',
+                                  kind:'image',url:wu,desc:wurl,
+                                  src:'fetched from the web'});
+              results.push({text:'Downloaded the image and saved it as '+wname
+                                 +'. Refer to it by that name in later tool calls.',
+                            keep:'[Image fetched from '+wurl+' saved as '+wname+'.]',
+                            md:'!['+wname+']('+wu+')'});
+              loadImgHistory();
+            }else{
+              var wt=(jw2.title?jw2.title+'\n\n':'')+(jw2.text||'');
+              results.push({text:wt?('Contents of '+(jw2.final_url||wurl)+':\n\n'+wt)
+                                  :('The page at '+wurl+' had no readable text.'),
+                            md:'`\u2193 '+(jw2.title||wurl).replace(/`/g,"'").slice(0,90)+'`'});
+            }
+          }
+        }catch(ex){
+          if(ac.signal.aborted)return;
+          results.push({text:'Error fetching '+wurl+': '+ex.message,
+                        md:'`\u26a0 fetch_url: '+String(ex.message).replace(/`/g,"'")+'`'});
+        }
+      }else if(fn.name==='list_assets'){
+        setStatus('listing assets\u2026');
+        results.push({text:assetListText(liveChat(chatId)||currentChat)});
+      }else if(fn.name==='ask_user'){
+        setStatus('waiting for you\u2026');
+        var q=String(args.question||'').trim();
+        var opts=Array.isArray(args.options)?args.options.map(String).filter(Boolean):[];
+        if(!q){results.push({text:'Error: no question was given'});}
+        else{
+          var picked=await askUser(q,opts,ac.signal);
+          if(ac.signal.aborted)return;
+          // both halves go in the transcript, so a reload still reads sensibly
+          results.push({text:'The user answered: '+picked,
+                        md:'**'+q.replace(/\*/g,'')+'**\n\n> '+picked});
+        }
+      }else if(fn.name==='generate_video'){
+        setStatus('starting video\u2026');
+        try{
+          var vb={prompt:String(args.prompt||'').trim().slice(0,2000),
+                  length:VIDEO_FRAMES,steps:VIDEO_STEPS};
+          if(['long','square','tall'].indexOf(args.aspect)>=0)vb.aspect=args.aspect;
+          if(['small','medium','large'].indexOf(args.size)>=0)vb.size=args.size;
+          var vm=String(args.model||'').trim();
+          if(vm&&vm.length<80)vb.model=vm;
+          var rv=await fetch('v1/videos',{method:'POST',headers:{'Content-Type':'application/json'},
+                                          body:JSON.stringify(vb),signal:ac.signal});
+          if(!rv.ok){
+            var vm1='HTTP '+rv.status;try{var jv=await rv.json();vm1=jv.error||vm1}catch(e){}
+            results.push({text:'Error starting video: '+vm1,
+                          md:'`\u26a0 generate_video: '+String(vm1).replace(/`/g,"'")+'`'});
+          }else{
+            var vjob=await rv.json();
+            // Minutes, not seconds — poll and keep the status line honest about
+            // whether it is queued behind other work or actually rendering.
+            var vt0=Date.now(),done=null;
+            while(Date.now()-vt0<VIDEO_TOOL_WAIT){
+              await new Promise(function(r){setTimeout(r,3000)});
+              if(ac.signal.aborted)return;
+              var pv=await fetch('v1/videos/'+encodeURIComponent(vjob.id),{cache:'no-store'});
+              if(!pv.ok)break;
+              var jv2=await pv.json();
+              if(jv2.status==='completed'||jv2.status==='failed'){done=jv2;break}
+              setStatus((jv2.phase||jv2.status||'working')+'\u2026 '
+                        +Math.round((Date.now()-vt0)/1000)+'s');
+            }
+            if(done&&done.status==='completed'){
+              var vurl='v1/videos/'+encodeURIComponent(vjob.id)+'/content';
+              urls.push(vurl);
+              var vname=assetAdd(liveChat(chatId)||currentChat,
+                                 {name:args.name||'video',kind:'video',url:vurl,
+                                  desc:vb.prompt,src:'generated'});
+              results.push({text:'Video ready, saved as '+vname+': '+vurl,
+                            keep:'[Video saved as '+vname+'.]',
+                            md:'['+vb.prompt.slice(0,80).replace(/[\[\]]/g,'')+']('+vurl+')'});
+              loadVidGallery();
+            }else if(done){
+              results.push({text:'Error generating video: '+(done.error||'failed'),
+                            md:'`\u26a0 generate_video: '+String(done.error||'failed').replace(/`/g,"'")+'`'});
+            }else{
+              // still going: hand back the link rather than pretending it failed
+              results.push({text:'The video is still rendering. It will appear in the Video gallery when done.',
+                            md:'`\u23f3 generate_video: still rendering \u2014 check the Video tab`'});
+            }
+          }
+        }catch(ex){
+          if(ac.signal.aborted)return;
+          results.push({text:'Error generating video: '+ex.message,
+                        md:'`\u26a0 generate_video: '+String(ex.message).replace(/`/g,"'")+'`'});
+        }
       }else if(fn.name==='edit_image'){
         setStatus('editing image\u2026');
         try{
-          var src=lastEditableImage();
-          if(!src){
+          // Named assets when the model asked for them — that is how two
+          // pictures get combined — and the most recent image when it didn't,
+          // which keeps plain "make it night" a one-argument call.
+          var echat=liveChat(chatId)||currentChat;
+          var wantNames=Array.isArray(args.images)
+                ? args.images.map(String).map(function(x){return x.trim()}).filter(Boolean).slice(0,4)
+                : [];
+          var picks=[],missing=[];
+          wantNames.forEach(function(w){
+            var a=assetFind(echat,w);
+            if(a&&a.kind==='image')picks.push(a);else missing.push(w);
+          });
+          var src=picks.length?null:lastEditableImage();
+          if(missing.length){
+            results.push({text:'Error: this conversation has no image named '+missing.join(', ')
+                               +'. Call list_assets to see the real names, then try again.',
+                          md:'`⚠ edit_image: no image named '+missing.join(', ').replace(/`/g,"'")+'`'});
+          }else if(!picks.length&&!src){
             results.push({text:'Error: there is no image in this conversation to edit. Ask the user to attach one, or generate one first with generate_image.',
                           md:'`\u26a0 edit_image: no image in this conversation to edit`'});
           }else{
-            var blob=await _editSourceBlob(src);
+            var blobs=[];
+            if(picks.length){
+              for(var pi=0;pi<picks.length;pi++)
+                blobs.push({blob:await assetBlob(echat,picks[pi]),name:picks[pi].name});
+            }else blobs.push({blob:await _editSourceBlob(src),name:src.name||'source.png'});
             var efd=new FormData();
             efd.append('prompt',String(args.prompt||'').trim().slice(0,2000));
             // Only forward a model the user actually asked for. Models like to
@@ -2543,15 +2876,26 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
             var em=String(args.model||'').trim();
             if(em&&em.length<80)efd.append('model',em);
             efd.append('match_source','1');
-            efd.append('image',blob,src.name||'source.png');
+            // Order is meaningful: the first reference is the one whose shape
+            // the result keeps, and the rest are drawn from.
+            blobs.forEach(function(b){efd.append('image',b.blob,b.name)});
             var r4=await fetch('v1/images/edits',{method:'POST',body:efd,signal:ac.signal});
             if(r4.ok){
               var j4=await r4.json();
               var ef=j4._dyva_files||[];
               if(ef.length){
-                ef.forEach(function(f){urls.push('sdapi/v1/images/'+f)});
-                results.push({text:'Image edited successfully:\n'+ef.map(function(f){return 'sdapi/v1/images/'+f}).join('\n'),
-                              md:ef.map(function(f){return '![edited image](sdapi/v1/images/'+f+')'}).join('\n\n')});
+                var enames=[];
+                ef.forEach(function(f){
+                  urls.push('sdapi/v1/images/'+f);
+                  enames.push(assetAdd(echat,{name:args.name||'edited',kind:'image',
+                                              url:'sdapi/v1/images/'+f,
+                                              desc:String(args.prompt||''),
+                                              src:'edited from '+blobs.map(function(b){return b.name}).join(' + ')}));
+                });
+                results.push({text:'Image edited and saved as '+enames.join(', ')
+                                   +'. Refer to it by that name in later tool calls.',
+                              keep:'[Edited image saved as '+enames.join(', ')+'.]',
+                              md:ef.map(function(f,k){return '!['+(enames[k]||'edited image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')});
                 loadImgHistory();
               }else results.push({text:'Error: edit returned no image',
                                  md:'`\u26a0 edit_image: the host returned no image`'});
@@ -2600,9 +2944,13 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                               model:'chat',host:r3.headers.get('X-Dyva-Host')||'',
                               node:r3.headers.get('X-Dyva-Node')||'',
                               ts:Date.now(),url:curl});
+                var aname=assetAdd(liveChat(chatId)||currentChat,
+                                   {name:args.name||'speech',kind:'audio',url:curl,
+                                    desc:sb.input,src:'generated'});
                 results.push({text:(sb._trimmed
-                    ? 'Spoken, but the text was too long and only the first part was voiced. Tell the user. Clip: '
-                    : 'Spoken successfully: ')+curl,
+                    ? 'Spoken, but the text was too long and only the first part was voiced. Tell the user. Saved as '
+                    : 'Spoken successfully, saved as ')+aname+': '+curl,
+                              keep:'[Audio clip saved as '+aname+'.]',
                               md:'['+sb.input.slice(0,90).replace(/[\[\]]/g,'')+']('+curl+')'});
               }else results.push({text:'Error: speech produced no clip'});
             }else{
@@ -2630,6 +2978,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
     if(inView())saveCurrentChat();
     if(full.trim())appendMsgRecord(chatId,{role:'assistant',content:full});
     results.forEach(function(res){
+      if(res.keep)appendMsgRecord(chatId,{role:'assistant',content:res.keep,_meta:{hidden:true}});
       if(!res.md)return;
       appendMsgRecord(chatId,{role:'assistant',content:res.md});
     });
@@ -2795,7 +3144,7 @@ function tryResume(){
   if((j.n||0)>=2)return;
   fetchChat(j.id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
     touchIndex(currentChat);
     renderMessages();
     renderSidebar();
@@ -2866,8 +3215,141 @@ function recallPrompt(dir,e){
   input.selectionStart=input.selectionEnd=input.value.length;
 }
 
-var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'}},required:['prompt']}}};
-var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit the image already in this conversation \u2014 the one the user just uploaded, or the last one generated \u2014 by describing the change. Use for "make it night", "put a hat on the dog", "remove the background". Do NOT specify which image: the most recent one is used automatically. Edits are incremental, so each call builds on the previous result.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name.'}},required:['prompt']}}};
+// ---- conversation assets -------------------------------------------------
+// Every file in a conversation — attached by the user or produced by a tool —
+// gets a short, human-shaped name and lives in one list. The model never sees
+// "20260903T081311Z-4f1c.png"; it sees "garden.jpg", the same way it sees
+// document titles. That is what makes "add this lady to the garden" possible:
+// the model can name two of them in one edit_image call.
+function assetsOf(chat){
+  if(!chat)return [];
+  if(!chat.assets)chat.assets=[];
+  return chat.assets;
+}
+var _ASSET_EXT={image:'.png',video:'.mp4',audio:'.mp3'};
+function _assetSplit(s){
+  var i=s.lastIndexOf('.');
+  // only a real extension counts — a sentence ending in a full stop is not one
+  return (i>0&&/^\.[a-z0-9]{1,5}$/i.test(s.slice(i)))?[s.slice(0,i),s.slice(i)]:[s,''];
+}
+// Models will hand back "Beautiful Garden!.JPG", "output/garden", or nothing.
+function assetSlug(want,kind){
+  var s=String(want||'').replace(/\\/g,'/').split('/').pop().trim().toLowerCase();
+  s=s.replace(/[^a-z0-9._-]+/g,'_').replace(/_{2,}/g,'_').replace(/^[._-]+/,'');
+  var parts=_assetSplit(s),base=parts[0].slice(0,40).replace(/[._-]+$/,''),ext=parts[1];
+  if(!base)base=kind||'file';
+  if(!ext)ext=_ASSET_EXT[kind]||'';
+  return base+ext;
+}
+function assetUnique(chat,fname){
+  var list=assetsOf(chat),parts=_assetSplit(fname),n=fname,k=2;
+  while(list.some(function(a){return a.name===n}))n=parts[0]+'-'+(k++)+parts[1];
+  return n;
+}
+// rec: {name, kind, desc, url} for anything the server stores, or
+//      {name, kind, desc, aid} for a user attachment, resolved out of the
+//      message it rode in on rather than copied (dataUrls are big).
+function assetAdd(chat,rec){
+  if(!chat)return '';
+  rec.name=assetUnique(chat,assetSlug(rec.name,rec.kind));
+  rec.ts=rec.ts||Date.now();
+  assetsOf(chat).push(rec);
+  return rec.name;
+}
+function _assetNorm(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'')}
+// Forgiving on the way in: the model may say "garden", "Garden.jpg" or
+// "garden.png" for the same thing, and refusing on a punctuation mismatch
+// would just burn a turn.
+function assetFind(chat,want){
+  var list=assetsOf(chat);
+  if(!want||!list.length)return null;
+  var w=String(want).replace(/\\/g,'/').split('/').pop().trim();
+  var i;
+  for(i=list.length-1;i>=0;i--)if(list[i].name===w.toLowerCase())return list[i];
+  for(i=list.length-1;i>=0;i--)if(_assetNorm(list[i].name)===_assetNorm(w))return list[i];
+  var ws=_assetNorm(_assetSplit(w.toLowerCase())[0]);
+  for(i=list.length-1;i>=0;i--)if(_assetNorm(_assetSplit(list[i].name)[0])===ws)return list[i];
+  return null;
+}
+async function assetBlob(chat,a){
+  if(a.url){
+    var r=await fetch(a.url);
+    if(!r.ok)throw new Error('could not read '+a.name);
+    return await r.blob();
+  }
+  if(a.aid){
+    var msgs=(chat&&chat.messages)||[];
+    for(var i=msgs.length-1;i>=0;i--){
+      var fs=(msgs[i]&&msgs[i].files)||[];
+      for(var k=0;k<fs.length;k++)
+        if(fs[k].aid===a.aid&&fs[k].dataUrl)return await (await fetch(fs[k].dataUrl)).blob();
+    }
+  }
+  throw new Error('the file for '+a.name+' is no longer in this conversation');
+}
+function assetListText(chat){
+  var list=assetsOf(chat);
+  if(!list.length)
+    return 'There are no assets in this conversation yet. Images, videos and '
+         + 'audio appear here once the user attaches one or a tool creates one.';
+  var rows=list.map(function(a){
+    var o={name:a.name,kind:a.kind,source:a.src||'unknown'};
+    if(a.desc)o.description=a.desc;
+    return o;
+  });
+  return 'Assets in this conversation, oldest first. Pass the "name" value '
+       + 'verbatim to other tools.\n'+JSON.stringify(rows,null,1);
+}
+function assetKindOf(mime){
+  var t=String(mime||'').toLowerCase();
+  if(t.indexOf('image/')===0)return 'image';
+  if(t.indexOf('video/')===0)return 'video';
+  if(t.indexOf('audio/')===0)return 'audio';
+  return 'file';
+}
+// Conversations that predate the asset list still have their images sitting
+// in the transcript, so rebuild from that rather than showing an empty list.
+// Runs on every load and skips anything already registered, so a chat that is
+// half old and half new comes out whole.
+function assetBackfill(chat){
+  if(!chat)return;
+  var list=assetsOf(chat),added=0,seen={};
+  list.forEach(function(a){seen[a.url||a.aid]=1});
+  function take(rec,keyv){
+    if(!keyv||seen[keyv])return;
+    seen[keyv]=1;assetAdd(chat,rec);added++;
+  }
+  (chat.messages||[]).forEach(function(m){
+    if(!m)return;
+    (m.files||[]).forEach(function(f){
+      if(!f)return;
+      if(!f.aid)f.aid='a'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+      if(seen[f.aid])return;
+      seen[f.aid]=1;
+      f.asset=assetAdd(chat,{name:f.name,kind:assetKindOf(f.type),aid:f.aid,
+                             src:'uploaded by the user'});
+      added++;
+    });
+    if(typeof m.content!=='string')return;
+    var re=/!\[([^\]]*)\]\((sdapi\/v1\/images\/[\w.\-]+)\)/g,mm;
+    while((mm=re.exec(m.content)))
+      take({name:mm[1]||'image',kind:'image',url:mm[2],src:'generated'},mm[2]);
+    // the link text is the prompt or the spoken line, which makes a far better
+    // name than "video.mp4"
+    var re2=/\[([^\]]*)\]\((v1\/audio\/clips\/[\w.\-]+|v1\/videos\/[^\s)]+\/content)\)/g;
+    while((mm=re2.exec(m.content))){
+      var u=mm[2],kind=u.indexOf('v1/videos')===0?'video':'audio';
+      take({name:mm[1]||kind,kind:kind,url:u,src:'generated',
+            desc:(mm[1]||'')},u);
+    }
+  });
+  if(added)saveChat(chat);
+  return added;
+}
+var WEB_TOOL={type:'function',function:{name:'fetch_url',description:'Read the page at an explicit URL. Use it when the user gives you a link, or when you already know the exact address of something — this fetches one address, it does not search the web. The page comes back as text. If the URL points at an image it is downloaded into the conversation instead and can then be used with edit_image.',parameters:{type:'object',properties:{url:{type:'string',description:'The full URL, including http:// or https://'},name:{type:'string',description:'Only for an image URL: a short filename to save it under, e.g. "lady.jpg". Ignored for pages.'}},required:['url']}}};
+var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
+var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
+var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, or combine several, by describing the change. Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image in the conversation, which is what you want for an incremental tweak. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name.'}},required:['prompt','name']}}};
 // The image to edit is known deterministically, so the model never picks it:
 // walk back through the conversation and take whichever came last, a generated
 // image or one the user attached.
@@ -2897,8 +3379,60 @@ async function _editSourceBlob(src){
   if(!r2.ok)throw new Error('could not read the source image');
   return await r2.blob();
 }
+// Aspect and size rather than pixels, because the right numbers depend on
+// which family the job lands on — the server resolves them per host. Frames
+// and steps are fixed at sane values; a model guessing 3 frames or 150 steps
+// helps nobody.
+var VIDEO_FRAMES=100,VIDEO_STEPS=20,VIDEO_TOOL_WAIT=600000;   // give it ten minutes
+var ASK_TOOL={type:'function',function:{name:'ask_user',description:'Ask the user one multiple-choice question when their request is genuinely underspecified and different answers would lead to materially different work \u2014 "write me a story" (what kind?), "make me a logo" (for what?). Do NOT use it for things you can reasonably decide yourself, and ask at most one question before getting on with the task.',parameters:{type:'object',properties:{question:{type:'string',description:'The question, in one short sentence'},options:{type:'array',items:{type:'string'},description:'Two to four short, mutually exclusive choices. The user can also type their own answer, so do not add an "other" option.'}},required:['question','options']}}};
+// The model asks, the turn stops, the user clicks, the turn resumes with the
+// answer as the tool result. Nothing else in the tool loop blocks on a human,
+// so this owns its own promise and has to settle on abort as well as on click.
+function askUser(question,options,signal){
+  return new Promise(function(resolve){
+    var card=document.createElement('div');card.className='ask-card';
+    var q=document.createElement('div');q.className='ask-q';q.textContent=question;
+    card.appendChild(q);
+    var box=document.createElement('div');box.className='ask-opts';
+    var settled=false;
+    function answer(v){
+      if(settled)return;settled=true;
+      card.classList.add('answered');
+      var a=document.createElement('div');a.className='ask-answer';a.textContent='\u2192 '+v;
+      card.appendChild(a);
+      // the card collapses to one line and the reply starts streaming below
+      // it, so follow it down rather than leaving the user staring at the gap
+      _stickBottom=true;
+      scrollChat(true);
+      resolve(v);
+    }
+    (options||[]).slice(0,6).forEach(function(o){
+      var b=document.createElement('button');b.type='button';b.className='ask-opt';
+      b.textContent=o;
+      b.addEventListener('click',function(){answer(o)});
+      box.appendChild(b);
+    });
+    card.appendChild(box);
+    var other=document.createElement('div');other.className='ask-other';
+    var inp=document.createElement('input');inp.type='text';inp.placeholder='or type your own\u2026';
+    var go=document.createElement('button');go.type='button';go.className='ask-opt';go.textContent='Send';
+    go.style.flex='0 0 auto';
+    function sendOther(){var v=inp.value.trim();if(v)answer(v)}
+    go.addEventListener('click',sendOther);
+    inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendOther()}});
+    other.appendChild(inp);other.appendChild(go);
+    card.appendChild(other);
+    chatLog.appendChild(card);scrollChat(true);
+    setTimeout(function(){inp.focus()},0);
+    if(signal){
+      if(signal.aborted)answer('(cancelled)');
+      else signal.addEventListener('abort',function(){answer('(cancelled)')});
+    }
+  });
+}
+var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a paper boat drifting down a rain gutter, slow motion"'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'Leave blank. Blank picks the best available model automatically. Only set it if the user named one, and then pass their words verbatim.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var TTS_TOOL_MAX=600;   // hard ceiling on what the chat tool will speak
-var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'}},required:['text']}}};
+var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "hello_world.mp3". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['text','name']}}};
 var DOC_TOOLS=[
   {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
   {type:'function',function:{name:'edit_document',description:'Replace the ENTIRE contents of an existing document. Only for a wholesale rewrite — to change part of one, use replace_in_document instead. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
@@ -2912,18 +3446,30 @@ var toolImageChk=document.getElementById('toolImage');
 var toolDocsChk=document.getElementById('toolDocs');
 var toolSpeechChk=document.getElementById('toolSpeech');
 var toolEditChk=document.getElementById('toolImageEdit');
-var toolsOn=false,docsOn=false,speechOn=false,imgEditOn=false;
+var toolVideoChk=document.getElementById('toolVideo');
+var toolAskChk=document.getElementById('toolAsk');
+var toolWebChk=document.getElementById('toolWeb');
+var toolsOn=false,docsOn=false,speechOn=false,imgEditOn=false,videoOn=false,askOn=false,webOn=false;
 try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
 try{docsOn=localStorage.getItem('dyva_tools_docs')==='1'}catch(e){}
 try{speechOn=localStorage.getItem('dyva_tools_speech')==='1'}catch(e){}
 try{imgEditOn=localStorage.getItem('dyva_tools_imgedit')==='1'}catch(e){}
-function anyToolsOn(){return toolsOn||docsOn||speechOn||imgEditOn}
+try{videoOn=localStorage.getItem('dyva_tools_video')==='1'}catch(e){}
+try{askOn=localStorage.getItem('dyva_tools_ask')==='1'}catch(e){}
+try{webOn=localStorage.getItem('dyva_tools_web')==='1'}catch(e){}
+function anyToolsOn(){return toolsOn||docsOn||speechOn||imgEditOn||videoOn||askOn||webOn}
 function buildTools(){
   var t=[];
   if(toolsOn)t.push(IMG_TOOL);
   if(imgEditOn)t.push(EDIT_TOOL);
+  if(videoOn)t.push(VIDEO_TOOL);
+  if(askOn)t.push(ASK_TOOL);
   if(speechOn)t.push(SPEECH_TOOL);
+  if(webOn)t.push(WEB_TOOL);
   if(docsOn)t=t.concat(DOC_TOOLS);
+  // No toggle of its own: it is the index for whatever media tools are on,
+  // and useless without them.
+  if(toolsOn||imgEditOn||videoOn||speechOn||webOn)t.push(LIST_ASSETS_TOOL);
   return t;
 }
 // wrench stays lit whenever any tool is enabled
@@ -2933,6 +3479,9 @@ function paintTools(){
   if(toolDocsChk)toolDocsChk.checked=docsOn;
   if(toolSpeechChk)toolSpeechChk.checked=speechOn;
   if(toolEditChk)toolEditChk.checked=imgEditOn;
+  if(toolVideoChk)toolVideoChk.checked=videoOn;
+  if(toolAskChk)toolAskChk.checked=askOn;
+  if(toolWebChk)toolWebChk.checked=webOn;
   chatToolsBtn.title=anyToolsOn()?'Tools on':'Tools';
 }
 chatToolsBtn.addEventListener('click',function(e){
@@ -2943,6 +3492,21 @@ toolsPop.addEventListener('click',function(e){e.stopPropagation()});
 toolImageChk.addEventListener('change',function(){
   toolsOn=this.checked;
   try{localStorage.setItem('dyva_tools',toolsOn?'1':'0')}catch(e){}
+  paintTools();
+});
+if(toolWebChk)toolWebChk.addEventListener('change',function(){
+  webOn=this.checked;
+  try{localStorage.setItem('dyva_tools_web',webOn?'1':'0')}catch(e){}
+  paintTools();
+});
+if(toolAskChk)toolAskChk.addEventListener('change',function(){
+  askOn=this.checked;
+  try{localStorage.setItem('dyva_tools_ask',askOn?'1':'0')}catch(e){}
+  paintTools();
+});
+if(toolVideoChk)toolVideoChk.addEventListener('change',function(){
+  videoOn=this.checked;
+  try{localStorage.setItem('dyva_tools_video',videoOn?'1':'0')}catch(e){}
   paintTools();
 });
 if(toolEditChk)toolEditChk.addEventListener('change',function(){
@@ -3348,7 +3912,11 @@ chatFilesInput.addEventListener('change',function(){
   chatFilesInput.value='';
   files.forEach(function(f){
     var r=new FileReader();
-    r.onload=function(){attachments.push({name:f.name,type:f.type,size:f.size,dataUrl:r.result});renderAttachments();};
+    r.onload=function(){
+      attachments.push({name:f.name,type:f.type,size:f.size,dataUrl:r.result,
+                        aid:'a'+Date.now().toString(36)+Math.random().toString(36).slice(2,8)});
+      renderAttachments();
+    };
     r.readAsDataURL(f);
   });
 });
@@ -3653,7 +4221,7 @@ function showMediaPane(name){
   if(name==='speech'&&!_ttsVoicesLoaded)loadTtsVoices();
   if(name==='speech')loadTtsHistory();
   if(name==='music'&&!_musicLoaded)loadMusicModels();
-  if(name==='video')loadVidGallery();
+  if(name==='video'){loadVidModels();loadVidGallery()}
 }
 document.querySelectorAll('[data-mediapane]').forEach(function(b){
   b.addEventListener('click',function(){
@@ -3854,6 +4422,25 @@ function loadTtsHistory(){
 // ---- video ---------------------------------------------------------------
 // Async: POST returns 202 + an id, then poll until completed/failed.
 var _vidPoll=null;
+var _vidModelsLoaded=false;
+function loadVidModels(){
+  if(_vidModelsLoaded)return;_vidModelsLoaded=true;
+  fetch('v1/videos/models',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+    var dl=document.getElementById('vidModels'),rows=j.data||[];
+    dl.innerHTML='';
+    rows.forEach(function(o){
+      var opt=document.createElement('option');
+      opt.value=o.id;
+      // the family and host count are the useful things to see while choosing
+      opt.label=o.family+' \u00b7 '+o.count+' host'+(o.count===1?'':'s');
+      dl.appendChild(opt);
+    });
+    document.getElementById('vidModel').placeholder=rows.length
+      ? rows.length+' models \u2014 type to filter, blank picks per host'
+      : 'no video models found';
+  }).catch(function(){_vidModelsLoaded=false;
+    document.getElementById('vidModel').placeholder='type a model name\u2026'});
+}
 function loadVidGallery(){
   var el=document.getElementById('vidGallery');
   if(!el)return;
@@ -3938,12 +4525,11 @@ async function generateVideo(){
   if(!prompt){_mediaError(out,'a prompt is required');return}
   var body={prompt:prompt};
   var m=document.getElementById('vidModel').value.trim();if(m)body.model=m;
-  // These have to be the names the workflow builders read — `duration` and
-  // `resolution` were being sent and silently ignored.
-  var res=document.getElementById('vidResolution').value.trim();
-  var wh=/^(\d+)\s*[x\u00d7]\s*(\d+)$/.exec(res);
-  if(wh){body.width=parseInt(wh[1],10);body.height=parseInt(wh[2],10)}
-  else if(res)body.resolution=res;   // let the server complain about the shape
+  // Aspect and size, not pixels: the server resolves them against whichever
+  // family it lands on, so the numbers are always ones that model was trained
+  // near. A free-text resolution box can only be right for one family.
+  body.aspect=document.getElementById('vidAspect').value;
+  body.size=document.getElementById('vidSize').value;
   var fr=parseInt(document.getElementById('vidFrames').value,10);
   if(!isNaN(fr)&&fr>0)body.length=fr;
   var st2=parseInt(document.getElementById('vidSteps').value,10);
@@ -3951,18 +4537,21 @@ async function generateVideo(){
   if(_vidStart){body.image=await _fileToB64(_vidStart);body.image_name=_vidStart.name}
   if(_vidPoll){clearTimeout(_vidPoll);_vidPoll=null}
   btn.disabled=true;
-  var st=_mediaStatus(out,'submitting…');
+  out.innerHTML='';
+  showSnack('submitting\u2026');
+  var st=snackStatus;
+  function vidDone(){hideSnack()}
   try{
     var r=await fetch('v1/videos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!r.ok){_mediaError(out,await _errText(r));btn.disabled=false;return}
+    if(!r.ok){_mediaError(out,await _errText(r));vidDone();btn.disabled=false;return}
     var job=await r.json();
-    if(!job||!job.id){_mediaError(out,'no job id came back');btn.disabled=false;return}
+    if(!job||!job.id){_mediaError(out,'no job id came back');vidDone();btn.disabled=false;return}
     var t0=Date.now();
     (function poll(){
       _vidPoll=setTimeout(async function(){
         try{
           var pr=await fetch('v1/videos/'+encodeURIComponent(job.id),{cache:'no-store'});
-          if(!pr.ok){_mediaError(out,await _errText(pr));btn.disabled=false;return}
+          if(!pr.ok){_mediaError(out,await _errText(pr));vidDone();btn.disabled=false;return}
           var j=await pr.json();
           if(j.status==='completed'){
             out.innerHTML='';
@@ -3972,16 +4561,21 @@ async function generateVideo(){
             var a=document.createElement('a');a.className='dl';a.href=vid.src;a.download='dyva-video.mp4';
             a.textContent='download';out.appendChild(a);
             loadVidGallery();
-            btn.disabled=false;return;
+            vidDone();btn.disabled=false;return;
           }
-          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');loadVidGallery();btn.disabled=false;return}
-          if(st&&st.parentNode)st.textContent=(j.status||'working')+'… '+Math.round((Date.now()-t0)/1000)+'s'
-            +(j.model?' on '+j.model:'');
+          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');loadVidGallery();vidDone();btn.disabled=false;return}
+          // `phase` is what the host says: "queued #3" until it starts, then
+          // "rendering". Without it a five-minute wait looks like a hang.
+          var where=j.phase||j.status||'working';
+          var host=(j.host||'').replace(/^https?:\/\//,'');
+          var mo=(j.model||'').replace(/\\/g,'/').split('/').pop();
+          st.textContent=where+'\u2026 '+Math.round((Date.now()-t0)/1000)+'s'
+            +(host?' on '+host:'')+(mo?' ('+mo+')':'');
           poll();
-        }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+        }catch(ex){_mediaError(out,ex.message);vidDone();btn.disabled=false}
       },2000);
     })();
-  }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+  }catch(ex){_mediaError(out,ex.message);vidDone();btn.disabled=false}
 }
 document.getElementById('vidGenerate').addEventListener('click',generateVideo);
 
@@ -4222,10 +4816,37 @@ function openLightbox(e,keepIndex){
   var pos=(_lightboxAt>=0&&all.length)?(' ('+(_lightboxAt+1)+'/'+all.length+')'):'';
   openLightboxSrc('sdapi/v1/images/'+encodeURIComponent(e.file),bits.join(' · ')+pos);
 }
-// click any image inside a chat message to view it in the same lightbox
+// The caption is the asset name — the same string the tools take — so what
+// you are looking at and what you would type at the model are never two
+// different things. Matched on the source rather than the alt text, so images
+// from before assets existed and user attachments both still resolve.
+function assetForImg(src){
+  var chat=currentChat,list=assetsOf(chat),i;
+  if(!src||!list.length)return null;
+  if(src.indexOf('data:')===0){
+    var msgs=(chat&&chat.messages)||[];
+    for(i=msgs.length-1;i>=0;i--){
+      var fs=(msgs[i]&&msgs[i].files)||[];
+      for(var k=0;k<fs.length;k++)
+        if(fs[k].dataUrl===src&&fs[k].aid){
+          for(var j=0;j<list.length;j++)if(list[j].aid===fs[k].aid)return list[j];
+        }
+    }
+    return null;
+  }
+  for(i=list.length-1;i>=0;i--){
+    var u=list[i].url;
+    if(u&&(src===u||src.slice(-u.length-1)==='/'+u||src.slice(-u.length)===u))return list[i];
+  }
+  return null;
+}
 chatLog.addEventListener('click',function(e){
   var img=e.target.closest('img');
-  if(img&&img.src)openLightboxSrc(img.src,img.alt||'');
+  if(!img||!img.src)return;
+  var a=assetForImg(img.src),cap;
+  if(a)cap=a.name+(a.desc?' \u00b7 '+a.desc:'');
+  else cap=img.alt||'';
+  openLightboxSrc(img.src,cap);
 });
 ['posPrompt','negPrompt'].forEach(function(id){
   document.getElementById(id).addEventListener('keydown',function(e){

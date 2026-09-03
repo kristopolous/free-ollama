@@ -326,26 +326,34 @@
   ],
   "video": [
     {
-      "name": "wan",
+      "name": "minimax",
       "loader": "UNETLoader",
-      "model": "(?i)wan",
+      "model": "(?i)minimax.*h3",
       "clip": [
-        "(?i)umt5"
+        "(?i)minimax",
+        "(?i)qwen3vl.*minimax"
       ],
-      "clip_type": "wan",
+      "clip_type": "minimax",
       "vae": [
-        "(?i)wan.*vae",
-        "(?i)wan"
+        "(?i)minimax.*video.*vae",
+        "(?i)minimax.*vae"
       ],
       "needs": [
-        "EmptyHunyuanLatentVideo",
-        "VideoLinearCFGGuidance",
+        "MiniMaxH3ImageToVideo",
+        "MiniMaxH3SigmaShift",
+        "ConditioningZeroOut",
         "KSampler",
         "VAEDecode",
-        "CLIPTextEncode",
         "CLIPLoader",
         "VAELoader"
-      ]
+      ],
+      "length": 124,
+      "steps": 20,
+      "cfg": 1.0,
+      "fps": 24,
+      "px": 1032192,
+      "dim_step": 32,
+      "frame_step": 1
     },
     {
       "name": "ltx",
@@ -358,35 +366,58 @@
       "clip_type": "ltxv",
       "vae": [],
       "needs": [
-        "EmptyLTXVLatentVideo",
         "LTXVConditioning",
-        "LTXVScheduler",
-        "KSamplerSelect",
-        "CFGGuider",
-        "RandomNoise",
-        "SamplerCustomAdvanced",
-        "VAEDecode",
-        "CLIPTextEncode",
-        "CLIPLoader"
-      ]
-    },
-    {
-      "name": "mochi",
-      "loader": "UNETLoader",
-      "model": "(?i)mochi",
-      "clip": [
-        "(?i)t5xxl"
-      ],
-      "clip_type": "mochi",
-      "vae": [
-        "(?i)mochi.*vae"
-      ],
-      "needs": [
-        "EmptyMochiLatentVideo",
+        "EmptyLTXVLatentVideo",
         "KSampler",
         "VAEDecode",
         "CLIPTextEncode"
-      ]
+      ],
+      "length": 97,
+      "steps": 20,
+      "cfg": 3.0,
+      "fps": 25,
+      "px": 393216,
+      "dim_step": 32,
+      "frame_step": 8
+    },
+    {
+      "name": "wan",
+      "loader": "UNETLoader",
+      "model": "(?i)wan|bernini",
+      "clip": [
+        "(?i)umt5"
+      ],
+      "clip_type": "wan",
+      "vae": [
+        "(?i)wan.*vae"
+      ],
+      "needs": [
+        "KSampler",
+        "VAEDecode",
+        "CLIPTextEncode",
+        "CLIPLoader",
+        "VAELoader",
+        "EmptyHunyuanLatentVideo"
+      ],
+      "length": 81,
+      "steps": 20,
+      "cfg": 1.0,
+      "shift": 5.0,
+      "fps": 16,
+      "frame_step": 4,
+      "px": 409600,
+      "dim_step": 32,
+      "moe": true
     }
+  ],
+  "tts_exclude": [
+    "(?i)voice.?design",
+    "(?i)voice.?clone",
+    "(?i)voice.?convert",
+    "(?i)clone|convert|train|finetune",
+    "(?i)^(load|save|preview|play)",
+    "(?i)loader$|saver$|batch|concat|combine|merge|split|trim",
+    "(?i)stt|speech.?to.?text|transcri|asr",
+    "(?i)upscal|denois|separat"
   ]
 }

@@ -9,11 +9,13 @@ import fnmatch
 import csv
 import json
 import hashlib
+import html as html_mod
 import logging
 import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -741,6 +743,38 @@ async def _waiting_worker(label, host, phase="rendering"):
         yield wid
     finally:
         await _unregister_worker(wid)
+
+
+def is_active(host):
+    """Is one of our own jobs already sitting on this host?
+
+    Derived from the live worker registry rather than an "active hosts" set of
+    our own, because a set like that needs whoever put a host in to take it
+    back out — and the first time something raises on an unusual path, that
+    host is stuck marked busy forever. Heartbeats and timeouts are the usual
+    answers and they are all worse than not having the problem. The workers
+    registry is already unwound by the context managers that create it, so it
+    cannot leak; it also already records which host each job is talking to.
+
+    There is a race here: a host is only listed once a job has actually taken
+    it, so two requests that check within the same instant can both pick it.
+    The window is milliseconds against renders that run for minutes, and
+    losing it only costs the old behaviour, so it is not worth closing.
+    """
+    if not host:
+        return False
+    return any(w.get("host") == host for w in _workers.values())
+
+
+def _idle_first(hosts):
+    """Move hosts we are already using to the back, order otherwise intact.
+
+    Not a hard filter: a busy host is still better than no host, and with one
+    good ComfyUI on the network a filter would turn "wait your turn" into "no
+    hosts available". Python's sort is stable, so the reputation ordering
+    inside each group survives untouched.
+    """
+    return sorted(hosts, key=is_active)
 
 
 async def _unregister_worker(wid):
@@ -1938,6 +1972,130 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     return result, stopped, tried, tally
 
 
+# Which dialect a host speaks. dyva has always recorded the service; the chat
+# path just ignored it and POSTed Ollama's /api/chat at everything, so LM
+# Studio, vLLM and llama.cpp answered "Unexpected endpoint or method" and were
+# marked bad. They are 38% of the chat pool and they work fine — in their own
+# language.
+# sglang serves an OpenAI-compatible API; graflex labels a host sglang exactly
+# because it answered /api/tags but not /api/version, which is an ollama-shim
+# detail and says nothing about how you talk to it for inference.
+_OPENAI_SERVICES = {"lmstudio", "vllm", "llama.cpp", "llamacpp", "sglang",
+                    "tabby", "koboldcpp", "text-generation-webui", "openai"}
+_service_index = None
+
+
+def service_of(host):
+    global _service_index
+    if _service_index is None:
+        _service_index = {s.get("server"): s.get("service")
+                          for s in load_servers() if s.get("server")}
+    return _service_index.get(host) or _service_index.get(_norm_host(host)) or "ollama"
+
+
+def speaks_openai(host):
+    return service_of(host) in _OPENAI_SERVICES
+
+
+def chat_endpoint(host, ollama_endpoint="/api/chat"):
+    if not speaks_openai(host):
+        return ollama_endpoint
+    return ("/v1/completions" if ollama_endpoint == "/api/generate"
+            else "/v1/chat/completions")
+
+
+# Ollama-only knobs that an OpenAI server will either reject or ignore.
+_OLLAMA_ONLY = ("options", "keep_alive", "format", "template", "context", "raw",
+                "system", "think", "images")
+
+
+def openai_payload(p):
+    out = {k: v for k, v in p.items() if k not in _OLLAMA_ONLY}
+    opts = p.get("options") or {}
+    for src, dst in (("temperature", "temperature"), ("top_p", "top_p"),
+                     ("num_predict", "max_tokens"), ("seed", "seed"),
+                     ("stop", "stop")):
+        if src in opts:
+            out[dst] = opts[src]
+    return out
+
+
+def openai_to_ollama(data, model):
+    """One non-streaming OpenAI completion, in Ollama's shape."""
+    ch = ((data.get("choices") or [{}])[0]) or {}
+    msg = dict(ch.get("message") or {})
+    if msg.get("tool_calls"):
+        msg["tool_calls"] = [
+            {"function": {"name": (t.get("function") or {}).get("name"),
+                          "arguments": _maybe_json((t.get("function") or {}).get("arguments"))}}
+            for t in msg["tool_calls"]]
+    out = {"model": data.get("model") or model, "created_at": _now_iso(),
+           "message": {"role": msg.get("role") or "assistant",
+                       "content": msg.get("content") or ""},
+           "done": True, "done_reason": ch.get("finish_reason") or "stop"}
+    if msg.get("tool_calls"):
+        out["message"]["tool_calls"] = msg["tool_calls"]
+    usage = data.get("usage") or {}
+    if usage:
+        out["prompt_eval_count"] = usage.get("prompt_tokens")
+        out["eval_count"] = usage.get("completion_tokens")
+    return out
+
+
+def openai_stream_to_ollama(line, model):
+    """One SSE line to one Ollama NDJSON object, or None to skip.
+
+    OpenAI streams `data: {...}` with the text in choices[0].delta and a final
+    `data: [DONE]`; Ollama streams bare JSON objects with a `done` flag. The
+    rest of the pipeline speaks Ollama, so normalise here and nothing
+    downstream has to care which kind of host answered.
+    """
+    if isinstance(line, bytes):
+        line = line.decode("utf-8", errors="replace")
+    line = line.strip()
+    if not line or line.startswith(":"):
+        return None
+    if line.startswith("data:"):
+        line = line[5:].strip()
+    if line == "[DONE]":
+        return {"model": model, "created_at": _now_iso(), "message": {"role": "assistant", "content": ""},
+                "done": True, "done_reason": "stop"}
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if obj.get("error"):
+        return {"error": obj["error"] if isinstance(obj["error"], str)
+                else (obj["error"].get("message") or str(obj["error"]))}
+    ch = ((obj.get("choices") or [{}])[0]) or {}
+    delta = dict(ch.get("delta") or ch.get("message") or {})
+    fin = ch.get("finish_reason")
+    msg = {"role": delta.get("role") or "assistant", "content": delta.get("content") or ""}
+    if delta.get("tool_calls"):
+        msg["tool_calls"] = [
+            {"function": {"name": (t.get("function") or {}).get("name"),
+                          "arguments": _maybe_json((t.get("function") or {}).get("arguments"))}}
+            for t in delta["tool_calls"]]
+    out = {"model": obj.get("model") or model, "created_at": _now_iso(), "message": msg,
+           "done": bool(fin)}
+    if fin:
+        out["done_reason"] = fin
+    return out
+
+
+def _maybe_json(v):
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return v
+    return v
+
+
+def _now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
 async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None):
     errors = []
     errors_lock = asyncio.Lock()
@@ -1982,19 +2140,44 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
         start = time.time()
         tag = f"{host} {full}"
-        p = dict(payload, model=full, stream=do_stream)
-        _curlify("POST", f"{host}{endpoint}", p)
+        # Speak the host's own dialect. If the recorded service turns out to be
+        # wrong, the other dialect is tried once before writing the host off —
+        # "Unexpected endpoint or method" is a labelling problem, not a broken
+        # host, and 38% of the pool speaks OpenAI rather than Ollama.
+        oai = speaks_openai(host)
+        resp = None
         try:
-            resp = await asyncio.wait_for(
-                session.post(f"{host}{endpoint}", json=p),
-                timeout=TIMEOUT,
-            )
+            for attempt_oai in (oai, not oai):
+                ep = chat_endpoint(host, endpoint) if attempt_oai else endpoint
+                p = dict(payload, model=full, stream=do_stream)
+                if attempt_oai:
+                    p = openai_payload(p)
+                _curlify("POST", f"{host}{ep}", p)
+                resp = await asyncio.wait_for(
+                    session.post(f"{host}{ep}", json=p), timeout=TIMEOUT)
+                if resp.status not in (404, 405, 501):
+                    oai = attempt_oai
+                    break
+                peek = ""
+                try:
+                    peek = (await resp.text())[:200]
+                except Exception:
+                    pass
+                await resp.release()
+                resp = None
+                log.debug(f"{host}: {ep} -> {peek[:80]}; trying the other dialect")
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             dur = time.time() - start
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
             return (timed_out(type(e).__name__) if isinstance(e, asyncio.TimeoutError)
                     else failed(type(e).__name__))
+        if resp is None:
+            dur = time.time() - start
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - no chat endpoint (tried both dialects)",
+                duration=dur, wid=wid)
+            return unsuitable("no chat endpoint (tried /api/chat and /v1/chat/completions)")
 
         if resp.status != 200:
             dur = time.time() - start
@@ -2002,7 +2185,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             try:
                 raw = await resp.read()
                 body = raw.decode('utf-8', errors='replace')[:500]
-                log_upstream(code, host, endpoint, body, remote=remote)
+                log_upstream(code, host, ep, body, remote=remote)
                 await _collect_err(f"{host}: {body}")
             except Exception:
                 pass
@@ -2030,6 +2213,8 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
                 return failed("bad response")
             await resp.release()
+            if oai and "choices" in data:
+                data = openai_to_ollama(data, full)
             if "error" in data:
                 dur = time.time() - start
                 await _collect_err(f"{host}: {data['error']}")
@@ -2044,6 +2229,18 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 
         try:
             first_line = await resp.content.readline()
+            if oai:
+                # step over SSE keep-alives and blank separators to reach the
+                # first line that actually carries content, and hand the rest
+                # of the pipeline an Ollama-shaped object
+                for _ in range(20):
+                    conv = openai_stream_to_ollama(first_line, full)
+                    if conv is not None:
+                        first_line = json.dumps(conv).encode()
+                        break
+                    first_line = await resp.content.readline()
+                    if not first_line:
+                        break
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
             await resp.release()
             resp = None
@@ -2083,7 +2280,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         log.debug(f"  \u2713 {tag}")
         await broadcast_activity(host, model, "connected",
             f"success: {host} for {model}", duration=dur, wid=wid, rmodel=full)
-        return accepted(("ok_stream", host, full, resp, first_line, first), extra=full)
+        return accepted(("ok_stream", host, full, resp, first_line, first, oai), extra=full)
 
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1])
@@ -2238,7 +2435,8 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
     return (resp, first_line, first), None
 
 
-async def _forward_stream(request, response, resp, first_line, host, full, openai_format):
+async def _forward_stream(request, response, resp, first_line, host, full, openai_format,
+                          upstream_openai=False):
     content_type = "text/event-stream" if openai_format else "application/x-ndjson"
     response.headers["Content-Type"] = content_type
     response.headers["Cache-Control"] = "no-cache"
@@ -2267,6 +2465,12 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
             if not line or line == b"\n":
                 continue
             line = line.rstrip(b"\n\r")
+            if upstream_openai:
+                # the host speaks SSE; everything below this point speaks Ollama
+                conv = openai_stream_to_ollama(line, full)
+                if conv is None:
+                    continue
+                line = json.dumps(conv).encode()
             try:
                 if openai_format:
                     obj = json.loads(line)
@@ -2570,9 +2774,10 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
             if do_stream:
                 result, errors, stopped = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid)
                 if result:
-                    _, host, full, resp, first_line, first = result
+                    _, host, full, resp, first_line, first, _oai = result
                     stream_resp = web.StreamResponse()
-                    await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format)
+                    await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format,
+                                          upstream_openai=_oai)
                     return stream_resp
                 msg = "worker manually stopped" if stopped else "all servers failed"
                 if errors:
@@ -2710,9 +2915,10 @@ async def _proxy_generate(request, session):
         if do_stream:
             result, errors, stopped = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
             if result:
-                _, host, full, resp, first_line, first = result
+                _, host, full, resp, first_line, first, _oai = result
                 stream_resp = web.StreamResponse()
-                await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format=False)
+                await _forward_stream(request, stream_resp, resp, first_line, host, full,
+                                      openai_format=False, upstream_openai=_oai)
                 return stream_resp
             msg = "worker manually stopped" if stopped else "all servers failed"
             if errors:
@@ -4230,6 +4436,269 @@ async def handle_chat_delete(request):
     return web.json_response({"ok": True})
 
 
+# ---- Fetching explicit URLs -----------------------------------------------
+# Three backends, best first. A real browser engine is preferred because a
+# growing share of the web renders nothing without JavaScript, and the point of
+# this is to read what a person would see. lightpanda is a headless engine
+# built for exactly this and starts in milliseconds; Chrome does the same job
+# for far more memory; curl is the honest floor — it gets the bytes and we
+# strip the tags ourselves.
+WEB_FETCH_TIMEOUT = 45          # wall clock for one page
+WEB_FETCH_MAX = 200_000         # bytes of text handed back to a model
+WEB_IMAGE_MAX = 32 * 1024 * 1024
+WEB_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+_CHROMES = ("chromium", "chromium-browser", "google-chrome",
+            "google-chrome-stable", "chrome", "headless-shell")
+_web_backend_cache = None
+
+
+def web_backend():
+    """(name, path) of the best fetcher on this machine, probed once."""
+    global _web_backend_cache
+    if _web_backend_cache is None:
+        path = shutil.which("lightpanda")
+        if path:
+            _web_backend_cache = ("lightpanda", path)
+        else:
+            for c in _CHROMES:
+                path = shutil.which(c)
+                if path:
+                    _web_backend_cache = ("chrome", path)
+                    break
+            else:
+                _web_backend_cache = ("curl", shutil.which("curl") or "")
+    return _web_backend_cache
+
+
+async def _run_cmd(argv, timeout):
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        raise
+    return proc.returncode, out, err
+
+
+_TAG_DROP = re.compile(r"(?is)<(script|style|noscript|template|svg)\b.*?</\1\s*>")
+_BREAKS = re.compile(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)\b[^>]*>")
+_TAGS = re.compile(r"(?s)<[^>]+>")
+
+
+def _html_to_text(html):
+    """Good-enough readable text. Only the curl and Chrome paths need it —
+    lightpanda emits markdown directly."""
+    t = _TAG_DROP.sub(" ", html)
+    t = _BREAKS.sub("\n", t)
+    t = _TAGS.sub(" ", t)
+    t = html_mod.unescape(t)
+    t = re.sub(r"[ \t ]+", " ", t)
+    t = re.sub(r"\n\s*\n\s*\n+", "\n\n", t)
+    return t.strip()
+
+
+def _html_title(html):
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html or "")
+    return html_mod.unescape(m.group(1)).strip()[:200] if m else ""
+
+
+async def _fetch_lightpanda(path, url, timeout):
+    code, out, err = await _run_cmd(
+        [path, "fetch", url, "--dump", "markdown", "--json",
+         "--dump-max-bytes", str(WEB_FETCH_MAX),
+         "--wait-ms", "5000",
+         "--terminate-ms", str(int(timeout * 1000 * 0.7))], timeout)
+    body = (out or b"").decode("utf-8", "replace")
+    start = body.find("{")
+    if start < 0:
+        raise ComfyError((err or b"").decode("utf-8", "replace").strip()[:200]
+                         or f"lightpanda exited {code}")
+    doc = json.loads(body[start:])
+    if doc.get("error"):
+        raise ComfyError(f"lightpanda: {doc['error']}")
+    return {"text": doc.get("content") or "",
+            "final_url": doc.get("url") or url,
+            "status": doc.get("http_status")}
+
+
+async def _fetch_chrome(path, url, timeout):
+    code, out, err = await _run_cmd(
+        [path, "--headless=new", "--disable-gpu", "--no-sandbox",
+         "--disable-dev-shm-usage", f"--user-agent={WEB_UA}",
+         f"--virtual-time-budget={int(timeout * 1000 * 0.5)}",
+         "--dump-dom", url], timeout)
+    html = (out or b"").decode("utf-8", "replace")
+    if not html.strip():
+        raise ComfyError((err or b"").decode("utf-8", "replace").strip()[:200]
+                         or f"chrome exited {code}")
+    return {"text": _html_to_text(html), "title": _html_title(html),
+            "final_url": url, "status": None}
+
+
+async def _fetch_curl(path, url, timeout):
+    if not path:
+        raise ComfyError("no web fetcher available (install lightpanda, "
+                         "a headless Chrome, or curl)")
+    code, out, err = await _run_cmd(
+        [path, "-sSL", "--compressed", "--max-time", str(int(timeout)),
+         "-A", WEB_UA, url], timeout)
+    if code != 0:
+        raise ComfyError((err or b"").decode("utf-8", "replace").strip()[:200]
+                         or f"curl exited {code}")
+    raw = (out or b"").decode("utf-8", "replace")
+    looks_html = "<" in raw[:2000] and re.search(r"(?i)<(html|body|div|p)\b", raw[:4000])
+    return {"text": _html_to_text(raw) if looks_html else raw,
+            "title": _html_title(raw), "final_url": url, "status": None}
+
+
+async def _web_probe(session, url):
+    """What is at this URL, without downloading it. HEAD when the server
+    honours it, otherwise a one-byte range GET."""
+    try:
+        r = await session.head(url, allow_redirects=True,
+                               timeout=aiohttp.ClientTimeout(total=20),
+                               headers={"User-Agent": WEB_UA})
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        status, final = r.status, str(r.url)
+        await r.release()
+        if status < 400 and ctype:
+            return status, ctype, final
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        pass
+    try:
+        r = await session.get(url, allow_redirects=True,
+                              timeout=aiohttp.ClientTimeout(total=20),
+                              headers={"User-Agent": WEB_UA, "Range": "bytes=0-0"})
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        status, final = r.status, str(r.url)
+        await r.release()
+        return status, ctype, final
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+        raise ComfyError(f"could not reach {url}: {e}")
+
+
+async def _web_save_image(session, url, ctype):
+    """Pull an image down into the same store generated images use, so it shows
+    up in the gallery and can be handed straight to /v1/images/edits."""
+    r = await session.get(url, allow_redirects=True,
+                          timeout=aiohttp.ClientTimeout(total=WEB_FETCH_TIMEOUT),
+                          headers={"User-Agent": WEB_UA})
+    if r.status >= 400:
+        await r.release()
+        raise ComfyError(f"HTTP {r.status} fetching {url}")
+    raw = await r.content.read(WEB_IMAGE_MAX + 1)
+    await r.release()
+    if len(raw) > WEB_IMAGE_MAX:
+        raise ComfyError("image is too large")
+    ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+           "image/gif": ".gif", "image/bmp": ".bmp"}.get(ctype, ".png")
+    os.makedirs(IMG_DIR, exist_ok=True)
+    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}{ext}"
+    with open(os.path.join(IMG_DIR, name), "wb") as f:
+        f.write(raw)
+    try:
+        with open(IMG_HISTORY_FILE, encoding="utf-8") as f:
+            history = json.load(f)
+    except Exception:
+        history = []
+    history.insert(0, {"file": name, "host": "", "model": "web",
+                       "prompt": url[:200], "when": time.time()})
+    with open(IMG_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(history[:IMG_HISTORY_MAX], f)
+    return name, len(raw)
+
+
+async def web_fetch(session, url, timeout=WEB_FETCH_TIMEOUT):
+    """Read one explicit URL. Images are saved; everything else comes back as
+    text, rendered by whichever backend this machine has."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ComfyError("only http and https URLs can be fetched")
+
+    status, ctype, final = await _web_probe(session, url)
+    if ctype.startswith("image/"):
+        name, size = await _web_save_image(session, final, ctype)
+        return {"kind": "image", "url": url, "final_url": final,
+                "status": status, "content_type": ctype,
+                "file": name, "bytes": size, "backend": "http"}
+
+    name, path = web_backend()
+    runner = {"lightpanda": _fetch_lightpanda, "chrome": _fetch_chrome}.get(
+        name, _fetch_curl)
+    try:
+        got = await runner(path, final, timeout)
+    except (ComfyError, asyncio.TimeoutError, OSError) as e:
+        # A browser engine can fail on a page curl reads fine (and vice versa),
+        # so the chain is a real fallback, not just a preference order.
+        if name == "curl":
+            raise ComfyError(str(e) or "fetch failed")
+        log.debug(f"web: {name} failed on {final} ({e}); falling back to curl")
+        got = await _fetch_curl(shutil.which("curl") or "", final, timeout)
+        name = "curl"
+
+    text = (got.get("text") or "").strip()
+    truncated = len(text) > WEB_FETCH_MAX
+    if truncated:
+        text = text[:WEB_FETCH_MAX] + "\n\n[truncated]"
+    return {"kind": "text", "url": url,
+            "final_url": got.get("final_url") or final,
+            "status": got.get("status", status), "content_type": ctype,
+            "title": got.get("title") or "", "text": text,
+            "truncated": truncated, "backend": name}
+
+
+async def handle_web_fetch(request):
+    """
+    Fetch a URL
+    ---
+    tags: [Web]
+    summary: POST /v1/web/fetch — read an explicit URL as text, or save it if it is an image
+    description: |
+      Renders the page with the best engine installed — lightpanda, then a
+      headless Chrome, then curl — and returns readable text. An image URL is
+      downloaded into the generated-image store instead and reported by
+      filename, so it can be fed straight to `/v1/images/edits`.
+    responses:
+      '200':
+        description: '{"kind": "text", "text": ..., "backend": ...} or {"kind": "image", "file": ...}'
+      '400':
+        description: Missing or unusable URL
+      '502':
+        description: The fetch failed
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    url = (body.get("url") or request.query.get("url") or "").strip()
+    if not url:
+        return web.json_response({"error": "'url' is required"}, status=400)
+    t0 = time.time()
+    await broadcast_activity(url, "web", "trying", f"fetch: {url}")
+    try:
+        out = await web_fetch(request.app["session"], url)
+    except ComfyError as e:
+        await broadcast_activity(url, "web", "failure", f"fetch: {url} - {e}")
+        return web.json_response({"error": str(e)}, status=502)
+    except asyncio.TimeoutError:
+        await broadcast_activity(url, "web", "failure", f"fetch: {url} - timed out")
+        return web.json_response({"error": "timed out"}, status=502)
+    await broadcast_activity(url, "web", "success",
+                             f"fetch: {url} ✓ ({out.get('backend')})",
+                             duration=time.time() - t0)
+    return web.json_response(out)
+
+
 async def handle_txt2img(request):
     """
     Text-to-image generation (A1111 format)
@@ -4381,6 +4850,7 @@ async def handle_txt2img(request):
     _last_img = get_last(IMG_KEY)
     hosts.sort(key=lambda h: capability_tier(
         h, IMG_KEY, marks, _last_img[0] if _last_img else None))
+    hosts = _idle_first(hosts)
 
     wkey = f"{activity_label} (image)"
 
@@ -4417,7 +4887,10 @@ async def handle_txt2img(request):
         t0 = time.time()
         await broadcast_activity(host, activity_label, "trying",
             f"txt2img (comfy): {activity_label}", wid=wid)
-        data = await _txt2img_comfyui(session, host, body, model_filter)
+        # the one long occupancy that wasn't registering a host, which left it
+        # invisible to is_active()
+        async with _waiting_worker(f"txt2img: {activity_label}", host, "rendering"):
+            data = await _txt2img_comfyui(session, host, body, model_filter)
         if data:
             await broadcast_activity(host, activity_label, "connected",
                 "txt2img (comfy) \u2713", duration=time.time() - t0, wid=wid,
@@ -4465,7 +4938,8 @@ async def handle_txt2img(request):
             if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
                    for m in s.get("models", []))
         ]
-    comfy_hosts = [s.get("server") for s in comfy_candidates if not _img_bad(s.get("server"))]
+    comfy_hosts = _idle_first(
+        [s.get("server") for s in comfy_candidates if not _img_bad(s.get("server"))])
     data = await _race(comfy_hosts, comfy_attempt, workers=3)
     if data:
         return _deliver(data)
@@ -5099,6 +5573,30 @@ def _tts_save_node(host_info):
     return None
 
 
+_tts_exclude_cache = None
+
+
+def tts_excluded(node_class):
+    """True for nodes whose *name* says they aren't plain text-to-speech.
+
+    The schema can't tell you this: FB_Qwen3TTSVoiceDesign declares text and
+    instruct as ordinary STRINGs with defaults, so every field looks fillable —
+    and then it refuses at execution because the voice description can't be
+    empty. Its sibling FB_Qwen3TTSCustomVoice, on the same host, takes a
+    speaker from an enum and just works. The difference is only in the name.
+    """
+    global _tts_exclude_cache
+    if _tts_exclude_cache is None:
+        pats = []
+        try:
+            with open(NODE_CLASSIFIER_FILE, encoding="utf-8") as f:
+                pats = (json.load(f).get("tts_exclude") or [])
+        except Exception as e:
+            log.warning(f"node-classifier: failed to load tts_exclude: {e}")
+        _tts_exclude_cache = [re.compile(p) for p in pats]
+    return any(r.search(node_class) for r in _tts_exclude_cache)
+
+
 def _tts_viable(node_class, info, fam):
     """Can this node actually be driven end to end on this host?
 
@@ -5110,6 +5608,8 @@ def _tts_viable(node_class, info, fam):
     ELEVENLABS_VOICE socket, fed by a separate selector node) and
     `missing_node_type` for SaveAudio on a host that ships no audio saver.
     """
+    if tts_excluded(node_class):
+        return False
     node = info.get(node_class) or {}
     required = ((node.get("input") or {}).get("required")) or {}
     text_field = fam["text"]
@@ -5407,7 +5907,7 @@ def _find_tts_hosts(target_host=None, model_filter=None):
         return (tier, within)
 
     hosts.sort(key=rank)
-    return hosts
+    return _idle_first(hosts)
 
 
 def _host_has_class(host, classes):
@@ -5439,7 +5939,7 @@ def _find_video_hosts(target_host=None):
     last = get_last(VIDEO_KEY)
     if last and last[0]:
         hosts = [last[0]] + [h for h in hosts if h != last[0]]
-    return hosts
+    return _idle_first(hosts)
 
 
 # ---- Async ComfyUI video-generation jobs (OpenRouter /v1/videos shape) ----
@@ -5568,12 +6068,16 @@ async def _run_video_job(session, jid):
         job["host"] = host
         job["model"] = plan.get("model")
         job["comfyui_prompt_id"] = prompt_id
+        job["phase"] = "submitted"
         _video_job_save()
         try:
             async with _waiting_worker(label, host, "rendering") as _wid:
+                def _phase(w):
+                    _set_worker_phase(_wid, w)
+                    job["phase"] = w      # so the polling client can show it too
+                    _video_job_save()
                 content, filename = await _poll_video_result(
-                    session, host, prompt_id, job,
-                    on_status=lambda w: _set_worker_phase(_wid, w))
+                    session, host, prompt_id, job, on_status=_phase)
         except (_VideoError, ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             outcome = render_verdict(e)
             record_verdict(host, vkey, outcome)
@@ -5584,6 +6088,9 @@ async def _run_video_job(session, jid):
                 f"failure: {host} for {label} - render: {err}")
             if outcome.verdict == V_UNSUITABLE and plan.get("model"):
                 bad_models.add(plan["model"])
+                # remember it past this request, so tomorrow's job doesn't
+                # rediscover the same incompatible pairing from scratch
+                remember_bad_pair(host, "edit", plan["model"])
                 tried_hosts.discard(host)
             continue
 
@@ -5639,6 +6146,36 @@ def load_video_families():
     return out
 
 
+# Nine buckets instead of a resolution box. Every family has a native pixel
+# budget it was trained near, so scale that by size and split it by aspect,
+# rather than offering a grid of numbers that is wrong for two families out of
+# three. Medium/long lands on each family's own default — 1344x768 for
+# MiniMax-H3, 832x480 for LTX — which is the point of deriving it.
+VIDEO_SIZES = {"small": 0.45, "medium": 1.0, "large": 1.6}
+VIDEO_ASPECTS = {"long": 16 / 9, "square": 1.0, "tall": 9 / 16}
+
+
+def video_dims(fam, aspect="long", size="medium"):
+    px = float((fam or {}).get("px") or 640 * 640)
+    step = int((fam or {}).get("dim_step") or 32)
+    budget = px * VIDEO_SIZES.get(size, 1.0)
+    ratio = VIDEO_ASPECTS.get(aspect, 16 / 9)
+    w = max(step, int(round(math.sqrt(budget * ratio) / step)) * step)
+    h = max(step, int(round(math.sqrt(budget / ratio) / step)) * step)
+    return w, h
+
+
+def video_frames(fam, want=None):
+    """Snap to what the family's temporal VAE can encode: Wan wants 4n+1, LTX
+    8n+1. A count off that grid is mangled or rejected."""
+    fam = fam or {}
+    step = int(fam.get("frame_step") or 1)
+    n = int(want or fam.get("length") or 81)
+    if step > 1:
+        n = max(step + 1, ((n - 1) // step) * step + 1)
+    return max(1, n)
+
+
 def _video_plan(info, model_filter=None, exclude=()):
     """Pick a video model on this host from its *loader enums*.
 
@@ -5669,9 +6206,15 @@ def _video_plan(info, model_filter=None, exclude=()):
             continue
         if fam.get("clip_type") and fam["clip_type"] not in _enum_options(info, "CLIPLoader", "type"):
             continue
-        return {"family": fam["name"], "loader": loader, "clip": clip, "vae": vae,
-                "clip_type": fam.get("clip_type"),
-                "model": sorted(cands, key=_match_rank(model_filter))[0]}
+        chosen = sorted(cands, key=_match_rank(model_filter))[0]
+        plan = {"family": fam["name"], "loader": loader, "clip": clip, "vae": vae,
+                "clip_type": fam.get("clip_type"), "spec": fam, "model": chosen}
+        if fam.get("moe"):
+            pair = wan_expert_pair(_enum_options(info, loader, field), chosen)
+            if pair and "KSamplerAdvanced" in info and "ModelSamplingSD3" in info:
+                plan["high"], plan["low"] = pair
+                plan["model"] = pair[0]
+        return plan
     return None
 
 
@@ -5705,20 +6248,20 @@ async def _get_object_info(session, host):
     return None
 
 
-def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed, info=None, plan=None):
-    """Text-to-video graph for LTX-2.x diffusion models. Wiring:
-    DiffusionModelLoader -> MODEL/CLIP/VAE, CLIPLoader -> CLIP, CLIPTextEncode,
-    LTXVConditioning -> pos/neg conditioning + latent, EmptyLTXVLatentVideo,
-    LTXVScheduler -> SIGMAS, KSamplerSelect -> SAMPLER, CFGGuider -> GUIDER,
-    RandomNoise -> NOISE, SamplerCustomAdvanced -> latent, VAEDecode -> images,
-    SaveVideo."""
-    prompt = params.get("prompt", "")
+def _build_minimax_workflow(params, model_path, steps, cfg, width, height, length, seed,
+                            info=None, plan=None):
+    """MiniMax-H3 video graph — by downloads the most-used image-to-video family
+    by a wide margin, and the simplest to drive.
+
+    MiniMaxH3ImageToVideo takes the prompt directly (no CLIPTextEncode) and
+    returns conditioning *and* the latent together, with `first_frame` optional
+    — so one graph covers text-to-video and image-to-video. It emits only a
+    positive, so the negative is a zeroed copy of it.
+    """
+    info = info or {}
+    plan = plan or {}
     workflow = {}
     def add(nid, cls, inputs):
-        # Node ids are strings in the graph, so a link has to name a string
-        # too. Passing [8, 0] made ComfyUI look up the integer 8 in a
-        # string-keyed dict and raise during validation — reported as the
-        # deeply unhelpful "exception_during_validation: 8".
         fixed = {}
         for k, v in inputs.items():
             if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int):
@@ -5727,50 +6270,107 @@ def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, s
                 fixed[k] = v
         workflow[str(nid)] = {"class_type": cls, "inputs": fixed}
 
-    plan = plan or {}
-    info = info or {}
-    loader = plan.get("loader") or ("CheckpointLoaderSimple" if "CheckpointLoaderSimple" in info else "UNETLoader")
-    clip = plan.get("clip") or _pick(_enum_options(info, "CLIPLoader", "clip_name"), r"(?i)t5xxl", r"(?i)umt5")
-    ctype = plan.get("clip_type") or "ltxv"
-    if not clip:
-        raise _VideoError("host has no LTX text encoder")
-    saver, saver_inputs = _video_save_node(info, params.get("fps", 25))
+    clip, vae = plan.get("clip"), plan.get("vae")
+    if not clip or not vae:
+        raise _VideoError("host has no MiniMax text encoder or video VAE")
+    saver, saver_inputs = _video_save_node(info, params.get("fps", 24))
     if not saver:
         raise _VideoError("host has no usable video save node")
+
+    add(1, "UNETLoader", {"unet_name": model_path, "weight_dtype": "default"})
+    add(2, "CLIPLoader", {"clip_name": clip, "type": plan.get("clip_type") or "minimax"})
+    add(3, "VAELoader", {"vae_name": vae})
+    add(4, "MiniMaxH3SigmaShift", {"model": [1, 0], "shift_video": 12.0, "shift_audio": 3.0})
+
+    i2v = {"clip": [2, 0], "vae": [3, 0], "prompt": params.get("prompt", ""),
+           "width": width, "height": height, "length": length}
+    start = params.get("start_image")
+    if start:
+        add(10, "LoadImage", {"image": start})
+        i2v["first_frame"] = [10, 0]
+    add(5, "MiniMaxH3ImageToVideo", i2v)
+    add(6, "ConditioningZeroOut", {"conditioning": [5, 0]})
+    add(7, "KSampler", {
+        "model": [4, 0], "positive": [5, 0], "negative": [6, 0],
+        "latent_image": [5, 1], "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+    })
+    add(8, "VAEDecode", {"samples": [7, 0], "vae": [3, 0]})
+    add(9, saver, dict(saver_inputs, images=[8, 0]))
+    return workflow
+
+
+def _build_ltx_workflow(params, model_path, steps, cfg, width, height, length, seed,
+                        info=None, plan=None):
+    """LTX-2.x video graph, text-to-video or image-to-video.
+
+    Deliberately plain KSampler rather than the SamplerCustomAdvanced chain the
+    reference workflow uses: KSamplerSelect's `sampler_name` is a dynamic combo
+    with no inline options, so there is nothing valid to put in it, whereas
+    KSampler declares its sampler and scheduler enums in the schema.
+    """
+    info = info or {}
+    plan = plan or {}
+    workflow = {}
+    def add(nid, cls, inputs):
+        fixed = {}
+        for k, v in inputs.items():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int):
+                fixed[k] = [str(v[0]), v[1]]
+            else:
+                fixed[k] = v
+        workflow[str(nid)] = {"class_type": cls, "inputs": fixed}
+
+    fps = float(params.get("fps") or 25)
+    saver, saver_inputs = _video_save_node(info, fps)
+    if not saver:
+        raise _VideoError("host has no usable video save node")
+
+    loader = plan.get("loader") or "CheckpointLoaderSimple"
     if loader == "CheckpointLoaderSimple":
         add(1, "CheckpointLoaderSimple", {"ckpt_name": model_path})
+        MODEL, CLIP, VAE = [1, 0], [1, 1], [1, 2]
     else:
         add(1, "UNETLoader", {"unet_name": model_path, "weight_dtype": "default"})
-    vae_name = plan.get("vae")
-    if vae_name:
-        add(14, "VAELoader", {"vae_name": vae_name})
-        VAE = [14, 0]
-    elif loader == "CheckpointLoaderSimple":
-        VAE = [1, 2]     # a real checkpoint does carry one
+        MODEL, CLIP, VAE = [1, 0], None, None
+    if plan.get("clip"):
+        add(2, "CLIPLoader", {"clip_name": plan["clip"],
+                              "type": plan.get("clip_type") or "ltxv"})
+        CLIP = [2, 0]
+    if plan.get("vae"):
+        add(3, "VAELoader", {"vae_name": plan["vae"]})
+        VAE = [3, 0]
+    if CLIP is None or VAE is None:
+        raise _VideoError("host has no LTX text encoder or VAE")
+
+    add(4, "CLIPTextEncode", {"clip": CLIP, "text": params.get("prompt", "")})
+    add(5, "CLIPTextEncode", {"clip": CLIP,
+                              "text": params.get("negative_prompt", "")})
+    POS, NEG = [4, 0], [5, 0]
+
+    start = params.get("start_image")
+    if start and "LTXVImgToVideo" in info:
+        add(6, "LoadImage", {"image": start})
+        add(7, "LTXVImgToVideo", {
+            "positive": POS, "negative": NEG, "vae": VAE, "image": [6, 0],
+            "width": width, "height": height, "length": length,
+            "batch_size": 1, "strength": 1.0,
+        })
+        POS, NEG, LATENT = [7, 0], [7, 1], [7, 2]
     else:
-        raise _VideoError("host has no LTX VAE")
-    add(2, "CLIPLoader", {"clip_name": clip, "type": ctype})
-    add(3, "CLIPTextEncode", {"clip": [2, 0], "text": prompt})
-    add(4, "CLIPTextEncode", {"clip": [2, 0], "text": ""})
-    add(5, "LTXVConditioning", {
-        "positive": [3, 0], "negative": [4, 0],
-        "width": 768, "height": 512, "frame_rate": 25,
+        add(7, "EmptyLTXVLatentVideo", {
+            "width": width, "height": height, "length": length, "batch_size": 1})
+        LATENT = [7, 0]
+
+    add(8, "LTXVConditioning", {"positive": POS, "negative": NEG,
+                                "frame_rate": fps})
+    add(9, "KSampler", {
+        "model": MODEL, "positive": [8, 0], "negative": [8, 1],
+        "latent_image": LATENT, "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
     })
-    add(6, "EmptyLTXVLatentVideo", {
-        "width": width, "height": height, "length": length, "batch_size": 1,
-    })
-    add(7, "LTXVScheduler", {"sigma_max": 1.0, "sigma_min": 0.03, "rho": 7.0})
-    add(8, "KSamplerSelect", {"sampler_name": "euler"})
-    add(9, "CFGGuider", {
-        "model": [1, 0], "positive": [5, 0], "negative": [5, 1], "cfg": cfg,
-    })
-    add(10, "RandomNoise", {"noise_seed": seed})
-    add(11, "SamplerCustomAdvanced", {
-        "noise": [10, 0], "guider": [9, 0], "sampler": [8, 0],
-        "sigmas": [7, 0], "latent_image": [6, 0],
-    })
-    add(12, "VAEDecode", {"samples": [11, 0], "vae": VAE})
-    add(13, saver, dict(saver_inputs, images=[12, 0]))
+    add(10, "VAEDecode", {"samples": [9, 0], "vae": VAE})
+    add(11, saver, dict(saver_inputs, images=[10, 0]))
     return workflow
 
 
@@ -5800,6 +6400,37 @@ def _video_save_node(info, fps=16):
             "filename_prefix": "dyva_video", "fps": float(fps), "lossless": False,
             "quality": 80, "method": _enum_options(info, "SaveAnimatedWEBP", "method")[0]}
     return None, None
+
+
+_HIGH_NOISE = re.compile(r"(?i)high[-_ ]?noise|(?<![a-z])high(?![a-z])")
+
+
+def wan_expert_pair(names, chosen):
+    """The (high, low) halves of a Wan 2.2 MoE, or None if this isn't one.
+
+    Wan 2.2 14B is two experts: the high-noise one lays down structure, the
+    low-noise one resolves detail. Running only the high-noise half is exactly
+    how you get a blurry mess — which is what a single-model graph does. The
+    pair is found by name, because that is how everyone ships them, and that
+    also picks up architecture-compatible finetunes like Bernini
+    (bernini_r_high_noise_14B / bernini_r_low_noise_14B) for free.
+    """
+    if not chosen or not _HIGH_NOISE.search(chosen):
+        # maybe we picked the low half; try to find its high sibling
+        for hi, lo in (("low_noise", "high_noise"), ("low", "high"),
+                       ("LOW", "HIGH"), ("Low", "High")):
+            if chosen and hi in chosen:
+                cand = chosen.replace(hi, lo)
+                if cand in names:
+                    return cand, chosen
+        return None
+    for hi, lo in (("high_noise", "low_noise"), ("HIGH", "LOW"),
+                   ("High", "Low"), ("high", "low")):
+        if hi in chosen:
+            cand = chosen.replace(hi, lo)
+            if cand in names:
+                return chosen, cand
+    return None
 
 
 def _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed, info=None, plan=None):
@@ -5866,12 +6497,43 @@ def _build_wan_workflow(params, model_path, steps, cfg, width, height, length, s
         })
         POS, NEG, LATENT = [3, 0], [4, 0], [5, 0]
 
-    add(6, "VideoLinearCFGGuidance", {"model": [1, 0], "min_cfg": 1.0})
-    add(7, "KSampler", {
-        "model": [6, 0], "positive": POS, "negative": NEG,
-        "latent_image": LATENT, "seed": seed, "steps": steps, "cfg": cfg,
-        "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
-    })
+    shift = float((plan.get("spec") or {}).get("shift") or 5.0)
+    has_shift = "ModelSamplingSD3" in info
+    if plan.get("high") and plan.get("low"):
+        # Two experts, one denoise. The high-noise half runs the first segment
+        # and hands over its *unfinished* latent (return_with_leftover_noise);
+        # the low-noise half resumes at the same step without re-noising and
+        # finishes. Running either alone is not a cheaper version of this — it
+        # is a different, worse thing, and it is why the output was mush.
+        boundary = max(1, min(steps - 1, round(steps / 2)))
+        add(1, "UNETLoader", {"unet_name": plan["high"], "weight_dtype": "default"})
+        add(12, "UNETLoader", {"unet_name": plan["low"], "weight_dtype": "default"})
+        add(13, "ModelSamplingSD3", {"model": [1, 0], "shift": shift})
+        add(14, "ModelSamplingSD3", {"model": [12, 0], "shift": shift})
+        add(6, "KSamplerAdvanced", {
+            "model": [13, 0], "add_noise": "enable", "noise_seed": seed,
+            "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": POS, "negative": NEG,
+            "latent_image": LATENT, "start_at_step": 0,
+            "end_at_step": boundary, "return_with_leftover_noise": "enable",
+        })
+        add(7, "KSamplerAdvanced", {
+            "model": [14, 0], "add_noise": "disable", "noise_seed": 0,
+            "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": POS, "negative": NEG,
+            "latent_image": [6, 0], "start_at_step": boundary,
+            "end_at_step": 10000, "return_with_leftover_noise": "disable",
+        })
+    else:
+        if has_shift:
+            add(13, "ModelSamplingSD3", {"model": [1, 0], "shift": shift})
+        MODEL_IN = [13, 0] if has_shift else [1, 0]
+        add(6, "VideoLinearCFGGuidance", {"model": MODEL_IN, "min_cfg": 1.0})
+        add(7, "KSampler", {
+            "model": [6, 0], "positive": POS, "negative": NEG,
+            "latent_image": LATENT, "seed": seed, "steps": steps, "cfg": cfg,
+            "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+        })
     add(8, "VAEDecode", {"samples": [7, 0], "vae": [10, 0]})
     add(9, saver, dict(saver_inputs, images=[8, 0]))
     return workflow
@@ -5916,11 +6578,6 @@ async def _submit_video_workflow(session, host, job):
     by the model's family (wan/ltx/mochi); unrecognized families fail cleanly
     rather than sending a garbage graph."""
     params = job.get("params") or {}
-    steps = int(params.get("steps", 20))
-    cfg = float(params.get("cfg", 6.0))
-    width = int(params.get("width", 768))
-    height = int(params.get("height", 512))
-    length = int(params.get("length", 25))
     seed = int(params.get("seed", -1))
     if seed == -1:
         import random
@@ -5947,7 +6604,22 @@ async def _submit_video_workflow(session, host, job):
         raise _VideoError("no usable video model on this host")
     model_path = plan["model"]
     family = plan["family"]
-    if family == "wan":
+    fam = plan.get("spec") or {}
+    # Family defaults first, the request on top — a caller that says nothing
+    # gets settings the model was actually trained near.
+    steps = int(params.get("steps") or fam.get("steps") or 20)
+    cfg = float(params.get("cfg") or fam.get("cfg") or 6.0)
+    if params.get("width") and params.get("height"):
+        width, height = int(params["width"]), int(params["height"])
+    else:
+        width, height = video_dims(fam, params.get("aspect", "long"),
+                                   params.get("size", "medium"))
+    length = video_frames(fam, params.get("length"))
+    params = dict(params, fps=params.get("fps") or fam.get("fps") or 16)
+    if family == "minimax":
+        workflow = _build_minimax_workflow(params, model_path, steps, cfg, width, height,
+                                           length, seed, info, plan)
+    elif family == "wan":
         workflow = _build_wan_workflow(params, model_path, steps, cfg, width, height, length, seed,
                                        info, plan)
     elif family == "ltx":
@@ -6094,6 +6766,58 @@ async def handle_videos_post(request):
     return web.json_response({"id": jid, "polling_url": job["polling_url"], "status": "pending"}, status=202)
 
 
+# A host's model list is every file it will admit to having. These are the ones
+# that are never the thing you sample with, and matching them is how a job ends
+# up trying to render with a VAE or a LoRA.
+_NOT_A_MODEL = re.compile(
+    r"(?i)(^|[/\\_.-])(vae|clip|t5|umt5|encoder|text_encoder|lora|embed|"
+    r"upscaler|upsampler|taesd|refiner|controlnet|ipadapter|preview)"
+    r"|\.(pt|pth|onnx|bin|ckpt\.index)$|_sr_|latent_upscal"
+    # Text encoders are named after the LLM they wrap, not after their job:
+    # qwen3vl_32b_minimax_h3 is MiniMax's *encoder*, not a MiniMax model.
+    r"|^(qwen[0-9._]*vl|qwen_[0-9._]+_vl|gemma|mistral|llava|byt5|pile-t5|flan)")
+
+
+async def handle_video_models(request):
+    """
+    List available video models
+    ---
+    tags: [Video]
+    summary: GET /v1/videos/models — video-class models across discovered ComfyUI hosts
+    description: |
+      Only files that are actually the thing you sample with: VAEs, text
+      encoders, LoRAs and upscalers are excluded even when their names carry a
+      family word. Grouped by the family that would drive them, commonest
+      first.
+    responses:
+      '200':
+        description: Model list
+    """
+    fams = [(f.get("name"), re.compile(f["model"])) for f in load_video_families()
+            if f.get("model")]
+    seen = {}
+    for srv in load_servers():
+        if srv.get("service") != "comfyui":
+            continue
+        host = srv.get("server", "")
+        for m in srv.get("models") or []:
+            name = m.replace("\\", "/").rsplit("/", 1)[-1]
+            if not name or _NOT_A_MODEL.search(name):
+                continue
+            fam = next((fn for fn, rx in fams if rx.search(name)), None)
+            if not fam:
+                continue
+            row = seen.setdefault(name, {"id": name, "family": fam,
+                                         "hosts": [], "count": 0})
+            row["count"] += 1
+            if host and host not in row["hosts"]:
+                row["hosts"].append(host)
+    return web.json_response({
+        "object": "list",
+        "data": sorted(seen.values(), key=lambda x: (-x["count"], x["id"])),
+    })
+
+
 async def handle_videos_list(request):
     """
     Recent video jobs
@@ -6178,6 +6902,9 @@ async def handle_videos_get(request):
         "id": jid,
         "status": job["status"],
         "model": job["model"],
+        "host": job.get("host"),
+        # where the host says the job actually is: "queued #3", "rendering"
+        "phase": job.get("phase"),
         "polling_url": f"/v1/videos/{jid}",
     }
     if job["status"] == "completed":
@@ -6729,7 +7456,7 @@ def _pick(options, *patterns):
     return None
 
 
-def _edit_plan(info, model_filter=None, exclude=()):
+def _edit_plan(info, model_filter=None, exclude=(), n_images=0):
     """Decide how to drive an edit on this host, or None if it can't.
 
     Everything is resolved against the host's live loader enums — those are the
@@ -6747,6 +7474,13 @@ def _edit_plan(info, model_filter=None, exclude=()):
         encode = next((k for k in info if any(r.search(k) for r in fam["regs"])), None)
         if not encode:
             continue
+        # "Put the lady into the garden" is two references, and an encode-style
+        # family has a fixed number of image slots. zip() would silently drop
+        # the extras and render a confidently wrong picture, so a family that
+        # can't hold them all isn't a candidate. Reference-style families chain
+        # a ReferenceLatent per image and take any number.
+        if fam.get("style") == "encode" and n_images > len(fam.get("images") or []):
+            continue
         for need in ("KSampler", "VAEDecode", "SaveImage", "LoadImage"):
             if need not in info:
                 break
@@ -6762,7 +7496,10 @@ def _edit_plan(info, model_filter=None, exclude=()):
             def candidates(options):
                 out = [o for o in options if not fam_rx or fam_rx.search(o)]
                 if exclude:
-                    out = [o for o in out if o not in exclude]
+                    out = [o for o in out
+                           if o not in exclude
+                           and _sep_insensitive(os.path.splitext(
+                               o.replace("\\", "/").rsplit("/", 1)[-1])[0]) not in exclude]
                 if model_filter:
                     out = [o for o in out if model_query_match(o, model_filter)]
                 return sorted(out, key=_match_rank(model_filter))
@@ -6961,6 +7698,32 @@ def _host_edit_models(host, model_filter=None):
     return out
 
 
+# A structural render failure is really a fact about one (host, model) pairing,
+# not about the host. Recording it against the host alone doesn't work: the
+# submit already marked the host *good*, and add_bad only demotes good ->
+# maybe_good, which still ranks near the top — so the same doomed pairing got
+# chosen again on every request. Remember the pairing itself.
+def _pair_key(cap, model):
+    base = (model or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return f"{cap}!{_sep_insensitive(os.path.splitext(base)[0])}"
+
+
+def remember_bad_pair(host, cap, model):
+    if model:
+        force_bad(host, _pair_key(cap, model))
+
+
+def bad_pairs_for(host, cap):
+    """Canonical model names this host has already failed structurally."""
+    pre = f"{cap}!"
+    out = set()
+    for (m,) in _get_db().execute(
+            "SELECT model FROM host_status WHERE host=? AND state='bad' AND model LIKE ?",
+            (host, pre + "%")):
+        out.add(m[len(pre):])
+    return out
+
+
 def _plan_summary(plan):
     """The rig a plan actually assembled, short enough for an error line."""
     L = plan.get("loader") or {}
@@ -7004,7 +7767,7 @@ def _find_edit_hosts(target_host=None, model_filter=None):
         return (has, tier) if model_filter else (tier, has)
 
     hosts.sort(key=rank)
-    return hosts
+    return _idle_first(hosts)
 
 
 async def _edit_read_request(request):
@@ -7151,7 +7914,9 @@ async def handle_image_edit(request):
         t0 = time.time()
         try:
             info = await comfy_object_info(session, host)
-            plan = _edit_plan(info, model_filter, exclude=bad_models)
+            plan = _edit_plan(info, model_filter,
+                              exclude=bad_models | bad_pairs_for(host, "edit"),
+                              n_images=len(images))
             if not plan:
                 raise ComfyUnsuitable("no edit model on this host"
                                       + (f" matching {model_filter!r}" if model_filter else ""))
@@ -7469,7 +8234,7 @@ def _find_music_hosts(target_host=None):
     last = get_last(MUSIC_KEY)
     if last and last[0]:
         hosts = [last[0]] + [h for h in hosts if h != last[0]]
-    return hosts
+    return _idle_first(hosts)
 
 
 def _music_job_save():
@@ -7892,6 +8657,7 @@ def make_app():
     swagger.add_get("/v1/music/models", handle_music_models)
     # Registered on the plain router (not swagger) so path params and the
     # sendBeacon POST body aren't subject to swagger request validation.
+    app.router.add_post("/v1/web/fetch", handle_web_fetch)
     app.router.add_get("/api/chats", handle_chats_get)
     app.router.add_get("/api/chats/{cid}", handle_chat_get)
     app.router.add_post("/api/chats/{cid}", handle_chat_post)
@@ -7900,6 +8666,7 @@ def make_app():
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
     app.router.add_post("/v1/videos", handle_videos_post)
     app.router.add_get("/v1/videos", handle_videos_list)
+    app.router.add_get("/v1/videos/models", handle_video_models)
     app.router.add_get("/v1/videos/{id}/delete", handle_videos_delete)
     app.router.add_get("/v1/videos/{id}", handle_videos_get)
     app.router.add_get("/v1/videos/{id}/content", handle_videos_content)
