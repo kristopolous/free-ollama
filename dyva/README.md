@@ -83,6 +83,54 @@ Clearing a key leaves those hosts unranked, so they get retried on the next
 request. This is the thing to reach for when you've fixed something and want
 the hosts that failed for the old reason reconsidered.
 
+### Bad pairings
+
+Some failures are facts about a **(host, model) pairing** rather than about
+either one alone. A host whose `flux-2-klein-4b.safetensors` and text encoder
+don't actually belong together dies with `mat1 and mat2 shapes cannot be
+multiplied` every time, while the same host runs its other edit models fine.
+
+Recording that against the host doesn't work. The submit succeeded — and by
+design that is what host selection judges — so the host was already marked
+`good`; the later render failure calls `add_bad`, which only demotes `good` to
+`maybe_good`, and `maybe_good` still sorts near the top. The same doomed
+pairing was chosen again on every request.
+
+So a structural render failure also writes a mark under `<capability>!<model>`,
+forced to `bad` rather than demoted, and the planner starts each attempt with
+`exclude=bad_pairs_for(host, "edit")`:
+
+```
+edit!flux2klein4b    bad    https://198.51.100.7:443
+```
+
+The model name is canonicalised the same way everything else is, so path
+prefixes and separator variants collapse to one record. The host keeps its
+general reputation for edit work and simply stops being offered that one
+checkpoint.
+
+### Busy hosts
+
+ComfyUI runs one prompt at a time per GPU, so handing a second job to a host
+already rendering just puts it in that host's queue. `is_active(host)` answers
+whether one of our own jobs is on a host, and `_idle_first()` moves those to
+the back of every candidate list — edit, TTS, video, music, and both phases of
+txt2img.
+
+There is deliberately no "active hosts" set. A set like that needs whoever put
+a host in to take it back out, and the first time something raises on an
+unusual path that host is stuck marked busy forever; heartbeats and timeouts
+are the usual answers and they are all worse than not having the problem.
+Instead the answer is derived from the live `/workers` registry, which already
+records which host each job is talking to and is unwound by the context manager
+that created it, so it cannot leak.
+
+It is a demotion, not a filter: a busy host is still better than no host, and
+with a single good ComfyUI on the network a filter would turn "wait your turn"
+into "no hosts available". There is a race — a host only appears once a job has
+taken it — but the window is milliseconds against renders that run for minutes,
+and losing it merely costs the old behaviour.
+
 ## Use It Like Ollama
 
 Point the official Ollama CLI at dyva and the everyday commands just work — except instead of one machine's models you see everything the swarm has to offer:
@@ -128,6 +176,7 @@ See the Swagger docs at `/docs` on a running instance for the full API reference
 | `GET` | `/v1/audio/clips/{name}` | Fetch a previously generated speech clip |
 | `GET` | `/sdapi/v1/images` | Metadata for recently generated images (last 100) |
 | `GET` | `/sdapi/v1/images/{name}` | Fetch a generated image file |
+| `POST` | `/v1/web/fetch` | Read one explicit URL as text, or save it if it is an image |
 | `*` | `/comfyui/{path}` | ComfyUI pass-through proxy |
 | `GET` | `/dashboard` | Dashboard UI (Server Room / Chat / Image tabs) |
 | `GET` | `/dashboard-data` | JSON snapshot of the last-successful/good/bad lists |
@@ -421,6 +470,19 @@ result reports the name actually assigned — which may differ, since collisions
 get a `-2` suffix. `list_assets` is offered automatically whenever any media
 tool is enabled; it has no toggle of its own.
 
+A name is only useful if it survives the turn it was minted in. The tool result
+carrying it is context for the request in flight and nothing more, so each
+creation also writes a hidden line into the stored transcript
+(`[Edited image saved as garden_with_lady.jpg.]`) and the image's markdown alt
+text becomes the name. Without both, a later turn sees an image with no handle
+on it and starts guessing.
+
+Conversations that predate all this are backfilled on load: attachments, and
+any `sdapi/v1/images/...`, clip or video link in the transcript, are rebuilt
+into the list, named from the alt text or link text that is already there. The
+backfill skips anything already registered, so a chat that is half old and half
+new comes out whole.
+
 #### Reading URLs
 
 `fetch_url` reads one explicit address — it is not a search engine. The page is
@@ -453,6 +515,28 @@ clip is also written to disk and referenced in the transcript by URL
 (`/v1/audio/clips/{name}`) — a saved conversation can hold a link, not audio
 bytes. The last 200 clips are kept. In the transcript the link is upgraded to
 the same themed player the Speech tab uses.
+
+### Slash Commands
+
+Typed into the chat composer; they leave a note in the transcript rather than a
+conversational turn, and are never sent to a model.
+
+| Command | Does |
+|---------|------|
+| `/list` | This chat's system prompt, enabled tools, answering host and files |
+| `/system [prompt]` | Set or show the chat's system prompt |
+| `/info` | Ask which host and model are answering |
+| `/next` | Drop this model's sticky host and move to the next one |
+| `/test` | Probe hosts with the routing probe and cull the liars |
+| `/retitle` | Regenerate the chat title |
+| `/download` | Download the chat as JSON |
+| `/delete` | Delete the current chat |
+| `/help` | List the commands |
+
+`/list` is the one to reach for when a conversation is behaving oddly — it
+shows, in one place, what the model was told to be, what it is allowed to do,
+who answered last, and every file it can name. `/listassets` and `/assets` still work, as aliases for the
+whole summary.
 
 ## Settings
 
