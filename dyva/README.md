@@ -535,8 +535,8 @@ conversational turn, and are never sent to a model.
 
 `/list` is the one to reach for when a conversation is behaving oddly — it
 shows, in one place, what the model was told to be, what it is allowed to do,
-who answered last, and every file it can name. `/listassets` and `/assets` still work, as aliases for the
-whole summary.
+who answered last, and every file it can name. `/listassets` and `/assets`
+still work, as aliases for the whole summary.
 
 ## Settings
 

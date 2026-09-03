@@ -1018,7 +1018,12 @@ def _get_db():
             "CREATE TABLE IF NOT EXISTS host_nodes("
             "host TEXT NOT NULL, capability TEXT NOT NULL, node TEXT, "
             "voices TEXT, spec TEXT, checked REAL NOT NULL, "
+            "rev INTEGER NOT NULL DEFAULT 0, "
             "PRIMARY KEY(host, capability))")
+        try:
+            _status_db.execute("ALTER TABLE host_nodes ADD COLUMN rev INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass        # already there
         _status_db.commit()
         if need_migrate:
             _migrate_status_from_txt()
@@ -1150,19 +1155,27 @@ def mark_unreachable(host):
 NODE_SURVEY_TTL = 24 * 3600
 
 
+# Bump when the rules that *choose* a node change. A survey is a cached
+# decision, not just cached data: without this, tightening the viability check
+# left every already-surveyed host still pointing at the node it had picked
+# under the old rules — which is why FB_Qwen3TTSVoiceDesign kept being used
+# long after it was ruled out.
+NODE_SURVEY_REV = 2
+
+
 def save_node_survey(host, capability, spec, voices=None):
     """Record what a host exposes for a capability. spec=None means surveyed
     and found nothing, which is itself worth remembering."""
     db = _get_db()
     db.execute(
-        "INSERT INTO host_nodes(host,capability,node,voices,spec,checked)"
-        " VALUES(?,?,?,?,?,?)"
+        "INSERT INTO host_nodes(host,capability,node,voices,spec,checked,rev)"
+        " VALUES(?,?,?,?,?,?,?)"
         " ON CONFLICT(host,capability) DO UPDATE SET"
         " node=excluded.node, voices=excluded.voices, spec=excluded.spec,"
-        " checked=excluded.checked",
+        " checked=excluded.checked, rev=excluded.rev",
         (host, capability, (spec or {}).get("class"),
          json.dumps(voices or []), json.dumps(spec) if spec else None,
-         time.time()))
+         time.time(), NODE_SURVEY_REV))
     db.commit()
 
 
@@ -1171,7 +1184,7 @@ def load_node_survey(capability):
     out = {}
     for host, node, voices, spec, checked in _get_db().execute(
             "SELECT host, node, voices, spec, checked FROM host_nodes"
-            " WHERE capability=?", (capability,)):
+            " WHERE capability=? AND rev=?", (capability, NODE_SURVEY_REV)):
         try:
             out[host] = {"node": node, "voices": json.loads(voices or "[]"),
                          "spec": json.loads(spec) if spec else None,
@@ -1184,10 +1197,12 @@ def load_node_survey(capability):
 def node_survey_for(host, capability, ttl=NODE_SURVEY_TTL):
     """A single host's stored survey, or None if absent or stale."""
     row = _get_db().execute(
-        "SELECT node, voices, spec, checked FROM host_nodes"
+        "SELECT node, voices, spec, checked, rev FROM host_nodes"
         " WHERE host=? AND capability=?", (host, capability)).fetchone()
     if not row or time.time() - (row[3] or 0) > ttl:
         return None
+    if (row[4] or 0) != NODE_SURVEY_REV:
+        return None     # surveyed under older selection rules; decide again
     try:
         return {"node": row[0], "voices": json.loads(row[1] or "[]"),
                 "spec": json.loads(row[2]) if row[2] else None,
@@ -4909,7 +4924,11 @@ async def handle_txt2img(request):
         return result
 
     def _deliver(data):
-        _save_image_history(data, body, data.pop("_dyva_host", ""), requested_model)
+        # keep the host in the payload, not just in the history file: the chat
+        # records where each generated file came from
+        host_used = data.pop("_dyva_host", "")
+        _save_image_history(data, body, host_used, requested_model)
+        data["host"] = host_used
         return web.json_response(data)
 
     # A host-wide unreachable mark (dead at the connection level) must exclude a
@@ -5400,6 +5419,7 @@ def load_node_classifier():
                             "text": spec.get("text", "text"),
                             "voice": spec.get("voice"),
                             "lang": spec.get("lang"),
+                            "style": spec.get("style"),
                         })
         except Exception as e:
             log.warning(f"node-classifier: failed to load {NODE_CLASSIFIER_FILE}: {e}")
@@ -5549,10 +5569,31 @@ def _tts_fill(entry):
     return False, None
 
 
+def _empty_required_string(entry):
+    """A required STRING whose default is empty — declared fillable, actually not.
+
+    FB_Qwen3TTSVoiceDesign is the case that taught this: its `instruct` is a
+    required STRING with `"default": ""` and the placeholder "Style instruction
+    (required for VoiceDesign)". Every field looks fillable, the graph
+    validates, and the node then refuses at execution with "Text and
+    instruction description are required". The node's own source
+    (flybirdxx/ComfyUI-Qwen-TTS) confirms it: `instruct` is a natural-language
+    description of the voice and must be non-empty.
+
+    An empty default is the schema saying "there is no sensible value here" —
+    so unless the caller knows what belongs in the field, the node can't run.
+    """
+    if not isinstance(entry, list) or not entry or isinstance(entry[0], list):
+        return False
+    attrs = entry[1] if len(entry) > 1 and isinstance(entry[1], dict) else {}
+    return entry[0] == "STRING" and attrs.get("default", None) == ""
+
+
 def _tts_unfillable(required, skip=()):
     """Names of required inputs we can neither fill nor wire."""
     return [k for k, v in required.items()
-            if k not in skip and not _tts_fill(v)[0]]
+            if k not in skip
+            and (not _tts_fill(v)[0] or _empty_required_string(v))]
 
 
 _SAVE_AUDIO_RE = re.compile(r"(?i)save.*audio|audio.*save")
@@ -5577,13 +5618,15 @@ _tts_exclude_cache = None
 
 
 def tts_excluded(node_class):
-    """True for nodes whose *name* says they aren't plain text-to-speech.
+    """True for nodes whose *name* says they do a different job.
 
-    The schema can't tell you this: FB_Qwen3TTSVoiceDesign declares text and
-    instruct as ordinary STRINGs with defaults, so every field looks fillable —
-    and then it refuses at execution because the voice description can't be
-    empty. Its sibling FB_Qwen3TTSCustomVoice, on the same host, takes a
-    speaker from an enum and just works. The difference is only in the name.
+    This is for tasks that are not text-to-speech at all — voice cloning and
+    conversion (they want reference audio), transcription, loaders and savers.
+    It is deliberately not used for "this node has an awkward required field":
+    that is a structural question, and `_empty_required_string` answers it from
+    the schema. FB_Qwen3TTSVoiceDesign was excluded by name here once, which
+    was wrong on both counts — it is real TTS, and the name-based rule silently
+    did nothing for hosts already surveyed.
     """
     global _tts_exclude_cache
     if _tts_exclude_cache is None:
@@ -5621,7 +5664,9 @@ def _tts_viable(node_class, info, fam):
         opts = entry[0] if isinstance(entry, list) and isinstance(entry[0], list) else None
         if isinstance(opts, list) and not opts:
             return False
-    if _tts_unfillable(required):
+    # the family's own text and style fields are ones we supply, so they are
+    # exempt from the empty-default rule
+    if _tts_unfillable(required, skip=tuple(x for x in (fam.get("text"), fam.get("style")) if x)):
         return False
     if not _tts_save_node(info):
         return False
@@ -5674,6 +5719,7 @@ async def _tts_node_for(session, host, info=None):
                 "text": fam["text"],
                 "voice": fam["voice"],
                 "lang": fam["lang"],
+                "style": fam.get("style"),
             }
             _TTS_NODE_CACHE[host] = (spec, time.time())
             save_node_survey(host, TTS_KEY, spec, _tts_voices_of(node_class, info, fam))
@@ -5705,6 +5751,9 @@ def _audio_out(node_info):
     return outputs.index("AUDIO") if "AUDIO" in outputs else None
 
 
+DEFAULT_VOICE_STYLE = "A clear, natural speaking voice, calm and even."
+
+
 def _tts_workflow(spec, schema, input_text, voice, host_info=None):
     cls = spec["class"]
     required = ((schema.get(cls) or {}).get("input") or {}).get("required") or {}
@@ -5719,6 +5768,13 @@ def _tts_workflow(spec, schema, input_text, voice, host_info=None):
     # something to say. Leave it at its default and let the fill loop below
     # supply that.
     inputs = {} if is_engine else {spec["text"]: input_text}
+
+    # A style field is a *description of a voice*, not a directive about the
+    # words. When the caller named a voice, that is the description; otherwise
+    # something neutral, because empty is what the node rejects.
+    style_field = spec.get("style")
+    if style_field and style_field in required:
+        inputs[style_field] = voice or DEFAULT_VOICE_STYLE
 
     voice_field = spec.get("voice")
     lang_field = spec.get("lang")

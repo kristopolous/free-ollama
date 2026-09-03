@@ -1,6 +1,27 @@
 {
   "tts": [
     {
+      "name": "Qwen3TTS-FB-Custom",
+      "patterns": [
+        "^FB_Qwen3TTSCustomVoice$"
+      ],
+      "text": "text",
+      "voice": "speaker",
+      "lang": "language",
+      "note": "flybirdxx/ComfyUI-Qwen-TTS. The plain TTS node of that pack: speaker comes from an enum of preset voices and instruct is optional."
+    },
+    {
+      "name": "Qwen3TTS-FB-Design",
+      "patterns": [
+        "^FB_Qwen3TTSVoiceDesign$"
+      ],
+      "text": "text",
+      "voice": null,
+      "lang": "language",
+      "style": "instruct",
+      "note": "Same pack. instruct is a required, non-empty natural-language description of the voice ('A gentle female voice with a high pitch'); the node raises 'Text and instruction description are required' without it."
+    },
+    {
       "name": "QwenTTS",
       "patterns": [
         "^Qwen(3)?TTS"
@@ -411,7 +432,6 @@
     }
   ],
   "tts_exclude": [
-    "(?i)voice.?design",
     "(?i)voice.?clone",
     "(?i)voice.?convert",
     "(?i)clone|convert|train|finetune",

@@ -514,7 +514,7 @@ body.img-edit .img-main > #imgResult{order:10}
 .mp-tool svg{width:18px;height:18px}
 /* wrench pull-down: opens upward with a caret pointing down at the wrench */
 .tool-menu{position:relative;flex-shrink:0}
-.tools-pop{display:none;position:absolute;bottom:calc(100% + 10px);right:0;width:250px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:10px;z-index:130}
+.tools-pop{display:none;position:fixed;width:250px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:10px;z-index:130}
 .tools-pop.open{display:block}
 .tools-pop::before,.tools-pop::after{content:'';position:absolute;top:100%;right:.75em;width:0;height:0;border:8px solid transparent}
 .tools-pop::before{border-top-color:var(--border-strong)}
@@ -788,13 +788,13 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button id="chatTools" class="mp-tool" title="Tools" aria-haspopup="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></button>
 <div id="toolsPop" class="tools-pop">
 <div class="tools-pop-title">Tools</div>
-<label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Let the model create images on request</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolImageEdit"><span class="tool-txt"><b>Image editing</b><small>Let the model change an image already in the chat</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolAsk"><span class="tool-txt"><b>Ask me</b><small>Let the model ask a multiple-choice question before answering</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Let the model make a short video (takes minutes)</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Let the model speak dialog out loud</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolWeb"><span class="tool-txt"><b>Web</b><small>Let the model read a URL you or it names</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Let the model write &amp; edit documents in a side panel</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Create images on request</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolImageEdit"><span class="tool-txt"><b>Image editing</b><small>Edit an image already in the chat</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolAsk"><span class="tool-txt"><b>Ask me</b><small>Ask a multiple-choice question before answering</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Make a short video (takes minutes)</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Speak dialog out loud</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolWeb"><span class="tool-txt"><b>Web</b><small>Read a page at a URL</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Write &amp; edit documents in a side panel</small></span></label>
 </div>
 </div>
 <button id="docToggle" class="mp-tool" title="Documents" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></button>
@@ -804,7 +804,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="attach-row" id="chatAttachments" style="display:none"></div>
 <div class="input-row">
 <div class="slash-pop" id="slashPop" style="display:none"></div>
-<textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline)"></textarea>
+<textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline, /help for commands)"></textarea>
 <input id="chatFiles" type="file" multiple style="display:none">
 <div class="input-tools">
 <button id="chatAttach" title="Attach files"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg></button>
@@ -1630,7 +1630,8 @@ function serializeChat(c){
   })};
   if(c.system)o.system=c.system;
   if(c.assets&&c.assets.length)o.assets=c.assets.map(function(a){
-    return {name:a.name,kind:a.kind,src:a.src,desc:a.desc,ts:a.ts,url:a.url,aid:a.aid};
+    return {name:a.name,kind:a.kind,src:a.src,desc:a.desc,ts:a.ts,url:a.url,
+            aid:a.aid,host:a.host,model:a.model};
   });
   if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}});
   return o;
@@ -1915,6 +1916,14 @@ function makeSpeakBtn(getText,msgEl){
       }
       _ttsRemember({text:text.slice(0,200),voice:'default',model:'reply',
                     host:host,node:node,ts:Date.now(),url:src});
+      // It is a file this conversation produced, so it belongs in the asset
+      // list like any other — the Speech tab's own history is not the
+      // conversation's memory of it.
+      if(file){
+        assetAdd(currentChat,{name:text,kind:'audio',url:src,desc:text,
+                              src:'spoken reply',host:host,model:node});
+        saveChat(currentChat);
+      }
       b.title='Speak this reply';
     }catch(ex){b.title='failed: '+ex.message}
     finally{
@@ -2420,13 +2429,14 @@ function chatSummaryMd(){
   out.push('#### files');
   if(!alist.length)out.push('> *(none)*');
   else{
-    out.push('| name | kind | source |');
-    out.push('|---|---|---|');
+    out.push('| name | kind | source | about |');
+    out.push('|---|---|---|---|');
     for(i=0;i<alist.length;i++){
       var a=alist[i];
       // linked when there is something to link to, plain otherwise
+      var where=(a.src||'')+(a.host?(' \u00b7 ['+a.host+'](http://'+a.host.replace(/^https?:\/\//,'')+')'):'');
       out.push('| '+(a.url?('['+a.name+']('+a.url+')'):a.name)+' | '+a.kind
-               +' | '+(a.src||'')+(a.desc?(' \u00b7 '+a.desc):'')+' |');
+               +' | '+where+' | '+(a.desc||'')+' |');
     }
   }
   return out.join('\n');
@@ -2715,7 +2725,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                 urls.push('sdapi/v1/images/'+f);
                 inames.push(assetAdd(ic,{name:args.name||'image',kind:'image',
                                          url:'sdapi/v1/images/'+f,
-                                         desc:ib.prompt,src:'generated'}));
+                                         desc:ib.prompt,src:'generated',
+                                         host:j.host||'',model:j._dyva_model||''}));
               });
               results.push({text:'Image generated and saved as '+inames.join(', ')
                                  +'. Refer to it by that name in later tool calls.',
@@ -2890,6 +2901,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                   enames.push(assetAdd(echat,{name:args.name||'edited',kind:'image',
                                               url:'sdapi/v1/images/'+f,
                                               desc:String(args.prompt||''),
+                                              host:j4.host||'',model:j4.model||'',
                                               src:'edited from '+blobs.map(function(b){return b.name}).join(' + ')}));
                 });
                 results.push({text:'Image edited and saved as '+enames.join(', ')
@@ -2946,7 +2958,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                               ts:Date.now(),url:curl});
                 var aname=assetAdd(liveChat(chatId)||currentChat,
                                    {name:args.name||'speech',kind:'audio',url:curl,
-                                    desc:sb.input,src:'generated'});
+                                    desc:sb.input,src:'generated',
+                                    host:r3.headers.get('X-Dyva-Host')||'',
+                                    model:r3.headers.get('X-Dyva-Node')||''});
                 results.push({text:(sb._trimmed
                     ? 'Spoken, but the text was too long and only the first part was voiced. Tell the user. Saved as '
                     : 'Spoken successfully, saved as ')+aname+': '+curl,
@@ -3294,6 +3308,8 @@ function assetListText(chat){
          + 'audio appear here once the user attaches one or a tool creates one.';
   var rows=list.map(function(a){
     var o={name:a.name,kind:a.kind,source:a.src||'unknown'};
+    if(a.host)o.host=a.host;
+    if(a.model)o.model=a.model;
     if(a.desc)o.description=a.desc;
     return o;
   });
@@ -3484,9 +3500,19 @@ function paintTools(){
   if(toolWebChk)toolWebChk.checked=webOn;
   chatToolsBtn.title=anyToolsOn()?'Tools on':'Tools';
 }
+function placeToolsPop(){
+  var r=chatToolsBtn.getBoundingClientRect();
+  toolsPop.style.right=Math.max(8,window.innerWidth-r.right)+'px';
+  toolsPop.style.bottom=Math.max(8,window.innerHeight-r.top+10)+'px';
+}
 chatToolsBtn.addEventListener('click',function(e){
   e.stopPropagation();
+  var opening=!toolsPop.classList.contains('open');
   toolsPop.classList.toggle('open');
+  if(opening)placeToolsPop();
+});
+window.addEventListener('resize',function(){
+  if(toolsPop.classList.contains('open'))placeToolsPop();
 });
 toolsPop.addEventListener('click',function(e){e.stopPropagation()});
 toolImageChk.addEventListener('change',function(){
