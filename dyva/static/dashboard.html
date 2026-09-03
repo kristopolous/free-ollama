@@ -221,6 +221,19 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .worker-card .worker-ago{font-size:var(--fs-2xs);color:var(--text-faint)}
 .worker-card .worker-meta{font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap}
 .worker-card .worker-meta.worker-phase{color:var(--accent);font-family:var(--font-mono);font-size:var(--fs-2xs)}
+.worker-card.worker-done{opacity:.72;border-style:dashed}
+.worker-card.worker-done .worker-model{color:var(--text-2)}
+.worker-host{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55%}
+.worker-rmodel{color:var(--text-2)}
+/* Two spans, each with a thin coloured rule under the words: finding a host
+   (blue) then running the job on it (green). Just a line — no fill. */
+.wk-timeline{display:flex;gap:14px;margin-top:var(--sp-2);font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
+.wk-seg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim);padding-bottom:3px;border-bottom:2px solid transparent}
+.wk-find{border-bottom-color:var(--accent)}
+.wk-run{border-bottom-color:#39d353;flex:1 1 auto}
+/* a job that never secured a host: a quiet line, not an alarm */
+.wk-seg.nofind{border-bottom-color:var(--border-strong)}
+.workers-idle{color:var(--text-muted);font-size:var(--fs-md);margin-bottom:var(--sp-3)}
 .worker-stop{background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);padding:4px 10px;font-size:var(--fs-sm);cursor:pointer}
 .worker-stop:hover{background:var(--accent-bg-active);color:var(--text)}
 .worker-stop[disabled]{opacity:.6;cursor:default;font-style:italic}
@@ -1440,8 +1453,19 @@ function renderHostLists(d){
 function agoText(secs){
   if(!isFinite(secs)||secs<0)secs=0;
   if(secs<60)return Math.floor(secs)+'s';
+  return agoLong(secs);
+}
+function agoLong(secs){
   if(secs<3600)return Math.floor(secs/60)+'m '+(secs%60|0)+'s';
   return Math.floor(secs/3600)+'h '+(Math.floor(secs%3600/60))+'m';
+}
+// The workers view wants precision the activity feed doesn't: a sub-second host
+// find should read "0.8s", not "0s", because that number is the whole point.
+function timerText(secs){
+  if(!isFinite(secs)||secs<0)secs=0;
+  if(secs<10)return secs.toFixed(1)+'s';
+  if(secs<60)return Math.floor(secs)+'s';
+  return agoLong(secs);
 }
 // wids with a stop in flight. Kept outside renderWorkers because every
 // snapshot rebuilds the cards from scratch, which would otherwise throw the
@@ -1449,9 +1473,12 @@ function agoText(secs){
 var _stopping={};
 // The Activity popup gets the same snapshot in miniature: you can watch the
 // feed and see what is in flight without switching panes.
-function renderActivityWorkers(arr){
+function renderActivityWorkers(all){
   var box=document.getElementById('activityWorkers');
   if(!box)return;
+  // the activity popup shows what is happening now — finished jobs live in the
+  // Workers pane, not here
+  var arr=(all||[]).filter(function(w){return !w.done});
   if(!arr.length){box.style.display='none';box.innerHTML='';return}
   box.style.display='grid';
   box.innerHTML='';
@@ -1475,32 +1502,77 @@ function renderActivityWorkers(arr){
     box.appendChild(card);
   });
 }
+// One card's two segments. `w` is the snapshot row; `liveOverride` lets the
+// ticker recompute from the wall clock without a new snapshot.
+function paintTimeline(tl,w,total,checkedStr){
+  var find=tl.querySelector('.wk-find'),run=tl.querySelector('.wk-run');
+  if(total==null)total=w.age||0;
+  var checked=(checkedStr!=null)?checkedStr:String(w.checked);
+  // Three states: a number is the seconds it took to find a host; null means
+  // the server is sure no host was found (yet, or ever); undefined means the
+  // server predates this field (its process hasn't been restarted) so we say
+  // nothing about finding and just show a plain timer.
+  var findSecs=w.find;
+  if(findSecs==null){                       // null OR undefined
+    var noData=(findSecs===undefined);
+    find.textContent=(w.done&&!noData?'no host found - ':timerText(total)+' - ')
+                     +'checked '+checked;
+    find.classList.toggle('nofind',!noData&&!!w.done);
+    run.textContent='';run.style.display='none';
+    return;
+  }
+  find.classList.remove('nofind');
+  find.textContent=timerText(findSecs)+' - checked '+checked;
+  run.style.display='';
+  var runSecs=Math.max(0,total-findSecs);
+  run.textContent=(w.done?(w.ok===false?'stopped at ':'ran ')+timerText(runSecs)
+                        :'running '+timerText(runSecs));
+}
+var _lastWorkers=[];
 function renderWorkers(workers){
   var c=document.getElementById('workersList'),arr=workers||[];
+  _lastWorkers=arr;
   renderActivityWorkers(arr);
+  var liveArr=arr.filter(function(w){return !w.done});
   // Forget wids that are gone from the snapshot — that worker stopped.
   var live={};arr.forEach(function(w){live[w.wid]=1});
   Object.keys(_stopping).forEach(function(k){if(!live[k])delete _stopping[k]});
-  _setCount('cnt-workers',arr.length);
+  _setCount('cnt-workers',liveArr.length||'');
   c.innerHTML='';
   if(!arr.length){c.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">Nothing running right now</div>';return}
+  if(!liveArr.length){
+    var idle=document.createElement('div');idle.className='workers-idle';
+    idle.textContent='Nothing running right now';c.appendChild(idle);
+  }
   arr.forEach(function(w){
-    var card=document.createElement('div');card.className='worker-card';
+    var card=document.createElement('div');card.className='worker-card'
+      +(w.done?' worker-done'+(w.ok===false?' worker-failed':''):'');
+    card.setAttribute('data-wid',w.wid);
     var top=document.createElement('div');top.className='worker-title';
     var n=document.createElement('span');n.className='worker-model';n.textContent=w.model||'';n.title=w.model;top.appendChild(n);
-    var ago=document.createElement('span');ago.className='worker-ago';ago.textContent='started '+agoText(w.age||0)+' ago';top.appendChild(ago);
-    card.appendChild(top);
-    var body=document.createElement('div');body.className='worker-meta';
-    // A race reports how many hosts it has tried; a job that already has a
-    // host is waiting on it, so say what it's doing and where.
-    if(w.phase){
-      body.textContent=w.phase+(w.host?' on '+String(w.host).replace(/^https?:\/\//,''):'');
-      body.classList.add('worker-phase');
-    }else{
-      body.textContent='checked '+w.checked+(w.total?' / '+w.total:'');
+    var where=w.host?String(w.host).replace(/^https?:\/\//,''):'';
+    var rm=w.rmodel?String(w.rmodel).replace(/\\/g,'/').split('/').pop():'';
+    if(where||rm){
+      var hs=document.createElement('span');hs.className='worker-host';
+      if(rm){var rms=document.createElement('span');rms.className='worker-rmodel';rms.textContent=rm;hs.appendChild(rms);}
+      if(where){hs.appendChild(document.createTextNode((rm?' ':'')+where));}
+      hs.title=(rm?rm+' ':'')+where;
+      top.appendChild(hs);
     }
-    card.appendChild(body);
-    if(w.phase){card.appendChild(document.createElement('span'));c.appendChild(card);return}
+    card.appendChild(top);
+    // Two spans, two clocks: finding a host (blue) and running the job on it
+    // (green). Data attributes drive the local ticker; the server hands back
+    // `find` (seconds to secure a host) and `age` (total).
+    var tl=document.createElement('div');tl.className='wk-timeline';
+    tl.setAttribute('data-started',String(Date.now()-(w.age||0)*1000));
+    tl.setAttribute('data-find',w.find===undefined?'?':(w.find===null?'':String(w.find)));
+    tl.setAttribute('data-checked',String(w.checked));
+    var find=document.createElement('span');find.className='wk-seg wk-find';
+    var run=document.createElement('span');run.className='wk-seg wk-run';
+    tl.appendChild(find);tl.appendChild(run);
+    card.appendChild(tl);
+    paintTimeline(tl,w);
+    if(w.done||w.phase){card.appendChild(document.createElement('span'));c.appendChild(card);return}
     var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
     // A stop isn't instant — the race has to unwind and the in-flight upstream
     // request has to be cancelled — so the button latches into "stopping…"
@@ -1523,6 +1595,18 @@ function renderWorkers(workers){
     c.appendChild(card);
   });
 }
+setInterval(function(){
+  var pane=document.getElementById('pane-workers');
+  if(!pane||pane.style.display==='none')return;   // not looking, don't bother
+  var els=document.querySelectorAll('#workersList .worker-card:not(.worker-done) .wk-timeline[data-started]');
+  Array.prototype.forEach.call(els,function(tl){
+    var t0=parseInt(tl.getAttribute('data-started'),10);if(!t0)return;
+    var fv=tl.getAttribute('data-find');
+    var fval=(fv==='?')?undefined:(fv===''?null:parseFloat(fv));
+    paintTimeline(tl,{find:fval,done:false,ok:null},
+                  (Date.now()-t0)/1000, tl.getAttribute('data-checked')||'');
+  });
+},100);
 // Live worker updates over WebSocket (robust through the reverse proxy where
 // SSE streaming gets buffered/dropped). Auto-reconnects on close.
 function renderWorkersFromMsg(ev){

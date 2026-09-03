@@ -31,12 +31,37 @@ Here it is. See all the tools. This interacts with all the discovered infrastruc
 | `-w`, `--workers` | Concurrent workers (default: 3) |
 | `-l`, `--local` | Restrict inference endpoints to localhost only |
 | `-r`, `--refresh` | Refresh server cache and exit; optionally name a single source (e.g. `--refresh graflex`) — other sources keep their last-fetched data |
-| `--source` | Manage extra host sources: `--source list`, `--source add <url>` |
+| `--source` | Manage host sources: `--source list`, `--source add <url>`, `--source disable <name>\|all`, `--source enable <name>\|all` — see [below](#running-it-over-your-own-machines) |
 | `--hosts` | Inspect or prune the host reputation table — see [below](#host-reputation) |
 | `--curlify` | Print `curl` commands of upstream requests to stderr |
 | `-v`, `--version` | Show version |
 
 All of these run and exit; none of them start the server.
+
+## Sources, and Running It Over Your Own Machines
+
+Where the host list comes from is a setting, not an assumption. The built-in
+sources are public lists that are no longer aggressively refreshed — a small
+and fairly inert set — and the additional-source mechanism exists so a *private*
+list (graflex's own output, say) can be pointed at dyva without being published
+for other people to abuse.
+
+The routing doesn't care about any of that. The racing, failover, reputation
+tiers and single OpenAI/Ollama endpoint work the same over a pool you own, so
+the sources can be switched off entirely:
+
+```bash
+dyva --source disable all          # discover nothing
+dyva --source add https://example.com/my-hosts.json
+dyva --source list                 # confirm what is live
+```
+
+With every built-in source disabled dyva finds no hosts at all; add your own
+list and it is a load balancer over your own machines and nothing else.
+Individual sources go off by name (`--source disable forrany`) and back on with
+`--source enable`. State lives in `disabled_sources` in `settings.json`, and a
+change refreshes the cache immediately, so hosts a disabled source contributed
+actually go away instead of lingering in the cached list.
 
 ## Host Reputation
 

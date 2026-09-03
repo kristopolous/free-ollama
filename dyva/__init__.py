@@ -252,6 +252,62 @@ def save_settings(extra=None):
         pass
 
 
+def disabled_sources():
+    """Slugs of sources the operator has switched off.
+
+    dyva points at hosts other people left open, which is fine for a
+    demonstration and not fine as somewhere to send real work or real data.
+    Turning every discovery source off leaves the routing, racing and
+    reputation machinery intact with nothing in it — at which point you add
+    your own list and it is simply a load balancer over your own boxes.
+    """
+    if not os.path.exists(SETTINGS_FILE):
+        return set()
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return set()
+    got = cfg.get("disabled_sources") if isinstance(cfg, dict) else None
+    return {_source_slug(x) for x in got} if isinstance(got, list) else set()
+
+
+def source_disabled(name):
+    return _source_slug(name) in disabled_sources()
+
+
+def known_source_names():
+    """Every source that can be switched, built-in and configured."""
+    return ([s["name"] for s in BUILTIN_SOURCES]
+            + [str(s.get("name") or "") for s in _stored_sources() if isinstance(s, dict)])
+
+
+def set_sources_enabled(names, enabled):
+    """Returns (changed, unknown)."""
+    known = {_source_slug(x): x for x in known_source_names() if x}
+    off = disabled_sources()
+    changed, unknown = [], []
+    for raw in names:
+        slug = _source_slug(raw)
+        if slug == "all":
+            for k, disp in known.items():
+                if (k in off) != (not enabled):
+                    changed.append(disp)
+            off = set() if enabled else set(known)
+            continue
+        if slug not in known:
+            unknown.append(raw)
+            continue
+        if enabled and slug in off:
+            off.discard(slug)
+            changed.append(known[slug])
+        elif not enabled and slug not in off:
+            off.add(slug)
+            changed.append(known[slug])
+    save_settings({"disabled_sources": sorted(off)})
+    return changed, unknown
+
+
 def _stored_sources():
     """Raw sources list as stored (for the editor), before validation."""
     if not os.path.exists(SETTINGS_FILE):
@@ -386,10 +442,11 @@ def add_sources_from_url(url):
     return added, skipped
 
 
-def _source_line(s):
+def _source_line(s, off=()):
     name = s.get("name") or "(unnamed)"
     mapped = ", ".join(sorted(s.get("mapping").keys())) if isinstance(s.get("mapping"), dict) else ""
-    line = f"  {name}\n      url:     {_normalize_url(s.get('url'))}"
+    mark = "  (disabled)" if _source_slug(name) in off else ""
+    line = f"  {name}{mark}\n      url:     {_normalize_url(s.get('url'))}"
     if mapped:
         line += f"\n      mapping: {mapped}"
     return line
@@ -401,18 +458,55 @@ def source_cli(argv):
     cmd = str(argv[0]).lower()
     if cmd == "list":
         srcs = _stored_sources()
+        off = disabled_sources()
         print(f"{len(BUILTIN_SOURCES)} built-in source{'' if len(BUILTIN_SOURCES) == 1 else 's'}:")
         for s in BUILTIN_SOURCES:
-            print(_source_line(s))
+            print(_source_line(s, off))
         print()
-        if not srcs:
+        if srcs:
+            print(f"{len(srcs)} additional source{'' if len(srcs) == 1 else 's'} "
+                  f"(from {SETTINGS_FILE}):")
+            for s in srcs:
+                print(_source_line(s, off) if isinstance(s, dict)
+                      else f"  {s!r}  (not a source object)")
+        else:
             print("No additional sources configured.")
-            return 0
-        print(f"{len(srcs)} additional source{'' if len(srcs) == 1 else 's'} "
-              f"(from {SETTINGS_FILE}):")
-        for s in srcs:
-            print(_source_line(s) if isinstance(s, dict) else f"  {s!r}  (not a source object)")
+        live = [x for x in known_source_names() if x and _source_slug(x) not in off]
+        print()
+        if live:
+            print(f"{len(live)} source{'' if len(live) == 1 else 's'} enabled: "
+                  + ", ".join(live))
+        else:
+            print("Every source is disabled: dyva will discover no hosts at all.")
+            print("Add your own with '--source add <url>' to use it over your own"
+                  " machines only.")
         return 0
+
+    if cmd in ("disable", "enable"):
+        names = argv[1:]
+        if not names:
+            print(f"usage: dyva --source {cmd} <name>|all", file=sys.stderr)
+            print(f"known sources: {', '.join(x for x in known_source_names() if x)}",
+                  file=sys.stderr)
+            return 1
+        changed, unknown = set_sources_enabled(names, cmd == "enable")
+        for u in unknown:
+            print(f"unknown source '{u}' (known: "
+                  f"{', '.join(x for x in known_source_names() if x)})", file=sys.stderr)
+        if changed:
+            print(f"{cmd}d: {', '.join(changed)}")
+        else:
+            print("nothing to change")
+        off = disabled_sources()
+        live = [x for x in known_source_names() if x and _source_slug(x) not in off]
+        print(f"{len(live)} source{'' if len(live) == 1 else 's'} still enabled"
+              + (": " + ", ".join(live) if live else " \u2014 dyva will discover no hosts"))
+        if changed:
+            # the cached host list still holds whatever the disabled sources
+            # put there, so it has to be rebuilt for this to mean anything
+            print("Refreshing cache...")
+            refresh_cache()
+        return 1 if unknown else 0
 
     if cmd == "add":
         urls = argv[1:]
@@ -436,7 +530,8 @@ def source_cli(argv):
             refresh_cache()
         return rc
 
-    print(f"unknown --source command '{cmd}' (expected 'list' or 'add')", file=sys.stderr)
+    print(f"unknown --source command '{cmd}' "
+          "(expected 'list', 'add', 'disable' or 'enable')", file=sys.stderr)
     return 1
 
 
@@ -649,6 +744,13 @@ _ACTIVITY_HISTORY_MAX = 500
 # gone through (checked), the total candidates, and a stop handle to abort it.
 _workers = {}
 _WORKERS_MAX = 500
+# A finished job doesn't vanish; it goes muted and keeps its final stats, so
+# the timer you watched run leaves a result behind — how long it took, how many
+# hosts it checked, where it landed. "At minimum" because live jobs are never
+# evicted to make room; only finished ones are trimmed to this many. Two in
+# flight at once is already unusual, so 20 is comfortably more headroom than a
+# human operator produces.
+_WORKERS_DONE_KEEP = 20
 _worker_queues = []
 _worker_lock = asyncio.Lock()
 
@@ -661,17 +763,27 @@ def _worker_snapshot():
     now = time.time()
     out = []
     for w in _workers.values():
+        done = w.get("done")
         out.append({
             "wid": w["wid"],
             "model": w["model"],
             "started": w["started"],
-            "age": round(now - w["started"], 1),
+            # live: a running clock; done: frozen at the elapsed it finished on
+            "age": round((done - w["started"]) if done else (now - w["started"]), 2),
+            # seconds spent finding a host, frozen once one was secured; None
+            # while still searching, and for a job that never found one
+            "find": (round(w["found"] - w["started"], 2) if w.get("found") else None),
             "checked": w["checked"],
             "total": w["total"],
             "phase": w.get("phase"),
             "host": w.get("host"),
+            "rmodel": w.get("rmodel"),
+            "done": bool(done),
+            "ok": w.get("ok"),
         })
-    out.sort(key=lambda w: w["started"])
+    # live first, oldest at the top (as before); finished after, most recent
+    # first, so a just-completed job settles directly under the running ones
+    out.sort(key=lambda w: (w["done"], w["started"] if not w["done"] else -w["started"]))
     return out
 
 
@@ -699,10 +811,23 @@ async def _remove_worker_listener(q):
             _worker_queues.remove(q)
 
 
+def _trim_done_workers():
+    done = [(w["done"], wid) for wid, w in _workers.items() if w.get("done")]
+    if len(done) <= _WORKERS_DONE_KEEP:
+        return
+    done.sort()                         # oldest-finished first
+    for _, wid in done[:len(done) - _WORKERS_DONE_KEEP]:
+        _workers.pop(wid, None)
+
+
 async def _register_worker(model, total, stop, phase=None, host=None):
     wid = _new_wid()
+    _trim_done_workers()
     if len(_workers) >= _WORKERS_MAX:
-        _workers.pop(next(iter(_workers)))
+        # last resort, and never a live job: drop the oldest finished one
+        victim = next((k for k, w in _workers.items() if w.get("done")), None)
+        if victim:
+            _workers.pop(victim, None)
     _workers[wid] = {
         "wid": wid,
         "model": model,
@@ -712,9 +837,28 @@ async def _register_worker(model, total, stop, phase=None, host=None):
         "stop": stop,
         "phase": phase,
         "host": host,
+        "found": None,
+        "done": None,
+        "ok": None,
     }
     await _broadcast_workers()
     return wid
+
+
+def mark_worker_found(wid, host=None, model=None):
+    """A host has been secured: stamp the split between finding and running.
+    `checked` stops climbing here, so the count on the card is how many hosts
+    it took to land this one. `model` is the resolved model that answered, which
+    the routing key (`model` on the record) may only pattern-match."""
+    w = _workers.get(wid)
+    if not w:
+        return
+    if not w.get("found"):
+        w["found"] = time.time()
+    if host and not w.get("host"):
+        w["host"] = host
+    if model and not w.get("rmodel"):
+        w["rmodel"] = model
 
 
 async def _worker_checked(wid):
@@ -733,16 +877,19 @@ def _set_worker_phase(wid, phase):
 
 
 @contextlib.asynccontextmanager
-async def _waiting_worker(label, host, phase="rendering"):
+async def _waiting_worker(label, host, phase="rendering", model=None):
     """Show a job in the workers view while we wait on a host that already took
     it. The race registers a worker for *finding* a host; without this the job
     vanishes from the view for the whole render, which is the part that
     actually takes minutes."""
     wid = await _register_worker(label, 1, lambda: None, phase=phase, host=host)
+    mark_worker_found(wid, host, model)   # the finding already happened; this is the run
+    ok = False
     try:
         yield wid
+        ok = True           # the wait completed without raising
     finally:
-        await _unregister_worker(wid)
+        await _unregister_worker(wid, ok=ok)
 
 
 def is_active(host):
@@ -763,7 +910,8 @@ def is_active(host):
     """
     if not host:
         return False
-    return any(w.get("host") == host for w in _workers.values())
+    return any(w.get("host") == host and not w.get("done")
+               for w in _workers.values())
 
 
 def _idle_first(hosts):
@@ -777,10 +925,19 @@ def _idle_first(hosts):
     return sorted(hosts, key=is_active)
 
 
-async def _unregister_worker(wid):
-    if wid in _workers:
-        _workers.pop(wid, None)
-        await _broadcast_workers()
+async def _unregister_worker(wid, ok=None):
+    w = _workers.get(wid)
+    if not w:
+        return
+    # Don't delete — freeze. The card goes muted and keeps its stats.
+    w["done"] = time.time()
+    if ok is None:
+        ok = w.get("found") is not None   # found a host and ran = success
+    w["ok"] = bool(ok)
+    w["phase"] = None
+    w["stop"] = lambda: None
+    _trim_done_workers()
+    await _broadcast_workers()
 
 
 
@@ -855,11 +1012,14 @@ def refresh_cache(source=None):
     log.debug("Refreshing server cache...")
     _db = f'{CACHE_DIR}/free-ollama.json'
 
-    extra_sources = _config_sources()
+    off = disabled_sources()
+    extra_sources = [s for s in _config_sources()
+                     if _source_slug(s.get("name")) not in off]
     downloads = [
        (_normalize_url(s.get("url")), f"{_db}-extra-{_source_slug(s.get('name'))}.tmp", str(s.get('name') or '')) for s in extra_sources
     ] + [
-       ( _normalize_url(s["url"]), f"{_db}-{_source_slug(s['name'])}.tmp", s["name"] ) for s in BUILTIN_SOURCES
+       ( _normalize_url(s["url"]), f"{_db}-{_source_slug(s['name'])}.tmp", s["name"] )
+       for s in BUILTIN_SOURCES if _source_slug(s["name"]) not in off
     ]
     if source:
         want = _source_slug(source)
@@ -914,7 +1074,7 @@ def refresh_cache(source=None):
         if ip not in host_map:
           host_map[ip] = entry
 
-    if os.path.exists(f'{_db}-forrany.tmp'):
+    if 'forrany' not in off and os.path.exists(f'{_db}-forrany.tmp'):
       with open(f'{_db}-forrany.tmp', 'r', encoding="utf-8", errors="replace") as f:
         try:
           for row in json.loads(f.read()):
@@ -924,7 +1084,7 @@ def refresh_cache(source=None):
         except Exception as ex:
           logging.warning(f"Unable to parse {_db}-forrany.tmp: {ex}")
 
-    if os.path.exists(f"{_db}-happyshua.tmp"):
+    if 'happyshua' not in off and os.path.exists(f"{_db}-happyshua.tmp"):
       with open(f"{_db}-happyshua.tmp", 'r', encoding="utf-8", errors="replace", newline="") as csvfile:
         for r in csv.reader(csvfile):
           ip = re.sub(r'/?v1', '', r[0])
@@ -934,7 +1094,7 @@ def refresh_cache(source=None):
     
           host_map[ip]['models'] += models
 
-    if os.path.exists(f"{_db}-spider.tmp"):
+    if 'spider' not in off and os.path.exists(f"{_db}-spider.tmp"):
       with open(f'{_db}-spider.tmp', 'r', encoding="utf-8", errors="replace") as f:
         for row in json.loads(f.read()):
           ip = re.sub(r'/?v1', '', row.get('url'))
@@ -1944,6 +2104,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             tally[outcome.verdict] += 1
             record_verdict(host_of(item), key, outcome)
             if outcome.verdict == V_ACCEPTED:
+                mark_worker_found(wwid, host_of(item))
                 await result_queue.put(outcome.result)
                 done.set()
                 return
@@ -2766,6 +2927,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
             if do_stream:
                 result, last_host_err = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True, remote=request.remote)
                 if result:
+                    mark_worker_found(job_wid, last_host, last_full)
                     resp, first_line, first = result
                     stream_resp = web.StreamResponse()
                     await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format)
@@ -2773,6 +2935,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
             else:
                 data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload, remote=request.remote)
                 if data:
+                    mark_worker_found(job_wid, last_host, last_full)
                     resp = chat_fmt(data, model_list[0], openai_format)
                     resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", last_host)
                     resp.headers["X-Dyva-Model"] = last_full
@@ -2790,6 +2953,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                 result, errors, stopped = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid)
                 if result:
                     _, host, full, resp, first_line, first, _oai = result
+                    mark_worker_found(job_wid, host, full)
                     stream_resp = web.StreamResponse()
                     await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format,
                                           upstream_openai=_oai)
@@ -2807,6 +2971,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
                 if result:
                     _, host, full, data = result
+                    mark_worker_found(job_wid, host, full)
                     resp = chat_fmt(data, model, openai_format)
                     resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
                     resp.headers["X-Dyva-Model"] = full
@@ -2866,6 +3031,7 @@ async def _proxy_generate(request, session):
             if do_stream:
                 result, last_host_err = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint, remote=request.remote)
                 if result:
+                    mark_worker_found(job_wid, last_host, last_full)
                     resp, first_line, first = result
                     stream_resp = web.StreamResponse()
                     await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format=False)
@@ -2896,6 +3062,7 @@ async def _proxy_generate(request, session):
                         await r.release()
                         if data and "error" not in data:
                             dur = time.time() - start
+                            mark_worker_found(job_wid, last_host, last_full)
                             set_last(model, last_host, last_full)
                             add_good(last_host, model)
                             await broadcast_activity(last_host, model, "connected",
@@ -2931,6 +3098,7 @@ async def _proxy_generate(request, session):
             result, errors, stopped = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
             if result:
                 _, host, full, resp, first_line, first, _oai = result
+                mark_worker_found(job_wid, host, full)
                 stream_resp = web.StreamResponse()
                 await _forward_stream(request, stream_resp, resp, first_line, host, full,
                                       openai_format=False, upstream_openai=_oai)
@@ -2943,6 +3111,7 @@ async def _proxy_generate(request, session):
         result, errors, stopped = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
         if result:
             _, host, full, data = result
+            mark_worker_found(job_wid, host, full)
             return web.json_response(data)
 
         msg = "worker manually stopped" if stopped else "all servers failed"
@@ -3594,9 +3763,11 @@ async def handle_stop_worker(request):
         w = _workers.get(wid)
     if w is None and model:
         for _w in _workers.values():
-            if _w.get("model") == model:
+            if _w.get("model") == model and not _w.get("done"):
                 w = _w
                 break
+    if w is not None and w.get("done"):
+        return web.json_response({"error": "worker already finished"}, status=409)
     if w is None:
         return web.json_response({"error": "worker not found"}, status=404)
     stop = w.get("stop")
@@ -7254,7 +7425,7 @@ async def handle_tts_speech(request):
         host, prompt_id, node = result
         tried_hosts.add(host)
         try:
-            async with _waiting_worker(label, host, "speaking"):
+            async with _waiting_worker(label, host, "speaking", model=node):
                 raw, filename = await _tts_collect(
                     session, host, prompt_id, timeout=_tts_render_budget(input_text))
         except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
@@ -8102,7 +8273,7 @@ async def handle_image_edit(request):
         model_used = plan["model"]
         tried_hosts.add(host)
         try:
-            async with _waiting_worker(label, host, "editing"):
+            async with _waiting_worker(label, host, "editing", model=model_used):
                 raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
                                                timeout=EDIT_RENDER_TIMEOUT,
                                                poll=2, view_timeout=90)
@@ -8903,7 +9074,8 @@ def main():
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
     parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
     parser.add_argument("--source", nargs="+", metavar=("CMD"),
-                        help="manage additional host sources: '--source list' or '--source add <url>' "
+                        help="manage host sources: '--source list', '--source add <url>', "
+                             "'--source disable <name>|all', '--source enable <name>|all' "
                              "(the url returns a JSON list of source definitions, same as the dashboard's add-by-URL)")
     parser.add_argument("--hosts", nargs="*", metavar="ARG",
                         help="inspect or prune the host reputation table; arguments narrow left to "
