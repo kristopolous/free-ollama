@@ -224,6 +224,11 @@ proxy() {
     exit
 }
 
+if [[ "$1" == '--debug' ]]; then
+  set -x
+  shift
+fi
+
 cache
 if [[ -z "$1" ]]; then
     jq -r 'map(.models[]) | group_by(.) | map("\(length) \(.[0])") | .[]' "$_db" | sort -n
