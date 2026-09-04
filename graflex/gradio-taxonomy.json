@@ -1,0 +1,10 @@
+[
+  {"name": "image-gen", "keywords": ["stable diffusion", "sdxl", "txt2img", "text to image", "text-to-image", "flux", "comfyui", "fooocus", "dreambooth", "latent diffusion", "generate image", "img2img", "controlnet", "lora"]},
+  {"name": "video-gen", "keywords": ["text to video", "text-to-video", "image to video", "image-to-video", "video generation", "animatediff", "svd", "wan2", "cogvideo"]},
+  {"name": "image-edit", "keywords": ["rembg", "background", "matting", "remove bg", "remove background", "alpha matting", "upscal", "super resolution", "super-resolution", "inpaint", "outpaint", "restore", "colorize", "gfpgan", "codeformer", "face swap", "faceswap", "roop", "facefusion"]},
+  {"name": "cv-detect", "keywords": ["detect", "canny", "hough", "opencv", "yolo", "object detection", "segment", "segmentation", "ocr", "边缘", "检测", "classify image", "image classification", "pose", "depth"]},
+  {"name": "audio", "keywords": ["text to speech", "text-to-speech", "tts", "speech to text", "speech-to-text", "whisper", "asr", "voice clone", "voice conversion", "rvc", "bark", "musicgen", "audiocraft", "vocal", "audio generation"]},
+  {"name": "llm-chat", "keywords": ["chatbot", "chat", "base url", "api key", "system prompt", "deepseek", "gpt-", "openai", "conversation", "respond", "language model", "对话", "assistant"]},
+  {"name": "science", "keywords": ["protein", "molecul", "amino acid", "saprot", "dna", "rna", "genome", "docking", "smiles", "chemistry", "compound", "peptide"]},
+  {"name": "demo", "keywords": ["greet", "hello world", "hello, ", "example demo", "welcome to gradio"]}
+]
