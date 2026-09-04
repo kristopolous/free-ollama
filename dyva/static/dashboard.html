@@ -2645,10 +2645,24 @@ var TOOL_LABELS=[
   ['toolsOn','Image generation'],['imgEditOn','Image editing'],['videoOn','Video'],
   ['speechOn','Speech'],['askOn','Ask me'],['webOn','Web'],['docsOn','Documents']
 ];
+function _toolFlags(){
+  return {toolsOn:toolsOn,imgEditOn:imgEditOn,videoOn:videoOn,speechOn:speechOn,
+          askOn:askOn,webOn:webOn,docsOn:docsOn};
+}
 function enabledToolNames(){
-  var live={toolsOn:toolsOn,imgEditOn:imgEditOn,videoOn:videoOn,speechOn:speechOn,
-            askOn:askOn,webOn:webOn,docsOn:docsOn};
+  var live=_toolFlags();
   return TOOL_LABELS.filter(function(p){return live[p[0]]}).map(function(p){return p[1]});
+}
+function disabledToolNames(){
+  var live=_toolFlags();
+  return TOOL_LABELS.filter(function(p){return !live[p[0]]}).map(function(p){return p[1]});
+}
+// Tools with no toggle, pulled in automatically when any media tool is on.
+function alwaysOnToolNames(){
+  var live=_toolFlags();
+  if(live.toolsOn||live.imgEditOn||live.videoOn||live.speechOn||live.webOn)
+    return ['list_assets','search_models'];
+  return [];
 }
 // Whoever actually answered last, rather than a sticky host we would have to
 // go and ask the server about — this is a description of the conversation.
@@ -2668,9 +2682,15 @@ function chatSummaryMd(){
     out.push('');
   }
   block('system prompt',(currentChat&&currentChat.system||'').trim());
-  var tn=enabledToolNames();
   out.push('#### tools');
-  out.push(tn.length?tn.map(function(x){return '- '+x}).join('\n'):'> *(none)*');
+  function _grp(label,names){
+    return '- '+label+':'+(names.length
+      ? '\n'+names.map(function(x){return '  - '+x}).join('\n')
+      : ' *(none)*');
+  }
+  out.push(_grp('enabled',enabledToolNames()));
+  out.push(_grp('disabled',disabledToolNames()));
+  out.push(_grp('always on',alwaysOnToolNames()));
   out.push('');
   var meta=lastAnswerMeta();
   var wanted=document.getElementById('chatModel').value.trim();
@@ -3100,6 +3120,54 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           results.push({text:'Error fetching '+wurl+': '+ex.message,
                         md:'`\u26a0 fetch_url: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
+      }else if(fn.name==='search_models'){
+        var mtype=String(args.type||'').trim();
+        var sub=String(args.substring||'').trim().toLowerCase();
+        var ep={image:'sdapi/v1/sd-models',edit:'v1/images/edit-models',
+                video:'v1/videos/models',speech:'v1/audio/voices',text:'v1/models'}[mtype];
+        setStatus('reading '+(mtype||'?')+' models\u2026');
+        if(!ep){results.push({text:'Error: unknown model type "'+mtype+'"'});}
+        else{
+          try{
+            var rm=await fetch(ep,{cache:'no-store',signal:ac.signal});
+            if(!rm.ok){
+              var em='HTTP '+rm.status;try{var jm=await rm.json();em=jm.error||em}catch(e){}
+              results.push({text:'Error reading '+mtype+' models: '+em});
+            }else{
+              var jm2=await rm.json(),rows=[];
+              if(mtype==='speech'){
+                rows=(jm2.voices||[]).map(function(v){return {id:v}});
+              }else{
+                rows=(jm2.data||[]).map(function(o){return {id:o.id,count:o.count,family:o.family}});
+              }
+              if(sub)rows=rows.filter(function(r){return String(r.id||'').toLowerCase().indexOf(sub)>=0});
+              if(!rows.length){
+                results.push({text:'No '+mtype+' models'+(sub?' matching "'+sub+'"':'')
+                                   +' are available across the discovered hosts right now.'});
+              }else{
+                var LIM=50;
+                var pages=Math.ceil(rows.length/LIM);
+                var page=Math.max(1,Math.min(pages,parseInt(args.page,10)||1));
+                var shown=rows.slice((page-1)*LIM,page*LIM);
+                var lines=shown.map(function(r){
+                  var extra=[];
+                  if(r.family)extra.push(r.family);
+                  if(r.count)extra.push(r.count+' host'+(r.count===1?'':'s'));
+                  return '- '+r.id+(extra.length?' ('+extra.join(', ')+')':'');
+                }).join('\n');
+                var head=rows.length+' '+mtype+' model'+(rows.length===1?'':'s')
+                        +(sub?' matching "'+sub+'"':'')+' available'
+                        +(pages>1?' \u2014 page '+page+' of '+pages
+                                 +' (ask for page '+(page<pages?(page+1):1)
+                                 +' for '+(page<pages?'more':'the start')+')':'')+':';
+                results.push({text:head+'\n'+lines});
+              }
+            }
+          }catch(ex){
+            if(ac.signal.aborted)return;
+            results.push({text:'Error reading '+mtype+' models: '+ex.message});
+          }
+        }
       }else if(fn.name==='list_assets'){
         setStatus('listing assets\u2026');
         results.push({text:assetListText(liveChat(chatId)||currentChat)});
@@ -3208,27 +3276,30 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
             var a=assetFind(echat,w);
             if(a&&a.kind==='image')picks.push(a);else missing.push(w);
           });
+          // Only fall back to the most recent image when the model didn't name
+          // any AND didn't intend a from-scratch generation. With no image at
+          // all we still proceed — edit-class models (Flux.2, etc.) generate
+          // from text alone.
           var src=picks.length?null:lastEditableImage();
           if(missing.length){
             results.push({text:'Error: this conversation has no image named '+missing.join(', ')
                                +'. Call list_assets to see the real names, then try again.',
-                          md:'`⚠ edit_image: no image named '+missing.join(', ').replace(/`/g,"'")+'`'});
-          }else if(!picks.length&&!src){
-            results.push({text:'Error: there is no image in this conversation to edit. Ask the user to attach one, or generate one first with generate_image.',
-                          md:'`\u26a0 edit_image: no image in this conversation to edit`'});
+                          md:'`\u26a0 edit_image: no image named '+missing.join(', ').replace(/`/g,"'")+'`'});
           }else{
             var blobs=[];
             if(picks.length){
               for(var pi=0;pi<picks.length;pi++)
                 blobs.push({blob:await assetBlob(echat,picks[pi]),name:picks[pi].name});
-            }else blobs.push({blob:await _editSourceBlob(src),name:src.name||'source.png'});
+            }else if(src){blobs.push({blob:await _editSourceBlob(src),name:src.name||'source.png'});}
             var efd=new FormData();
             efd.append('prompt',String(args.prompt||'').trim().slice(0,2000));
             // Only forward a model the user actually asked for. Models like to
             // fill optional fields with plausible-looking nonsense.
             var em=String(args.model||'').trim();
             if(em&&em.length<80)efd.append('model',em);
-            efd.append('match_source','1');
+            // match_source only matters when there IS a source to match; a
+            // from-text generation uses an empty latent instead.
+            if(blobs.length)efd.append('match_source','1');
             // Order is meaningful: the first reference is the one whose shape
             // the result keeps, and the rest are drawn from.
             blobs.forEach(function(b){efd.append('image',b.blob,b.name)});
@@ -3339,9 +3410,17 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
       var fn=(tc&&tc.function)||{};
       return {function:{name:fn.name,arguments:fn.arguments}};
     });
-    if(full.trim()||_tclite.length)
-      appendMsgRecord(chatId,{role:'assistant',content:full,
-                              _meta:_tclite.length?{toolcalls:_tclite}:undefined});
+    // persist the turn's thinking too, or the tool-calling message loses its
+    // reasoning on reload (and after this round re-renders) — the same split
+    // the finished-turn path does.
+    var _spTc=splitThink(full);
+    var _meta={};
+    if(_tclite.length)_meta.toolcalls=_tclite;
+    var _thTc=(think+_spTc.t);
+    if(_thTc)_meta.think=_thTc;
+    if(_spTc.c.trim()||Object.keys(_meta).length)
+      appendMsgRecord(chatId,{role:'assistant',content:_spTc.c,
+                              _meta:Object.keys(_meta).length?_meta:undefined});
     results.forEach(function(res){
       if(!res.md)return;
       appendMsgRecord(chatId,{role:'assistant',content:res.md});
@@ -3739,9 +3818,10 @@ function _resultMetaMd(name,model,service,host){
   if(!bits.length)return '';
   return '\n\n<span class="result-meta">'+bits.map(escHtml).join(' \u00b7 ')+'</span>';
 }
+var SEARCH_MODELS_TOOL={type:'function',function:{name:'search_models',description:'Search the models actually available across the discovered hosts for a given kind of generation \u2014 to tell the user what they can make things with, or to find one matching what they asked for. Read-only. Call it for questions like "what models can you make images with" or "any cartoon image models" (pass substring "cartoon"). Returns matching model names with how many hosts have each.',parameters:{type:'object',properties:{type:{type:'string',enum:['image','edit','video','speech','text'],description:'Which capability: image (generate), edit (image editing), video, speech (TTS voices), or text (chat LLMs).'},substring:{type:'string',description:'Optional case-insensitive filter, e.g. "cartoon" or "flux" \u2014 only models whose name contains it are returned.'},page:{type:'integer',description:'1-based page number when there are more than 50 matches; the result says how many pages there are. Defaults to 1.'}},required:['type']}}};
 var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
-var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name. Globs work, so "flux*" matches every Flux variant.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
-var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, or combine several, by describing the change. Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image in the conversation, which is what you want for an incremental tweak. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name.'}},required:['prompt','name']}}};
+var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'The checkpoint to render with. If the user names a model, family, or style \u2014 e.g. "dreamshaper", "flux", "juggernaut" \u2014 put it HERE, as a substring or glob ("dreamshaper*" matches dreamshaper_8.safetensors), and do NOT mention the model in the prompt. Leave blank only when the user did not name one, to auto-pick the best available. Never invent a model name; use search_models if unsure what exists.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
+var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, combine several, or generate a fresh image on an edit-class model (Flux.2 and similar do text-to-image too \u2014 no reference needed). Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image (an incremental tweak), or when there is no image at all to generate from the prompt. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'The edit model to use. If the user names one, put it HERE as a substring or glob (globs work, e.g. "flux*2") \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a model name; use search_models (type "edit") if unsure.'}},required:['prompt','name']}}};
 // The image to edit is known deterministically, so the model never picks it:
 // walk back through the conversation and take whichever came last, a generated
 // image or one the user attached.
@@ -3822,7 +3902,7 @@ function askUser(question,options,signal){
     }
   });
 }
-var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. It can start from a picture (image-to-video) \u2014 if the user says "this cat/dog/photo" or attached an image, pass that image\'s name in `image` and the video animates from it. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a man petting a cat" or "the dog chases its tail". Describe the motion, not just the subject.'},seconds:{type:'number',description:'Desired length in seconds, e.g. 5. Optional \u2014 leave blank for the model\'s default (usually a few seconds). Keep it short; these are brief clips.'},image:{type:'string',description:'Optional start frame: the name of an image already in this conversation (from list_assets, an upload, or a generated image) to animate FROM. Use this whenever the user refers to "this" picture or attached one. Omit for a video made purely from the text prompt.'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'Leave blank. Blank picks the best available model automatically. Only set it if the user named one, and then pass their words verbatim.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
+var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. It can start from a picture (image-to-video) \u2014 if the user says "this cat/dog/photo" or attached an image, pass that image\'s name in `image` and the video animates from it. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a man petting a cat" or "the dog chases its tail". Describe the motion, not just the subject.'},seconds:{type:'number',description:'Desired length in seconds, e.g. 5. Optional \u2014 leave blank for the model\'s default (usually a few seconds). Keep it short; these are brief clips.'},image:{type:'string',description:'Optional start frame: the name of an image already in this conversation (from list_assets, an upload, or a generated image) to animate FROM. Use this whenever the user refers to "this" picture or attached one. Omit for a video made purely from the text prompt.'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'The video model to use. If the user names one, put it HERE as a substring or glob \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a name; use search_models (type "video").'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var TTS_TOOL_MAX=600;   // hard ceiling on what the chat tool will speak
 var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "hello_world.mp3". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['text','name']}}};
 var DOC_TOOLS=[
@@ -3862,6 +3942,7 @@ function buildTools(){
   // No toggle of its own: it is the index for whatever media tools are on,
   // and useless without them.
   if(toolsOn||imgEditOn||videoOn||speechOn||webOn)t.push(LIST_ASSETS_TOOL);
+  if(toolsOn||imgEditOn||videoOn||speechOn)t.push(SEARCH_MODELS_TOOL);
   return t;
 }
 // wrench stays lit whenever any tool is enabled

@@ -555,6 +555,7 @@ and remembered across sessions:
 | **Speech** | `generate_speech` — speak a line of dialog out loud |
 | **Ask** | `ask_user` — put one multiple-choice question to the user |
 | **Web** | `fetch_url` — read an explicit URL |
+| *(auto)* | `search_models` — list available models per capability (image/edit/video/speech/text), optional substring filter, paged 50 at a time; `list_assets` — this chat's files |
 | **Documents** | create/edit/rename/search/replace documents in a side panel |
 
 #### Assets
