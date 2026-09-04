@@ -881,12 +881,13 @@ def mark_worker_found(wid, host=None, model=None):
     if not w:
         return
     if not w.get("found"):
-        w["found"] = time.time()
-    if host and not w.get("host"):
+        w["found"] = time.time()   # the find-time latches once, on the first host
+    # host/model, though, track the host we are actually on now — a job that
+    # abandons a stalled host and moves to the next must show the new one
+    if host:
         w["host"] = host
-    if host and not w.get("service"):
         w["service"] = service_of(host)
-    if model and not w.get("rmodel"):
+    if model:
         w["rmodel"] = model
 
 
@@ -5062,10 +5063,12 @@ async def handle_txt2img(request):
         t0 = time.time()
         await broadcast_activity(host, activity_label, "trying",
             f"txt2img (comfy): {activity_label}", wid=wid)
-        # the one long occupancy that wasn't registering a host, which left it
-        # invisible to is_active()
-        async with _waiting_worker(f"txt2img: {activity_label}", host, "rendering"):
-            data = await _txt2img_comfyui(session, host, body, model_filter)
+        # one worker for the whole request (job_wid) — mark the render phase on
+        # it rather than spawning a second card, and keep it visible to is_active
+        mark_worker_found(job_wid, host)
+        _set_worker_phase(job_wid, "rendering")
+        data = await _txt2img_comfyui(session, host, body, model_filter)
+        _set_worker_phase(job_wid, None)
         if data:
             await broadcast_activity(host, activity_label, "connected",
                 "txt2img (comfy) \u2713", duration=time.time() - t0, wid=wid,
@@ -5300,7 +5303,7 @@ async def comfy_queue_state(session, host, prompt_id):
 
 
 async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
-                        poll=2, view_timeout=60, on_status=None):
+                        poll=2, view_timeout=60, on_status=None, queue_stall=0):
     """Wait out a job the host already accepted; return (bytes, filename).
 
     Deliberately not part of the race: by here the host is chosen and marked,
@@ -5316,6 +5319,8 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
     # twice denied knowing about it.
     missing = 0
     checked_at = 0.0
+    best_pos = None       # lowest queue position we've seen
+    pos_since = time.time()   # when it last improved
     while time.time() < deadline:
         await asyncio.sleep(poll)
         try:
@@ -5346,6 +5351,20 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
                     missing = 0
                     if on_status and where != "unknown":
                         on_status(where)
+                    # Queue patience: if we're stuck queued and the position
+                    # isn't dropping, this host is swamped — abandon it so the
+                    # caller can try the next one, rather than aging in a line
+                    # that may even be growing.
+                    if queue_stall and isinstance(where, str):
+                        mpos = re.match(r"queued #(\d+)", where)
+                        if mpos:
+                            pos = int(mpos.group(1))
+                            if best_pos is None or pos < best_pos:
+                                best_pos, pos_since = pos, now
+                            elif now - pos_since >= queue_stall:
+                                raise ComfyQueueStalled(
+                                    f"still queued (#{pos}) with no progress for "
+                                    f"{int(now - pos_since)}s")
             continue
         missing = 0
 
@@ -6324,6 +6343,8 @@ async def _run_video_job(session, jid):
         _video_job_save()
         return
     errors = []
+    job_wid = await _register_worker(job.get("model_filter") or "*", len(hosts),
+                                     lambda: None, kind="video")
 
     async def attempt(host, wid, done):
         await broadcast_activity(host, vkey, "trying", f"trying: {host} for {label}", wid=wid)
@@ -6355,7 +6376,7 @@ async def _run_video_job(session, jid):
             break
         job["exclude_models"] = sorted(bad_models)
         result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey,
-                                                            label=(job.get("model_filter") or "*"))
+                                                            job_wid=job_wid)
         if not result or stopped:
             break
         host, prompt_id, plan = result
@@ -6365,14 +6386,16 @@ async def _run_video_job(session, jid):
         job["comfyui_prompt_id"] = prompt_id
         job["phase"] = "submitted"
         _video_job_save()
+        # same worker, now rendering
+        mark_worker_found(job_wid, host, plan.get("model"))
+        _set_worker_phase(job_wid, "rendering")
         try:
-            async with _waiting_worker(label, host, "rendering", kind="video") as _wid:
-                def _phase(w):
-                    _set_worker_phase(_wid, w)
-                    job["phase"] = w      # so the polling client can show it too
-                    _video_job_save()
-                content, filename = await _poll_video_result(
-                    session, host, prompt_id, job, on_status=_phase)
+            def _phase(w):
+                _set_worker_phase(job_wid, w)
+                job["phase"] = w      # so the polling client can show it too
+                _video_job_save()
+            content, filename = await _poll_video_result(
+                session, host, prompt_id, job, on_status=_phase)
         except (_VideoError, ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             outcome = render_verdict(e)
             record_verdict(host, vkey, outcome)
@@ -6387,6 +6410,7 @@ async def _run_video_job(session, jid):
                 # rediscover the same incompatible pairing from scratch
                 remember_bad_pair(host, "edit", plan["model"])
                 tried_hosts.discard(host)
+            _set_worker_phase(job_wid, None)
             continue
 
         os.makedirs(VIDEO_JOBS_DIR, exist_ok=True)
@@ -6397,8 +6421,10 @@ async def _run_video_job(session, jid):
                     "status": "completed",
                     "unsigned_urls": [f"/v1/videos/{jid}/content"]})
         _video_job_save()
+        await _unregister_worker(job_wid, ok=True)
         return
 
+    await _unregister_worker(job_wid)
     reasons = collections.Counter(e.split(": ", 1)[1] if ": " in e else e for e in errors)
     job["status"] = "failed"
     job["error"] = ("; ".join(f"{c}x {r}" for r, c in reasons.most_common())
@@ -6950,7 +6976,8 @@ async def _poll_video_result(session, host, prompt_id, job, on_status=None):
     try:
         return await comfy_collect(session, host, prompt_id, COMFY_VIDEO,
                                    timeout=VIDEO_RENDER_TIMEOUT, poll=3,
-                                   view_timeout=120, on_status=on_status)
+                                   view_timeout=120, on_status=on_status,
+                                   queue_stall=QUEUE_STALL)
     except ComfyError as e:
         raise _VideoError(str(e))
 
@@ -7422,21 +7449,25 @@ async def handle_tts_speech(request):
     tried_hosts, tried = set(), 0
     tally = collections.Counter()
     stopped = False
+    job_wid = await _register_worker(str(body.get("model") or "").strip() or "*",
+                                     len(hosts), lambda: None, kind="speech")
     for _round in range(EDIT_RENDER_ATTEMPTS):
         pool = [h for h in hosts if h not in tried_hosts]
         if not pool:
             break
-        result, stopped, n_tried, round_tally = await _race_hosts(pool, attempt, tkey)
+        result, stopped, n_tried, round_tally = await _race_hosts(pool, attempt, tkey,
+                                                                  job_wid=job_wid)
         tried += n_tried
         tally.update(round_tally)
         if not result or stopped:
             break
         host, prompt_id, node = result
         tried_hosts.add(host)
+        mark_worker_found(job_wid, host, node)
+        _set_worker_phase(job_wid, "speaking")
         try:
-            async with _waiting_worker(label, host, "speaking", model=node):
-                raw, filename = await _tts_collect(
-                    session, host, prompt_id, timeout=_tts_render_budget(input_text))
+            raw, filename = await _tts_collect(
+                session, host, prompt_id, timeout=_tts_render_budget(input_text))
         except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             outcome = render_verdict(e)
             record_verdict(host, tkey, outcome)
@@ -7450,6 +7481,7 @@ async def handle_tts_speech(request):
             # detect one node per host, so forget the detection and let the
             # next probe pick differently.
             _TTS_NODE_CACHE.pop(host, None)
+            _set_worker_phase(job_wid, None)
             continue
 
         clip = _save_audio_clip(raw, filename)
@@ -7462,10 +7494,12 @@ async def handle_tts_speech(request):
         if clip:
             headers["X-Dyva-File"] = clip
         ext = os.path.splitext(filename)[1].lower()
+        await _unregister_worker(job_wid, ok=True)
         return web.Response(body=raw,
                             content_type=_TTS_MIME.get(ext, "application/octet-stream"),
                             headers=headers)
 
+    await _unregister_worker(job_wid)
     if stopped:
         return web.json_response({"error": "tts stopped"}, status=499)
 
@@ -7629,7 +7663,16 @@ _RENDER_UNSUITABLE = re.compile(
     r"|has no attribute|unexpected key")
 
 
+QUEUE_STALL = 150   # give up on a queue that hasn't advanced for this long
+
+
+class ComfyQueueStalled(ComfyError):
+    """The host accepted the job but its queue isn't moving for us."""
+
+
 def render_verdict(err):
+    if isinstance(err, ComfyQueueStalled):
+        return timed_out(str(err))
     """Turn an exception from the render phase into a verdict, so a host that
     took the job and then couldn't do it stops looking like a good host."""
     if isinstance(err, asyncio.TimeoutError):
@@ -8224,6 +8267,8 @@ async def handle_image_edit(request):
     snippet = prompt[:60] + ("..." if len(prompt) > 60 else "")
     label = f"edit: {snippet}"
     errors = []
+    job_wid = await _register_worker(model_filter or "*", len(hosts),
+                                     lambda: None, kind="edit")
 
     async def attempt(host, wid, done):
         await broadcast_activity(host, ekey, "trying",
@@ -8274,7 +8319,7 @@ async def handle_image_edit(request):
         if not pool:
             break
         result, stopped, n_tried, round_tally = await _race_hosts(
-            pool, attempt, ekey, label=(model_filter or "*"))
+            pool, attempt, ekey, job_wid=job_wid)
         tried += n_tried
         tally.update(round_tally)
         if not result or stopped:
@@ -8282,11 +8327,14 @@ async def handle_image_edit(request):
         host, prompt_id, plan, workflow = result
         model_used = plan["model"]
         tried_hosts.add(host)
+        # same worker, now rendering: name the resolved model, flip the phase
+        mark_worker_found(job_wid, host, model_used)
+        _set_worker_phase(job_wid, "editing")
         try:
-            async with _waiting_worker(label, host, "editing", model=model_used):
-                raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
-                                               timeout=EDIT_RENDER_TIMEOUT,
-                                               poll=2, view_timeout=90)
+            raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
+                                           timeout=EDIT_RENDER_TIMEOUT,
+                                           poll=2, view_timeout=90,
+                                           queue_stall=QUEUE_STALL)
         except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             outcome = render_verdict(e)
             record_verdict(host, ekey, outcome)
@@ -8308,17 +8356,20 @@ async def handle_image_edit(request):
                         f"  graph: {json.dumps(workflow)[:2000]}")
             await broadcast_activity(host, ekey, "failed",
                 f"failure: {host} for {label} - render: {err} [{rig}]")
+            _set_worker_phase(job_wid, None)
             continue
 
         b64 = base64.b64encode(raw).decode()
         stored = {"images": [b64], "_dyva_model": model_used}
         _save_image_history(stored, {"prompt": prompt}, host, model_used)
+        await _unregister_worker(job_wid, ok=True)
         return web.json_response({"created": int(time.time()),
                                   "data": [{"b64_json": b64}],
                                   "_dyva_files": stored.get("_dyva_files") or [],
                                   "model": model_used, "host": host,
                                   "service": service_of(host)})
 
+    await _unregister_worker(job_wid)
     if stopped:
         return web.json_response({"error": "edit stopped"}, status=499)
 
