@@ -63,6 +63,27 @@ Individual sources go off by name (`--source disable forrany`) and back on with
 change refreshes the cache immediately, so hosts a disabled source contributed
 actually go away instead of lingering in the cached list.
 
+## What Counts As Secured
+
+This project is a survey of servers people left open, and part of documenting
+that is being clear about what *good* looks like — so that a correctly
+configured server reads as a pass, not a target.
+
+A server that requires an authentication token is doing the bare minimum right,
+and that is where dyva stops. When a probe is turned away for want of
+credentials — an `unsloth` studio, a `litellm` proxy (both require API keys by
+default), or a `llama.cpp` that answers `401` on `/props` — that is recorded as
+a clean result and the host is left alone. It is the green check: *good, you did
+the bare minimum.*
+
+There is deliberately no attempt to get past it. This project has **no interest
+in cracking or guessing API keys, in brute force, or in finding zero-days** in
+`litellm`, `unsloth`, `llama.cpp`, or anything else. The point of the survey is
+to measure how many servers are exposed with no protection at all and how long
+they last — not to defeat the ones that are protected. An auth wall is the end
+of the interaction, and a result worth recording as the server having got it
+right.
+
 ## Host Reputation
 
 Every host+key pair dyva has tried carries a state — `good`, `maybe_good`, or
@@ -509,8 +530,8 @@ and remembered across sessions:
 
 Every file in a conversation — attached by the user or produced by a tool — is
 registered under a short name, and `list_assets` hands the model that list as
-JSON — `[{"name": "garden.jpg", "kind": "image", "source": "generated"}]`,
-oldest first — so the `name` field goes straight into the next tool call
+JSON — `[{"name": "garden.jpg", "kind": "image", "source": "generated",
+"model": ..., "service": ..., "host": ...}]`, oldest first — so the `name` field goes straight into the next tool call
 instead of having to be picked out of a prose line.
 This is what makes *"add this lady to the garden"* work: the model calls
 `list_assets`, sees `lady.jpg` and `garden.jpg`, and passes both to
@@ -563,6 +584,15 @@ Passing more than one image narrows host selection: an encode-style edit family
 has a fixed number of image slots (`QwenImageEditPlus` takes three,
 `QwenImageEdit` one), so a host whose only edit model can't hold them all is
 skipped rather than silently rendering with the extras dropped.
+
+Provenance travels with everything: a generated or spoken asset records the
+resolved model, the host's **service** (`ollama`, `vllm`, `llama.cpp`,
+`sglang`, `comfyui`, ...) and the host itself, and `/list` and the chat's own
+`ASSISTANT` label show the same `model · service · host` line. The service is
+carried on responses in the `X-Dyva-Service` header alongside `X-Dyva-Host` and
+`X-Dyva-Model`. The Workers pane tags each job with its inference **class**
+(text / image / edit / speech / video / music) and the resolved
+`model · service · host` of whatever answered.
 
 `generate_speech` goes through `/v1/audio/speech` like everything else, but the
 clip is also written to disk and referenced in the transcript by URL

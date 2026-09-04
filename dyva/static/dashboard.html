@@ -215,26 +215,37 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .htab-count{background:var(--accent-bg);color:var(--text-3);border-radius:var(--r-lg);padding:1px var(--sp-2);font-size:var(--fs-2xs);font-family:var(--font-mono);min-width:1.4em;text-align:center;line-height:1.4}
 .htab.active .htab-count{background:var(--accent-bg-active);color:var(--text-2)}
 .more{font-size:var(--fs-sm);color:var(--text-faint);margin-top:var(--sp-2)}
-.worker-card{display:flex;align-items:center;gap:var(--sp-2);justify-content:space-between;padding:var(--sp-2) var(--sp-3);border:1px solid var(--border);border-radius:var(--r-lg);margin-bottom:var(--sp-2)}
-.worker-card .worker-title{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}
-.worker-card .worker-model{font-family:var(--font-mono);font-size:var(--fs-md);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-card{display:flex;align-items:stretch;gap:var(--sp-2);justify-content:space-between;padding:var(--sp-2) var(--sp-3);border:1px solid var(--border);border-radius:var(--r-lg);margin-bottom:var(--sp-2)}
+.worker-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}
+.worker-card .worker-title{display:flex;align-items:baseline;gap:var(--sp-3);min-width:0}
+.worker-card .worker-model{font-family:var(--font-mono);font-size:var(--fs-md);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
+.worker-sub{display:flex;align-items:baseline;gap:var(--sp-2);margin-top:1px;min-width:0}
+.worker-kind{flex:0 0 auto;font-size:var(--fs-3xs);letter-spacing:.03em;color:var(--text-dim);text-transform:uppercase}
+.worker-sub{min-width:0}
+.worker-sub .worker-host{margin-left:0;flex:1 1 auto}
+.kind-image{color:#e3b341}
+.kind-edit{color:#c297ff}
+.kind-speech{color:#8ff0a4}
+.kind-video{color:#f778ba}
+.kind-music{color:#76e3ea}
 .worker-card .worker-ago{font-size:var(--fs-2xs);color:var(--text-faint)}
 .worker-card .worker-meta{font-size:var(--fs-sm);color:var(--text-muted);white-space:nowrap}
 .worker-card .worker-meta.worker-phase{color:var(--accent);font-family:var(--font-mono);font-size:var(--fs-2xs)}
 .worker-card.worker-done{opacity:.72;border-style:dashed}
 .worker-card.worker-done .worker-model{color:var(--text-2)}
-.worker-host{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55%}
+.worker-host{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .worker-rmodel{color:var(--text-2)}
 /* Two spans, each with a thin coloured rule under the words: finding a host
    (blue) then running the job on it (green). Just a line — no fill. */
-.wk-timeline{display:flex;gap:14px;margin-top:var(--sp-2);font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
-.wk-seg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim);padding-bottom:3px;border-bottom:2px solid transparent}
+.wk-timeline{margin-left:auto;flex:0 0 auto;display:flex;gap:12px;font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
+.wk-seg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim);padding-bottom:2px;border-bottom:2px solid transparent}
 .wk-find{border-bottom-color:var(--accent)}
 .wk-run{border-bottom-color:#39d353;flex:1 1 auto}
 /* a job that never secured a host: a quiet line, not an alarm */
 .wk-seg.nofind{border-bottom-color:var(--border-strong)}
+.workers-empty{color:var(--text-muted);font-size:var(--fs-md);text-align:center;padding:2.5rem 0}
 .workers-idle{color:var(--text-muted);font-size:var(--fs-md);margin-bottom:var(--sp-3)}
-.worker-stop{background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);padding:4px 10px;font-size:var(--fs-sm);cursor:pointer}
+.worker-stop{flex:0 0 auto;background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer}
 .worker-stop:hover{background:var(--accent-bg-active);color:var(--text)}
 .worker-stop[disabled]{opacity:.6;cursor:default;font-style:italic}
 .worker-stop[disabled]:hover{background:var(--accent-bg);color:var(--text-2)}
@@ -793,8 +804,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" class="htab active" data-pane="last" title="Recent">🎉<span class="htab-count" id="cnt-last"></span></button>
 <button type="button" class="htab" data-pane="good" title="Good">👍<span class="htab-count" id="cnt-good"></span></button>
 <button type="button" class="htab" data-pane="maybe" title="Maybe">🤷<span class="htab-count" id="cnt-maybe"></span></button>
-<button type="button" class="htab" data-pane="bad" title="Bad">👎<span class="htab-count" id="cnt-bad"></span></button>
-<button type="button" class="htab" data-pane="workers" title="Workers">🛠️<span class="htab-count" id="cnt-workers"></span></button>
+<button type="button" class="htab" data-pane="bad" title="Bad">💀<span class="htab-count" id="cnt-bad"></span></button>
+<button type="button" class="htab" data-pane="workers" title="Workers">🛠️<span class="htab-count" id="cnt-workers">0</span></button>
 </div>
 <div id="pane-last">
 <div id="lastList"></div>
@@ -1485,7 +1496,9 @@ function renderActivityWorkers(all){
   arr.forEach(function(w){
     var card=document.createElement('div');card.className='ap-worker';
     var m=document.createElement('div');m.className='apw-model';
-    m.textContent=w.model||'';m.title=w.model||'';
+    // the class of inference, not the raw routing key
+    m.textContent=(w.kind||'text')+(w.rmodel?' \u00b7 '+String(w.rmodel).replace(/\\/g,'/').split('/').pop():'');
+    m.title=w.model||'';
     var meta=document.createElement('div');meta.className='apw-meta';
     if(w.phase){
       meta.classList.add('phase');
@@ -1502,31 +1515,42 @@ function renderActivityWorkers(all){
     box.appendChild(card);
   });
 }
-// One card's two segments. `w` is the snapshot row; `liveOverride` lets the
-// ticker recompute from the wall clock without a new snapshot.
+// The search indicator cycles through these while a host is being hunted for —
+// thinking, looking, hoping, running — so a live card visibly fidgets. Once a
+// host is in hand it settles on the magnifying glass.
+var _CHECK_EMOJI=['\uD83E\uDD14','\uD83D\uDD0E','\uD83E\uDDD0','\uD83D\uDC40','\uD83E\uDD1E','\uD83C\uDFC3\u200D\u2640\uFE0F'];
+function _checkGlyph(w,findSecs){
+  if(w.done)return 'checked';               // job over: the word, not an emoji
+  if(findSecs==null)                         // still hunting: fidget
+    return _CHECK_EMOJI[Math.floor(Date.now()/1350)%_CHECK_EMOJI.length];
+  return '\uD83D\uDD0E';                    // found, still running
+}
+// One card's two segments, both reading "<time> - <what>" for consistency: the
+// find side is "<time> - <emoji> <hosts>", the run side "<time> - ran".
 function paintTimeline(tl,w,total,checkedStr){
   var find=tl.querySelector('.wk-find'),run=tl.querySelector('.wk-run');
   if(total==null)total=w.age||0;
   var checked=(checkedStr!=null)?checkedStr:String(w.checked);
-  // Three states: a number is the seconds it took to find a host; null means
-  // the server is sure no host was found (yet, or ever); undefined means the
-  // server predates this field (its process hasn't been restarted) so we say
-  // nothing about finding and just show a plain timer.
+  // find state: a number is seconds-to-find; null means the server is sure no
+  // host was found; undefined means an old server that never sent the field.
   var findSecs=w.find;
-  if(findSecs==null){                       // null OR undefined
-    var noData=(findSecs===undefined);
-    find.textContent=(w.done&&!noData?'no host found - ':timerText(total)+' - ')
-                     +'checked '+checked;
-    find.classList.toggle('nofind',!noData&&!!w.done);
+  if(findSecs==null){
+    if(findSecs===null&&w.done){
+      find.textContent=timerText(total)+' - no host';
+      find.classList.add('nofind');
+    }else{
+      find.textContent=timerText(total)+' - '+_checkGlyph(w,null)+' '+checked;
+      find.classList.remove('nofind');
+    }
     run.textContent='';run.style.display='none';
     return;
   }
   find.classList.remove('nofind');
-  find.textContent=timerText(findSecs)+' - checked '+checked;
+  find.textContent=timerText(findSecs)+' - '+_checkGlyph(w,findSecs)+' '+checked;
   run.style.display='';
   var runSecs=Math.max(0,total-findSecs);
-  run.textContent=(w.done?(w.ok===false?'stopped at ':'ran ')+timerText(runSecs)
-                        :'running '+timerText(runSecs));
+  var label=w.done?(w.ok===false?'stopped':'ran'):'running';
+  run.textContent=timerText(runSecs)+' - '+label;
 }
 var _lastWorkers=[];
 function renderWorkers(workers){
@@ -1537,29 +1561,58 @@ function renderWorkers(workers){
   // Forget wids that are gone from the snapshot — that worker stopped.
   var live={};arr.forEach(function(w){live[w.wid]=1});
   Object.keys(_stopping).forEach(function(k){if(!live[k])delete _stopping[k]});
-  _setCount('cnt-workers',liveArr.length||'');
+  _setCount('cnt-workers',liveArr.length);
   c.innerHTML='';
-  if(!arr.length){c.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">Nothing running right now</div>';return}
-  if(!liveArr.length){
-    var idle=document.createElement('div');idle.className='workers-idle';
-    idle.textContent='Nothing running right now';c.appendChild(idle);
-  }
+  // the empty-state line belongs only to a genuinely empty pane; finished
+  // cards are content, not emptiness
+  if(!arr.length){c.innerHTML='<div class="workers-empty">No workers yet</div>';return}
   arr.forEach(function(w){
     var card=document.createElement('div');card.className='worker-card'
       +(w.done?' worker-done'+(w.ok===false?' worker-failed':''):'');
     card.setAttribute('data-wid',w.wid);
+    var body=document.createElement('div');body.className='worker-body';
     var top=document.createElement('div');top.className='worker-title';
-    var n=document.createElement('span');n.className='worker-model';n.textContent=w.model||'';n.title=w.model;top.appendChild(n);
+    // Row 1: the model being searched for (the routing key).
+    var n=document.createElement('span');n.className='worker-model';
+    n.textContent=w.model||'';n.title=w.model||'';
+    top.appendChild(n);
+    body.appendChild(top);
+    // Row 2: the class marker, then the provenance of whatever answered —
+    // "text  gemma2:27b \u00b7 llama.cpp \u00b7 1.2.3.4:5678".
+    var sub=document.createElement('div');sub.className='worker-sub';
+    var kind=w.kind||'text';
+    var k=document.createElement('span');k.className='worker-kind kind-'+kind;k.textContent=kind;
+    sub.appendChild(k);
+    if(!w.done&&!w.phase){
+      var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
+      // A stop isn't instant — the race has to unwind and the in-flight upstream
+      // request has to be cancelled — so the button latches into "stopping…"
+      // until the worker actually disappears from a snapshot.
+      if(_stopping[w.wid]){stop.textContent='stopping\u2026';stop.disabled=true;}
+      else stop.textContent='stop';
+      stop.addEventListener('click',function(){
+        if(_stopping[w.wid])return;
+        _stopping[w.wid]=Date.now();
+        stop.textContent='stopping\u2026';stop.disabled=true;
+        fetch('stop-worker?wid='+encodeURIComponent(w.wid)).then(function(r){
+          if(!r.ok)throw 0;
+        }).catch(function(){
+          delete _stopping[w.wid];
+          stop.textContent='stop';stop.disabled=false;
+        });
+      });
+      sub.appendChild(stop);
+    }
     var where=w.host?String(w.host).replace(/^https?:\/\//,''):'';
     var rm=w.rmodel?String(w.rmodel).replace(/\\/g,'/').split('/').pop():'';
-    if(where||rm){
+    var svc=w.service||'';
+    var prov=[rm,svc,where].filter(Boolean).join(' \u00b7 ');
+    if(prov){
       var hs=document.createElement('span');hs.className='worker-host';
-      if(rm){var rms=document.createElement('span');rms.className='worker-rmodel';rms.textContent=rm;hs.appendChild(rms);}
-      if(where){hs.appendChild(document.createTextNode((rm?' ':'')+where));}
-      hs.title=(rm?rm+' ':'')+where;
-      top.appendChild(hs);
+      hs.textContent=prov;hs.title=prov;
+      sub.appendChild(hs);
     }
-    card.appendChild(top);
+    body.appendChild(sub);
     // Two spans, two clocks: finding a host (blue) and running the job on it
     // (green). Data attributes drive the local ticker; the server hands back
     // `find` (seconds to secure a host) and `age` (total).
@@ -1570,28 +1623,9 @@ function renderWorkers(workers){
     var find=document.createElement('span');find.className='wk-seg wk-find';
     var run=document.createElement('span');run.className='wk-seg wk-run';
     tl.appendChild(find);tl.appendChild(run);
-    card.appendChild(tl);
     paintTimeline(tl,w);
-    if(w.done||w.phase){card.appendChild(document.createElement('span'));c.appendChild(card);return}
-    var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
-    // A stop isn't instant — the race has to unwind and the in-flight upstream
-    // request has to be cancelled — so the button latches into "stopping…"
-    // until the worker actually disappears from a snapshot.
-    if(_stopping[w.wid]){stop.textContent='stopping\u2026';stop.disabled=true;}
-    else stop.textContent='stop';
-    stop.addEventListener('click',function(){
-      if(_stopping[w.wid])return;
-      _stopping[w.wid]=Date.now();
-      stop.textContent='stopping\u2026';stop.disabled=true;
-      fetch('stop-worker?wid='+encodeURIComponent(w.wid)).then(function(r){
-        if(!r.ok)throw 0;
-      }).catch(function(){
-        // The request never landed, so nothing is stopping — give the button back.
-        delete _stopping[w.wid];
-        stop.textContent='stop';stop.disabled=false;
-      });
-    });
-    card.appendChild(stop);
+    top.appendChild(tl);             // top row, pulled right, beside the model
+    card.appendChild(body);
     c.appendChild(card);
   });
 }
@@ -2076,7 +2110,7 @@ function makeSpeakBtn(getText,msgEl){
       var file=r.headers.get('X-Dyva-File')||'';
       var blob=await r.blob();
       var src=file?'v1/audio/clips/'+file:URL.createObjectURL(blob);
-      var host=r.headers.get('X-Dyva-Host')||'',node=r.headers.get('X-Dyva-Node')||'';
+      var host=r.headers.get('X-Dyva-Host')||'',node=r.headers.get('X-Dyva-Node')||'',svc=r.headers.get('X-Dyva-Service')||'';
       if(msgEl){
         var old=msgEl.querySelector('.speak-out');
         if(old)old.parentNode.removeChild(old);
@@ -2092,7 +2126,7 @@ function makeSpeakBtn(getText,msgEl){
       // conversation's memory of it.
       if(file){
         assetAdd(currentChat,{name:text,kind:'audio',url:src,desc:text,
-                              src:'spoken reply',host:host,model:node});
+                              src:'spoken reply',host:host,model:node,service:svc});
         saveChat(currentChat);
       }
       b.title='Speak this reply';
@@ -2124,7 +2158,7 @@ function addMsg(role,text,index){
     if(index!==undefined){
       var m=currentChat.messages[index];
       var meta=m&&m._meta;
-      if(meta||m&&m.tps)setAssistantLabel(r,meta&&meta.server,meta&&meta.model,m&&m.tps);
+      if(meta||m&&m.tps)setAssistantLabel(r,meta&&meta.server,meta&&meta.model,m&&m.tps,meta&&meta.service);
     }
   }
   else{
@@ -2351,9 +2385,9 @@ function chatInView(chatId){return String(currentChat.id)===String(chatId)}
 // The chat being appended to is the one live object for that id: currentChat if
 // in view, else gens[id].chat for a background generation. Both point at the
 // same object the gen was started with, so no full-cache lookup is needed.
-function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render,think){
+function pushAssistant(chatId,created,title,model,content,host,fmodel,tps,render,think,service){
   if(!content&&!think)return;
-  var msg={role:'assistant',content:content,_meta:{server:host||'',model:fmodel||''},tps:tps,ts:Date.now()};
+  var msg={role:'assistant',content:content,_meta:{server:host||'',model:fmodel||'',service:service||''},tps:tps,ts:Date.now()};
   if(think)msg._meta.think=think;
   var chat=liveChat(chatId);
   if(!chat)return;
@@ -2435,7 +2469,7 @@ function regenerateFrom(index){
   sendChat();
 }
 function retryUserMsg(index){regenerateFrom(index)}
-function setAssistantLabel(el,host,fmodel,tps){
+function setAssistantLabel(el,host,fmodel,tps,service){
   // The label is uppercased by .role; a hostname and a model filename are not
   // words, and shouting them makes them harder to read. Keep ASSISTANT in the
   // styled label and put the machine details in their own span.
@@ -2443,6 +2477,7 @@ function setAssistantLabel(el,host,fmodel,tps){
   lbl.textContent='ASSISTANT';
   var bits=[];
   if(fmodel)bits.push(fmodel);
+  if(service)bits.push(service);
   if(host)bits.push(String(host).replace(/^https?:\/\//,''));
   if(tps!==undefined&&tps!==null&&!isNaN(tps))bits.push(tps+' tps');
   var meta=el.querySelector('.role-meta');
@@ -2632,6 +2667,9 @@ function chatSummaryMd(){
       ? '<a href="'+escHtml(a.url)+'" target="_blank" rel="noopener noreferrer">'+nm+'</a>'
       : nm;
     var meta=escHtml(a.kind)+(a.src?' \u00b7 '+escHtml(a.src):'');
+    // provenance: which model, on what kind of service, at which host
+    if(a.model)meta+=' \u00b7 '+escHtml(String(a.model).replace(/\\/g,'/').split('/').pop());
+    if(a.service)meta+=' \u00b7 '+escHtml(a.service);
     if(a.host){
       var h=a.host.replace(/^https?:\/\//,'');
       meta+=' \u00b7 <a href="http://'+escHtml(h)+'" target="_blank" rel="noopener noreferrer">'+escHtml(h)+'</a>';
@@ -2903,7 +2941,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
       await runToolRound();
       return;
     }
-    finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
+    finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full,gen.service);
   }
   async function runToolRound(){
     setStatus('calling tool\u2026');
@@ -2933,7 +2971,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                 inames.push(assetAdd(ic,{name:args.name||'image',kind:'image',
                                          url:'sdapi/v1/images/'+f,
                                          desc:ib.prompt,src:'generated',
-                                         host:j.host||'',model:j.model||''}));
+                                         host:j.host||'',model:j.model||'',
+                                         service:j.service||''}));
               });
               results.push({text:'Image generated and saved as '+inames.join(', ')
                                  +'. Refer to it by that name in later tool calls.',
@@ -3039,7 +3078,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
               urls.push(vurl);
               var vname=assetAdd(liveChat(chatId)||currentChat,
                                  {name:args.name||'video',kind:'video',url:vurl,
-                                  desc:vb.prompt,src:'generated'});
+                                  desc:vb.prompt,src:'generated',
+                                  host:done.host||'',model:done.model||'',service:done.service||''});
               results.push({text:'Video ready, saved as '+vname+': '+vurl,
                             keep:'[Video saved as '+vname+'.]',
                             md:'['+vb.prompt.slice(0,80).replace(/[\[\]]/g,'')+']('+vurl+')'});
@@ -3108,7 +3148,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                   enames.push(assetAdd(echat,{name:args.name||'edited',kind:'image',
                                               url:'sdapi/v1/images/'+f,
                                               desc:String(args.prompt||''),
-                                              host:j4.host||'',model:j4.model||'',
+                                              host:j4.host||'',model:j4.model||'',service:j4.service||'',
                                               src:'edited from '+blobs.map(function(b){return b.name}).join(' + ')}));
                 });
                 results.push({text:'Image edited and saved as '+enames.join(', ')
@@ -3167,7 +3207,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                                    {name:args.name||'speech',kind:'audio',url:curl,
                                     desc:sb.input,src:'generated',
                                     host:r3.headers.get('X-Dyva-Host')||'',
-                                    model:r3.headers.get('X-Dyva-Node')||''});
+                                    model:r3.headers.get('X-Dyva-Node')||'',
+                                    service:r3.headers.get('X-Dyva-Service')||''});
                 results.push({text:(sb._trimmed
                     ? 'Spoken, but the text was too long and only the first part was voiced. Tell the user. Saved as '
                     : 'Spoken successfully, saved as ')+aname+': '+curl,
@@ -3225,6 +3266,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
     var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify((useTools&&toolList.length)?{model:model,messages:msgs,stream:true,tools:toolList}:{model:model,messages:msgs,stream:true}),signal:ac.signal});
     host=resp.headers.get('X-Dyva-Host')||'';gen.host=host;
     fmodel=resp.headers.get('X-Dyva-Model')||model;gen.fmodel=fmodel;
+    var service=resp.headers.get('X-Dyva-Service')||'';gen.service=service;
     if(!resp.ok){
       clearInflight();
       var msg='HTTP '+resp.status;
@@ -3238,7 +3280,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
       renderSidebar();
       return;
     }
-    if(live())setAssistantLabel(gen.bubble.roleEl,host,fmodel);
+    if(live())setAssistantLabel(gen.bubble.roleEl,host,fmodel,undefined,gen.service);
     var reader=resp.body.getReader();
     var dec=new TextDecoder();
     while(true){
@@ -3283,7 +3325,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
     if(stopped){
       if(full){
         if(live()){gen.bubble.bodyEl.classList.remove('streaming');gen.bubble.bodyEl.removeAttribute('data-stream');}
-        finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full);
+        finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full,gen.service);
       }else if(live()){
         gen.bubble.bodyEl.classList.remove('streaming');
         gen.bubble.bodyEl.textContent='Generation stopped.';
@@ -3330,10 +3372,10 @@ function reattachGen(id){
   b.bodyEl.parentNode.insertBefore(st,b.bodyEl);
   g.statusEl=st;
   activeStatus=st;
-  if(g.host)setAssistantLabel(b.roleEl,g.host,g.fmodel);
+  if(g.host)setAssistantLabel(b.roleEl,g.host,g.fmodel,undefined,g.service);
   if(g.raw||g.think)paintGen(g);else showRummage(b.bodyEl);
 }
-function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full){
+function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full,service){
   var sp=splitThink(full);
   var thAll=think+sp.t;
   var content=sp.c;
@@ -3343,7 +3385,7 @@ function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle
     try{if(JSON.parse(infoText))content='```json\n'+infoText+'\n```';}catch(e){}
   }
   if(isLive){
-    setAssistantLabel(bubble.roleEl,host,fmodel,tps);
+    setAssistantLabel(bubble.roleEl,host,fmodel,tps,service);
     bubble.bodyEl.classList.remove('streaming');
     bubble.bodyEl.removeAttribute('data-stream');
     bubble.bodyEl.innerHTML=thinkHtml(thAll,true)+renderChatText(content);
@@ -3352,7 +3394,7 @@ function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle
   }
   var _fin=splitDocBlocks(content);
   if(_fin.docs.length)syncStreamDocs(genOf(chatId),_fin.docs,true);
-  pushAssistant(chatId,chatCreated,chatTitle,model,content,host,fmodel,tps,isLive,thAll);
+  pushAssistant(chatId,chatCreated,chatTitle,model,content,host,fmodel,tps,isLive,thAll,service);
 }
 function tryResume(){
   for(var k in gens)return;

@@ -778,6 +778,8 @@ def _worker_snapshot():
             "phase": w.get("phase"),
             "host": w.get("host"),
             "rmodel": w.get("rmodel"),
+            "kind": w.get("kind") or "text",
+            "service": w.get("service"),
             "done": bool(done),
             "ok": w.get("ok"),
         })
@@ -820,7 +822,22 @@ def _trim_done_workers():
         _workers.pop(wid, None)
 
 
-async def _register_worker(model, total, stop, phase=None, host=None):
+def _kind_for_key(key):
+    k = str(key or "")
+    if key == IMG_KEY or k == "image":
+        return "image"
+    if key == TTS_KEY or k.startswith("tts"):
+        return "speech"
+    if key == VIDEO_KEY or k.startswith("video"):
+        return "video"
+    if key == MUSIC_KEY or k.startswith("music"):
+        return "music"
+    if key == EDIT_KEY or k.startswith("edit"):
+        return "edit"
+    return "text"
+
+
+async def _register_worker(model, total, stop, phase=None, host=None, kind="text"):
     wid = _new_wid()
     _trim_done_workers()
     if len(_workers) >= _WORKERS_MAX:
@@ -837,6 +854,8 @@ async def _register_worker(model, total, stop, phase=None, host=None):
         "stop": stop,
         "phase": phase,
         "host": host,
+        "kind": kind,
+        "service": service_of(host) if host else None,
         "found": None,
         "done": None,
         "ok": None,
@@ -857,6 +876,8 @@ def mark_worker_found(wid, host=None, model=None):
         w["found"] = time.time()
     if host and not w.get("host"):
         w["host"] = host
+    if host and not w.get("service"):
+        w["service"] = service_of(host)
     if model and not w.get("rmodel"):
         w["rmodel"] = model
 
@@ -876,13 +897,18 @@ def _set_worker_phase(wid, phase):
         w["phase"] = phase
 
 
+_PHASE_KIND = {"editing": "edit", "speaking": "speech", "composing": "music",
+               "rendering": "image"}
+
+
 @contextlib.asynccontextmanager
-async def _waiting_worker(label, host, phase="rendering", model=None):
+async def _waiting_worker(label, host, phase="rendering", model=None, kind=None):
     """Show a job in the workers view while we wait on a host that already took
     it. The race registers a worker for *finding* a host; without this the job
     vanishes from the view for the whole render, which is the part that
     actually takes minutes."""
-    wid = await _register_worker(label, 1, lambda: None, phase=phase, host=host)
+    wid = await _register_worker(label, 1, lambda: None, phase=phase, host=host,
+                                 kind=kind or _PHASE_KIND.get(phase, "image"))
     mark_worker_found(wid, host, model)   # the finding already happened; this is the run
     ok = False
     try:
@@ -2122,7 +2148,8 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         _workers[job_wid]["stop"] = _stop
         wwid = job_wid
     else:
-        wwid = await _register_worker(label or key, len(entries), _stop)
+        wwid = await _register_worker(label or key, len(entries), _stop,
+                                      kind=_kind_for_key(key))
     n = min(workers or WORKER_COUNT, len(entries)) or 1
     tasks = [asyncio.create_task(worker()) for _ in range(n)]
     _tasks_holder[:] = tasks
@@ -2618,6 +2645,8 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
     response.headers["Cache-Control"] = "no-cache"
     response.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
     response.headers["X-Dyva-Model"] = full
+    response.headers["X-Dyva-Service"] = service_of(host)
+    response.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
     try:
         await response.prepare(request)
     except (BrokenPipeError, ConnectionResetError, aiohttp.ClientConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
@@ -2916,7 +2945,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
     _servers = find_servers(model_in, req_caps)
     total = len(_servers)
-    job_wid = await _register_worker(model_list[0], total, lambda: None)
+    job_wid = await _register_worker(model_list[0], total, lambda: None, kind="text")
     try:
         last = get_last(model_list[0])
         last_host_err = None
@@ -2939,6 +2968,8 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     resp = chat_fmt(data, model_list[0], openai_format)
                     resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", last_host)
                     resp.headers["X-Dyva-Model"] = last_full
+                    resp.headers["X-Dyva-Service"] = service_of(last_host)
+                    resp.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
                     return resp
 
         if not _servers:
@@ -2975,6 +3006,8 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     resp = chat_fmt(data, model, openai_format)
                     resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
                     resp.headers["X-Dyva-Model"] = full
+                    resp.headers["X-Dyva-Service"] = service_of(host)
+                    resp.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
                     return resp
 
         msg = "worker manually stopped" if stopped else "all servers failed"
@@ -3020,7 +3053,7 @@ async def _proxy_generate(request, session):
             return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
         return _info_response(model, info, do_stream=do_stream)
 
-    job_wid = await _register_worker(model, len(find_servers(model, req_caps)), lambda: None)
+    job_wid = await _register_worker(model, len(find_servers(model, req_caps)), lambda: None, kind="text")
     try:
         last = get_last(model)
         last_host_err = None
@@ -5111,6 +5144,7 @@ async def handle_txt2img(request):
         _save_image_history(data, body, host_used, requested_model)
         data["host"] = host_used
         data["model"] = model_used
+        data["service"] = service_of(host_used) if host_used else ""
         return web.json_response(data)
 
     # A host-wide unreachable mark (dead at the connection level) must exclude a
@@ -6372,7 +6406,7 @@ async def _run_video_job(session, jid):
         job["phase"] = "submitted"
         _video_job_save()
         try:
-            async with _waiting_worker(label, host, "rendering") as _wid:
+            async with _waiting_worker(label, host, "rendering", kind="video") as _wid:
                 def _phase(w):
                     _set_worker_phase(_wid, w)
                     job["phase"] = w      # so the polling client can show it too
@@ -7141,6 +7175,7 @@ async def handle_videos_list(request):
             "prompt": job.get("prompt") or "",
             "model": job.get("model") or "",
             "host": job.get("host") or "",
+            "service": service_of(job.get("host") or "") if job.get("host") else "",
             "created": job.get("created"),
             "error": job.get("error"),
             "frames": (job.get("params") or {}).get("length"),
@@ -7204,6 +7239,7 @@ async def handle_videos_get(request):
         "status": job["status"],
         "model": job["model"],
         "host": job.get("host"),
+        "service": service_of(job.get("host") or "") if job.get("host") else "",
         # where the host says the job actually is: "queued #3", "rendering"
         "phase": job.get("phase"),
         "polling_url": f"/v1/videos/{jid}",
@@ -7447,7 +7483,8 @@ async def handle_tts_speech(request):
         headers = {
             "X-Dyva-Host": host,
             "X-Dyva-Node": node,
-            "Access-Control-Expose-Headers": "X-Dyva-Host, X-Dyva-Node, X-Dyva-File",
+            "X-Dyva-Service": service_of(host),
+            "Access-Control-Expose-Headers": "X-Dyva-Host, X-Dyva-Node, X-Dyva-Service, X-Dyva-File",
         }
         if clip:
             headers["X-Dyva-File"] = clip
@@ -8306,7 +8343,8 @@ async def handle_image_edit(request):
         return web.json_response({"created": int(time.time()),
                                   "data": [{"b64_json": b64}],
                                   "_dyva_files": stored.get("_dyva_files") or [],
-                                  "model": model_used, "host": host})
+                                  "model": model_used, "host": host,
+                                  "service": service_of(host)})
 
     if stopped:
         return web.json_response({"error": "edit stopped"}, status=499)
