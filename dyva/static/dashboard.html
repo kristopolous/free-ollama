@@ -151,7 +151,9 @@ body{font-family:var(--font-ui);background:var(--bg);color:var(--text);padding:v
 a{color:var(--text-muted)}
 .header{display:flex;align-items:center;gap:var(--sp-4);margin-bottom:var(--sp-6);flex-shrink:0;position:relative}
 .header img{flex-shrink:0}
-.activity-btn{margin-left:auto;background:var(--surface);color:var(--text-muted);border:none;border-radius:var(--r-md);padding:var(--sp-3) var(--sp-5);font-size:var(--fs-md);cursor:pointer;flex-shrink:0}
+.activity-btn{position:relative;margin-left:auto;background:var(--surface);color:var(--text-muted);border:none;border-radius:var(--r-md);padding:var(--sp-3) var(--sp-5);font-size:var(--fs-md);cursor:pointer;flex-shrink:0}
+.act-badge{position:absolute;top:-6px;right:-6px;min-width:18px;height:18px;padding:0 5px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;background:var(--err,#e5484d);color:#fff;border-radius:9px;font-size:11px;line-height:1;font-weight:600;font-variant-numeric:tabular-nums;pointer-events:none}
+.act-badge[hidden]{display:none}
 .activity-btn:hover{color:var(--text-2);background:var(--accent-bg)}
 .activity-pop{display:none;position:absolute;top:calc(100% + var(--sp-3));right:0;width:min(520px,calc(100vw - 24px));max-height:min(60vh,480px);overflow:hidden;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);z-index:120;padding:var(--sp-4) 14px}
 .activity-pop.open{display:flex;flex-direction:column}
@@ -392,7 +394,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg .body p img{max-width:min(360px,100%);border-radius:var(--r-lg);display:block;margin:var(--sp-2) 0}
 .msg .files img,.msg .body img{cursor:zoom-in}
 .msg img.img-missing{max-width:128px;max-height:128px;object-fit:contain;opacity:.6;cursor:default}
-.result-meta{display:block;margin-top:.3em;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint)}
+.result-meta{display:block;margin-top:.3em;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-2)}
 .msg .file-chip{display:inline-block;background:var(--a-900);border:1px solid var(--border);border-radius:var(--r-md);padding:3px var(--sp-3);font-size:var(--fs-xs);color:var(--accent);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid var(--border-strong);background:#232323;border-radius:var(--r-sm);padding:.25em .65em}
@@ -704,10 +706,15 @@ body.dragging-image .hist-item{cursor:grabbing}
 .mini-search:focus{outline:none;border-color:var(--border-focus)}
 .mini-search::placeholder{color:var(--text-faint)}
 #imgHistory{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:var(--sp-3)}
-/* prompt and start image side by side: an image-to-video job is both */
-.vid-prompt-row{display:grid;grid-template-columns:2fr 1fr;gap:var(--sp-4);align-items:start}
-@media (max-width:640px){.vid-prompt-row{grid-template-columns:1fr}}
-.vid-prompt-row .drop{min-height:0;padding:var(--sp-4)}
+/* Left half is the job's parameters — [frames][steps] over [prompt]; right
+   half is the start image (an image-to-video job is both), which spans the
+   full height of the two left rows. */
+.vid-io{display:grid;grid-template-columns:2fr 1fr;gap:var(--sp-4);align-items:stretch;margin-bottom:var(--sp-4)}
+.vid-io-left{display:flex;flex-direction:column;gap:var(--sp-3)}
+.vid-io-left .media-row-2{margin-bottom:0}
+.vid-io-right{display:flex;flex-direction:column}
+.vid-io-right .drop{flex:1 1 auto;min-height:0;padding:var(--sp-4)}
+@media (max-width:640px){.vid-io{grid-template-columns:1fr}}
 .img-pager{display:flex;align-items:center;justify-content:center;gap:var(--sp-3);margin-top:var(--sp-4)}
 .pager-btn{background:var(--surface);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-md);min-width:2rem;padding:2px var(--sp-3);font-size:var(--fs-lg);line-height:1.4;cursor:pointer}
 .pager-btn:hover:not(:disabled){background:var(--accent-bg);color:var(--text)}
@@ -765,10 +772,10 @@ body.dragging-image .hist-item{cursor:grabbing}
 <img src="dyva.avif" alt="" width="56" height="56">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a title="docs" href="docs/" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
+<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a title="guide" href="guide" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
 </p>
 </div>
-<button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾</button>
+<button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾<span id="actBadge" class="act-badge" hidden></span></button>
 <div id="activityPop" class="activity-pop">
 <div class="ap-head">Activity <span id="pauseBtn" style="font-size:var(--fs-2xl);font-weight:normal;cursor:pointer;color:var(--text-dim);margin-left:auto;border:1px solid var(--text-dim);border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></div>
 <div id="activityWorkers" class="ap-workers" style="display:none"></div>
@@ -1092,6 +1099,8 @@ __SD_MODELS__
 </select>
 </div>
 </div>
+<div class="vid-io">
+<div class="vid-io-left">
 <div class="media-row media-row-2">
 <div class="field">
 <label for="vidFrames">Frames</label>
@@ -1102,12 +1111,12 @@ __SD_MODELS__
 <input id="vidSteps" type="number" min="1" max="60" step="1" placeholder="20">
 </div>
 </div>
-<div class="vid-prompt-row">
 <div class="field">
 <label for="vidPrompt">Prompt</label>
 <textarea id="vidPrompt" rows="3" placeholder="a paper boat drifting down a rain gutter, slow motion"></textarea>
 </div>
-<div class="field">
+</div>
+<div class="field vid-io-right">
 <label for="vidStartFile">Start image <small class="setting-help">optional</small></label>
 <div id="vidDrop" class="drop">
   <input id="vidStartFile" type="file" accept="image/*" hidden>
@@ -1591,6 +1600,10 @@ function renderWorkers(workers){
   var live={};arr.forEach(function(w){live[w.wid]=1});
   Object.keys(_stopping).forEach(function(k){if(!live[k])delete _stopping[k]});
   _setCount('cnt-workers',liveArr.length);
+  // Notification badge on the Activity button: the number of live workers, or
+  // hidden entirely when there are none.
+  var _ab=document.getElementById('actBadge');
+  if(_ab){var _n=liveArr.length;_ab.textContent=_n>99?'99+':String(_n);_ab.hidden=!_n;}
   c.innerHTML='';
   // the empty-state line belongs only to a genuinely empty pane; finished
   // cards are content, not emptiness
@@ -3202,17 +3215,18 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                 var pages=Math.ceil(rows.length/LIM);
                 var page=Math.max(1,Math.min(pages,parseInt(args.page,10)||1));
                 var shown=rows.slice((page-1)*LIM,page*LIM);
-                var lines=shown.map(function(r){
-                  var extra=[];
-                  if(r.family)extra.push(r.family);
-                  if(r.count)extra.push(r.count+' host'+(r.count===1?'':'s'));
-                  return '- '+r.id+(extra.length?' ('+extra.join(', ')+')':'');
-                }).join('\n');
+                // [model_name, cardinality] pairs, e.g. ["flux-2", 100] means
+                // 100 hosts serve flux-2.
+                var lines=JSON.stringify(shown.map(function(r){
+                  return [r.id, r.count||0];
+                }));
                 var head=rows.length+' '+mtype+' model'+(rows.length===1?'':'s')
                         +(sub?' matching "'+sub+'"':'')+' available'
                         +(pages>1?' \u2014 page '+page+' of '+pages
                                  +' (ask for page '+(page<pages?(page+1):1)
-                                 +' for '+(page<pages?'more':'the start')+')':'')+':';
+                                 +' for '+(page<pages?'more':'the start')+')':'')
+                        +'. Each entry is [model_name, host_count] \u2014 the number is how '
+                        +'many discovered hosts serve that model:';
                 results.push({text:head+'\n'+lines});
               }
             }
@@ -5444,8 +5458,14 @@ function _showChatImage(i){
   if(!im)return;
   _lbChatAt=i;
   var a=assetForImg(im.src);
-  openLightboxSrc(im.src,(a?a.name+(a.desc?' \u00b7 '+a.desc:''):(im.alt||''))
-                        +' ('+(i+1)+'/'+_lbChat.length+')');
+  var cap;
+  if(a){
+    var parts=[a.name];
+    if(a.desc)parts.push(a.desc);
+    if(a.model)parts.push(a.model);   // provenance: what generated it
+    cap=parts.join(' \u00b7 ');
+  }else cap=im.alt||'';
+  openLightboxSrc(im.src,cap+' ('+(i+1)+'/'+_lbChat.length+')');
 }
 // Arrow keys walk the gallery as it is currently shown: filtered, in the same
 // order, across page boundaries — paging along so the grid behind stays in

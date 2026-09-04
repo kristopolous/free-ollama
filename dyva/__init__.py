@@ -198,15 +198,36 @@ def classify_model(model):
     return None
 
 
+def model_classes(model):
+    """Every capability class a model belongs to, as a set.
+
+    `image_edit` (Flux.2 and friends) is a *both-buckets* category: graflex's
+    classifier consolidates it into `image` AND `edit` and destroys the empty
+    `image_edit` bucket. dyva doesn't consume that consolidated output — it
+    re-classifies raw model filenames at query time — so the same consolidation
+    has to happen here, at the classifier stage, once, rather than being
+    special-cased in each capability endpoint. A set is the honest shape: a
+    model can be an image generator and an edit model at the same time."""
+    c = classify_model(model)
+    if c is None:
+        return frozenset()
+    if c == "image_edit":
+        return frozenset({"image", "edit"})
+    return frozenset({c})
+
+
 def model_modalities(model):
     """Derive OpenRouter-style output modalities for a model path."""
-    ctype = classify_model(model)
-    if ctype and ctype in _CLASS_MODALITIES:
-        return list(_CLASS_MODALITIES[ctype])
-    if ctype == "other" or ctype is None:
+    cls = model_classes(model)
+    if not cls or cls == {"other"}:
         return []
-    # any recognized-but-unmapped category defaults to text
-    return ["text"]
+    out = []
+    for c in cls:
+        # any recognized-but-unmapped category defaults to text
+        for mod in _CLASS_MODALITIES.get(c, ["text"]):
+            if mod not in out:
+                out.append(mod)
+    return out
 
 
 def load_settings():
@@ -3209,6 +3230,20 @@ async def handle_dashboard(request):
     html = html.replace("__SD_MODELS__", sd_options)
     return web.Response(text=html, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-cache"})
+
+
+async def handle_guide(request):
+    """
+    Consolidated guide to graflex, dyva and free-ollama.
+    ---
+    tags: [UI]
+    summary: GET /guide — a terse how-to (links to the Swagger API docs)
+    responses:
+      '200':
+        description: HTML guide page
+    """
+    path = os.path.join(os.path.dirname(__file__), "static", "guide.html")
+    return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
 
 
 async def handle_dashboard_models(request):
@@ -6377,7 +6412,7 @@ def _host_has_class(host, classes):
         if s.get("server") != host:
             continue
         for m in s.get("models") or []:
-            if classify_model(m) in classes:
+            if model_classes(m) & classes:
                 return True
     return False
 
@@ -6613,7 +6648,7 @@ def _pick_video_model(host, model_filter=None):
         if s.get("server") != host:
             continue
         for m in s.get("models") or []:
-            if classify_model(m) not in _VIDEO_CLASSES:
+            if not (model_classes(m) & _VIDEO_CLASSES):
                 continue
             if model_filter and not model_query_match(m, model_filter):
                 continue
@@ -8263,9 +8298,12 @@ def _host_edit_models(host, model_filter=None):
         if s.get("server") != host:
             continue
         for m in s.get("models") or []:
-            if classify_model(m) != "edit":
+            if "edit" not in model_classes(m):
                 continue
-            if model_filter and not match_model(m, model_filter):
+            # Same separator-blind match _edit_plan uses, so the host we pick as
+            # a candidate is one planning will actually accept — otherwise a
+            # filter/plan mismatch sends the whole pool through "no edit model".
+            if model_filter and not model_query_match(m, model_filter):
                 continue
             out.append(m)
     return out
@@ -8316,10 +8354,12 @@ def _find_edit_hosts(target_host=None, model_filter=None):
     """ComfyUI hosts that might run an edit model, best-first — same tiering as
     everything else, keyed on __edit__.
 
-    When a model is named, hosts whose cached model list actually contains a
-    match come first. Without that, asking for "flux" would race whichever
-    hosts happened to rank highest, most of which don't have one, and every
-    attempt would come back unsuitable before reaching a host that does."""
+    When a model is named, race only the hosts whose cached model list actually
+    contains a match — not every ComfyUI host. Merely sorting matches first
+    still grinds through the entire pool (hundreds of hosts) once the few real
+    candidates are exhausted, each one failing "no edit model matching …". Only
+    when the cache shows no host has it at all do we fall back to a best-effort
+    race over everything (the cache can lag what a host really serves)."""
     if target_host:
         return [target_host] if any(x.get("service") == "comfyui"
                                     for x in load_servers()
@@ -8331,15 +8371,15 @@ def _find_edit_hosts(target_host=None, model_filter=None):
     last = get_last(ekey)
     last_host = last[0] if last and last[0] else None
 
-    def rank(h):
-        tier = capability_tier(h, ekey, marks, last_host)
-        if model_filter:
-            has = 0 if _host_edit_models(h, model_filter) else 1
-        else:
-            has = 0 if _host_has_class(h, {"edit"}) else 1
-        return (has, tier) if model_filter else (tier, has)
-
-    hosts.sort(key=rank)
+    if model_filter:
+        matching = [h for h in hosts if _host_edit_models(h, model_filter)]
+        # Filter to the hosts that have it; only if none do, fall back to the
+        # whole pool as a best-effort in case the cache is stale.
+        hosts = matching or hosts
+        hosts.sort(key=lambda h: capability_tier(h, ekey, marks, last_host))
+    else:
+        hosts.sort(key=lambda h: (capability_tier(h, ekey, marks, last_host),
+                                  0 if _host_has_class(h, {"edit"}) else 1))
     return _idle_first(hosts)
 
 
@@ -8413,7 +8453,14 @@ async def handle_edit_models(request):
             continue
         host = s.get("server", "")
         for m in s.get("models", []):
-            if classify_model(m) != "edit":
+            if "edit" not in model_classes(m):
+                continue
+            # `image_edit` matches on "flux2", which also catches that family's
+            # VAE and text encoder (vae/flux2-vae, text_encoders/mistral_..flux2).
+            # Those are parts, not models — drop them. Match on the full path so
+            # a giveaway folder (vae/, text_encoders/, clip/, loras/) is caught
+            # even when the basename alone looks innocent.
+            if _NOT_A_MODEL.search(m.replace("\\", "/")):
                 continue
             # the file name is what a user types; the full path is host-specific
             name = m.replace("\\", "/").rsplit("/", 1)[-1]
@@ -9104,7 +9151,7 @@ def _pick_music_model(host, model_filter=None):
         if s.get("server") != host:
             continue
         for m in s.get("models") or []:
-            if classify_model(m) not in _AUDIO_CLASSES:
+            if not (model_classes(m) & _AUDIO_CLASSES):
                 continue
             if model_filter and not match_model(m, model_filter):
                 continue
@@ -9214,7 +9261,7 @@ async def handle_music_models(request):
         return {"host": _norm_host(host), "family": fam["name"],
                 "encode_node": enc, "latent_node": lat,
                 "models": [m for m in (_host_models(host) or [])
-                           if classify_model(m) in _AUDIO_CLASSES]}
+                           if model_classes(m) & _AUDIO_CLASSES]}
 
     found = [r for r in await asyncio.gather(*(probe(h) for h in hosts[:12]),
                                              return_exceptions=True) if isinstance(r, dict)]
@@ -9256,6 +9303,7 @@ def make_app():
     )
 
     swagger.add_get("/", handle_dashboard)
+    swagger.add_get("/guide", handle_guide)
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
     swagger.add_get("/dashboard-models", handle_dashboard_models)

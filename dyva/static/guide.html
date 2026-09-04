@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>free-ollama guide</title>
+<style>
+:root{--bg:#161616;--surface:#1e1e1e;--card:#232323;--border:#333;--text:#e6e6e6;
+      --text-2:#b9b9b9;--dim:#8a8a8a;--accent:#7aa2f7;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+     font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:820px;margin:0 auto;padding:32px 20px 80px}
+h1{font-size:1.6rem;margin:0 0 .2em}
+h2{font-size:1.15rem;margin:2em 0 .4em;padding-top:.6em;border-top:1px solid var(--border)}
+h3{font-size:.95rem;margin:1.2em 0 .3em;color:var(--text-2)}
+p{margin:.4em 0;color:var(--text-2)}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--mono);font-size:.86em;background:var(--card);padding:.1em .4em;border-radius:4px;color:#e6e6e6}
+pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow-x:auto;margin:.5em 0}
+pre code{background:none;padding:0}
+.lead{color:var(--text-2);font-size:1.02rem;margin-bottom:.6em}
+.note{border-left:3px solid var(--accent);background:var(--surface);padding:.5em .8em;border-radius:0 6px 6px 0;margin:.8em 0;color:var(--dim);font-size:.9em}
+.pill{display:inline-block;font-family:var(--mono);font-size:.78rem;color:var(--dim);border:1px solid var(--border);border-radius:20px;padding:.1em .7em;margin-right:.3em}
+.top-links{margin:.8em 0 0;font-size:.9rem}
+table{border-collapse:collapse;width:100%;margin:.5em 0;font-size:.9rem}
+td,th{border:1px solid var(--border);padding:.4em .6em;text-align:left;vertical-align:top}
+th{color:var(--text-2);font-weight:600}
+td code{white-space:nowrap}
+footer{margin-top:3em;color:var(--dim);font-size:.85rem;border-top:1px solid var(--border);padding-top:1em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>free-ollama</h1>
+<p class="lead">Instrumentation for surveying the open inference servers sitting on the public internet — and a proxy that routes to them. Two parts: <b>graflex</b> finds and classifies hosts; <b>dyva</b> serves them behind one API.</p>
+<div class="top-links">
+  <span class="pill">API reference</span> <a href="/docs" target="_blank">Swagger / OpenAPI docs →</a>
+  &nbsp;·&nbsp; <a href="https://github.com/kristopolous/free-ollama" target="_blank">source</a>
+</div>
+<div class="note">This is a research tool. It observes and measures — it never bypasses authentication, and an auth-required server is a recorded pass, not a target. A server exposing someone else's metered API key is documented statistically, never used.</div>
+
+<h2>graflex — find the servers</h2>
+<p>graflex queries FOFA for exposed services (Ollama, ComfyUI, a1111, vLLM, llama.cpp, SGLang, LM&nbsp;Studio, …), probes each for liveness, and classifies what it found. All actions take <code>-a</code>.</p>
+
+<h3>Crawling for new servers</h3>
+<pre><code># pull fresh candidates from FOFA, then probe only the new ones
+./graflex.py -a fetch   -n ollama
+./graflex.py -a check-new -n ollama
+
+# or in one step
+./graflex.py -a fetch-check -n ollama
+
+# re-probe everything already known to be working (all services)
+./graflex.py -a check-working -s all</code></pre>
+<p><code>-n</code> names the service/query (e.g. <code>ollama</code>, <code>comfyui</code>, <code>gradio</code>). <code>check-new</code> probes only hosts not yet checked; <code>check-all</code> re-probes the lot.</p>
+
+<h3>Classifying</h3>
+<pre><code>./graflex.py -a classify</code></pre>
+<p>Buckets each working host's models (image / edit / video / music / text …) into the survey files dyva reads.</p>
+
+<h2>dyva — use the servers</h2>
+<p>dyva is a managed proxy. Point any OpenAI-, Ollama-, ComfyUI-, a1111-, vLLM-, SGLang- or llama.cpp-compatible client at it; it races the discovered hosts, sticks to what works, and falls back automatically.</p>
+
+<h3>Ollama compatibility</h3>
+<p>dyva answers the Ollama and OpenAI wire protocols, so an existing client needs only its base URL changed to this proxy:</p>
+<pre><code># Ollama-style
+curl http://THIS-HOST:PORT/api/tags
+curl http://THIS-HOST:PORT/api/chat -d '{"model":"gemma3","messages":[{"role":"user","content":"hi"}]}'
+
+# OpenAI-style
+curl http://THIS-HOST:PORT/v1/chat/completions -d '{"model":"qwen3","messages":[...]}'</code></pre>
+<p>Model names are <b>routing patterns</b>: partials and globs work (<code>qwen*27b</code>, <code>abliterated</code>), as do fallbacks (<code>gemma?4/qwen3</code>). One name covers every matching variant on every host. Media (image / edit / video / TTS) rides the OpenAI-ish endpoints under <code>/v1/…</code> and <code>/sdapi/…</code> — see the <a href="/docs" target="_blank">Swagger docs</a>.</p>
+
+<h3>Adding a source (settings)</h3>
+<p>dyva's host list comes from one or more <b>sources</b>: the public discovery cache, or a private federation you point it at. Manage them in the dashboard <b>Settings</b> tab (paste a source URL), or from the CLI:</p>
+<pre><code>./dyva.py --source list
+./dyva.py --source add https://example.com/hosts.json
+./dyva.py --source disable graflex      # or: enable / disable all
+./dyva.py --refresh                     # re-pull the caches</code></pre>
+<div class="note">Privately-sourced host IPs are never disclosed publicly. Keep the public-discovery demo and the private-federation path both working.</div>
+
+<h3>Removing / pruning hosts</h3>
+<p>Host reputation lives in a table keyed by <code>(host, capability)</code>. Inspect and prune it with <code>--hosts</code> — arguments narrow left to right, the verb comes last:</p>
+<table>
+<tr><th>command</th><th>does</th></tr>
+<tr><td><code>./dyva.py --hosts</code></td><td>summary of every state, with counts</td></tr>
+<tr><td><code>./dyva.py --hosts bad</code></td><td>the keys marked <code>bad</code></td></tr>
+<tr><td><code>./dyva.py --hosts bad __tts__</code></td><td>the hosts carrying that mark</td></tr>
+<tr><td><code>./dyva.py --hosts bad __tts__ del</code></td><td>clear those marks (removes the hosts)</td></tr>
+</table>
+
+<h3>Running it</h3>
+<pre><code>uvx dyva            # or: ./dyva.py
+./dyva.py -p 11434 -w 3 -t 30      # port, workers, timeout
+./dyva.py -l                       # localhost-only inference</code></pre>
+
+<footer>
+free-ollama · <a href="/docs" target="_blank">API docs</a> · <a href="https://github.com/kristopolous/free-ollama" target="_blank">github.com/kristopolous/free-ollama</a>
+</footer>
+
+</div>
+</body>
+</html>
