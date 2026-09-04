@@ -177,6 +177,24 @@ into "no hosts available". There is a race — a host only appears once a job ha
 taken it — but the window is milliseconds against renders that run for minutes,
 and losing it merely costs the old behaviour.
 
+### Hedged failover
+
+The sticky host is tried first, as always, but it no longer gets to block the
+request while it dies. `find_servers` sorts the last-good host to the front, and
+the race gives it a **head start** of `hedge_delay` seconds (default 30) before
+fanning out to the rest of the pool. Whoever produces first wins; the losing
+connection is cancelled and released by the same machinery that already handles
+a normal race.
+
+The head start is cut short the instant the sticky host actually *fails* — the
+moment the pool advances to a second host, the rest are raced immediately rather
+than waiting out the full delay. So the two bad outcomes are both avoided: a
+healthy sticky host answers well within the delay and nothing else is contacted
+(no wasted fan-out), while a dead-but-connected one is overtaken after the delay
+instead of hanging the request until it times out. It is implemented as an
+opt-in staggered start in the shared race engine (`hedge_delay`), so every
+capability could use it, but only chat and generate do today.
+
 ## Use It Like Ollama
 
 Point the official Ollama CLI at dyva and the everyday commands just work — except instead of one machine's models you see everything the swarm has to offer:
@@ -345,7 +363,7 @@ Two node shapes cover what is actually deployed, declared in
 | family | how references get in |
 |---|---|
 | Qwen-Image-Edit | native multi-image: `TextEncodeQwenImageEditPlus(clip, prompt, vae, image1..3)` |
-| Flux Kontext / Flux.2 | no multi-image node — each reference is `LoadImage → FluxKontextImageScale → VAEEncode → ReferenceLatent`, chained through the conditioning, then `FluxGuidance` |
+| Flux Kontext / Flux.2 (klein=Qwen3, dev=Mistral) | no multi-image node — each reference is `LoadImage → FluxKontextImageScale → VAEEncode → ReferenceLatent`, chained through the conditioning, then `FluxGuidance` |
 
 Which model, CLIP and VAE to load is resolved against the host's **live loader
 enums** (`CheckpointLoaderSimple`, `UNETLoader`, `CLIPLoader`/`DualCLIPLoader`,
@@ -353,6 +371,19 @@ enums** (`CheckpointLoaderSimple`, `UNETLoader`, `CLIPLoader`/`DualCLIPLoader`,
 host is only accepted when every file the graph needs actually exists there.
 With no reference images the same graph runs as a plain generation on the edit
 model.
+
+**The text encoder is matched to the exact model variant, because Flux.2 is not
+one family.** The distilled **klein** models (`flux-2-klein-4b`, `-9b`) use a
+**Qwen3** encoder (`qwen_3_4b` / `qwen_3_8b`), while **dev/pro Flux.2** uses
+**Mistral-3 small** — pairing klein with Mistral produces
+`mat1 and mat2 shapes cannot be multiplied (…x15360 and 7680x3072)` minutes into
+the render, because the encoder's output width is wrong for that backbone. So
+`Flux2Klein` requires a Qwen3 encoder and `Flux2` (dev) requires Mistral, with
+klein excluded from the dev family by a lookahead. A klein host that has only
+Mistral is now rejected at *planning* time — no host, no wasted render — instead
+of failing after the fact; if it also has a Qwen3 encoder, that is what gets
+loaded. (This is the classifier acting on the published model cards, not a
+guess: the shapes only line up for the encoder the variant was trained with.)
 
 The dashboard's Image tab has a **Generate / Edit** toggle; in Edit mode the
 negative prompt is hidden (edit models don't take one) and a drop zone accepts
@@ -630,6 +661,7 @@ The dashboard's **Settings** tab is backed by `~/.cache/free-ollama/settings.jso
 |---------|---------|
 | **Workers** | Parallel hosts raced per request (fan-out). |
 | **Timeout** | Per-host request timeout, in seconds. |
+| **Hedge delay** | Seconds the sticky (last-good) host gets to itself before the rest of the pool is raced alongside it; whoever answers first wins and the loser is dropped. Default `30`, `0` races everything at once. This is what stops a dead-but-still-connected favourite from stalling a whole request for a full timeout before failover kicks in — in practice, when the host is healthy it answers well inside the delay and nothing else is ever contacted. |
 | **Minimum model count** | Hide models served by fewer than this many hosts from `/api/tags` and `/v1/models` — the listings third-party apps read. `0` = show everything. (The dashboard always shows everything.) |
 | **Admin password** | When set, viewing or changing the Settings tab and its sources requires it (sent as an `X-Admin-Key` header). Everything else — chat, models, the dashboard — stays public, so you can host a demo without letting visitors edit your config. Stored hashed; if you forget it, clear `admin_pw` in `settings.json` and restart. |
 | **Additional sources** | Extra host lists to pull from — see below. |

@@ -141,9 +141,38 @@ graflex -n gradio -a fetch   # icon_hash=="55115683", site fofa
 ```
 
 Entries are saved to `~/.cache/free-ollama/gradio-hosts.json` with
-`service: "gradio"` and no check action applies to them. To categorize hosts
-found by other searches as gradio, run FID follow-ups for those searches —
-the `fid` recorded on each entry tells you which fingerprint surfaced it.
+`service: "gradio"` and no *service* check applies to them.
+
+### Checking and classifying the Gradio family
+
+The Gradio icon is not a service — it is *every* Gradio app anyone exposed:
+image generators, background removers, OpenCV demos, protein tools, LLM-key
+proxies, hello-world stubs. There is no shared inference API, so it flows
+through the normal pipeline with app-specific parsing:
+
+```bash
+graflex -n gradio -a fetch     # icon_hash=="55115683" (+ default ports/countries/fids)
+graflex -n gradio -a check     # liveness = a parseable /config manifest per host
+graflex -n gradio -a classify  # bucket the manifests by app purpose
+```
+
+- **check** — for a gradio host the probe is its `/config` (Gradio's own app
+  manifest: title, component labels, function names). A host is "working" when
+  that parses as a Gradio config; the manifest summary is stored on the working
+  entry (Gradio embeds raw control chars, so it is read with a lenient JSON
+  parse). Same worker pool, pruning and resume as every other service.
+- **classify** — buckets each host's manifest against an **ordered**, editable
+  keyword taxonomy in [`gradio-taxonomy.json`](gradio-taxonomy.json)
+  (`image-gen`, `video-gen`, `image-edit`, `cv-detect`, `audio`, `llm-chat`,
+  `science`, `demo`; first match wins, else `unknown`) and writes
+  `gradio-working-classified.json` with an `app_type` per host. Re-runnable, so
+  you can grow the taxonomy and re-bucket without re-probing.
+
+This is survey instrumentation — most buckets are apps nothing would ever route
+to. Finding *usable* generators for dyva is the opposite job: hunt branded apps
+by their own fingerprints (as with the `fooocus` service), not by the Gradio
+icon.
+
 
 ## How it works
 

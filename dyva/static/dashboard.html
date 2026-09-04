@@ -1137,6 +1137,7 @@ __SD_MODELS__
 <div id="settingsBody">
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Hedge delay (s)</span><small class="setting-help">How long the last-good host gets to respond before the rest of the pool is raced alongside it. Whoever answers first wins. 0 races everything at once. Keeps a dead-but-connected favourite from stalling the whole request.</small></span><input type="number" id="setHedge" min="0" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
 <div class="setting">
 <span class="setting-text"><span class="setting-name">Model list override</span>
@@ -1520,10 +1521,11 @@ function renderActivityWorkers(all){
 // host is in hand it settles on the magnifying glass.
 var _CHECK_EMOJI=['\uD83E\uDD14','\uD83D\uDD0E','\uD83E\uDDD0','\uD83D\uDC40','\uD83E\uDD1E','\uD83C\uDFC3\u200D\u2640\uFE0F'];
 function _checkGlyph(w,findSecs){
-  if(w.done)return 'checked';               // job over: the word, not an emoji
-  if(findSecs==null)                         // still hunting: fidget
-    return _CHECK_EMOJI[Math.floor(Date.now()/1350)%_CHECK_EMOJI.length];
-  return '\uD83D\uDD0E';                    // found, still running
+  // Cycle the emoji only while a host is actually being hunted for. The instant
+  // one is found (findSecs set) the search is over, so it becomes "checked" —
+  // the same word a finished job shows.
+  if(w.done||findSecs!=null)return 'checked';
+  return _CHECK_EMOJI[Math.floor(Date.now()/1350)%_CHECK_EMOJI.length];
 }
 // One card's two segments, both reading "<time> - <what>" for consistency: the
 // find side is "<time> - <emoji> <hosts>", the run side "<time> - ran".
@@ -2881,8 +2883,26 @@ async function sendChat(){
   attachments=[];
   renderAttachments();
   setSendButton('streaming');
+  // The transcript carries media as markdown (`![name](sdapi/v1/images/...)`,
+  // clip/video links) purely for display. The model must not see those: it
+  // imitates them and pastes a *stale* URL into its own reply, so the user gets
+  // the freshly edited image followed by the model re-embedding the original.
+  // It already learns what exists from the "[... saved as name.png]" lines and
+  // the tool results, so strip the raw media markdown from what we send.
+  function _stripMediaMd(txt){
+    return String(txt||'')
+      .replace(/!\[[^\]]*\]\(sdapi\/v1\/images\/[^)]*\)/g,'')
+      .replace(/\[[^\]]*\]\((?:v1\/audio\/clips\/[^)]*|v1\/videos\/[^)]*\/content)\)/g,'')
+      .replace(/^\[(?:Generated image|Edited image|Video|Audio clip|Image fetched)[^\]]*\]\s*$/gm,'')
+      .replace(/\n{3,}/g,'\n\n').trim();
+  }
   var msgs=currentChat.messages.map(function(m){
-      var o={role:m.role,content:m.content};
+      var content=(m.role==='assistant')?_stripMediaMd(m.content):m.content;
+      // a message that was nothing but a media embed carries no signal for the
+      // model once stripped — drop it rather than send an empty turn
+      if(m.role==='assistant'&&!content&&!m.tool_calls&&!(m.files&&m.files.length))
+        return null;
+      var o={role:m.role,content:content};
       if(m.tool_calls)o.tool_calls=m.tool_calls;
       if(m.files&&m.files.length){
         var imgs=[],extra='';
@@ -2909,9 +2929,20 @@ async function sendChat(){
         if(extra)o.content=(o.content||'')+extra;
       }
       return o;
-    });
+    }).filter(Boolean);
     var sysMsg=currentChat.system||'';
     if(docsOn)sysMsg=sysMsg?(sysMsg+'\n\n'+DOC_SYSTEM):DOC_SYSTEM;
+    // The files in this conversation, by name, as a plain fact the model can
+    // consult — not something it should echo. Reply in prose; the images are
+    // already shown to the user.
+    var _al=assetsOf(currentChat);
+    if(_al.length){
+      var man='Files already in this conversation (refer to them by name with '
+            +'the media tools; do NOT print image links or "saved as" lines '
+            +'yourself, the user already sees the files):\n'
+            +_al.map(function(a){return '- '+a.name+' ('+a.kind+')'}).join('\n');
+      sysMsg=sysMsg?(sysMsg+'\n\n'+man):man;
+    }
     if(sysMsg)msgs.unshift({role:'system',content:sysMsg});
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
   runStream(chatId,chatCreated,chatTitle,model,msgs,bubble);
@@ -3046,12 +3077,34 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
       }else if(fn.name==='generate_video'){
         setStatus('starting video\u2026');
         try{
-          var vb={prompt:String(args.prompt||'').trim().slice(0,2000),
-                  length:VIDEO_FRAMES,steps:VIDEO_STEPS};
+          var vb={prompt:String(args.prompt||'').trim().slice(0,2000),steps:VIDEO_STEPS};
+          // seconds -> the server maps to frames per the chosen model's fps;
+          // clamp so nobody asks for a five-minute render
+          var secs=parseFloat(args.seconds);
+          if(!isNaN(secs)&&secs>0)vb.seconds=Math.min(secs,20);
           if(['long','square','tall'].indexOf(args.aspect)>=0)vb.aspect=args.aspect;
           if(['small','medium','large'].indexOf(args.size)>=0)vb.size=args.size;
           var vm=String(args.model||'').trim();
           if(vm&&vm.length<80)vb.model=vm;
+          // a named image becomes the start frame (image-to-video)
+          var vchat=liveChat(chatId)||currentChat;
+          var vwant=String(args.image||'').trim();
+          if(vwant){
+            var va=assetFind(vchat,vwant);
+            if(!va||va.kind!=='image'){
+              results.push({text:'Error: no image named "'+vwant+'" to start the video from. '
+                                 +'Call list_assets to see the real names.',
+                            md:'`\u26a0 generate_video: no image named '+vwant.replace(/`/g,"'")+'`'});
+              continue;
+            }
+            try{
+              vb.image=await _fileToB64(await assetBlob(vchat,va));
+              vb.image_name=va.name;
+            }catch(ex2){
+              results.push({text:'Error reading the start image: '+ex2.message});
+              continue;
+            }
+          }
           var rv=await fetch('v1/videos',{method:'POST',headers:{'Content-Type':'application/json'},
                                           body:JSON.stringify(vb),signal:ac.signal});
           if(!rv.ok){
@@ -3240,7 +3293,6 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
     if(inView())saveCurrentChat();
     if(full.trim())appendMsgRecord(chatId,{role:'assistant',content:full});
     results.forEach(function(res){
-      if(res.keep)appendMsgRecord(chatId,{role:'assistant',content:res.keep,_meta:{hidden:true}});
       if(!res.md)return;
       appendMsgRecord(chatId,{role:'assistant',content:res.md});
     });
@@ -3711,7 +3763,7 @@ function askUser(question,options,signal){
     }
   });
 }
-var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a paper boat drifting down a rain gutter, slow motion"'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'Leave blank. Blank picks the best available model automatically. Only set it if the user named one, and then pass their words verbatim.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
+var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. It can start from a picture (image-to-video) \u2014 if the user says "this cat/dog/photo" or attached an image, pass that image\'s name in `image` and the video animates from it. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a man petting a cat" or "the dog chases its tail". Describe the motion, not just the subject.'},seconds:{type:'number',description:'Desired length in seconds, e.g. 5. Optional \u2014 leave blank for the model\'s default (usually a few seconds). Keep it short; these are brief clips.'},image:{type:'string',description:'Optional start frame: the name of an image already in this conversation (from list_assets, an upload, or a generated image) to animate FROM. Use this whenever the user refers to "this" picture or attached one. Omit for a video made purely from the text prompt.'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'Leave blank. Blank picks the best available model automatically. Only set it if the user named one, and then pass their words verbatim.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var TTS_TOOL_MAX=600;   // hard ceiling on what the chat tool will speak
 var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "hello_world.mp3". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['text','name']}}};
 var DOC_TOOLS=[
@@ -5342,6 +5394,7 @@ function populateSettings(s){
   showSettingsLocked(false);
   document.getElementById('setWorkers').value=s.workers;
   document.getElementById('setTimeout').value=s.timeout;
+  document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   document.getElementById('setMinCount').value=s.min_count;
   setModelList(s.model_list||[],false);
   document.getElementById('setLocal').checked=!!s.local;
@@ -5429,12 +5482,14 @@ function saveSettings(){
   var body={
     workers:parseInt(document.getElementById('setWorkers').value,10),
     timeout:parseInt(document.getElementById('setTimeout').value,10),
+    hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
     model_list:_modelList,
     local:document.getElementById('setLocal').checked
   };
   if(isNaN(body.workers)||body.workers<1)delete body.workers;
   if(isNaN(body.timeout)||body.timeout<1)delete body.timeout;
+  if(isNaN(body.hedge_delay)||body.hedge_delay<0)delete body.hedge_delay;
   if(isNaN(body.min_count)||body.min_count<0)delete body.min_count;
   // Only send admin_pw when the operator typed a new one (blank = keep current).
   var newPw=document.getElementById('setAdminPw').value;
@@ -5455,6 +5510,7 @@ function saveSettings(){
       if(newPw)setAdminKeyStored(newPw);
       document.getElementById('setWorkers').value=s.workers;
       document.getElementById('setTimeout').value=s.timeout;
+      document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
       document.getElementById('setMinCount').value=s.min_count;
       setModelList(s.model_list||[],false);
       document.getElementById('setLocal').checked=!!s.local;

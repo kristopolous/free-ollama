@@ -58,6 +58,19 @@ SERVICE_CONFIG = {
         "fofa_query": 'icon_hash="2075038152" && body="Stable Diffusion"',
         "check_path": "/sdapi/v1/sd-models",
     },
+    "fooocus": {
+        "port": 7865,
+        "fofa_query": '("fooocus") && icon_hash=="2075038152"',
+        "check_path": "/v1/engines/all-models",
+    },
+    "gradio": {
+        # Not a real inference service — a family of arbitrary Gradio apps. The
+        # "check" is fetching /config; `classify` buckets the manifests. Fetch
+        # defaults (ports/countries/fids) live in NAMED_QUERIES["gradio"].
+        "port": 7860,
+        "fofa_query": 'icon_hash=="55115683"',
+        "check_path": "/config",
+    },
     "comfyui": {
         "port": 8188,
         "fofa_query": 'title="ComfyUI"',
@@ -92,8 +105,29 @@ SERVICE_CONFIG = {
 # step. Fetch by name alone (-n <name>); entries land in <name>-hosts.json
 # with service set to the name.
 NAMED_QUERIES = {
-    "gradio": 'icon_hash=="55115683"',
+    # Ported from graflex.sh's gradio case so `-n gradio -a fetch` finds the
+    # same hosts standalone (the Gradio UI commonly runs on 7860). A named
+    # query may be a bare string, or a dict with default ports/countries/fids
+    # that the CLI can still override.
+    "gradio": {
+        "query": 'icon_hash=="55115683"',
+        "ports": "80,443,8080,7860",
+        "countries": "US,CN,DE,IN,JP,KR,BR,GB,FR,HK,TW,CA,AU,RU,NL,SG,ID,VN,IT,ES",
+        "fids": ["CfOOPt6Nd3WtpgTJF1CZMQ==", "SKGUqQuUlkehGS8jB/cz3w==",
+                 "bkoVAuNuNwTuBfCjZ+d4xw==", "sGe21936bIKF2zWmLyb7fQ==",
+                 "t5OB7B8z43gJDAyGFPredQ==", "zO99w44qU6me2LeJntB/xw==",
+                 "N/Vkkdevw+ddMZQvyu4UHw=="],
+    },
 }
+
+
+def _named_query(name):
+    """(query_string, defaults_dict) for a named query, tolerating both the
+    bare-string and dict forms."""
+    v = NAMED_QUERIES.get(name)
+    if isinstance(v, dict):
+        return v.get("query"), v
+    return v, {}
 
 # Services that cache a raw model-list snapshot per host during check, so a
 # resume (-i) run can skip hosts already snapshotted this session.
@@ -371,6 +405,42 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         "service": service,
                         "url": base_url,
                         "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+                elif service == "fooocus":
+                    # Fooocus-API: {"model_filenames": [...], "lora_filenames": [...]}
+                    data = await resp.json()
+                    await resp.release()
+                    if not isinstance(data, dict) or "model_filenames" not in data:
+                        last_error = {"error": f"not a fooocus API ({current_scheme})"}
+                        break
+                    models = _filter_models(
+                        [m for m in data.get("model_filenames", []) if isinstance(m, str)])
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+                elif service == "gradio":
+                    # Liveness = a parseable Gradio /config manifest. Gradio
+                    # embeds raw control chars in user strings, so read the text
+                    # and json.loads(strict=False) rather than resp.json().
+                    raw = await resp.read()
+                    await resp.release()
+                    try:
+                        cfg = json.loads(raw.decode("utf-8", "replace"), strict=False)
+                    except Exception:
+                        last_error = {"error": f"bad /config json ({current_scheme})"}
+                        break
+                    if not isinstance(cfg, dict) or not ("components" in cfg or "title" in cfg):
+                        last_error = {"error": f"not a gradio /config ({current_scheme})"}
+                        break
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": [],
+                        "gradio": _gradio_summary(cfg),
                         "checked": datetime.now(timezone.utc).isoformat(),
                     }
                 elif service == "ollama":
@@ -909,7 +979,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
     global _RUN_TS
     hosts_file = _cache_file(name, "hosts")
 
-    if not query and not service and name not in NAMED_QUERIES:
+    if not query and not service and name not in NAMED_QUERIES:  # noqa: named dicts still count
         log.error(f"no query for name '{name}' — pass --query or --service, or use a named query ({', '.join(sorted(NAMED_QUERIES))})")
         return []
 
@@ -1025,6 +1095,13 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         # them instead of skipping the exact already-done prefix.
         random.seed(run_ts)
 
+        _nq = _named_query(name)[1] if (name in NAMED_QUERIES and not service) else {}
+        if not isinstance(countries, str) and _nq.get("countries"):
+            countries = _nq["countries"]
+        if not isinstance(ports, str) and _nq.get("ports"):
+            ports = _nq["ports"]
+        if not fids and _nq.get("fids"):
+            fids = ",".join(_nq["fids"])
         if isinstance(countries, str):
             country_list = [None] + [s.strip() for s in countries.split(",")]
         else:
@@ -1062,7 +1139,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             q = SERVICE_CONFIG[service]["fofa_query"]
             base_queries = q if isinstance(q, list) else [q]
         else:
-            base_queries = [NAMED_QUERIES[name]]
+            base_queries = [_named_query(name)[0]]
 
         # The query is one axis of the country/port/server cross product. It
         # cycles INNERMOST, so each (server,port,country) combo iterates all
@@ -1529,6 +1606,32 @@ def _classify_model(model, compiled):
     return "....."
 
 
+def _classify_gradio_hosts(name, entries):
+    """Bucket Gradio hosts by app purpose using their /config manifest, the way
+    `classify` buckets comfyui hosts by their models. Same input (the working
+    file), same -classified output, different classifier."""
+    from datetime import datetime, timezone
+    taxonomy = _load_gradio_taxonomy()
+    counts = {}
+    out = []
+    for entry in entries:
+        e = dict(entry)
+        summ = entry.get("gradio") or {}
+        bucket = _classify_gradio(summ, taxonomy)
+        e["app_type"] = bucket
+        counts[bucket] = counts.get(bucket, 0) + 1
+        out.append(e)
+    input_file = _cache_file(name, "working")
+    root, ext = os.path.splitext(input_file)
+    out_file = f"{root}-classified{ext}"
+    _save_json(out_file, out)
+    for bucket, c in sorted(counts.items(), key=lambda kv: -kv[1]):
+        print(f"{bucket:18s} {c}")
+    summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+    log.info(f"classify: {len(entries)} gradio hosts -> {out_file} ({summary}) "
+             f"[{datetime.now(timezone.utc).isoformat()}]")
+
+
 def classify(name=None):
     from datetime import datetime, timezone
 
@@ -1536,10 +1639,15 @@ def classify(name=None):
     input_file = _cache_file(name, "working")
     entries = _load_json(input_file)
     entries = [e for e in entries if isinstance(e, dict)]
-    log.info(f"using {CLASSIFIER_FILE}")
     if not entries:
         log.error(f"classify: no hosts in {input_file}")
         return
+    # Gradio hosts carry a /config manifest, not a model list — bucket by app
+    # purpose against the gradio taxonomy instead of the model classifier.
+    if name == "gradio" or any(e.get("service") == "gradio" or "gradio" in e for e in entries):
+        _classify_gradio_hosts(name, entries)
+        return
+    log.info(f"using {CLASSIFIER_FILE}")
 
     compiled = _load_classifier()
 
@@ -1565,6 +1673,68 @@ def classify(name=None):
     _save_json(out_file, out)
     summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
     log.info(f"classify: {len(entries)} hosts -> {out_file} ({summary}) [{datetime.now(timezone.utc).isoformat()}]")
+
+
+
+
+# ---- Gradio classification -------------------------------------------------
+# The gradio icon (icon_hash 55115683) is not one app — it is every Gradio app
+# anyone exposed. There is no shared inference API, so the *check* for a gradio
+# host is fetching its /config manifest (title, component labels, function
+# names) and the *classify* step buckets those manifests by app purpose. Both
+# reuse the normal check/classify machinery; only the parsing differs.
+GRADIO_TAXONOMY_FILE = os.path.join(os.path.dirname(__file__), "gradio-taxonomy.json")
+
+
+def _gradio_summary(cfg, host=None):
+    """The bits of a Gradio /config that say what the app is for."""
+    labels = []
+    for c in cfg.get("components", []) or []:
+        if not isinstance(c, dict):
+            continue
+        lab = (c.get("props") or {}).get("label")
+        if isinstance(lab, str) and lab.strip():
+            labels.append(lab.strip())
+    api = [d.get("api_name") for d in (cfg.get("dependencies") or [])
+           if isinstance(d, dict) and d.get("api_name")]
+    return {
+        "title": cfg.get("title"),
+        "version": cfg.get("version"),
+        "n_components": len(cfg.get("components", []) or []),
+        "labels": list(dict.fromkeys(labels)),
+        "api_names": list(dict.fromkeys(a for a in api if a)),
+    }
+
+
+_gradio_taxonomy_cache = None
+
+
+def _load_gradio_taxonomy():
+    """Ordered buckets of keyword lists; first match wins, so specific buckets
+    come before generic ones. Editable data, not code."""
+    global _gradio_taxonomy_cache
+    if _gradio_taxonomy_cache is None:
+        try:
+            with open(GRADIO_TAXONOMY_FILE, encoding="utf-8") as f:
+                _gradio_taxonomy_cache = json.load(f)
+        except Exception as e:
+            log.warning(f"gradio taxonomy: {e}")
+            _gradio_taxonomy_cache = []
+    return _gradio_taxonomy_cache
+
+
+def _classify_gradio(summary, taxonomy=None):
+    taxonomy = taxonomy if taxonomy is not None else _load_gradio_taxonomy()
+    hay = " ".join(filter(None, [
+        summary.get("title") or "",
+        " ".join(summary.get("labels") or []),
+        " ".join(summary.get("api_names") or []),
+    ])).lower()
+    for bucket in taxonomy:
+        for kw in bucket.get("keywords", []):
+            if kw.lower() in hay:
+                return bucket["name"]
+    return "unknown"
 
 
 def main():
@@ -1602,7 +1772,8 @@ def main():
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
     parser.add_argument("-r", "--random", dest="shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
     parser.add_argument("-t", "--site", choices=["fofa", "shodan"], default="fofa", help="site to scrape (default: fofa)")
-    parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG), help="service to search for")
+    parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG) + ["all"],
+                        help="service to search for; 'all' re-surveys every service (check-working only)")
     parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")
     parser.add_argument("-z", "--sleep", type=int, default=SLEEP_DEFAULT, help=f"seconds to sleep between requests (default: {SLEEP_DEFAULT})")
     args = parser.parse_args()
@@ -1611,6 +1782,8 @@ def main():
         parser.error("--query requires --name")
     if not args.service and not args.query and not args.name:
         parser.error("either --service, --query, or --name is required")
+    if args.service == "all" and args.action != "check-working":
+        parser.error("--service all is only supported with -a check-working")
     if args.site == "shodan":
         if args.fids:
             log.warning("-f/--fid is ignored with --site shodan")
@@ -1621,8 +1794,16 @@ def main():
 
     if args.action == "check-working":
         log.info("--- check-working ---")
+        # "-s all" re-surveys every service in turn — each has its own working
+        # file, so this is just the single-service pass run once per service.
+        services = list(SERVICE_CONFIG) if args.service == "all" else [args.service]
         try:
-            check_working(service=args.service, name=args.name, check_timeout=args.check_timeout, workers=args.workers, session=args.session)
+            for svc in services:
+                if args.service == "all":
+                    log.info(f"--- check-working: {svc} ---")
+                check_working(service=svc, name=(None if args.service == "all" else args.name),
+                              check_timeout=args.check_timeout, workers=args.workers,
+                              session=args.session)
         except KeyboardInterrupt:
             base = f"graflex -s {args.service}" if args.service else f"graflex -n {args.name or 'image-gen'}"
             ts = _RUN_TS or args.session

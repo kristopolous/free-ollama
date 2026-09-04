@@ -333,6 +333,23 @@
       "steps": 20
     },
     {
+      "name": "Flux2Klein",
+      "style": "reference",
+      "patterns": [
+        "^ReferenceLatent$"
+      ],
+      "scale": "FluxKontextImageScale",
+      "guidance_node": "FluxGuidance",
+      "guidance": 2.5,
+      "model": "(?i)klein",
+      "clip": "(?i)qwen[-_. ]?3",
+      "vae": "(?i)flux[-_.]?2[-_.]?vae",
+      "clip_type": "flux2",
+      "cfg": 1.0,
+      "steps": 20,
+      "note": "FLUX.2 klein uses Qwen3, not Mistral. Verified against the FLUX.2 klein model cards and ComfyUI's klein tutorial."
+    },
+    {
       "name": "Flux2",
       "style": "reference",
       "patterns": [
@@ -341,12 +358,13 @@
       "scale": "FluxKontextImageScale",
       "guidance_node": "FluxGuidance",
       "guidance": 2.5,
-      "model": "(?i)flux[-_. ]?2|klein",
-      "clip": "(?i)mistral.*flux2|flux2.*mistral",
+      "model": "(?i)flux[-_. ]?2(?!.*klein)",
+      "clip": "(?i)mistral.*flux2|flux2.*mistral|mistral",
       "vae": "(?i)flux[-_.]?2[-_.]?vae",
       "clip_type": "flux2",
       "cfg": 1.0,
-      "steps": 20
+      "steps": 20,
+      "note": "Non-klein Flux.2 uses Mistral-3 small. klein is excluded via lookahead so a klein+Mistral host is rejected at planning, not after a multi-minute render."
     },
     {
       "name": "FluxKontext",

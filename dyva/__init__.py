@@ -107,6 +107,10 @@ _CURLIFY = False
 PORT = 11434
 TIMEOUT = 30
 WORKER_COUNT = 10
+# Seconds the sticky (last-good) host gets to itself before the rest of the
+# pool is raced alongside it; first to produce wins, the loser is dropped.
+# Caps the wait on a dead-but-connected favourite. 0 disables (race at once).
+HEDGE_DELAY = 30
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
@@ -140,6 +144,7 @@ _AUDIO_CLASSES = {"audio", "music", "t2a"}
 
 # Async ComfyUI video-generation jobs (OpenRouter /v1/videos compatible).
 VIDEO_KEY = "video"      # no wildcard: canon_pattern() eats a trailing "*"
+IMG_KEY = "__a1111__"    # reputation key for image generation (a1111 + comfy)
 # Video is the slowest thing here: seconds per frame, plus however long the
 # host's queue is. Half an hour is patience, not a leak — the wait happens
 # after the race, on a host that has already accepted the work.
@@ -206,7 +211,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -218,6 +223,8 @@ def load_settings():
         WORKER_COUNT = s["workers"]
     if isinstance(s.get("timeout"), int) and s["timeout"] > 0:
         TIMEOUT = s["timeout"]
+    if isinstance(s.get("hedge_delay"), (int, float)) and s["hedge_delay"] >= 0:
+        HEDGE_DELAY = s["hedge_delay"]
     if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
         MIN_COUNT = s["min_count"]
     if isinstance(s.get("admin_pw"), str):
@@ -240,6 +247,7 @@ def save_settings(extra=None):
     if not isinstance(data, dict):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
+                 "hedge_delay": HEDGE_DELAY,
                  "min_count": MIN_COUNT, "local": _LOCAL,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST})
     if isinstance(extra, dict):
@@ -2080,7 +2088,7 @@ def record_verdict(host, key, outcome):
 
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
-                      label=None):
+                      label=None, hedge_delay=0):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -2151,8 +2159,29 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         wwid = await _register_worker(label or key, len(entries), _stop,
                                       kind=_kind_for_key(key))
     n = min(workers or WORKER_COUNT, len(entries)) or 1
-    tasks = [asyncio.create_task(worker()) for _ in range(n)]
+    hedging = hedge_delay and hedge_delay > 0 and n > 1
+    initial = 1 if hedging else n
+    tasks = [asyncio.create_task(worker()) for _ in range(initial)]
     _tasks_holder[:] = tasks
+
+    async def _fanout():
+        # wait out the head start, but cut it short the moment the first host
+        # has failed and the pool has moved on (tried >= 2) — a fast failure
+        # shouldn't cost the full delay before the rest are raced
+        t0 = time.time()
+        while (not done.is_set() and time.time() - t0 < hedge_delay and tried < 2):
+            await asyncio.sleep(0.1)
+        if done.is_set():
+            return
+        for _ in range(n - initial):
+            t = asyncio.create_task(worker())
+            tasks.append(t)
+            _tasks_holder.append(t)
+
+    if hedging:
+        fan = asyncio.create_task(_fanout())
+        tasks.append(fan)
+        _tasks_holder.append(fan)
     try:
         while True:
             try:
@@ -2299,7 +2328,7 @@ def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None):
+async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None, hedge_delay=0):
     errors = []
     errors_lock = asyncio.Lock()
 
@@ -2486,7 +2515,8 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         return accepted(("ok_stream", host, full, resp, first_line, first, oai), extra=full)
 
     result, stopped, _tried, _tally = await _race_hosts(
-        servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1])
+        servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
+        hedge_delay=hedge_delay)
     return result, errors, stopped
 
 
@@ -2947,41 +2977,19 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
     total = len(_servers)
     job_wid = await _register_worker(model_list[0], total, lambda: None, kind="text")
     try:
-        last = get_last(model_list[0])
-        last_host_err = None
-        if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
-            last_host, last_full = last
-            log.debug(f"Reusing {last_host} for {model_list[0]}")
-            await _worker_checked(job_wid)
-            if do_stream:
-                result, last_host_err = await _try_host(session, last_host, last_full, model_list[0], opayload, do_stream=True, remote=request.remote)
-                if result:
-                    mark_worker_found(job_wid, last_host, last_full)
-                    resp, first_line, first = result
-                    stream_resp = web.StreamResponse()
-                    await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format)
-                    return stream_resp
-            else:
-                data, last_host_err = await _try_one(session, last_host, model_list[0], last_full, opayload, remote=request.remote)
-                if data:
-                    mark_worker_found(job_wid, last_host, last_full)
-                    resp = chat_fmt(data, model_list[0], openai_format)
-                    resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", last_host)
-                    resp.headers["X-Dyva-Model"] = last_full
-                    resp.headers["X-Dyva-Service"] = service_of(last_host)
-                    resp.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
-                    return resp
-
+        # The sticky (last-good) host is already sorted first in _servers, so
+        # the hedged race tries it alone for HEDGE_DELAY seconds and only fans
+        # out to the rest of the pool if it stalls — no more blocking on a
+        # dead-but-connected favourite for a full timeout before racing.
         if not _servers:
-            err_msg = f"no available servers for '{model_in}'"
-            if last_host_err:
-                err_msg += f": {last_host_err}"
-            return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
+            return web.json_response(
+                err_obj(f"no available servers for '{model_in}'", "model_not_found"),
+                status=404)
 
         stopped = False
         for model in model_list:
             if do_stream:
-                result, errors, stopped = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid)
+                result, errors, stopped = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
                 if result:
                     _, host, full, resp, first_line, first, _oai = result
                     mark_worker_found(job_wid, host, full)
@@ -2998,7 +3006,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                         content_type="text/event-stream",
                     )
             else:
-                result, errors, stopped = await _race_servers(session, model, _servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid)
+                result, errors, stopped = await _race_servers(session, model, _servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
 
                 if result:
                     _, host, full, data = result
@@ -3055,80 +3063,16 @@ async def _proxy_generate(request, session):
 
     job_wid = await _register_worker(model, len(find_servers(model, req_caps)), lambda: None, kind="text")
     try:
-        last = get_last(model)
-        last_host_err = None
-        if last and _known_capable(last[0], last[1], req_caps) and ("vision" not in req_caps or _known_has(last[0], last[1], "vision")):
-            last_host, last_full = last
-            log.debug(f"Reusing {last_host} for {model}")
-            await _worker_checked(job_wid)
-            if do_stream:
-                result, last_host_err = await _try_host(session, last_host, last_full, model, body, do_stream=True, endpoint=endpoint, remote=request.remote)
-                if result:
-                    mark_worker_found(job_wid, last_host, last_full)
-                    resp, first_line, first = result
-                    stream_resp = web.StreamResponse()
-                    await _forward_stream(request, stream_resp, resp, first_line, last_host, last_full, openai_format=False)
-                    return stream_resp
-            else:
-                wid = asyncio.current_task().get_name()
-                await broadcast_activity(last_host, model, "trying",
-                    f"trying: {last_host} for {model}", wid=wid)
-                start = time.time()
-                p = dict(body, model=last_full, stream=False)
-                _curlify("POST", f"{last_host}{endpoint}", p)
-                try:
-                    r = await asyncio.wait_for(
-                        session.post(f"{last_host}{endpoint}", json=p),
-                        timeout=TIMEOUT,
-                    )
-                except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-                    dur = time.time() - start
-                    await broadcast_activity(last_host, model, "failed",
-                        f"failure: {last_host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-                    pass
-                else:
-                    if r.status == 200:
-                        try:
-                            data = await r.json()
-                        except Exception:
-                            data = None
-                        await r.release()
-                        if data and "error" not in data:
-                            dur = time.time() - start
-                            mark_worker_found(job_wid, last_host, last_full)
-                            set_last(model, last_host, last_full)
-                            add_good(last_host, model)
-                            await broadcast_activity(last_host, model, "connected",
-                                f"success: {last_host} for {model}", duration=dur, wid=wid)
-                            return web.json_response(data)
-                        dur = time.time() - start
-                        add_bad(last_host, model)
-                        if data and "error" in data:
-                            last_host_err = data["error"]
-                        await broadcast_activity(last_host, model, "failed",
-                            f"failure: {last_host} for {model} - bad response", duration=dur, wid=wid)
-                    else:
-                        dur = time.time() - start
-                        try:
-                            raw = await r.read()
-                            last_host_err = raw.decode('utf-8', errors='replace')[:500]
-                            log_upstream(r.status, last_host, endpoint, last_host_err, remote=request.remote)
-                        except Exception:
-                            pass
-                        await r.release()
-                        add_bad(last_host, model)
-                        await broadcast_activity(last_host, model, "failed",
-                            f"failure: {last_host} for {model} - status {r.status}", duration=dur, wid=wid)
-
+        # Sticky host first (via find_servers), then hedge: it gets HEDGE_DELAY
+        # to itself before the rest of the pool is raced alongside it.
         servers = find_servers(model, req_caps)
         if not servers:
-            err_msg = f"no available servers for '{model}'"
-            if last_host_err:
-                err_msg += f": {last_host_err}"
-            return web.json_response(err_obj(err_msg, "model_not_found"), status=404)
+            return web.json_response(
+                err_obj(f"no available servers for '{model}'", "model_not_found"),
+                status=404)
 
         if do_stream:
-            result, errors, stopped = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
+            result, errors, stopped = await _race_servers(session, model, servers, body, do_stream=True, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
             if result:
                 _, host, full, resp, first_line, first, _oai = result
                 mark_worker_found(job_wid, host, full)
@@ -3141,7 +3085,7 @@ async def _proxy_generate(request, session):
                 msg += ": " + "; ".join(dict.fromkeys(errors))
             return web.json_response(err_obj(msg), status=502)
 
-        result, errors, stopped = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid)
+        result, errors, stopped = await _race_servers(session, model, servers, dict(body, stream=False), do_stream=False, endpoint=endpoint, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
         if result:
             _, host, full, data = result
             mark_worker_found(job_wid, host, full)
@@ -3282,6 +3226,7 @@ async def handle_settings_get(request):
         # show a password prompt instead of the controls.
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
+                              "hedge_delay": HEDGE_DELAY,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
@@ -3298,7 +3243,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY
     resp = _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -3319,6 +3264,8 @@ async def handle_settings_post(request):
             log.info(f"worker count changed to {WORKER_COUNT}")
     if isinstance(body.get("timeout"), int) and body["timeout"] > 0:
         TIMEOUT = min(body["timeout"], 600)
+    if isinstance(body.get("hedge_delay"), (int, float)) and body["hedge_delay"] >= 0:
+        HEDGE_DELAY = min(body["hedge_delay"], 600)
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
         MIN_COUNT = body["min_count"]
     if isinstance(body.get("local"), bool):
@@ -3343,6 +3290,7 @@ async def handle_settings_post(request):
     if sources_changed:
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
+                              "hedge_delay": HEDGE_DELAY,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
@@ -4993,11 +4941,14 @@ async def handle_txt2img(request):
     except json.JSONDecodeError:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
-    IMG_KEY = "__a1111__"
-
     model_filter = body.pop("model", None)
     requested_model = model_filter or ""
     activity_label = (model_filter or body.get("prompt", "txt2img"))[:60]
+
+    # One worker for the whole request. Without this the sticky-host fast path
+    # below served images with no card in the Workers pane at all — only the
+    # cold race registered one.
+    job_wid = await _register_worker(activity_label, 0, lambda: None, kind="image")
 
     last = get_last(IMG_KEY)
     if last:
@@ -5033,9 +4984,14 @@ async def handle_txt2img(request):
             ) as r:
                 if r.status == 200:
                     data = await r.json()
+                    mark_worker_found(job_wid, last_host,
+                                      _resolve_sd_model(data, body) or requested_model)
                     await broadcast_activity(last_host, activity_label, "connected",
                         f"txt2img ✓", duration=0)
                     _save_image_history(data, body, last_host, requested_model)
+                    data["host"] = last_host
+                    data["service"] = service_of(last_host)
+                    await _unregister_worker(job_wid)
                     return web.json_response(data)
                 add_bad(last_host, IMG_KEY)
             await broadcast_activity(last_host, activity_label, "failed",
@@ -5071,7 +5027,7 @@ async def handle_txt2img(request):
         h, IMG_KEY, marks, _last_img[0] if _last_img else None))
     hosts = _idle_first(hosts)
 
-    wkey = f"{activity_label} (image)"
+    wkey = model_filter or "*"   # worker-card title: the model search, not the prompt
 
     async def a1111_attempt(host, wid, done):
         t0 = time.time()
@@ -5131,12 +5087,13 @@ async def handle_txt2img(request):
         if not host_list:
             return None
         result, _stopped, tried, tally = await _race_hosts(
-            host_list, attempt, IMG_KEY, workers=workers, label=wkey)
+            host_list, attempt, IMG_KEY, workers=workers, label=wkey, job_wid=job_wid)
         tried_total += tried
         verdict_totals.update(tally)
         return result
 
-    def _deliver(data):
+    async def _deliver(data):
+        await _unregister_worker(job_wid)
         # keep the host in the payload, not just in the history file: the chat
         # records where each generated file came from
         host_used = data.pop("_dyva_host", "")
@@ -5158,12 +5115,12 @@ async def handle_txt2img(request):
     # Phase 1: good + untested hosts (skip known-bad and unreachable)
     data = await _race([h for h in hosts if not _img_bad(h)], a1111_attempt)
     if data:
-        return _deliver(data)
+        return await _deliver(data)
 
     # Phase 2: exhausted — retry the previously bad / unreachable (recovery path)
     data = await _race([h for h in hosts if _img_bad(h)], a1111_attempt)
     if data:
-        return _deliver(data)
+        return await _deliver(data)
 
     # Phase 3: comfyui hosts
     comfy_candidates = [s for s in servers if s.get("service") == "comfyui"]
@@ -5177,16 +5134,18 @@ async def handle_txt2img(request):
         [s.get("server") for s in comfy_candidates if not _img_bad(s.get("server"))])
     data = await _race(comfy_hosts, comfy_attempt, workers=3)
     if data:
-        return _deliver(data)
+        return await _deliver(data)
 
     # Nothing was even attempted: the filter matched hosts by their cached
     # model list and then every one of them was already excluded.
     if not tried_total:
+        await _unregister_worker(job_wid)
         return web.json_response(
             {"error": (f"no image-gen host currently has a model matching "
                        f"{model_filter!r}" if model_filter else
                        "no image-gen hosts were available to try")}, status=503)
     verdicts = ", ".join(f"{c} {v}" for v, c in verdict_totals.most_common())
+    await _unregister_worker(job_wid)
     return web.json_response(
         {"error": f"image generation failed on {tried_total} "
                   f"host{'' if tried_total == 1 else 's'}"
@@ -6395,7 +6354,8 @@ async def _run_video_job(session, jid):
         if not pool:
             break
         job["exclude_models"] = sorted(bad_models)
-        result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey, label=label)
+        result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey,
+                                                            label=(job.get("model_filter") or "*"))
         if not result or stopped:
             break
         host, prompt_id, plan = result
@@ -6949,7 +6909,16 @@ async def _submit_video_workflow(session, host, job):
     else:
         width, height = video_dims(fam, params.get("aspect", "long"),
                                    params.get("size", "medium"))
-    length = video_frames(fam, params.get("length"))
+    # Duration can be given as `length` (frames, exact) or `seconds` (converted
+    # per this family's fps, then snapped to its temporal grid). Chat users
+    # speak in seconds; the frame count is the model's business.
+    want = params.get("length")
+    if not want and params.get("seconds"):
+        try:
+            want = round(float(params["seconds"]) * (fam.get("fps") or 16))
+        except (TypeError, ValueError):
+            want = None
+    length = video_frames(fam, want)
     params = dict(params, fps=params.get("fps") or fam.get("fps") or 16)
     if family == "minimax":
         workflow = _build_minimax_workflow(params, model_path, steps, cfg, width, height,
@@ -7058,6 +7027,10 @@ async def handle_videos_post(request):
 
     params = dict(body)
     params["prompt"] = prompt_text
+    # `duration` (OpenRouter's field) is seconds; map it to our `seconds` unless
+    # an explicit frame `length` was given.
+    if body.get("duration") and not body.get("seconds") and not body.get("length"):
+        params["seconds"] = body["duration"]
     # A start image turns this into image-to-video. Kept as bytes on the job,
     # not in params, because it has to be uploaded to whichever host wins.
     start = body.get("image") or body.get("start_image")
@@ -8301,7 +8274,7 @@ async def handle_image_edit(request):
         if not pool:
             break
         result, stopped, n_tried, round_tally = await _race_hosts(
-            pool, attempt, ekey, label=label)
+            pool, attempt, ekey, label=(model_filter or "*"))
         tried += n_tried
         tally.update(round_tally)
         if not result or stopped:
