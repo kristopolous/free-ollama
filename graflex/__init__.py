@@ -63,6 +63,13 @@ SERVICE_CONFIG = {
         "fofa_query": '("fooocus") && icon_hash=="2075038152"',
         "check_path": "/v1/engines/all-models",
     },
+    "sillytavern": {
+        "port": 8000,
+        "fofa_query": '(app="sillytavern") && icon_hash=="358928722" && title=="SillyTavern"',
+        "ports": "8000,443,80,8001",
+        "countries": "CN,US,HK,SG,JP,DE,KR,RU,TW",
+        "check_path": "/",
+    },
     "gradio": {
         # Not a real inference service — a family of arbitrary Gradio apps. The
         # "check" is fetching /config; `classify` buckets the manifests. Fetch
@@ -420,6 +427,29 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         "service": service,
                         "url": base_url,
                         "models": models,
+                        "checked": datetime.now(timezone.utc).isoformat(),
+                    }
+                elif service == "sillytavern":
+                    # Open instances serve the app HTML with <title>SillyTavern
+                    # </title>; a secured one answers a login page (different
+                    # title) and is correctly recorded as not-working. models
+                    # stays empty ON PURPOSE — a SillyTavern is a front-end for
+                    # someone else's (often paid) backend, so it must never gain
+                    # a model list that dyva could match and route to.
+                    raw = await resp.read()
+                    await resp.release()
+                    html = raw.decode("utf-8", "replace")
+                    tm = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+                    title = (tm.group(1).strip() if tm else "")
+                    if "sillytavern" not in title.lower():
+                        last_error = {"error": f"not an open SillyTavern "
+                                      f"(title {title[:40]!r}) ({current_scheme})"}
+                        break
+                    return {
+                        "service": service,
+                        "url": base_url,
+                        "models": [],
+                        "title": title,
                         "checked": datetime.now(timezone.utc).isoformat(),
                     }
                 elif service == "gradio":
@@ -979,7 +1009,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
     global _RUN_TS
     hosts_file = _cache_file(name, "hosts")
 
-    if not query and not service and name not in NAMED_QUERIES:  # noqa: named dicts still count
+    if not query and not service and not (name in NAMED_QUERIES and _named_query(name)[0]):
         log.error(f"no query for name '{name}' — pass --query or --service, or use a named query ({', '.join(sorted(NAMED_QUERIES))})")
         return []
 
@@ -1095,7 +1125,8 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         # them instead of skipping the exact already-done prefix.
         random.seed(run_ts)
 
-        _nq = _named_query(name)[1] if (name in NAMED_QUERIES and not service) else {}
+        _nq = (SERVICE_CONFIG.get(service) or {}) if service else \
+              (_named_query(name)[1] if name in NAMED_QUERIES else {})
         if not isinstance(countries, str) and _nq.get("countries"):
             countries = _nq["countries"]
         if not isinstance(ports, str) and _nq.get("ports"):
@@ -1139,7 +1170,8 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             q = SERVICE_CONFIG[service]["fofa_query"]
             base_queries = q if isinstance(q, list) else [q]
         else:
-            base_queries = [_named_query(name)[0]]
+            nq = _named_query(name)[0]
+            base_queries = nq if isinstance(nq, list) else [nq]
 
         # The query is one axis of the country/port/server cross product. It
         # cycles INNERMOST, so each (server,port,country) combo iterates all

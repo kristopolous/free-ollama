@@ -6898,7 +6898,7 @@ async def _submit_video_workflow(session, host, job):
     the ComfyUI prompt_id, or None on submission failure. The builder is chosen
     by the model's family (wan/ltx/mochi); unrecognized families fail cleanly
     rather than sending a garbage graph."""
-    params = job.get("params") or {}
+    params = dict(job.get("params") or {})   # per-host copy; never mutate the job
     seed = int(params.get("seed", -1))
     if seed == -1:
         import random
@@ -6908,14 +6908,19 @@ async def _submit_video_workflow(session, host, job):
     # Wan graph ended up referring to an encoder and a VAE that may not exist.
     info = await comfy_object_info(session, host)
 
-    # A start image has to live on the host before LoadImage can name it.
-    if job.get("start_image_b64") and "start_image" not in params:
+    # A start image has to live on THIS host before its LoadImage can name it —
+    # uploaded fresh per host, since the race may try several.
+    params.pop("start_image", None)
+    if job.get("start_image_b64"):
         try:
             raw = base64.b64decode(job["start_image_b64"])
             params["start_image"] = await comfy_upload_image(
                 session, host, raw, job.get("start_image_name") or "start.png")
         except Exception as e:
+            # Don't reference a file we failed to upload — that just reproduces
+            # the not-found error. Fall back to text-to-video on this host.
             log.warning(f"video: {host}: start image upload failed: {e}")
+            params.pop("start_image", None)
 
     # The model is chosen here, from what the host can actually load — the
     # name carried on the job is only a hint.
@@ -7069,6 +7074,13 @@ async def handle_videos_post(request):
             job_start = base64.b64decode(blob)
         except Exception:
             return web.json_response({"error": "'image' is not valid base64"}, status=400)
+        kind = image_magic(job_start)
+        if not kind:
+            head = job_start[:16]
+            return web.json_response(
+                {"error": "'image' is not a decodable image "
+                          f"({len(job_start)} bytes, starts {head!r}) — the start "
+                          "frame may have been a stale or missing asset"}, status=400)
     else:
         job_start = None
     # `resolution: "832x480"` is the friendly spelling; the builders want
@@ -7704,6 +7716,26 @@ def load_edit_families():
     return out
 
 
+def image_magic(data):
+    """The image type from the leading bytes, or None if it isn't an image.
+    LoadImage opens the file with PIL, so bytes that aren't a real image come
+    back as 'custom_validation_failed: Invalid image file' after the graph has
+    already been submitted — catch it here instead."""
+    if not data or len(data) < 12:
+        return None
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    return None
+
+
 async def comfy_upload_image(session, host, data, filename):
     """Put an image on a host so a graph can reference it.
 
@@ -7713,7 +7745,7 @@ async def comfy_upload_image(session, host, data, filename):
     """
     form = aiohttp.FormData()
     form.add_field("image", data, filename=filename,
-                   content_type="application/octet-stream")
+                   content_type=image_magic(data) or "application/octet-stream")
     form.add_field("type", "input")
     form.add_field("overwrite", "true")
     try:

@@ -386,10 +386,16 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg .body p img{max-width:min(360px,100%);border-radius:var(--r-lg);display:block;margin:var(--sp-2) 0}
 .msg .files img,.msg .body img{cursor:zoom-in}
 .msg img.img-missing{max-width:128px;max-height:128px;object-fit:contain;opacity:.6;cursor:default}
+.result-meta{display:block;margin-top:.3em;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint)}
 .msg .file-chip{display:inline-block;background:var(--a-900);border:1px solid var(--border);border-radius:var(--r-md);padding:3px var(--sp-3);font-size:var(--fs-xs);color:var(--accent);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid var(--border-strong);background:var(--bg-sunken-alt);border-radius:var(--r-sm);padding:.25em .65em}
 details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none}
+details.toolbox{margin:.15em 0 .55em;border-left:3px solid var(--border-accent);background:var(--bg-sunken-alt);border-radius:var(--r-sm);padding:.25em .65em}
+details.toolbox>summary{cursor:pointer;color:var(--accent);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none;font-family:var(--font-mono)}
+.toolbox .tc-item{margin:.4em 0 .2em}
+.toolbox .tc-fn{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-2)}
+.toolbox .tc-args{white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-3);background:var(--bg-inset);border-radius:var(--r-sm);padding:.4em .5em;margin:.2em 0 0;max-height:280px;overflow:auto}
 .think-body{white-space:pre-wrap;color:var(--text-3);font-size:var(--fs-sm);line-height:var(--line-body);font-style:italic;margin-top:.3em;max-height:320px;overflow:auto}
 
 .chat-status{display:flex;align-items:center;gap:.45em;color:var(--text-dim);font-size:var(--fs-xs);font-style:italic;margin:.15em 0 .3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2155,7 +2161,8 @@ function addMsg(role,text,index){
   var b=document.createElement('div');b.className='body';
   if(role==='assistant'){
     var _mt=index!==undefined?currentChat.messages[index]:null;
-    b.innerHTML=thinkHtml(_mt&&_mt._meta&&_mt._meta.think,false)+renderChatText(text);
+    b.innerHTML=thinkHtml(_mt&&_mt._meta&&_mt._meta.think,false)+renderChatText(text)
+              +toolCallHtml(_mt&&_mt._meta&&_mt._meta.toolcalls);
     highlightBlocks(b);
     if(index!==undefined){
       var m=currentChat.messages[index];
@@ -2199,6 +2206,28 @@ function splitThink(raw){
 function thinkHtml(t,open){
   if(!t)return '';
   return '<details class="thinkbox"'+(open?' open':'')+'><summary>thinking</summary><div class="think-body">'+escHtml(t)+'</div></details>';
+}
+// The tool calls a turn made, shown collapsed like the thinking block so you
+// can expand and inspect exactly what function ran with what parameters —
+// invaluable for diagnosing a bad call (a wrong asset name, a stray field).
+function toolCallHtml(tcs,open){
+  if(!tcs||!tcs.length)return '';
+  var rows=tcs.map(function(tc){
+    var fn=(tc&&tc.function)||{};
+    var name=fn.name||'?';
+    var args=fn.arguments;
+    if(typeof args==='string'){try{args=JSON.parse(args||'{}')}catch(e){}}
+    var pretty;
+    try{pretty=JSON.stringify(args,null,2)}catch(e){pretty=String(args)}
+    // long string values (a base64 image, a huge prompt) are trimmed so the
+    // inspector stays readable
+    if(pretty&&pretty.length>1200)pretty=pretty.slice(0,1200)+'\n… (truncated)';
+    return '<div class="tc-item"><span class="tc-fn">'+escHtml(name)+'</span>'
+         + '<pre class="tc-args">'+escHtml(pretty||'{}')+'</pre></div>';
+  }).join('');
+  var names=tcs.map(function(tc){return ((tc&&tc.function)||{}).name||'?'}).join(', ');
+  return '<details class="toolbox"'+(open?' open':'')+'><summary>tool call \u00b7 '
+       + escHtml(names)+'</summary>'+rows+'</details>';
 }
 function renderFiles(b,files){
   var wrap=document.createElement('div');wrap.className='files';
@@ -2976,6 +3005,17 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   }
   async function runToolRound(){
     setStatus('calling tool\u2026');
+    if(live()){
+      gen.bubble.bodyEl.classList.remove('streaming');
+      // keep the thinking block — it was streamed into this bubble and the
+      // tool call must sit alongside it, not replace it. Split think out of the
+      // streamed text the same way the finished turn does.
+      var _sp=splitThink(full);
+      gen.bubble.bodyEl.innerHTML=thinkHtml(think+_sp.t,false)
+                                +renderChatText(_sp.c)+toolCallHtml(toolCalls,true);
+      highlightBlocks(gen.bubble.bodyEl);
+      scrollChat();
+    }
     var results=[],urls=[];
     for(var i=0;i<toolCalls.length;i++){
       if(ac.signal.aborted)return;
@@ -3008,7 +3048,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
               results.push({text:'Image generated and saved as '+inames.join(', ')
                                  +'. Refer to it by that name in later tool calls.',
                             keep:'[Generated image saved as '+inames.join(', ')+'.]',
-                            md:fl.map(function(f,k){return '!['+(inames[k]||'generated image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')});
+                            md:fl.map(function(f,k){return '!['+(inames[k]||'generated image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
+                               +_resultMetaMd(inames[0],j.model,j.service,j.host)});
             }else results.push({text:'Error: image service returned no images',
                                 md:'`\u26a0 generate_image: the host returned no images`'});
           }else{
@@ -3045,7 +3086,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
               results.push({text:'Downloaded the image and saved it as '+wname
                                  +'. Refer to it by that name in later tool calls.',
                             keep:'[Image fetched from '+wurl+' saved as '+wname+'.]',
-                            md:'!['+wname+']('+wu+')'});
+                            md:'!['+wname+']('+wu+')'+_resultMetaMd(wname,'','fetched',wurl.replace(/^https?:\/\//,'').split('/')[0])});
               loadImgHistory();
             }else{
               var wt=(jw2.title?jw2.title+'\n\n':'')+(jw2.text||'');
@@ -3135,7 +3176,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                                   host:done.host||'',model:done.model||'',service:done.service||''});
               results.push({text:'Video ready, saved as '+vname+': '+vurl,
                             keep:'[Video saved as '+vname+'.]',
-                            md:'['+vb.prompt.slice(0,80).replace(/[\[\]]/g,'')+']('+vurl+')'});
+                            md:'['+vb.prompt.slice(0,80).replace(/[\[\]]/g,'')+']('+vurl+')'
+                               +_resultMetaMd(vname,done.model,done.service,done.host)});
               loadVidGallery();
             }else if(done){
               results.push({text:'Error generating video: '+(done.error||'failed'),
@@ -3207,7 +3249,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                 results.push({text:'Image edited and saved as '+enames.join(', ')
                                    +'. Refer to it by that name in later tool calls.',
                               keep:'[Edited image saved as '+enames.join(', ')+'.]',
-                              md:ef.map(function(f,k){return '!['+(enames[k]||'edited image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')});
+                              md:ef.map(function(f,k){return '!['+(enames[k]||'edited image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
+                                 +_resultMetaMd(enames[0],j4.model,j4.service,j4.host)});
                 loadImgHistory();
               }else results.push({text:'Error: edit returned no image',
                                  md:'`\u26a0 edit_image: the host returned no image`'});
@@ -3266,7 +3309,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                     ? 'Spoken, but the text was too long and only the first part was voiced. Tell the user. Saved as '
                     : 'Spoken successfully, saved as ')+aname+': '+curl,
                               keep:'[Audio clip saved as '+aname+'.]',
-                              md:'['+sb.input.slice(0,90).replace(/[\[\]]/g,'')+']('+curl+')'});
+                              md:'['+sb.input.slice(0,90).replace(/[\[\]]/g,'')+']('+curl+')'
+                                 +_resultMetaMd(aname,r3.headers.get('X-Dyva-Node')||'',r3.headers.get('X-Dyva-Service')||'',r3.headers.get('X-Dyva-Host')||'')});
               }else results.push({text:'Error: speech produced no clip'});
             }else{
               var sm='HTTP '+r3.status;
@@ -3291,7 +3335,13 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
     msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
     results.forEach(function(res){msgs.push({role:'tool',content:res.text,_meta:{hidden:true}})});
     if(inView())saveCurrentChat();
-    if(full.trim())appendMsgRecord(chatId,{role:'assistant',content:full});
+    var _tclite=(toolCalls||[]).map(function(tc){
+      var fn=(tc&&tc.function)||{};
+      return {function:{name:fn.name,arguments:fn.arguments}};
+    });
+    if(full.trim()||_tclite.length)
+      appendMsgRecord(chatId,{role:'assistant',content:full,
+                              _meta:_tclite.length?{toolcalls:_tclite}:undefined});
     results.forEach(function(res){
       if(!res.md)return;
       appendMsgRecord(chatId,{role:'assistant',content:res.md});
@@ -3680,6 +3730,15 @@ function assetBackfill(chat){
   return added;
 }
 var WEB_TOOL={type:'function',function:{name:'fetch_url',description:'Read the page at an explicit URL. Use it when the user gives you a link, or when you already know the exact address of something — this fetches one address, it does not search the web. The page comes back as text. If the URL points at an image it is downloaded into the conversation instead and can then be used with edit_image.',parameters:{type:'object',properties:{url:{type:'string',description:'The full URL, including http:// or https://'},name:{type:'string',description:'Only for an image URL: a short filename to save it under, e.g. "lady.jpg". Ignored for pages.'}},required:['url']}}};
+function _resultMetaMd(name,model,service,host){
+  var bits=[];
+  if(name)bits.push(name);
+  if(model)bits.push(String(model).replace(/\\/g,'/').split('/').pop());
+  if(service)bits.push(service);
+  if(host)bits.push(String(host).replace(/^https?:\/\//,''));
+  if(!bits.length)return '';
+  return '\n\n<span class="result-meta">'+bits.map(escHtml).join(' \u00b7 ')+'</span>';
+}
 var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
 var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name. Globs work, so "flux*" matches every Flux variant.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, or combine several, by describing the change. Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image in the conversation, which is what you want for an incremental tweak. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'Leave this blank. Blank means the best and fastest available model is chosen automatically, which is almost always what you want. Only set it if the user explicitly named a model, and then pass their words verbatim \u2014 never invent or guess a model name.'}},required:['prompt','name']}}};
@@ -4067,7 +4126,23 @@ function renderParsed(parsed){
     var d=parsed.docs[+i];return d?docChipHtml(d):'';
   });
 }
-function renderChatText(text){return renderParsed(splitDocBlocks(text))}
+// The model only knows assets by name (we never feed it URLs), so when it
+// tries to embed a result it writes a bare filename: ![clip](dog.mp4). Resolve
+// any markdown image/link whose target is an asset name to that asset's real
+// URL, so the model's attempt to show you the thing actually renders. A target
+// that is already a URL/path, or not a known asset, is left untouched.
+function _resolveAssetLinks(text){
+  var chat=currentChat;
+  if(!chat||!assetsOf(chat).length)return text;
+  return String(text||'').replace(/(!?)\[([^\]]*)\]\(([^)\s]+)\)/g,
+    function(m,bang,label,target){
+      if(/^(https?:|data:|\/|sdapi\/|v1\/|#)/.test(target))return m;  // already resolvable
+      var a=assetFind(chat,decodeURIComponent(target));
+      if(!a||!a.url)return m;
+      return bang+'['+label+']('+a.url+')';
+    });
+}
+function renderChatText(text){return renderParsed(splitDocBlocks(_resolveAssetLinks(text)))}
 // mirror the parsed documents into the conversation's document list as they
 // stream; `final` commits them once the turn is done
 function syncStreamDocs(gen,docs,final){
