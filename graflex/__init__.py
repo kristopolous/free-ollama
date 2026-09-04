@@ -1674,9 +1674,12 @@ def _consolidate_image_edit(classified):
     if not ie:
         return
     def _bucket(nm):
-        for k in classified:
-            if k.strip() == nm:
-                return k
+        # classified carries both a bare pre-populated key and the space-
+        # prefixed one _classify_model actually files models under; merge into
+        # the space-prefixed (populated) one so we don't split a bucket in two.
+        cands = [k for k in classified if k.strip() == nm]
+        if cands:
+            return max(cands, key=lambda k: len(k) - len(k.lstrip()))
         classified[nm] = []
         return nm
     ik, ek = _bucket("image"), _bucket("edit")

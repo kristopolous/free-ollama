@@ -159,7 +159,8 @@ VIDEO_JOBS_DIR = os.path.join(CACHE_DIR, "video-jobs")
 _VIDEO_JOBS = {}
 _VIDEO_JOB_ID_CTR = 0
 VIDEO_JOB_MAX = 200
-VIDEO_JOB_TTL = 3600
+VIDEO_JOB_TTL = 3600   # legacy; retention is now count-based
+VIDEO_JOBS_KEEP = 50   # keep the newest N finished videos, like the image gallery
 
 
 def load_classifier():
@@ -860,6 +861,7 @@ async def _register_worker(model, total, stop, phase=None, host=None, kind="text
         "checked": 0,
         "total": total,
         "stop": stop,
+        "skip": lambda: None,
         "phase": phase,
         "host": host,
         "kind": kind,
@@ -997,7 +999,14 @@ async def broadcast_activity(host, model, status, message, duration=None, wid=No
     # dashboard feed — otherwise a failure is only visible to whoever happens to
     # have the Activity pane open, and is gone once it scrolls past the cap.
     dur = f" [{entry['duration']:.2f}s]" if 'duration' in entry else ""
-    (log.warning if status == "failed" else log.info)(f"activity{dur} {message}")
+    # Name the host on every line. The dashboard feed carries `host` as its own
+    # field, but the server log only had the message — so a fan-out over many
+    # hosts logged "no response" ten times with no way to tell which host each
+    # was. `rmodel` (what actually ran) rides along when it differs from `model`.
+    where = f" @ {host}" if host else ""
+    rm = f" [{entry['rmodel']}]" if entry.get('rmodel') else ""
+    (log.warning if status == "failed" else log.info)(
+        f"activity{dur} {message}{where}{rm}")
     async with _activity_lock:
         _activity_history.append(entry)
         if len(_activity_history) > _ACTIVITY_HISTORY_MAX:
@@ -1943,12 +1952,7 @@ def to_ollama(body):
             out = []
             for tc in tcs:
                 fn = tc.get("function", {})
-                args = fn.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                args = _tool_args_obj(fn.get("arguments", {}))
                 out.append({"function": {"name": fn.get("name", ""), "arguments": args}})
             m["tool_calls"] = out
     return body
@@ -2121,6 +2125,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     tried = 0
     tally = collections.Counter()
     host_of = host_of or (lambda item: item)
+    _attempt_tasks = set()
 
     async def worker():
         nonlocal tried
@@ -2133,7 +2138,26 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 tried += 1
             await _worker_checked(wwid)
             wid = asyncio.current_task().get_name()
-            outcome = await attempt(item, wid, done)
+            # Run the attempt as its own task so a user "skip" can cancel just
+            # this host without tearing the whole race down. A full "stop"
+            # cancels the worker task and sets `done`; a "skip" cancels only the
+            # attempt, leaving `done` clear so the loop pulls the next host.
+            att = asyncio.ensure_future(attempt(item, wid, done))
+            _attempt_tasks.add(att)
+            try:
+                outcome = await att
+            except asyncio.CancelledError:
+                if not att.done():
+                    att.cancel()
+                if done.is_set():
+                    raise           # real stop / post-win cleanup: let it die
+                tally[V_SKIP] += 1
+                record_verdict(host_of(item), key, skip("skipped by user"))
+                await broadcast_activity(host_of(item), label or key, "failed",
+                    f"skipped: {host_of(item)}", wid=wid)
+                continue            # skip: move on to the next candidate host
+            finally:
+                _attempt_tasks.discard(att)
             if outcome is None:
                 outcome = skip()
             tally[outcome.verdict] += 1
@@ -2153,12 +2177,20 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         for t in _tasks_holder:
             t.cancel()
 
+    def _skip():
+        # Abandon whatever host(s) are being tried right now — but leave `done`
+        # clear and the worker tasks alive, so the race simply advances.
+        for t in list(_attempt_tasks):
+            t.cancel()
+
     if job_wid is not None:
         _workers[job_wid]["stop"] = _stop
+        _workers[job_wid]["skip"] = _skip
         wwid = job_wid
     else:
         wwid = await _register_worker(label or key, len(entries), _stop,
                                       kind=_kind_for_key(key))
+        _workers[wwid]["skip"] = _skip
     n = min(workers or WORKER_COUNT, len(entries)) or 1
     hedging = hedge_delay and hedge_delay > 0 and n > 1
     initial = 1 if hedging else n
@@ -2260,7 +2292,7 @@ def openai_to_ollama(data, model):
     if msg.get("tool_calls"):
         msg["tool_calls"] = [
             {"function": {"name": (t.get("function") or {}).get("name"),
-                          "arguments": _maybe_json((t.get("function") or {}).get("arguments"))}}
+                          "arguments": _tool_args_obj((t.get("function") or {}).get("arguments"))}}
             for t in msg["tool_calls"]]
     out = {"model": data.get("model") or model, "created_at": _now_iso(),
            "message": {"role": msg.get("role") or "assistant",
@@ -2323,6 +2355,43 @@ def _maybe_json(v):
         except Exception:
             return v
     return v
+
+
+def _tool_args_obj(v):
+    """Ollama's /api/chat wants tool_call arguments as a JSON *object*, never a
+    string. Abliterated models (and a truncated stream) hand back malformed JSON
+    like `{"prompt": "a dog` — and the old code, on a json.loads failure, left
+    that broken string in the payload, so every host answered 400
+    ("cannot unmarshal string into ... ToolCallFunctionArguments" on stricter
+    Ollamas, "can't find closing '}' symbol" on others). Always return a dict:
+    parse when we can, else drop to {} so the conversation survives the bad
+    call instead of failing on all N hosts."""
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str) and v.strip():
+        try:
+            d = json.loads(v)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            log.debug(f"tool_call arguments not valid JSON, dropping to {{}}: {v[:120]!r}")
+            return {}
+    return {}
+
+
+def _coerce_tool_args(messages):
+    """Ollama's /api/chat wants every assistant tool_call's `arguments` as an
+    object. The NATIVE chat path forwards the client body verbatim (no
+    to_ollama pass), so a client — or a model's own malformed tool call stored
+    in the conversation and sent back — that carries `arguments` as a string, or
+    a truncated one, makes every host answer 400 and the whole race dies.
+    Coerce in place so the native path is as safe as the OpenAI path."""
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            if isinstance(fn, dict) and "arguments" in fn:
+                fn["arguments"] = _tool_args_obj(fn["arguments"])
 
 
 def _now_iso():
@@ -3762,6 +3831,37 @@ async def handle_stop_worker(request):
     return web.json_response({"stopped": w.get("model"), "wid": w.get("wid")})
 
 
+async def handle_skip_worker(request):
+    """
+    Skip the host a race is currently trying, advancing to the next server.
+    ---
+    tags: [Admin]
+    summary: Abandon the in-flight host and let the race try a different server
+    parameters:
+      - in: query
+        name: wid
+        schema:
+          type: string
+        required: true
+        description: Worker id whose current host to skip
+    responses:
+      '200':
+        description: Skip requested
+    """
+    wid = request.query.get("wid")
+    w = _workers.get(wid) if wid else None
+    if w is None:
+        return web.json_response({"error": "worker not found"}, status=404)
+    if w.get("done"):
+        return web.json_response({"error": "worker already finished"}, status=409)
+    skip_fn = w.get("skip")
+    if callable(skip_fn):
+        log.info(f"worker skip requested: model={w.get('model')} wid={w.get('wid')}")
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(skip_fn) if loop.is_running() else skip_fn()
+    return web.json_response({"skipped": w.get("model"), "wid": w.get("wid")})
+
+
 async def handle_api_tags(request):
     """
     List models (Ollama-compatible)
@@ -4168,6 +4268,9 @@ async def handle_ollama_chat(request):
             return web.json_response(err_obj("model is required", "missing_model"), status=400)
         do_stream = body.get("stream", False)
         opayload = body
+        # Native path forwards the body as-is, so normalize tool_call arguments
+        # here the same way to_ollama does for the OpenAI path.
+        _coerce_tool_args(opayload.get("messages"))
         log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
         return await _proxy_chat(request, session, model, opayload, do_stream, openai_format=False)
 
@@ -4262,17 +4365,26 @@ async def handle_sd_models(request):
     """
     servers = load_servers()
     seen = {}
+    def _add(title, host):
+        row = seen.setdefault(title, {"id": title, "hosts": [], "count": 0})
+        row["count"] += 1
+        if host and host not in row["hosts"]:
+            row["hosts"].append(host)
     for s in servers:
-        if s.get("service") != "a1111":
-            continue
-        for m in s.get("models", []):
-            title = m.split(" [")[0] if " [" in m else m
-            if title not in seen:
-                seen[title] = {"id": title, "hosts": [], "count": 0}
-            seen[title]["count"] += 1
-            h = s.get("server", "")
-            if h not in seen[title]["hosts"]:
-                seen[title]["hosts"].append(h)
+        svc = s.get("service")
+        host = s.get("server", "")
+        if svc == "a1111":
+            for m in s.get("models", []):
+                _add(m.split(" [")[0] if " [" in m else m, host)
+        elif svc == "comfyui":
+            # ComfyUI hosts carry every kind of file; keep the image-gen models
+            # (checkpoints, UNETs like z-image / flux / sdxl) and drop the parts
+            # (vae/clip/lora) and the non-image families (video/audio/music).
+            for m in s.get("models", []):
+                name = str(m).replace("\\", "/").rsplit("/", 1)[-1]
+                if _NOT_A_MODEL.search(name) or _NOT_IMAGE_MODEL.search(name):
+                    continue
+                _add(m.rsplit("/", 1)[-1] if "/" in m else m, host)
     return web.json_response({
         "object": "list",
         "data": sorted(seen.values(), key=lambda x: -x["count"]),
@@ -5017,8 +5129,10 @@ async def handle_txt2img(request):
                 overrides[s.get("server")] = {"sd_model_checkpoint": mm}
         candidates = filtered
     hosts = [s.get("server") for s in candidates]
-    if not hosts:
-        return web.json_response({"error": "no available image-gen hosts"}, status=503)
+    # Don't 503 here just because no A1111 host matched the model: comfyui hosts
+    # (z-image, Flux.2, Qwen-Image and friends) are raced in Phase 3 below. An
+    # empty a1111 list simply makes Phase 1/2 no-ops. The honest "nothing
+    # anywhere had this model" answer is the tried_total == 0 check at the end.
 
     # Was a two-way good/not-good sort, which meant a1111 never used maybe_good
     # and re-probed hosts already known dead at the connection level.
@@ -5130,7 +5244,7 @@ async def handle_txt2img(request):
     if model_filter:
         comfy_candidates = [
             s for s in comfy_candidates
-            if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
+            if any(model_query_match(m.split(" [")[0] if " [" in m else m, model_filter)
                    for m in s.get("models", []))
         ]
     comfy_hosts = _idle_first(
@@ -5419,13 +5533,18 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
             return None
         checkpoints = await checkpoints_resp.json()
         await checkpoints_resp.release()
-        if not isinstance(checkpoints, list) or not checkpoints:
+        if not isinstance(checkpoints, list):
+            checkpoints = []
+        # No checkpoints and no model asked for: nothing to guess at. But if a
+        # model *was* named it may be a UNET/encode model (z-image, Flux.2) that
+        # this host has no checkpoint for — fall through to the edit-graph path.
+        if not checkpoints and not model_filter:
             return None
         ckpt = None
         if model_filter:
             ckpt = next(
-                (c for c in checkpoints if match_model(c, model_filter)), None)
-        if ckpt is None:
+                (c for c in checkpoints if model_query_match(c, model_filter)), None)
+        elif checkpoints:
             ckpt = checkpoints[0]
     except Exception:
         return None
@@ -5442,6 +5561,35 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
         seed = random.randint(0, 2**31 - 1)
     sampler = body.get("sampler_name", "euler")
     out_node = comfy_image_out_for(host)
+
+    # A specific model was asked for and it is not a checkpoint here. It may be
+    # a UNET + encode-node model (z-image, Flux.2, Qwen-Image) that the edit
+    # pipeline knows how to drive; with zero reference images those families are
+    # plain text-to-image. Build that graph instead of silently substituting an
+    # unrelated checkpoint. Only pay for /object_info on this miss, never on the
+    # ordinary checkpoint path.
+    if ckpt is None:
+        try:
+            info = await comfy_object_info(session, host)
+        except Exception:
+            info = None
+        plan = _edit_plan(info, model_filter, n_images=0) if info else None
+        if not (plan and model_query_match(plan["model"], model_filter)):
+            return None
+        eparams = {"width": width, "height": height, "steps": steps,
+                   "cfg_scale": cfg, "seed": seed, "sampler_name": sampler,
+                   "match_source": False}
+        try:
+            workflow = _edit_workflow(plan, prompt_text, [], eparams)
+            prompt_id = await comfy_submit(session, host, workflow)
+            raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
+                                           timeout=180, poll=2, view_timeout=30)
+        except ComfyError as e:
+            log.debug(f"txt2img (edit-graph {model_filter}): {host}: {e}")
+            return None
+        return {"images": [base64.b64encode(raw).decode()],
+                "_dyva_model": plan["model"], "_dyva_seed": seed,
+                "parameters": "{}", "info": json.dumps({"prompt": body})}
 
     workflow = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
@@ -5481,7 +5629,7 @@ def _find_comfyui_host(model_filter=None):
     if model_filter:
         candidates = [
             s for s in candidates
-            if any(match_model(m.split(" [")[0] if " [" in m else m, model_filter)
+            if any(model_query_match(m.split(" [")[0] if " [" in m else m, model_filter)
                    for m in s.get("models", []))
         ]
     hosts = [s.get("server") for s in candidates if s.get("server")]
@@ -6291,18 +6439,41 @@ def _load_video_jobs():
                     _VIDEO_JOB_ID_CTR = max(_VIDEO_JOB_ID_CTR, int(m.group(1)))
         except Exception:
             _VIDEO_JOBS = {}
-    # cull expired/failed-and-old jobs
-    now = time.time()
-    drop = [k for k, v in _VIDEO_JOBS.items()
-            if now - (v.get("created") or 0) > VIDEO_JOB_TTL]
-    for k in drop:
-        cp = (_VIDEO_JOBS[k] or {}).get("content_path")
+    # A finished video is research output the user comes back to, so retain it
+    # by COUNT like the image gallery — never delete a clip just because an hour
+    # elapsed. The old 1-hour VIDEO_JOB_TTL silently wiped completed videos on
+    # the next restart, and because the cull mutated memory without re-saving,
+    # the JSON kept advertising a "completed" job whose .bin was already gone.
+    changed = False
+    # Orphans: an in_progress job's render task died with the previous process,
+    # so nothing will ever finish it. Mark it failed so the pane stops spinning.
+    for v in _VIDEO_JOBS.values():
+        if isinstance(v, dict) and v.get("status") == "in_progress":
+            v["status"] = "failed"
+            v["error"] = "interrupted by a dyva restart"
+            changed = True
+    # Retain the newest VIDEO_JOBS_KEEP; drop older jobs and their files.
+    ordered = sorted(_VIDEO_JOBS.items(),
+                     key=lambda kv: (kv[1] or {}).get("created") or 0, reverse=True)
+    for k, v in ordered[VIDEO_JOBS_KEEP:]:
+        cp = (v or {}).get("content_path")
         if cp and os.path.exists(cp):
             try:
                 os.remove(cp)
             except Exception:
                 pass
         del _VIDEO_JOBS[k]
+        changed = True
+    # Reconcile: a completed job whose bytes have vanished must not stay in the
+    # index claiming a dead content_url.
+    for k, v in list(_VIDEO_JOBS.items()):
+        cp = (v or {}).get("content_path")
+        if (v and v.get("status") == "completed"
+                and (not cp or not os.path.exists(cp))):
+            del _VIDEO_JOBS[k]
+            changed = True
+    if changed:
+        _video_job_save()
 
 
 def _video_job_new(job):
@@ -7116,6 +7287,16 @@ async def handle_videos_post(request):
 # A host's model list is every file it will admit to having. These are the ones
 # that are never the thing you sample with, and matching them is how a job ends
 # up trying to render with a VAE or a LoRA.
+# Non-image model families to keep out of the image-generation listing: video,
+# audio and music models are "models" (they pass _NOT_A_MODEL) but you don't
+# render pictures with them.
+_NOT_IMAGE_MODEL = re.compile(
+    r"(?i)(wan[0-9._]*|ltx|mochi|cogvideo|hunyuan.?video|animatediff|framepack|"
+    r"seedvr|flashvsr|dynamicrafter|_i2v_|_t2v_|vace|"
+    r"svd(?=[._-])|ace.?step|acestep|musicgen|audiocraft|minimax.?music|"
+    r"minimax.?h3|f5.?tts|cosyvoice|vibevoice|_ref2va|_fl2va)")
+
+
 _NOT_A_MODEL = re.compile(
     r"(?i)(^|[/\\_.-])(vae|clip|t5|umt5|encoder|text_encoder|lora|embed|"
     r"upscaler|upsampler|taesd|refiner|controlnet|ipadapter|preview)"
@@ -9091,6 +9272,7 @@ def make_app():
     swagger.add_get("/workers-now", handle_workers_now)
     app.router.add_get("/workers-ws", handle_workers_ws)
     swagger.add_get("/stop-worker", handle_stop_worker)
+    swagger.add_get("/skip-worker", handle_skip_worker)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
     swagger.add_get("/api/version", handle_api_version)

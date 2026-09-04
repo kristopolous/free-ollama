@@ -241,14 +241,20 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .wk-seg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim);padding-bottom:2px;border-bottom:2px solid transparent}
 .wk-find{border-bottom-color:var(--accent)}
 .wk-run{border-bottom-color:#39d353;flex:1 1 auto}
+.wk-time{color:var(--text-faint);white-space:nowrap;flex:0 0 auto}
 /* a job that never secured a host: a quiet line, not an alarm */
 .wk-seg.nofind{border-bottom-color:var(--border-strong)}
 .workers-empty{color:var(--text-muted);font-size:var(--fs-md);text-align:center;padding:2.5rem 0}
+.workers-done-hdr{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint);margin:var(--sp-3) 0 var(--sp-2)}
+.workers-done-scroll{max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
 .workers-idle{color:var(--text-muted);font-size:var(--fs-md);margin-bottom:var(--sp-3)}
 .worker-stop{flex:0 0 auto;background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer}
 .worker-stop:hover{background:var(--accent-bg-active);color:var(--text)}
 .worker-stop[disabled]{opacity:.6;cursor:default;font-style:italic}
 .worker-stop[disabled]:hover{background:var(--accent-bg);color:var(--text-2)}
+.worker-skip{flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer;margin-left:4px}
+.worker-skip:hover{background:var(--accent-bg);color:var(--text)}
+.worker-skip[disabled]{opacity:.6;cursor:default;font-style:italic}
 
 label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-2)}
 input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-3) 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--field-bg);color:var(--text);font-size:var(--fs-md);outline:none;font-family:var(--font-mono)}
@@ -381,7 +387,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .attach-chip img{width:26px;height:26px;object-fit:cover;border-radius:var(--r-sm);flex-shrink:0}
 .attach-chip .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .attach-chip .x{cursor:pointer;color:var(--err-hover);padding:0 2px;flex-shrink:0}
-.msg .files{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:.5em}
+.msg .files{display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-4);margin-top:.5em}
 .msg .files img{max-width:160px;max-height:160px;border-radius:var(--r-md);border:1px solid var(--border)}
 .msg .body p img{max-width:min(360px,100%);border-radius:var(--r-lg);display:block;margin:var(--sp-2) 0}
 .msg .files img,.msg .body img{cursor:zoom-in}
@@ -1330,6 +1336,11 @@ function matchModel(name,pattern){
   }
   return n.indexOf(p)>=0;
 }
+function globSearch(query,list,key){
+  if(!query)return (list||[]).slice();
+  var k=key||function(x){return x};
+  return (list||[]).filter(function(x){return matchModel(k(x),query)});
+}
 // The tab labels are icons now, so the count carries the meaning: how many
 // models in that pane match the current filter. The words live in title=.
 function updateModelPaneCounts(q){
@@ -1440,7 +1451,7 @@ function _byModel(a,b){var am=a.slice(a.indexOf(' ')+1),bm=b.slice(b.indexOf(' '
 function _setCount(id,n){var e=document.getElementById(id);if(e)e.textContent=n}
 function renderKeyPane(listId,moreId,countId,arr,q,skip){
   var c=document.getElementById(listId);c.innerHTML='';
-  var matched=q?arr.filter(function(x){return matchModel(x,q)}):arr;
+  var matched=globSearch(q,arr);
   matched.slice(0,30).forEach(function(x){
     var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);
     c.appendChild(hostRow(h,mo,skip?'skip-good?host='+encodeURIComponent(h)+'&model='+encodeURIComponent(mo):null));
@@ -1452,7 +1463,7 @@ function renderKeyPane(listId,moreId,countId,arr,q,skip){
 function renderHostPanes(){
   var q=document.getElementById('modelFilter').value.trim();
   var last=document.getElementById('lastList');last.innerHTML='';
-  var lm=q?_hostData.last.filter(function(e){return matchModel((e.host||'')+' '+(e.model||''),q)}):_hostData.last;
+  var lm=globSearch(q,_hostData.last,function(e){return (e.host||'')+' '+(e.model||'')});
   if(!lm.length){last.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">'
     +(q&&_hostData.last.length?'None matching the filter':'None')+'</div>'}
   else lm.forEach(function(e){last.appendChild(hostRow(e.host,e.model,'next-host?model='+encodeURIComponent(e.model||'')))});
@@ -1479,6 +1490,7 @@ function agoLong(secs){
 }
 // The workers view wants precision the activity feed doesn't: a sub-second host
 // find should read "0.8s", not "0s", because that number is the whole point.
+function fmtClock(ms){var d=new Date(ms);function p(n){return(n<10?'0':'')+n}return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
 function timerText(secs){
   if(!isFinite(secs)||secs<0)secs=0;
   if(secs<10)return secs.toFixed(1)+'s';
@@ -1561,8 +1573,17 @@ function paintTimeline(tl,w,total,checkedStr){
   run.textContent=timerText(runSecs)+' - '+label;
 }
 var _lastWorkers=[];
+var _workersSig=null;
 function renderWorkers(workers){
   var c=document.getElementById('workersList'),arr=workers||[];
+  // Rebuilding the list every snapshot (~2s) scrolls the Previous container back
+  // to the top. Skip the rebuild when nothing structural changed. `age` is
+  // excluded from the signature because it ticks on every snapshot for a live
+  // worker — the 100ms ticker already animates the live timers in place, so a
+  // job merely running (only age moving) must not force a rebuild.
+  var sig=JSON.stringify(arr,function(k,v){return k==='age'?undefined:v});
+  if(sig===_workersSig)return;
+  _workersSig=sig;
   _lastWorkers=arr;
   renderActivityWorkers(arr);
   var liveArr=arr.filter(function(w){return !w.done});
@@ -1574,7 +1595,7 @@ function renderWorkers(workers){
   // the empty-state line belongs only to a genuinely empty pane; finished
   // cards are content, not emptiness
   if(!arr.length){c.innerHTML='<div class="workers-empty">No workers yet</div>';return}
-  arr.forEach(function(w){
+  function buildCard(w){
     var card=document.createElement('div');card.className='worker-card'
       +(w.done?' worker-done'+(w.ok===false?' worker-failed':''):'');
     card.setAttribute('data-wid',w.wid);
@@ -1610,6 +1631,18 @@ function renderWorkers(workers){
         });
       });
       sub.appendChild(stop);
+      // skip: abandon the host being tried right now and let the race move on
+      // to the next server, without killing the whole job the way stop does.
+      var skb=document.createElement('button');skb.type='button';skb.className='worker-skip';
+      skb.textContent='skip';skb.title='abandon this host and try a different server';
+      skb.addEventListener('click',function(){
+        skb.disabled=true;skb.textContent='skipping…';
+        fetch('skip-worker?wid='+encodeURIComponent(w.wid)).catch(function(){}).then(function(){
+          // the job keeps running on the next host, so re-enable shortly
+          setTimeout(function(){skb.disabled=false;skb.textContent='skip';},1200);
+        });
+      });
+      sub.appendChild(skb);
     }
     var where=w.host?String(w.host).replace(/^https?:\/\//,''):'';
     var rm=w.rmodel?String(w.rmodel).replace(/\\/g,'/').split('/').pop():'';
@@ -1624,18 +1657,38 @@ function renderWorkers(workers){
     // Two spans, two clocks: finding a host (blue) and running the job on it
     // (green). Data attributes drive the local ticker; the server hands back
     // `find` (seconds to secure a host) and `age` (total).
+    // The server sends an absolute start epoch; use it so the timestamp is
+    // fixed. Recomputing now-age drifts every render — and once a finished
+    // job's age freezes, now keeps moving, so the clock crept upward.
+    var started=(w.started!=null)?w.started*1000:(Date.now()-(w.age||0)*1000);
     var tl=document.createElement('div');tl.className='wk-timeline';
-    tl.setAttribute('data-started',String(Date.now()-(w.age||0)*1000));
+    tl.setAttribute('data-started',String(started));
     tl.setAttribute('data-find',w.find===undefined?'?':(w.find===null?'':String(w.find)));
     tl.setAttribute('data-checked',String(w.checked));
+    // Wall-clock time the request began (24hr). Static — set once, never ticks;
+    // plain dim text with no accent underline, unlike the timeline segments.
+    var ts=document.createElement('span');ts.className='wk-time';ts.textContent=fmtClock(started);
     var find=document.createElement('span');find.className='wk-seg wk-find';
     var run=document.createElement('span');run.className='wk-seg wk-run';
-    tl.appendChild(find);tl.appendChild(run);
+    tl.appendChild(ts);tl.appendChild(find);tl.appendChild(run);
     paintTimeline(tl,w);
     top.appendChild(tl);             // top row, pulled right, beside the model
     card.appendChild(body);
-    c.appendChild(card);
-  });
+    return card;
+  }
+  // Live workers stay pinned at the top; the finished ones — which only grow —
+  // live in their own scrollable container below so they never push the active
+  // jobs off-screen.
+  liveArr.forEach(function(w){c.appendChild(buildCard(w))});
+  var doneArr=arr.filter(function(w){return w.done});
+  if(doneArr.length){
+    var dh=document.createElement('div');dh.className='workers-done-hdr';
+    dh.textContent='Previous ('+doneArr.length+')';
+    c.appendChild(dh);
+    var dw=document.createElement('div');dw.className='workers-done-scroll';
+    doneArr.forEach(function(w){dw.appendChild(buildCard(w))});
+    c.appendChild(dw);
+  }
 }
 setInterval(function(){
   var pane=document.getElementById('pane-workers');
@@ -3122,7 +3175,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
         }
       }else if(fn.name==='search_models'){
         var mtype=String(args.type||'').trim();
-        var sub=String(args.substring||'').trim().toLowerCase();
+        var sub=String(args.substring||'').trim();
         var ep={image:'sdapi/v1/sd-models',edit:'v1/images/edit-models',
                 video:'v1/videos/models',speech:'v1/audio/voices',text:'v1/models'}[mtype];
         setStatus('reading '+(mtype||'?')+' models\u2026');
@@ -3140,7 +3193,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
               }else{
                 rows=(jm2.data||[]).map(function(o){return {id:o.id,count:o.count,family:o.family}});
               }
-              if(sub)rows=rows.filter(function(r){return String(r.id||'').toLowerCase().indexOf(sub)>=0});
+              if(sub)rows=globSearch(sub,rows,function(r){return String(r.id||'')});
               if(!rows.length){
                 results.push({text:'No '+mtype+' models'+(sub?' matching "'+sub+'"':'')
                                    +' are available across the discovered hosts right now.'});
@@ -3818,7 +3871,7 @@ function _resultMetaMd(name,model,service,host){
   if(!bits.length)return '';
   return '\n\n<span class="result-meta">'+bits.map(escHtml).join(' \u00b7 ')+'</span>';
 }
-var SEARCH_MODELS_TOOL={type:'function',function:{name:'search_models',description:'Search the models actually available across the discovered hosts for a given kind of generation \u2014 to tell the user what they can make things with, or to find one matching what they asked for. Read-only. Call it for questions like "what models can you make images with" or "any cartoon image models" (pass substring "cartoon"). Returns matching model names with how many hosts have each.',parameters:{type:'object',properties:{type:{type:'string',enum:['image','edit','video','speech','text'],description:'Which capability: image (generate), edit (image editing), video, speech (TTS voices), or text (chat LLMs).'},substring:{type:'string',description:'Optional case-insensitive filter, e.g. "cartoon" or "flux" \u2014 only models whose name contains it are returned.'},page:{type:'integer',description:'1-based page number when there are more than 50 matches; the result says how many pages there are. Defaults to 1.'}},required:['type']}}};
+var SEARCH_MODELS_TOOL={type:'function',function:{name:'search_models',description:'Search the models actually available across the discovered hosts for a given kind of generation \u2014 to tell the user what they can make things with, or to find one matching what they asked for. Read-only. Call it for questions like "what models can you make images with" or "any cartoon image models" (pass substring "cartoon"). Returns matching model names with how many hosts have each.',parameters:{type:'object',properties:{type:{type:'string',enum:['image','edit','video','speech','text'],description:'Which capability: image (generate), edit (image editing), video, speech (TTS voices), or text (chat LLMs).'},substring:{type:'string',description:'Optional filter \u2014 plain text matches as a case-insensitive substring ("cartoon", "flux"), and globs work too ("z*image" matches z-image / zImage / z_image, "flux*2" matches flux.2 and flux-2). Only matching model names are returned.'},page:{type:'integer',description:'1-based page number when there are more than 50 matches; the result says how many pages there are. Defaults to 1.'}},required:['type']}}};
 var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
 var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'The checkpoint to render with. If the user names a model, family, or style \u2014 e.g. "dreamshaper", "flux", "juggernaut" \u2014 put it HERE, as a substring or glob ("dreamshaper*" matches dreamshaper_8.safetensors), and do NOT mention the model in the prompt. Leave blank only when the user did not name one, to auto-pick the best available. Never invent a model name; use search_models if unsure what exists.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, combine several, or generate a fresh image on an edit-class model (Flux.2 and similar do text-to-image too \u2014 no reference needed). Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image (an incremental tweak), or when there is no image at all to generate from the prompt. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'The edit model to use. If the user names one, put it HERE as a substring or glob (globs work, e.g. "flux*2") \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a model name; use search_models (type "edit") if unsure.'}},required:['prompt','name']}}};
@@ -4551,7 +4604,7 @@ function attachPicker(inputId,listId){
   }
   function refresh(){
     var q=input.value.trim(),all=options();
-    var hit=q?all.filter(function(o){return matchModel(o.value,q)}):all;
+    var hit=globSearch(q,all,function(o){return o.value});
     rows=hit.slice(0,MPICK_MAX);
     rows._more=hit.length>MPICK_MAX?(hit.length-MPICK_MAX):0;
     sel=-1;

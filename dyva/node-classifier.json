@@ -333,6 +333,31 @@
       "steps": 20
     },
     {
+      "name": "ZImage",
+      "style": "encode",
+      "patterns": [
+        "^TextEncodeZImageOmni$"
+      ],
+      "images": [
+        "image1",
+        "image2",
+        "image3"
+      ],
+      "model": "(?i)z[-_. ]?image",
+      "clip": [
+        "(?i)qwen[-_. ]?2[-_. ]?5[-_. ]?vl",
+        "(?i)qwen.*vl"
+      ],
+      "clip_type": "qwen_image",
+      "vae": [
+        "(?i)qwen[-_. ]?image[-_. ]?vae",
+        "(?i)qwen.*vae"
+      ],
+      "cfg": 1.0,
+      "steps": 8,
+      "note": "Z-Image (Tongyi). Encode-style via TextEncodeZImageOmni; the image slots are optional, so with zero references it is text-to-image. Clip is Qwen2.5-VL loaded as type 'qwen_image' (inferred — the enum has no z-image type; same encoder backbone as Qwen-Image); VAE is Qwen-Image's. Verified feasible against a real z-image host's /object_info."
+    },
+    {
       "name": "Flux2Klein",
       "style": "reference",
       "patterns": [
