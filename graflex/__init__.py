@@ -1664,6 +1664,30 @@ def _classify_gradio_hosts(name, entries):
              f"[{datetime.now(timezone.utc).isoformat()}]")
 
 
+def _consolidate_image_edit(classified):
+    """Redistribute the `image_edit` bucket into `image` and `edit`, then drop
+    it. Dual-purpose models (Flux.2) generate AND edit, so they belong in both;
+    a single `image_edit` bucket exists only during classification so the
+    classifier can stay a clean, exclusive first-match. Keys may carry the
+    _classify_model space prefix, so match by stripped name."""
+    ie = [k for k in classified if k.strip() == "image_edit"]
+    if not ie:
+        return
+    def _bucket(nm):
+        for k in classified:
+            if k.strip() == nm:
+                return k
+        classified[nm] = []
+        return nm
+    ik, ek = _bucket("image"), _bucket("edit")
+    for k in ie:
+        for m in classified.pop(k):
+            if m not in classified[ik]:
+                classified[ik].append(m)
+            if m not in classified[ek]:
+                classified[ek].append(m)
+
+
 def classify(name=None):
     from datetime import datetime, timezone
 
@@ -1697,9 +1721,17 @@ def classify(name=None):
             if key not in printed:
                 printed.add(key)
                 print(f"{ctype:13s} {m}")
+        _consolidate_image_edit(classified)
         e["classified"] = classified
         out.append(e)
 
+    ie_total = 0
+    for k in [k for k in counts if k.strip() == "image_edit"]:
+        ie_total += counts.pop(k)
+    if ie_total:
+        for nm in ("image", "edit"):
+            ck = next((k for k in counts if k.strip() == nm), nm)
+            counts[ck] = counts.get(ck, 0) + ie_total
     root, ext = os.path.splitext(input_file)
     out_file = f"{root}-classified{ext}"
     _save_json(out_file, out)

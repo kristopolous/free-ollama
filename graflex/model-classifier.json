@@ -3,17 +3,23 @@
     "lora"
   ],
   "vision": [
-    "clip_"
+    "clip_",
+    "(?i)qwen.*2[._]?5.*vl",
+    "(?i)(^|/)(umt5|t5xxl|byt5|mistral_.*flux2)",
+    "(?i)text_encoders?/"
+  ],
+  "image_edit": [
+    "(?i)flux[-_. ]?2"
   ],
   "edit": [
-    "(FLUX|flux|Qwen-Rapid|edit)",
+    "(?i)(kontext|qwen[-_ ]?rapid|qwen[-_ ]?image[-_ ]?edit|edit)",
     "(?i)boogu",
     "(?i)hunyuanimage",
     "(?i)hidream[-_ ]?[oe]\\d",
     "(?i)hidream.*(edit|instruct)"
   ],
   "video": [
-    "(_i2v_|Ref2VA|FL2VA|wan|video|ltx|mochi|cogvideo|animatediff|svd|seedvr|flashvsr|framepack|dynamicrafter)",
+    "(_i2v_|Ref2VA|FL2VA|wan|video|ltx|mochi|cogvideo|animatediff|svd(?=[._-])|seedvr|flashvsr|framepack|dynamicrafter)",
     "^(clip_gguf|tmp_hunyuan_loras|tmp_wanvideo_loras|video_formats|frame_interpolation)/"
   ],
   "music": [
