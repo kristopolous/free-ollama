@@ -772,7 +772,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <img src="dyva.avif" alt="" width="56" height="56">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span title="servers"> 💻 __SERVER_COUNT__ </span>&middot;<span title="model count"> 🤖 __MODEL_COUNT__ </span>&middot;<span title="version"><a title="guide" href="guide" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
+<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span id="hostsPill" title="servers - loaded at __HOSTS_LOADED__" style="cursor:pointer"> <span id="hostsIcon">💻</span> <span id="serverCount">__SERVER_COUNT__</span> </span>&middot;<span title="model count"> 🤖 <span id="modelCount">__MODEL_COUNT__</span> </span>&middot;<span title="version"><a title="guide" href="guide" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
 </p>
 </div>
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾<span id="actBadge" class="act-badge" hidden></span></button>
@@ -1278,6 +1278,25 @@ connectActivity(false);
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
 document.getElementById('activityBtn').addEventListener('click',function(e){e.stopPropagation();actPop.classList.toggle('open')});
+// Clicking the 💻 host count re-reads free-ollama.json from disk — the file can
+// be rewritten under a running dyva (graflex appends new servers) and there was
+// no way to pick that up short of a restart.
+(function(){
+  var pill=document.getElementById('hostsPill');if(!pill)return;
+  pill.addEventListener('click',function(){
+    if(pill._busy)return;pill._busy=true;
+    var sc=document.getElementById('serverCount'),mc=document.getElementById('modelCount'),
+        ic=document.getElementById('hostsIcon');
+    // Indicate the reload by swapping the emoji (💻 → 🚚), not by replacing the
+    // number — changing the count's width shifts the header and reads as a glitch.
+    if(ic)ic.textContent='🚚';
+    fetch('reload-hosts',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
+      if(sc)sc.textContent=d.servers;
+      if(mc&&d.models!=null)mc.textContent=d.models;
+      if(d.loaded)pill.title='servers - loaded at '+d.loaded;
+    }).catch(function(){}).then(function(){if(ic)ic.textContent='💻';pill._busy=false;});
+  });
+})();
 document.addEventListener('keydown',function(e){if(e.key==='Escape')actPop.classList.remove('open')});
 </script>
 <script>

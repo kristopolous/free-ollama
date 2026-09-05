@@ -759,6 +759,7 @@ QUICK_TEST_PASS_RE = re.compile(r"\b(Washington|George)\b", re.I)
 
 _status_db = None
 _servers_cache = None
+_servers_loaded_at = None
 
 _activity_queues = []
 
@@ -1203,7 +1204,7 @@ def ensure_cache():
 
 
 def load_servers():
-    global _servers_cache
+    global _servers_cache, _servers_loaded_at
     ensure_cache()
     if _servers_cache is None:
         if not os.path.exists(CACHE_FILE):
@@ -1211,7 +1212,15 @@ def load_servers():
         else:
             with open(CACHE_FILE, encoding="utf-8") as f:
                 _servers_cache = json.load(f)
+        _servers_loaded_at = time.time()   # when this process last read the file
     return _servers_cache or []
+
+
+def _hosts_loaded_str():
+    """When the host list was last read from disk, as 'MM-DD HH:MM'."""
+    if not _servers_loaded_at:
+        return "?"
+    return time.strftime("%m-%d %H:%M", time.localtime(_servers_loaded_at))
 
 
 # Host reputation lives in a SQLite table (host, model) -> state + metadata.
@@ -3227,9 +3236,34 @@ async def handle_dashboard(request):
     html = html.replace("__SERVER_COUNT__", str(len(servers)))
     html = html.replace("__MODEL_COUNT__", str(len(models)))
     html = html.replace("__DYVA_VERSION__", VERSION)
+    html = html.replace("__HOSTS_LOADED__", _hosts_loaded_str())
     html = html.replace("__SD_MODELS__", sd_options)
     return web.Response(text=html, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-cache"})
+
+
+async def handle_reload_hosts(request):
+    """
+    Reload the host list from disk (no network re-fetch).
+    ---
+    tags: [UI]
+    summary: GET /reload-hosts — re-read free-ollama.json in place
+    description: |
+      The host cache (free-ollama.json) can be rewritten under a running dyva —
+      graflex appends newly-discovered servers, or a federation file updates —
+      and without this the process kept serving the copy it read at startup.
+      This invalidates the in-memory cache and re-reads the file from disk. It
+      is a pure re-read, not `/refresh` (which re-pulls every source over the
+      network).
+    responses:
+      '200':
+        description: New server and model counts
+    """
+    global _servers_cache
+    _servers_cache = None          # force load_servers() to re-read the file
+    servers = load_servers()
+    return web.json_response({"servers": len(servers), "models": len(all_models()),
+                              "loaded": _hosts_loaded_str()})
 
 
 async def handle_guide(request):
@@ -9304,6 +9338,7 @@ def make_app():
 
     swagger.add_get("/", handle_dashboard)
     swagger.add_get("/guide", handle_guide)
+    swagger.add_get("/reload-hosts", handle_reload_hosts)
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
     swagger.add_get("/dashboard-models", handle_dashboard_models)
