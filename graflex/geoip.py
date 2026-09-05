@@ -27,6 +27,12 @@ import urllib.request
 
 log = logging.getLogger("dyva.geoip")
 
+try:
+    import maxminddb
+    _HAVE_MMDB = True
+except ImportError:
+    _HAVE_MMDB = False
+
 GEO_DIR = os.path.join(os.path.expanduser("~/.cache/free-ollama"), "geo")
 DBIP_BASE = "https://download.db-ip.com/free"
 DBIP_ATTRIBUTION = "IP data by DB-IP (https://db-ip.com) — CC BY 4.0"
@@ -50,7 +56,19 @@ _PROVIDERS = [
     ("leaseweb", "leaseweb"),
     ("alibaba", "alibaba"), ("aliyun", "alibaba"),
     ("tencent", "tencent"),
+    ("huawei", "huawei"),
     ("cloudflare", "cloudflare"),
+    # regional hosts/clouds that were slipping into ;nocloud (ISPs/telecoms are
+    # deliberately left out — a Rostelecom/MTS host really is residential geo)
+    ("selectel", "selectel"),
+    ("yandex", "yandex"),
+    ("timeweb", "timeweb"),
+    ("beget", "beget"),
+    ("hostkey", "hostkey"),
+    ("adminvps", "adminvps"),
+    ("reg.ru", "regru"),
+    ("ruvds", "ruvds"),
+    ("aeza", "aeza"),
 ]
 
 
@@ -224,6 +242,98 @@ def _asn_lookup(ip):
     return out
 
 
+# ---- Fast path: DB-IP .mmdb via maxminddb (O(1) per-IP lookups) ----------
+# The CSV path below is a full-file sweep — fine for a one-shot bulk pass, but
+# murder when a churning file (ollama's dead hosts) gets re-enriched every cron
+# cycle. The .mmdb (same DB-IP Lite, CC BY, no signup) is a memory-mapped tree:
+# each lookup is a handful of node reads, so re-enriching is cheap regardless.
+_mmdb_readers = {}
+
+
+def _ensure_mmdb(kind):
+    """Path to the current DB-IP Lite `kind` .mmdb (ungzipped), downloading it
+    if missing; None if unavailable."""
+    os.makedirs(GEO_DIR, exist_ok=True)
+    now = time.gmtime()
+    months = [time.strftime("%Y-%m", now)]
+    prev = (now.tm_year, now.tm_mon - 1) if now.tm_mon > 1 else (now.tm_year - 1, 12)
+    months.append("%04d-%02d" % prev)
+    for m in months:
+        p = os.path.join(GEO_DIR, f"dbip-{kind}-lite-{m}.mmdb")
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            return p
+    for m in months:
+        gz = os.path.join(GEO_DIR, f"dbip-{kind}-lite-{m}.mmdb.gz")
+        out = gz[:-3]
+        try:
+            _download(f"{DBIP_BASE}/dbip-{kind}-lite-{m}.mmdb.gz", gz)
+            with gzip.open(gz, "rb") as fi, open(out, "wb") as fo:
+                while True:
+                    chunk = fi.read(1 << 20)
+                    if not chunk:
+                        break
+                    fo.write(chunk)
+            os.remove(gz)
+            for f in os.listdir(GEO_DIR):
+                if f.startswith(f"dbip-{kind}-lite-") and f.endswith(".mmdb") and f != os.path.basename(out):
+                    try:
+                        os.remove(os.path.join(GEO_DIR, f))
+                    except OSError:
+                        pass
+            return out
+        except Exception as e:
+            log.debug(f"geoip: mmdb {kind} {m} unavailable: {e}")
+    return None
+
+
+def _mmdb(kind):
+    if not _HAVE_MMDB:
+        return None
+    if kind not in _mmdb_readers:
+        _mmdb_readers[kind] = None
+        try:
+            p = _ensure_mmdb(kind)
+            if p:
+                _mmdb_readers[kind] = maxminddb.open_database(p)
+        except Exception as e:
+            log.debug(f"geoip: cannot open {kind} mmdb: {e}")
+    return _mmdb_readers[kind]
+
+
+def _mmdb_lookup(ip):
+    out = {}
+    cr = _mmdb("city")
+    if cr:
+        rec = cr.get(ip) or {}
+        cc = (rec.get("country") or {}).get("iso_code")
+        if cc:
+            out["country"] = cc
+        city = ((rec.get("city") or {}).get("names") or {}).get("en")
+        if city:
+            out["city"] = city
+        loc = rec.get("location") or {}
+        if loc.get("latitude") is not None:
+            out["lat"] = loc["latitude"]
+            out["lon"] = loc.get("longitude")
+    ar = _mmdb("asn")
+    if ar:
+        rec = ar.get(ip) or {}
+        asn = rec.get("autonomous_system_number")
+        if asn:
+            out["asn"] = asn
+        org = rec.get("autonomous_system_organization")
+        if org:
+            out["as_org"] = org
+            p = provider_of(org)
+            if p:
+                out["provider"] = p
+    return out
+
+
+def mmdb_available():
+    return _HAVE_MMDB and _mmdb("city") is not None
+
+
 def _iter_csv(path):
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rt", encoding="utf-8", errors="replace", newline="") as f:
@@ -345,6 +455,32 @@ def enrich_records(records, key=None, refresh=False, max_age_days=30, resolve=Fa
     now = time.time()
     max_age = max_age_days * 86400
     pairs = records.items() if isinstance(records, dict) else ((None, r) for r in records)
+
+    # Fast path: per-IP mmdb lookups (a plain loop, no full-file scan).
+    if mmdb_available():
+        looked = matched = 0
+        for host_key, r in pairs:
+            if not isinstance(r, dict):
+                continue
+            if not refresh and r.get("geo_checked") and now - r["geo_checked"] < max_age:
+                continue
+            src = _host_field(r, key)
+            if not src and host_key is not None:
+                src = host_key
+            ip = ip_from_server(src, resolve=resolve)
+            r["geo_checked"] = now
+            if not ip:
+                continue
+            looked += 1
+            info = _mmdb_lookup(ip)
+            if info:
+                matched += 1
+                for k in GEO_FIELDS:
+                    if k in info:
+                        r[k] = info[k]
+        return looked, matched
+
+    # Fallback: CSV sweep (no maxminddb / no mmdb file).
     targets = []      # [record, version, ip_int, ip_str]
     for host_key, r in pairs:
         if not isinstance(r, dict):

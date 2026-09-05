@@ -11,6 +11,7 @@ dependencies = [
     "curlify>=3.0.0",
     "aiohttp-swagger3>=0.10.0",
     "Pillow>=10.0.0",
+    "maxminddb>=2.0.0",
 ]
 
 [tool.setuptools]

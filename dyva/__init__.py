@@ -79,6 +79,9 @@ def log_upstream(code, host, endpoint, body, remote=None):
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
+# Dead-host population for the map's ;dead filter — the single consolidated,
+# geo-enriched notworking file that `graflex.sh combine` produces. Never routed.
+NOTWORKING_FILE = os.path.join(CACHE_DIR, "notworking-consolidated.json")
 BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
 GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
 STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
@@ -1179,8 +1182,27 @@ def refresh_cache(source=None):
       except TypeError:
         v['models'] = list(v.get('models') or [])
 
+    records = list(host_map.values())
+    # Re-apply geo/provider so a rebuild doesn't wipe the enrichment (a refresh
+    # pulls fresh source data with none). Best effort, and only when the offline
+    # DB is already downloaded — a routine refresh must never trigger an 85 MB
+    # download. graflex owns the enrichment; dyva just re-runs it on its cache.
+    try:
+        import glob as _glob
+        from graflex import geoip as _geoip
+        gd = _geoip.GEO_DIR
+        # Enrich only when a DB is already on disk (mmdb or csv) — never let a
+        # routine refresh trigger a download. enrich_records self-selects mmdb.
+        have = ((_glob.glob(os.path.join(gd, "dbip-city-lite-*.mmdb")) and
+                 _glob.glob(os.path.join(gd, "dbip-asn-lite-*.mmdb"))) or
+                (_glob.glob(os.path.join(gd, "dbip-city-lite-*.csv.gz")) and
+                 _glob.glob(os.path.join(gd, "dbip-asn-lite-*.csv.gz"))))
+        if have:
+            _geoip.enrich_records(records)
+    except Exception as _e:
+        log.debug(f"geo re-enrich after refresh skipped: {_e}")
     with open(_db, 'w', encoding="utf-8") as f:
-      json.dump(list(host_map.values()), f)
+      json.dump(records, f)
 
     by_source = {}
     for v in host_map.values():
@@ -1214,6 +1236,27 @@ def load_servers():
                 _servers_cache = json.load(f)
         _servers_loaded_at = time.time()   # when this process last read the file
     return _servers_cache or []
+
+
+_dead_cache = None
+
+
+def load_dead():
+    """The dead-host population for the map's ;dead filter: the single
+    consolidated notworking file `graflex.sh combine` writes (a host-keyed dict,
+    geo-enriched there). Cached, read-only, never routed to."""
+    global _dead_cache
+    if _dead_cache is not None:
+        return _dead_cache
+    _dead_cache = []
+    if os.path.exists(NOTWORKING_FILE):
+        try:
+            with open(NOTWORKING_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            _dead_cache = list(data.values()) if isinstance(data, dict) else (data or [])
+        except Exception:
+            _dead_cache = []
+    return _dead_cache
 
 
 def _hosts_loaded_str():
@@ -3259,8 +3302,9 @@ async def handle_reload_hosts(request):
       '200':
         description: New server and model counts
     """
-    global _servers_cache
+    global _servers_cache, _dead_cache
     _servers_cache = None          # force load_servers() to re-read the file
+    _dead_cache = None             # and the dead population
     servers = load_servers()
     return web.json_response({"servers": len(servers), "models": len(all_models()),
                               "loaded": _hosts_loaded_str()})
@@ -3315,32 +3359,72 @@ async def handle_geo_compare(request):
     """
     a = (request.query.get("a") or "").strip()
     b = (request.query.get("b") or "").strip()
+    atok, btok = a.split(), b.split()
+
+    # A side is a set of space-separated tokens, AND-combined. A ';' prefix is a
+    # meta token: ';live'/';dead' (working vs notworking population) or
+    # ';<service>' (ollama, comfyui, llama.cpp, …). Anything else is a model glob
+    # matched against the host's models. ';' is safe — never appears in a model.
+    def side_ok(models, svc, prov, live, tokens):
+        if not tokens:
+            return False
+        for t in tokens:
+            if t.startswith(";"):
+                meta = t[1:].lower()
+                if meta == "live":
+                    if not live:
+                        return False
+                elif meta == "dead":
+                    if live:
+                        return False
+                elif meta == "cloud":                # on a detected big provider
+                    if not prov:
+                        return False
+                elif meta == "nocloud":              # residential/ISP/unknown host
+                    if prov:
+                        return False
+                elif meta != svc and meta != prov:   # a service or a provider
+                    return False
+            elif not any(model_query_match(m, t) for m in models):
+                return False
+        return True
+
     countries, cities = {}, {}
-    for s in load_servers():
-        if not isinstance(s, dict):
-            continue
-        models = s.get("models") or []
-        ma = bool(a) and any(model_query_match(m, a) for m in models)
-        mb = bool(b) and any(model_query_match(m, b) for m in models)
-        if not (ma or mb):
-            continue
-        cc = s.get("country")
-        if cc:
-            r = countries.setdefault(cc, {"a": 0, "b": 0})
-            if ma:
-                r["a"] += 1
-            if mb:
-                r["b"] += 1
-        lat, lon = s.get("lat"), s.get("lon")
-        if lat is not None and lon is not None:
-            ck = (s.get("city") or "", cc or "", round(lat, 2), round(lon, 2))
-            c = cities.get(ck)
-            if not c:
-                c = cities[ck] = {"city": ck[0], "cc": ck[1], "lat": lat, "lon": lon, "a": 0, "b": 0}
-            if ma:
-                c["a"] += 1
-            if mb:
-                c["b"] += 1
+
+    def tally(records, live):
+        for s in records:
+            if not isinstance(s, dict):
+                continue
+            models = s.get("models") or []
+            svc = (s.get("service") or "").lower()
+            prov = (s.get("provider") or "").lower()
+            ma = side_ok(models, svc, prov, live, atok)
+            mb = side_ok(models, svc, prov, live, btok)
+            if not (ma or mb):
+                continue
+            cc = s.get("country")
+            if cc:
+                r = countries.setdefault(cc, {"a": 0, "b": 0})
+                if ma:
+                    r["a"] += 1
+                if mb:
+                    r["b"] += 1
+            lat, lon = s.get("lat"), s.get("lon")
+            if lat is not None and lon is not None:
+                ck = (s.get("city") or "", cc or "", round(lat, 2), round(lon, 2))
+                c = cities.get(ck)
+                if not c:
+                    c = cities[ck] = {"city": ck[0], "cc": ck[1], "lat": lat, "lon": lon, "a": 0, "b": 0}
+                if ma:
+                    c["a"] += 1
+                if mb:
+                    c["b"] += 1
+
+    tally(load_servers(), True)
+    # The dead population is large (all of graflex's notworking hosts), so only
+    # pull it in when a side actually asks for ;dead.
+    if any(t.lower() == ";dead" for t in atok + btok):
+        tally(load_dead(), False)
     return web.json_response({"a": a, "b": b, "countries": countries,
                               "cities": list(cities.values())})
 

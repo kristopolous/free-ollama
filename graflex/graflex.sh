@@ -26,6 +26,13 @@ case "$SERVICE" in
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > $_SERVER_PATH"
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > ${_SERVER_PATH%.json}-$DATE.json"
     source .venv/bin/activate
+
+    for i in ~/.cache/free-ollama/*-notworking.json; do
+      ./graflex.py -a enrich "$i" host
+    done
+
+    jq -s 'add' ~/.cache/free-ollama/*-notworking.json > ~/.cache/free-ollama/notworking-consolidated.json
+
     ./dyva.py --refresh $_SOURCE
     exit
     ;;

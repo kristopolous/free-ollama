@@ -1775,15 +1775,28 @@ def enrich_file(path, key=None, refresh=False):
     try:
         looked, matched = geoip.enrich_records(data, key=key, refresh=refresh)
     except Exception as e:
-        log.error(f"enrich: {e}")
+        log.error(f"enrich: lookup failed for {path}: {e}")
         return 1
+    # Write via a temp file + atomic replace, and surface any failure loudly —
+    # a silent non-write (disk full, permissions, a kill mid-write) otherwise
+    # looks like enrich "did nothing" after minutes of work.
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception as e:
+        log.error(f"enrich: FAILED to write {path}: {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return 1
     n = len(data)
-    log.info(f"enrich: {n} records in {os.path.basename(path)}, {looked} looked up, "
-             f"{matched} matched")
+    log.info(f"enrich: wrote {n} records to {os.path.basename(path)}, "
+             f"{looked} looked up, {matched} matched")
     return 0
 
 
