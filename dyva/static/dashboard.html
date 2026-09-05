@@ -2668,9 +2668,23 @@ function scheduleRender(gen){
   if(renderTimer)return;
   renderTimer=setTimeout(function(){renderTimer=null;paintGen(_paintGen)},60);
 }
+// A system-style note in the transcript (same look as /list), for informational
+// tool outcomes like "no models matching X" — not an assistant error.
+function addNote(label,md){
+  var d=document.createElement('div');d.className='msg note';
+  var b=document.createElement('div');b.className='body';
+  if(label){var l=document.createElement('span');l.className='note-cmd';l.textContent=label;b.appendChild(l)}
+  var t=document.createElement('div');t.className='note-text';t.innerHTML=mdRender(md||'');
+  _extLinks(t);_thumbFallbacks(t);b.appendChild(t);d.appendChild(b);
+  chatLog.appendChild(d);highlightBlocks(t);
+}
 function renderMessages(){
   chatLog.innerHTML='';
-  currentChat.messages.forEach(function(m,i){if(m&&m._meta&&m._meta.hidden)return;addMsg(m.role,m.content,i)});
+  currentChat.messages.forEach(function(m,i){
+    if(m&&m._meta&&m._meta.hidden)return;
+    if(m&&m._meta&&m._meta.note){addNote(m._meta.note,m.content);return}
+    addMsg(m.role,m.content,i);
+  });
   updateTokEst();
 }
 // Rough context-size gauge. Real tokenization is model-specific; the ~1.33
@@ -3347,8 +3361,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                                          host:j.host||'',model:j.model||'',
                                          service:j.service||''}));
               });
+              var realUrls=urls.map(function(u){return new URL(u,document.baseURI).href});
               results.push({text:'Image generated and saved as '+inames.join(', ')
-                                 +'. Refer to it by that name in later tool calls.',
+                                 +'. Refer to it by that name in later tool calls. '
+                                 +'Full URL'+(realUrls.length>1?'s':'')+' (use in HTML/markdown '
+                                 +'outside the chat): '+realUrls.join(', '),
                             keep:'[Generated image saved as '+inames.join(', ')+'.]',
                             md:fl.map(function(f,k){return '!['+(inames[k]||'generated image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
                                +_resultMetaMd(inames[0],j.model,j.service,j.host)});
@@ -3357,7 +3374,10 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           }else{
             var em='HTTP '+r2.status;
             try{var je=await r2.json();em=je.error||em}catch(e){}
-            results.push({text:'Error generating image: '+em,
+            if(r2.status===503){
+              // no host / no model matching \u2014 informational, not an error
+              results.push({text:'No image host available: '+em,note:'generate_image',md:em});
+            }else results.push({text:'Error generating image: '+em,
                           md:'`\u26a0 generate_image: '+String(em).replace(/`/g,"'")+'`'});
           }
         }catch(ex){
@@ -3600,8 +3620,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                                               host:j4.host||'',model:j4.model||'',service:j4.service||'',
                                               src:'edited from '+blobs.map(function(b){return b.name}).join(' + ')}));
                 });
+                var eReal=ef.map(function(f){return new URL('sdapi/v1/images/'+f,document.baseURI).href});
                 results.push({text:'Image edited and saved as '+enames.join(', ')
-                                   +'. Refer to it by that name in later tool calls.',
+                                   +'. Refer to it by that name in later tool calls. '
+                                   +'Full URL'+(eReal.length>1?'s':'')+' (use in HTML/markdown '
+                                   +'outside the chat): '+eReal.join(', '),
                               keep:'[Edited image saved as '+enames.join(', ')+'.]',
                               md:ef.map(function(f,k){return '!['+(enames[k]||'edited image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
                                  +_resultMetaMd(enames[0],j4.model,j4.service,j4.host)});
@@ -3706,7 +3729,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
                               _meta:Object.keys(_meta).length?_meta:undefined});
     results.forEach(function(res){
       if(!res.md)return;
-      appendMsgRecord(chatId,{role:'assistant',content:res.md});
+      appendMsgRecord(chatId,{role:'assistant',content:res.md,
+                              _meta:res.note?{note:res.note}:undefined});
     });
     var nb=null;
     if(inView()){
@@ -4041,6 +4065,8 @@ function assetListText(chat){
   if(list.length){
     var rows=list.map(function(a){
       var o={name:a.name,kind:a.kind,source:a.src||'unknown'};
+      // absolute URL so it can be embedded in HTML/markdown outside the chat
+      if(a.url)try{o.url=new URL(a.url,document.baseURI).href}catch(e){o.url=a.url}
       if(a.host)o.host=a.host;
       if(a.model)o.model=a.model;
       if(a.desc)o.description=a.desc;

@@ -4682,6 +4682,19 @@ async def handle_sd_models(request):
     })
 
 
+def _sd_model_mismatch(data, body, model_filter):
+    """True when a specific model was requested but the image was demonstrably
+    rendered with a different one. A1111's sd_model_checkpoint override fails
+    silently (stale model list, a fork that won't switch, a load error) and the
+    host returns 200 with its *loaded* model — so a flux request comes back as
+    majicmix. Reject that instead of accepting the wrong picture. Unknown actual
+    model = can't tell = don't reject."""
+    if not model_filter:
+        return False
+    actual = _resolve_sd_model(data, body)
+    return bool(actual) and not model_query_match(actual, model_filter)
+
+
 def _resolve_sd_model(data, body):
     """Best-effort name of the SD model that actually produced the images."""
     model = data.get("_dyva_model")
@@ -5380,7 +5393,7 @@ async def handle_txt2img(request):
             payload["override_settings_restore_afterwards"] = True
         log.debug(f"Reusing {last_host} for txt2img")
         await broadcast_activity(last_host, activity_label, "trying",
-            f"txt2img: {activity_label} on {last_host}")
+            f"trying: {last_host} for {activity_label}")
         try:
             async with session.post(
                 _host_url(last_host, "/sdapi/v1/txt2img"), json=payload,
@@ -5388,22 +5401,32 @@ async def handle_txt2img(request):
             ) as r:
                 if r.status == 200:
                     data = await r.json()
-                    mark_worker_found(job_wid, last_host,
-                                      _resolve_sd_model(data, body) or requested_model)
-                    await broadcast_activity(last_host, activity_label, "connected",
-                        f"txt2img ✓", duration=0)
-                    _save_image_history(data, body, last_host, requested_model)
-                    data["host"] = last_host
-                    data["service"] = service_of(last_host)
-                    await _unregister_worker(job_wid)
-                    return web.json_response(data)
-                add_bad(last_host, IMG_KEY)
-            await broadcast_activity(last_host, activity_label, "failed",
-                f"txt2img: HTTP {r.status}")
+                    if _sd_model_mismatch(data, body, model_filter):
+                        # override didn't take on the sticky host — fall through
+                        # to the full race rather than serve the wrong model
+                        log.debug(f"txt2img: {last_host} returned "
+                                  f"{_resolve_sd_model(data, body)!r}, wanted "
+                                  f"{model_filter!r}; not reusing")
+                        await broadcast_activity(last_host, activity_label, "failed",
+                            f"failure: {last_host} for {activity_label} - wrong model")
+                    else:
+                        data["_dyva_model"] = _resolve_sd_model(data, body) or requested_model
+                        mark_worker_found(job_wid, last_host, data["_dyva_model"])
+                        await broadcast_activity(last_host, activity_label, "connected",
+                            f"success: {last_host} for {activity_label}", duration=0)
+                        _save_image_history(data, body, last_host, requested_model)
+                        data["host"] = last_host
+                        data["service"] = service_of(last_host)
+                        await _unregister_worker(job_wid)
+                        return web.json_response(data)
+                else:
+                    add_bad(last_host, IMG_KEY)
+                    await broadcast_activity(last_host, activity_label, "failed",
+                        f"failure: {last_host} for {activity_label} - HTTP {r.status}")
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
             add_bad(last_host, IMG_KEY)
             await broadcast_activity(last_host, activity_label, "failed",
-                f"txt2img: {type(_e).__name__}")
+                f"failure: {last_host} for {activity_label} - {type(_e).__name__}")
 
     servers = load_servers()
     candidates = [s for s in servers if s.get("service") == "a1111"]
@@ -5438,7 +5461,7 @@ async def handle_txt2img(request):
     async def a1111_attempt(host, wid, done):
         t0 = time.time()
         await broadcast_activity(host, activity_label, "trying",
-            f"txt2img: {activity_label}", wid=wid)
+            f"trying: {host} for {activity_label}", wid=wid)
         ov = overrides.get(host)
         payload = ({**body, "override_settings": ov,
                     "override_settings_restore_afterwards": True} if ov else body)
@@ -5449,25 +5472,30 @@ async def handle_txt2img(request):
             ) as r:
                 if r.status == 200:
                     data = await r.json()
+                    if _sd_model_mismatch(data, body, model_filter):
+                        got = _resolve_sd_model(data, body)
+                        await broadcast_activity(host, activity_label, "failed",
+                            f"failure: {host} for {activity_label} - rendered {got}, not {model_filter}", wid=wid)
+                        return unsuitable(f"wrong model: {got}")
+                    data["_dyva_model"] = _resolve_sd_model(data, body)  # the actual model
                     await broadcast_activity(host, activity_label, "connected",
-                        "txt2img \u2713", duration=time.time() - t0, wid=wid,
-                        rmodel=(ov or {}).get("sd_model_checkpoint")
-                               or _resolve_sd_model(data, body))
+                        f"success: {host} for {activity_label}", duration=time.time() - t0, wid=wid,
+                        rmodel=data["_dyva_model"])
                     data["_dyva_host"] = host
                     return accepted(data)
                 await broadcast_activity(host, activity_label, "failed",
-                    f"txt2img: HTTP {r.status}", wid=wid)
+                    f"failure: {host} for {activity_label} - HTTP {r.status}", wid=wid)
                 return failed(f"HTTP {r.status}")
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
             await broadcast_activity(host, activity_label, "failed",
-                f"txt2img: {type(_e).__name__}", wid=wid)
+                f"failure: {host} for {activity_label} - {type(_e).__name__}", wid=wid)
             return (timed_out(type(_e).__name__) if isinstance(_e, asyncio.TimeoutError)
                     else unreachable_host(type(_e).__name__))
 
     async def comfy_attempt(host, wid, done):
         t0 = time.time()
         await broadcast_activity(host, activity_label, "trying",
-            f"txt2img (comfy): {activity_label}", wid=wid)
+            f"trying: {host} for {activity_label} (comfyui)", wid=wid)
         # one worker for the whole request (job_wid) — mark the render phase on
         # it rather than spawning a second card, and keep it visible to is_active
         mark_worker_found(job_wid, host)
@@ -5476,12 +5504,12 @@ async def handle_txt2img(request):
         _set_worker_phase(job_wid, None)
         if data:
             await broadcast_activity(host, activity_label, "connected",
-                "txt2img (comfy) \u2713", duration=time.time() - t0, wid=wid,
-                rmodel=data.get("_dyva_model"))
+                f"success: {host} for {activity_label} (comfyui)",
+                duration=time.time() - t0, wid=wid, rmodel=data.get("_dyva_model"))
             data["_dyva_host"] = host
             return accepted(data)
         await broadcast_activity(host, activity_label, "failed",
-            "txt2img (comfy): no response", wid=wid)
+            f"failure: {host} for {activity_label} (comfyui) - no response", wid=wid)
         return failed("no response")
 
     # Keep the tally across all three phases. "all image-gen hosts failed" told
