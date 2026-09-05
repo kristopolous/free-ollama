@@ -518,6 +518,11 @@ details.toolbox>summary{cursor:pointer;color:var(--accent);font-size:var(--fs-2x
 .doc-head{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) 10px;border-bottom:1px solid var(--border);flex-shrink:0}
 .doc-select{flex:1;min-width:0}
 .doc-type{color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);flex-shrink:0}
+.doc-ver{display:flex;align-items:center;gap:2px;flex-shrink:0}
+.doc-ver-btn{padding:2px 6px;line-height:1;font-size:var(--fs-md)}
+.doc-ver-btn:disabled{opacity:.35;cursor:default}
+.doc-ver-label{color:var(--text-dim);font-size:var(--fs-2xs);min-width:3.4em;text-align:center;white-space:nowrap}
+.doc-ver.old .doc-ver-label{color:var(--accent);font-weight:600}
 .settings-wrap{max-width:none}
 .settings-inner{height:auto;display:block;gap:0;overflow:visible}
 .setting{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-5);margin-bottom:var(--sp-6)}
@@ -971,6 +976,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="doc-head">
 <select id="docSelect" class="doc-select"></select>
 <span id="docType" class="doc-type"></span>
+<span id="docVer" class="doc-ver" style="display:none"><button id="docVerPrev" class="doc-btn doc-ver-btn" title="Older version">‹</button><span id="docVerLabel" class="doc-ver-label" title="Document version"></span><button id="docVerNext" class="doc-btn doc-ver-btn" title="Newer version">›</button></span>
 <button id="docView" class="doc-btn" title="Show rendered" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
 <button id="docDownload" class="doc-btn" title="Download"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></button>
 <button id="docClose" class="doc-close" title="Close">✕</button>
@@ -2099,7 +2105,7 @@ function serializeChat(c){
     return {name:a.name,kind:a.kind,src:a.src,desc:a.desc,ts:a.ts,url:a.url,
             aid:a.aid,host:a.host,model:a.model};
   });
-  if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}});
+  if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}});
   return o;
 }
 // Per-chat saves: async, debounced, coalesced by id (latest wins), non-blocking.
@@ -2832,7 +2838,7 @@ function loadChatById(id){
   if(g&&g.chat){currentChat=g.chat;afterLoadChat(String(id));return;}
   fetchChat(id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}})};
     afterLoadChat(String(id));
   });
 }
@@ -2999,8 +3005,8 @@ function chatSummaryMd(){
                  +(wanted&&wanted!=='*'?(' \u00b7 asking for `'+wanted+'`'):''));
   var alist=assetsOf(currentChat);
   out.push('#### files');
-  if(!alist.length){out.push('> *(none)*');return out.join('\n')}
-  out.push('');   // marked wants a blank line before an HTML block
+  if(!alist.length)out.push('> *(none)*');
+  else out.push('');   // marked wants a blank line before an HTML block
   // Hand-built HTML rather than a markdown table: a thumbnail beside the name
   // is the point, and a table column can't hold one without the other columns
   // collapsing. marked passes inline HTML through and DOMPurify keeps it safe.
@@ -3027,6 +3033,15 @@ function chatSummaryMd(){
              +(a.desc?'<div class="asset-about">'+escHtml(a.desc)+'</div>':'')
              +'</div></div>');
   }
+  var dlist=(currentChat&&currentChat.documents)||[];
+  out.push('');
+  out.push('#### documents');
+  if(!dlist.length)out.push('> *(none)*');
+  else dlist.forEach(function(d){
+    out.push('- '+escHtml(d.title||d.id)+' ('+escHtml(d.type||'text')
+             +(d.language?', '+escHtml(d.language):'')
+             +', '+String(d.content||'').split('\n').length+' lines)');
+  });
   return out.join('\n');
 }
 function slashHelpText(){
@@ -3895,7 +3910,7 @@ function tryResume(){
   if((j.n||0)>=2)return;
   fetchChat(j.id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}})};
     touchIndex(currentChat);
     renderMessages();
     renderSidebar();
@@ -4449,24 +4464,36 @@ function readDoc(doc, start, count){
           :' (end of document)')+':';
   return {text:head+'\n'+out.join('\n')};
 }
+// A document keeps a snapshot of every settled edit so the reader can page back
+// through what the model wrote earlier. versions[] is oldest\u2192newest and always
+// ends on the current content; the live doc.content is what's being written now.
+function _docCommitVersion(doc){
+  if(!doc)return;
+  if(!doc.versions)doc.versions=[];
+  var last=doc.versions[doc.versions.length-1];
+  if(last&&last.content===doc.content)return;   // nothing changed since last snapshot
+  doc.versions.push({content:doc.content,ts:doc.updated||Date.now()});
+  if(doc.versions.length>60)doc.versions.shift();
+}
 function applyDocOp(chatId,name,args){
   var ctx=docCtx(chatId);
   if(!ctx)return {text:'Error: conversation not found'};
   var docs=ctx.docs,doc,out;
   if(name==='create_document'){
-    doc={id:_docId(),title:String(args.title||'Untitled').slice(0,120),type:(args.type==='code'?'code':'markdown'),language:args.language?String(args.language):'',content:String(args.content||''),updated:Date.now()};
-    docs.push(doc);
+    doc={id:_docId(),title:String(args.title||'Untitled').slice(0,120),type:(args.type==='code'?'code':'markdown'),language:args.language?String(args.language):'',content:String(args.content||''),updated:Date.now(),versions:[]};
+    docs.push(doc);_docCommitVersion(doc);
     out={text:'Created '+doc.type+' document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Created **'+doc.title+'**'};
   }else if(name==='edit_document'){
     doc=findDoc(docs,args.id)||findDoc(docs,args.title);
     if(!doc)return {text:'Error: document not found'};
-    doc.content=String(args.content||'');doc.updated=Date.now();
+    doc.content=String(args.content||'');doc.updated=Date.now();_docCommitVersion(doc);
     out={text:'Updated document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Updated **'+doc.title+'**'};
   }else if(name==='replace_in_document'){
     doc=findDoc(docs,args.id)||findDoc(docs,args.title);
     if(!doc)return {text:'Error: document not found'};
     var rr=replaceInDoc(doc,args.old_text,args.new_text,!!args.all);
     if(rr.error)return {text:'Error: '+rr.error};
+    _docCommitVersion(doc);
     out={text:'Replaced '+rr.count+' occurrence'+(rr.count===1?'':'s')+' in "'+doc.title+'"'
               +(rr.how==='whitespace'?' (matched ignoring indentation)':'')
               +'. It is now '+_docLines(doc.content).length+' lines.',
@@ -4583,14 +4610,14 @@ function syncStreamDocs(gen,docs,final){
   var ctx=docCtx(gen.chatId);
   if(!ctx)return;
   gen.docIds=gen.docIds||[];
-  var created=null,touched=null,changed=false,settled=!!final;
+  var created=null,touched=null,changed=false,settled=!!final,recs=[];
   docs.forEach(function(d,i){
     var rec=gen.docIds[i]?findDoc(ctx.docs,gen.docIds[i]):null;
     if(!rec){
       // re-emitting a title from an earlier turn edits that document in place
       rec=findDoc(ctx.docs,d.ref)||findDoc(ctx.docs,d.title);
       if(!rec){
-        rec={id:_docId(),title:d.title,type:d.type,language:d.language,content:'',updated:Date.now()};
+        rec={id:_docId(),title:d.title,type:d.type,language:d.language,content:'',updated:Date.now(),versions:[]};
         ctx.docs.push(rec);created=rec;
       }
       gen.docIds[i]=rec.id;changed=true;
@@ -4602,13 +4629,16 @@ function syncStreamDocs(gen,docs,final){
       rec.content=d.content;rec.streaming=!d.closed&&!final;rec.updated=Date.now();
       changed=true;
     }
-    touched=rec;
+    touched=rec;recs.push(rec);
   });
   if(!changed)return;
   // say what's being written where the reader is already looking
   if(gen.statusEl&&gen.statusEl.parentNode&&touched)
     gen.statusEl.textContent=touched.streaming?('making \u201c'+touched.title+'\u201d\u2026'):'generating\u2026';
-  if(settled)ctx.commit();          // a finished document is worth persisting
+  if(settled){                      // a finished document is worth a snapshot + persisting
+    recs.forEach(_docCommitVersion);
+    ctx.commit();
+  }
   if(!ctx.inView)return;            // background chat: painted when it comes back
   if(created){refreshDocUI();openDoc(created.id);return}
   if(document.getElementById('docPanel').style.display==='none')return;
@@ -4651,7 +4681,7 @@ function docFilename(doc){
 }
 function downloadDoc(){
   var doc=findDoc(currentDocs(),activeDocId);if(!doc)return;
-  var blob=new Blob([doc.content],{type:'text/plain;charset=utf-8'});
+  var blob=new Blob([docViewState(doc).content],{type:'text/plain;charset=utf-8'});
   var url=URL.createObjectURL(blob);
   var a=document.createElement('a');a.href=url;a.download=docFilename(doc);
   document.body.appendChild(a);a.click();document.body.removeChild(a);
@@ -4672,6 +4702,18 @@ function docRenderKind(doc){
 }
 function docRenderable(doc){return !!docRenderKind(doc)}
 var _docView={};   // doc id -> 'source' when the reader asked to see the markup
+var _docVer={};    // doc id -> which version index the reader is paging back to
+// Resolve the version being viewed: newest is the live content, older ones come
+// from the snapshot list. Returns {content, cur, total, latest}.
+function docViewState(doc){
+  var vs=(doc&&doc.versions)||[],total=vs.length;
+  if(total<=1)return {content:doc?doc.content:'',cur:total?0:0,total:total,latest:true};
+  var cur=_docVer[doc.id];
+  if(cur==null||cur>total-1)cur=total-1;
+  if(cur<0)cur=0;
+  var latest=cur===total-1;
+  return {content:latest?doc.content:vs[cur].content,cur:cur,total:total,latest:latest};
+}
 function docPreviewOn(doc){
   if(!docRenderable(doc))return false;
   if(doc.streaming)return false;          // watch it being written, then it renders
@@ -4688,11 +4730,24 @@ function renderDocPanel(streaming){
   var typeEl=document.getElementById('docType');
   typeEl.textContent=doc.streaming?'writing…':'';
   typeEl.classList.toggle('doc-writing',!!doc.streaming);
+  // version stepper: page back through the snapshots the model wrote this chat
+  var vw=docViewState(doc);
+  var verEl=document.getElementById('docVer');
+  if(vw.total>1&&!doc.streaming){
+    verEl.style.display='';
+    verEl.classList.toggle('old',!vw.latest);
+    document.getElementById('docVerLabel').textContent='v'+(vw.cur+1)+'/'+vw.total;
+    document.getElementById('docVerPrev').disabled=vw.cur<=0;
+    document.getElementById('docVerNext').disabled=vw.latest;
+  }else{verEl.style.display='none';}
+  // when paging history, render that snapshot instead of the live content
+  var vdoc=vw.latest?doc:{id:doc.id,title:doc.title,type:doc.type,language:doc.language,content:vw.content,streaming:false};
+  var content=vw.content;
   var body=document.getElementById('docBody');
-  var pinned=streaming&&(body.scrollTop+body.clientHeight>=body.scrollHeight-40);
-  var canRender=docRenderKind(doc),preview=docPreviewOn(doc);
+  var pinned=streaming&&vw.latest&&(body.scrollTop+body.clientHeight>=body.scrollHeight-40);
+  var canRender=docRenderKind(vdoc),preview=docPreviewOn(vdoc);
   var vb=document.getElementById('docView');
-  vb.style.display=(canRender&&!doc.streaming)?'':'none';
+  vb.style.display=(canRender&&!vdoc.streaming)?'':'none';
   vb.classList.toggle('on',preview);
   vb.title=preview?'Show source':'Show rendered';
   body.classList.toggle('framed',preview&&canRender==='html');
@@ -4703,7 +4758,7 @@ function renderDocPanel(streaming){
     // origin: no reach into this document, its storage, or its cookies
     fr.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-popups');
     fr.setAttribute('referrerpolicy','no-referrer');
-    fr.srcdoc=doc.content;
+    fr.srcdoc=content;
     body.innerHTML='';
     body.appendChild(fr);
     return;
@@ -4712,7 +4767,7 @@ function renderDocPanel(streaming){
     var wrap=document.createElement('div');
     wrap.className='doc-preview';
     var clean='';
-    try{clean=window.DOMPurify.sanitize(doc.content,{USE_PROFILES:{svg:true,svgFilters:true}})}catch(e){clean=''}
+    try{clean=window.DOMPurify.sanitize(content,{USE_PROFILES:{svg:true,svgFilters:true}})}catch(e){clean=''}
     wrap.innerHTML=clean;
     body.innerHTML='';
     body.appendChild(wrap);
@@ -4726,9 +4781,9 @@ function renderDocPanel(streaming){
     body.innerHTML='<pre><code></code></pre>';
     var code=body.querySelector('code');
     if(doc.language)code.className='language-'+doc.language;
-    code.textContent=doc.content;
+    code.textContent=content;
   }else{
-    body.innerHTML=mdRender(doc.content);
+    body.innerHTML=mdRender(content);
   }
   // highlighting a half-written file every 60ms is wasted work — do it at rest
   if(!streaming)highlightBlocks(body);
@@ -4745,6 +4800,18 @@ document.getElementById('docView').addEventListener('click',function(){
   var doc=findDoc(currentDocs(),activeDocId);
   if(!doc)return;
   _docView[doc.id]=docPreviewOn(doc)?'source':'preview';
+  renderDocPanel();
+});
+document.getElementById('docVerPrev').addEventListener('click',function(){
+  var doc=findDoc(currentDocs(),activeDocId);if(!doc)return;
+  var vw=docViewState(doc);if(vw.cur<=0)return;
+  _docVer[doc.id]=vw.cur-1;renderDocPanel();
+});
+document.getElementById('docVerNext').addEventListener('click',function(){
+  var doc=findDoc(currentDocs(),activeDocId);if(!doc)return;
+  var vw=docViewState(doc);if(vw.latest)return;
+  if(vw.cur+1>=vw.total-1)delete _docVer[doc.id];  // caught up — resume following the newest
+  else _docVer[doc.id]=vw.cur+1;
   renderDocPanel();
 });
 document.getElementById('docDownload').addEventListener('click',downloadDoc);
@@ -6018,7 +6085,7 @@ function renderWorldMap(world,d,cmp){
     var tip=cmp?(single?('<b>'+cnm+'</b><br>'+escHtml(soleLabel)+': '+tot)
                        :('<b>'+cnm+'</b><br>'+escHtml(la)+': '+c.a+' · '+escHtml(lb)+': '+c.b))
                :('<b>'+cnm+'</b><br>'+c.count+' host'+(c.count===1?'':'s'));
-    var circ=_mkel('circle',{cx:X(c.lon).toFixed(1),cy:Y(c.lat).toFixed(1),r:3.2,fill:fill,'fill-opacity':op,stroke:LAND,'stroke-width':0.15,'vector-effect':'non-scaling-stroke'});
+    var circ=_mkel('circle',{cx:X(c.lon).toFixed(1),cy:Y(c.lat).toFixed(1),r:6.4,fill:fill,'fill-opacity':op,stroke:LAND,'stroke-width':0.15,'vector-effect':'non-scaling-stroke'});
     (function(t){circ.addEventListener('mousemove',function(ev){_showTip(t,ev)})})(tip);
     circ.addEventListener('mouseleave',_hideTip);
     gCity.appendChild(circ);
@@ -6029,7 +6096,7 @@ function renderWorldMap(world,d,cmp){
   // the zoom so they don't balloon when you zoom in.
   var cityCircles=gCity.childNodes;
   _mapZoom(host,svg,W,H,function(k){
-    var r=(3.2/k).toFixed(3);
+    var r=(6.4/k).toFixed(3);
     for(var i=0;i<cityCircles.length;i++)cityCircles[i].setAttribute('r',r);
   });
   var ramp=document.getElementById('mapRamp');
