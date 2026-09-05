@@ -450,7 +450,10 @@ details.toolbox>summary{cursor:pointer;color:var(--accent);font-size:var(--fs-2x
 .chat-item .re{opacity:0;color:var(--ok);cursor:pointer;font-size:var(--fs-md);padding:0 var(--sp-1)}
 .chat-item:hover .re{opacity:1}
 .chat-item .re:hover{color:var(--ok);filter:brightness(1.3)}
-.chat-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.chat-main{position:relative;flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.tok-est{position:absolute;top:0;right:14px;z-index:6;font:11px/1 var(--font-mono);
+         color:var(--text-2);background:rgba(20,20,20,.5);padding:3px 8px;border-radius:1px;
+         pointer-events:none;white-space:nowrap}
 .doc-panel{flex:1;min-width:0;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);overflow:hidden}
 .doc-head{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) 10px;border-bottom:1px solid var(--border);flex-shrink:0}
 .doc-select{flex:1;min-width:0}
@@ -861,6 +864,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="chatList" class="chat-list"></div>
 </div>
 <div class="chat-main">
+<div id="tokEst" class="tok-est" title="estimated context size (~words × 1.33; varies by model)"></div>
 <div id="chatMessages" class="messages"></div>
 <div class="field">
 <div class="model-picker">
@@ -2488,6 +2492,7 @@ function paintGen(gen){
   var tb=gen.bubble.bodyEl.querySelector('.think-body');
   if(tb)tb.scrollTop=tb.scrollHeight;
   scrollChat();
+  updateTokEst();
 }
 function highlightBlocks(scope){
   if(!window.hljs)return;
@@ -2502,6 +2507,28 @@ function scheduleRender(gen){
 function renderMessages(){
   chatLog.innerHTML='';
   currentChat.messages.forEach(function(m,i){if(m&&m._meta&&m._meta.hidden)return;addMsg(m.role,m.content,i)});
+  updateTokEst();
+}
+// Rough context-size gauge. Real tokenization is model-specific; the ~1.33
+// tokens-per-word rule of thumb is close enough to tell "roomy" from "getting
+// full". Counts the system prompt, every message, the documents, and whatever
+// the active generation has streamed so far.
+function _wc(s){var t=String(s||'').trim();return t?t.split(/\s+/).length:0}
+function _tokEst(){
+  var w=0;
+  if(currentChat){
+    w+=_wc(currentChat.system);
+    (currentChat.messages||[]).forEach(function(m){if(m&&m.content)w+=_wc(m.content)});
+    (currentChat.documents||[]).forEach(function(d){if(d&&d.content)w+=_wc(d.content)});
+    var g=(typeof gens!=='undefined')&&currentChat&&gens[currentChat.id];
+    if(g){w+=_wc(g.raw);w+=_wc(g.think)}
+  }
+  return Math.round(w*1.33);
+}
+function updateTokEst(){
+  var el=document.getElementById('tokEst');if(!el)return;
+  var n=_tokEst();
+  el.textContent='~'+(n>=1000?(n/1000).toFixed(n>=10000?0:1)+'k':n)+' tok';
 }
 function chatInView(chatId){return String(currentChat.id)===String(chatId)}
 // The chat being appended to is the one live object for that id: currentChat if
@@ -3487,9 +3514,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           results.push({text:'Error generating speech: '+ex.message});
         }
       }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'
-               ||fn.name==='replace_in_document'||fn.name==='search_document'){
+               ||fn.name==='replace_in_document'||fn.name==='search_document'||fn.name==='read_document'){
         var dverb={create_document:'making',edit_document:'rewriting',rename_document:'renaming',
-                   replace_in_document:'editing',search_document:'searching'}[fn.name];
+                   replace_in_document:'editing',search_document:'searching',read_document:'reading'}[fn.name];
         setStatus(dverb+' \u201c'+String(args.title||args.new_title||'document')+'\u201d\u2026');
         var dr=applyDocOp(chatId,fn.name,args);
         results.push({text:dr.text,md:dr.md});
@@ -3841,18 +3868,36 @@ function assetThumb(chat,a){
 }
 function assetListText(chat){
   var list=assetsOf(chat);
-  if(!list.length)
-    return 'There are no assets in this conversation yet. Images, videos and '
-         + 'audio appear here once the user attaches one or a tool creates one.';
-  var rows=list.map(function(a){
-    var o={name:a.name,kind:a.kind,source:a.src||'unknown'};
-    if(a.host)o.host=a.host;
-    if(a.model)o.model=a.model;
-    if(a.desc)o.description=a.desc;
-    return o;
-  });
-  return 'Assets in this conversation, oldest first. Pass the "name" value '
-       + 'verbatim to other tools.\n'+JSON.stringify(rows,null,1);
+  var docs=(chat&&chat.documents)||[];
+  if(!list.length&&!docs.length)
+    return 'There are no assets or documents in this conversation yet. Images, '
+         + 'videos and audio appear here once the user attaches one or a tool '
+         + 'creates one, and documents once one is written in the side panel.';
+  var out=[];
+  if(list.length){
+    var rows=list.map(function(a){
+      var o={name:a.name,kind:a.kind,source:a.src||'unknown'};
+      if(a.host)o.host=a.host;
+      if(a.model)o.model=a.model;
+      if(a.desc)o.description=a.desc;
+      return o;
+    });
+    out.push('Assets in this conversation, oldest first. Pass the "name" value '
+           + 'verbatim to other tools.\n'+JSON.stringify(rows,null,1));
+  }
+  if(docs.length){
+    // Documents live in the side panel, not the asset store, but they're still
+    // files the user made — surface them so list_assets isn't empty when the
+    // only artifacts are documents. Refer to one by its title.
+    var drows=docs.map(function(d){
+      var o={name:d.title||d.id,kind:'document',type:d.type||'text'};
+      if(d.language)o.language=d.language;
+      return o;
+    });
+    out.push('Documents in this conversation (written in the side panel). Refer '
+           + 'to one by its "name" (title).\n'+JSON.stringify(drows,null,1));
+  }
+  return out.join('\n\n');
 }
 function assetKindOf(mime){
   var t=String(mime||'').toLowerCase();
@@ -3911,7 +3956,7 @@ function _resultMetaMd(name,model,service,host){
   return '\n\n<span class="result-meta">'+bits.map(escHtml).join(' \u00b7 ')+'</span>';
 }
 var SEARCH_MODELS_TOOL={type:'function',function:{name:'search_models',description:'Search the models actually available across the discovered hosts for a given kind of generation \u2014 to tell the user what they can make things with, or to find one matching what they asked for. Read-only. Call it for questions like "what models can you make images with" or "any cartoon image models" (pass substring "cartoon"). Returns matching model names with how many hosts have each.',parameters:{type:'object',properties:{type:{type:'string',enum:['image','edit','video','speech','text'],description:'Which capability: image (generate), edit (image editing), video, speech (TTS voices), or text (chat LLMs).'},substring:{type:'string',description:'Optional filter \u2014 plain text matches as a case-insensitive substring ("cartoon", "flux"), and globs work too ("z*image" matches z-image / zImage / z_image, "flux*2" matches flux.2 and flux-2). Only matching model names are returned.'},page:{type:'integer',description:'1-based page number when there are more than 50 matches; the result says how many pages there are. Defaults to 1.'}},required:['type']}}};
-var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
+var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created, plus any documents written in the side panel. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
 var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'The checkpoint to render with. If the user names a model, family, or style \u2014 e.g. "dreamshaper", "flux", "juggernaut" \u2014 put it HERE, as a substring or glob ("dreamshaper*" matches dreamshaper_8.safetensors), and do NOT mention the model in the prompt. Leave blank only when the user did not name one, to auto-pick the best available. Never invent a model name; use search_models if unsure what exists.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, combine several, or generate a fresh image on an edit-class model (Flux.2 and similar do text-to-image too \u2014 no reference needed). Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image (an incremental tweak), or when there is no image at all to generate from the prompt. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'The edit model to use. If the user names one, put it HERE as a substring or glob (globs work, e.g. "flux*2") \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a model name; use search_models (type "edit") if unsure.'}},required:['prompt','name']}}};
 // The image to edit is known deterministically, so the model never picks it:
@@ -4002,6 +4047,7 @@ var DOC_TOOLS=[
   {type:'function',function:{name:'edit_document',description:'Replace the ENTIRE contents of an existing document. Only for a wholesale rewrite — to change part of one, use replace_in_document instead. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
   {type:'function',function:{name:'rename_document',description:'Rename an existing document. Identify it by id (preferred) or current title.',parameters:{type:'object',properties:{id:{type:'string'},title:{type:'string',description:'current title if id unknown'},new_title:{type:'string',description:'the new title'}},required:['new_title']}}},
   {type:'function',function:{name:'search_document',description:'Search inside a document and get back the matching lines with their line numbers and surrounding context. Use this to find the exact text you want to change before calling replace_in_document, so you never have to hold the whole document in mind.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},query:{type:'string',description:'Text to look for (case-insensitive)'},regex:{type:'boolean',description:'Treat query as a regular expression'},context:{type:'integer',description:'Lines of context around each match (default 2)'}},required:['query']}}},
+  {type:'function',function:{name:'read_document',description:'Read a range of lines from a document. The result includes the requested lines (numbered) AND the document’s total line count, so you can tell whether there is more to read and page through a long document with start_line/line_count.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},start_line:{type:'integer',description:'1-based line to start reading from (default 1)'},line_count:{type:'integer',description:'How many lines to return (default 100)'}},required:[]}}},
   {type:'function',function:{name:'replace_in_document',description:'Change PART of a document: replace an exact snippet with new text, leaving the rest untouched. Prefer this over edit_document for anything short of a total rewrite. old_text must appear EXACTLY ONCE — copy it verbatim from the document, including indentation, and include enough surrounding lines to make it unique. Do not use line numbers.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},old_text:{type:'string',description:'The exact text to replace, copied verbatim from the document'},new_text:{type:'string',description:'What to put in its place. Empty string deletes the snippet.'},all:{type:'boolean',description:'Replace every occurrence instead of requiring exactly one'}},required:['old_text','new_text']}}}
 ];
 var chatToolsBtn=document.getElementById('chatTools');
@@ -4194,6 +4240,25 @@ function searchDoc(doc, query, useRegex, ctx){
   return {text:head+'\n'+out.join('\n')
     +'\n(line numbers are for reading only — replace_in_document takes the text itself)'};
 }
+function readDoc(doc, start, count){
+  var lines=_docLines(doc.content), total=lines.length;
+  var s=parseInt(start,10); if(isNaN(s)||s<1)s=1;
+  var c=parseInt(count,10); if(isNaN(c)||c<=0)c=100;   // default window
+  var lo=s-1, hi=Math.min(total, lo+c);                // [lo,hi) 0-based
+  if(lo>=total)
+    return {text:'"'+doc.title+'" has '+total+' line'+(total===1?'':'s')
+                 +' total; start_line '+s+' is past the end.'};
+  var out=[];
+  for(var i=lo;i<hi;i++)out.push((i+1)+': '+lines[i]);
+  var more=hi<total;
+  // Always report the TOTAL line count so the model knows whether there is more
+  // to read and can page with start_line/line_count.
+  var head='"'+doc.title+'" — '+total+' line'+(total===1?'':'s')+' total; showing '
+    +s+'–'+hi
+    +(more?' ('+(total-hi)+' more after this — call read_document again with start_line '+(hi+1)+')'
+          :' (end of document)')+':';
+  return {text:head+'\n'+out.join('\n')};
+}
 function applyDocOp(chatId,name,args){
   var ctx=docCtx(chatId);
   if(!ctx)return {text:'Error: conversation not found'};
@@ -4222,6 +4287,11 @@ function applyDocOp(chatId,name,args){
     if(!doc)return {text:'Error: document not found'};
     var sr=searchDoc(doc,String(args.query||''),!!args.regex,args.context);
     return {text:sr.error?('Error: '+sr.error):sr.text};   // read-only: nothing to commit
+  }else if(name==='read_document'){
+    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
+    if(!doc&&docs.length===1)doc=docs[0];
+    if(!doc)return {text:'Error: document not found'};
+    return {text:readDoc(doc,args.start_line,args.line_count).text};   // read-only
   }else if(name==='rename_document'){
     doc=findDoc(docs,args.id)||findDoc(docs,args.title);
     if(!doc)return {text:'Error: document not found'};
