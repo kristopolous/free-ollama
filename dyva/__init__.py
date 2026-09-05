@@ -3266,6 +3266,144 @@ async def handle_reload_hosts(request):
                               "loaded": _hosts_loaded_str()})
 
 
+async def handle_geo_summary(request):
+    """
+    Host population by country and provider (for the map).
+    ---
+    tags: [UI]
+    summary: GET /geo-summary — counts of hosts per country / provider
+    responses:
+      '200':
+        description: Population counts
+    """
+    countries, providers, cities = {}, {}, {}
+    total = with_geo = 0
+    for s in load_servers():
+        if not isinstance(s, dict):
+            continue
+        total += 1
+        cc = s.get("country")
+        if cc:
+            with_geo += 1
+            countries[cc] = countries.get(cc, 0) + 1
+        p = s.get("provider")
+        if p:
+            providers[p] = providers.get(p, 0) + 1
+        lat, lon = s.get("lat"), s.get("lon")
+        if lat is not None and lon is not None:
+            # aggregate hosts sharing a city into one point
+            ck = (s.get("city") or "", cc or "", round(lat, 2), round(lon, 2))
+            c = cities.get(ck)
+            if c:
+                c["count"] += 1
+            else:
+                cities[ck] = {"city": ck[0], "cc": ck[1], "lat": lat, "lon": lon, "count": 1}
+    return web.json_response({"countries": countries, "providers": providers,
+                              "cities": list(cities.values()),
+                              "total": total, "with_geo": with_geo})
+
+
+async def handle_geo_compare(request):
+    """
+    Per-region tally of hosts matching two model globs (for the diverging map).
+    ---
+    tags: [UI]
+    summary: GET /geo-compare?a=<glob>&b=<glob> — hosts matching A vs B by country/city
+    responses:
+      '200':
+        description: Per-country and per-city {a, b} counts
+    """
+    a = (request.query.get("a") or "").strip()
+    b = (request.query.get("b") or "").strip()
+    countries, cities = {}, {}
+    for s in load_servers():
+        if not isinstance(s, dict):
+            continue
+        models = s.get("models") or []
+        ma = bool(a) and any(model_query_match(m, a) for m in models)
+        mb = bool(b) and any(model_query_match(m, b) for m in models)
+        if not (ma or mb):
+            continue
+        cc = s.get("country")
+        if cc:
+            r = countries.setdefault(cc, {"a": 0, "b": 0})
+            if ma:
+                r["a"] += 1
+            if mb:
+                r["b"] += 1
+        lat, lon = s.get("lat"), s.get("lon")
+        if lat is not None and lon is not None:
+            ck = (s.get("city") or "", cc or "", round(lat, 2), round(lon, 2))
+            c = cities.get(ck)
+            if not c:
+                c = cities[ck] = {"city": ck[0], "cc": ck[1], "lat": lat, "lon": lon, "a": 0, "b": 0}
+            if ma:
+                c["a"] += 1
+            if mb:
+                c["b"] += 1
+    return web.json_response({"a": a, "b": b, "countries": countries,
+                              "cities": list(cities.values())})
+
+
+async def handle_host_info(request):
+    """
+    Consolidated detail for one host (the host-card backing data).
+    ---
+    tags: [UI]
+    summary: GET /host-info?host=… — cache record + geo joined with the reputation DB
+    responses:
+      '200':
+        description: Host detail
+      '404':
+        description: Host not in the cache
+    """
+    host = (request.query.get("host") or "").strip()
+    if not host:
+        return web.json_response({"error": "host required"}, status=400)
+
+    def _bare(u):
+        return re.sub(r"^https?://", "", u or "").rstrip("/")
+
+    target = _bare(host)
+    rec = next((s for s in load_servers() if _bare(s.get("server")) == target), None)
+    server_url = rec.get("server") if rec else host
+
+    out = {"host": server_url, "found": rec is not None}
+    if rec:
+        for k in ("service", "version", "source", "models", "tps", "status",
+                  "lastUpdate", "country", "city", "lat", "lon", "asn", "as_org",
+                  "provider", "geo_checked"):
+            if k in rec:
+                out[k] = rec[k]
+
+    # Reputation + capability caps from the SQLite store, keyed by the full URL.
+    try:
+        db = _get_db()
+        out["reputation"] = [
+            {"model": m, "state": st, "last_good": lg, "failure_streak": fs}
+            for (m, st, lg, fs) in db.execute(
+                "SELECT model, state, last_good, failure_streak FROM host_status "
+                "WHERE host=? ORDER BY model", (server_url,)).fetchall()]
+        caps = []
+        for (cap, node, voices, checked) in db.execute(
+                "SELECT capability, node, voices, checked FROM host_nodes "
+                "WHERE host=? ORDER BY capability", (server_url,)).fetchall():
+            row = {"capability": cap, "node": node, "checked": checked}
+            if voices:
+                try:
+                    row["voices"] = json.loads(voices)
+                except Exception:
+                    pass
+            caps.append(row)
+        out["capabilities"] = caps
+    except Exception as e:
+        log.debug(f"host-info: reputation join failed: {e}")
+
+    if rec is None and not out.get("reputation"):
+        return web.json_response(out, status=404)
+    return web.json_response(out)
+
+
 async def handle_guide(request):
     """
     Consolidated guide to graflex, dyva and free-ollama.
@@ -9339,6 +9477,9 @@ def make_app():
     swagger.add_get("/", handle_dashboard)
     swagger.add_get("/guide", handle_guide)
     swagger.add_get("/reload-hosts", handle_reload_hosts)
+    swagger.add_get("/host-info", handle_host_info)
+    swagger.add_get("/geo-summary", handle_geo_summary)
+    swagger.add_get("/geo-compare", handle_geo_compare)
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
     swagger.add_get("/dashboard-models", handle_dashboard_models)

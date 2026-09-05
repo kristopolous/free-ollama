@@ -20,6 +20,8 @@ except ImportError:
 log = logging.getLogger("graflex")
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
+# geo/provider fields carried across record rebuilds (see geoip.GEO_FIELDS)
+_GEO_CARRY = ("geo_checked", "country", "city", "lat", "lon", "asn", "as_org", "provider")
 HOSTS_FILE = os.path.join(CACHE_DIR, "image-gen-hosts.json")
 WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
@@ -1588,11 +1590,16 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
         if status == "keep":
             rec = dict(payload)
             rec["host"] = entry["host"]
+            # the probe result rebuilds the record, so carry geo across it
+            # rather than re-deriving it (and losing it on every re-survey)
+            for _gk in _GEO_CARRY:
+                if _gk in entry and _gk not in rec:
+                    rec[_gk] = entry[_gk]
             kept.append(rec)
         else:
             removed += 1
             if entry:
-                notworking[entry["host"]] = {
+                nw = {
                     "service": service,
                     "host": entry["host"],
                     "url": f"http://{entry['host']}",
@@ -1600,6 +1607,12 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
                     "result": "unreachable",
                     "checked": datetime.now(timezone.utc).isoformat(),
                 }
+                # keep the geo on a host that has gone dark — a dead host's last
+                # known location is exactly what the longitudinal study wants
+                for _gk in _GEO_CARRY:
+                    if _gk in entry:
+                        nw[_gk] = entry[_gk]
+                notworking[entry["host"]] = nw
             log.info(f"~ {host} dead: {payload}")
 
     kept.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
@@ -1744,6 +1757,59 @@ def classify(name=None):
 
 
 
+def enrich_file(path, key=None, refresh=False):
+    """Geo-enrich an arbitrary JSON file in place (list of dicts, or dict keyed
+    by host). `key` names the host field; auto-detected when None. `refresh`
+    re-stamps records already enriched (needed after the DB gains new fields,
+    e.g. adding city/lat/lon on top of a country-only pass)."""
+    from . import geoip
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        log.error(f"enrich: cannot read {path}: {e}")
+        return 1
+    if not isinstance(data, (list, dict)):
+        log.error(f"enrich: {path} is not a JSON list or object")
+        return 1
+    try:
+        looked, matched = geoip.enrich_records(data, key=key, refresh=refresh)
+    except Exception as e:
+        log.error(f"enrich: {e}")
+        return 1
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+    n = len(data)
+    log.info(f"enrich: {n} records in {os.path.basename(path)}, {looked} looked up, "
+             f"{matched} matched")
+    return 0
+
+
+def enrich(name=None):
+    """Stamp country / ASN / cloud-provider onto a service's working hosts.
+
+    Runs on `<name>-working.json` — the file `graflex.sh combine` ships as the
+    dyva feed — so the enrichment is baked into what dyva serves. Offline: the
+    only network is DB-IP's monthly database download (and a DNS lookup for the
+    rare hostname-not-IP host). Idempotent; re-stamps only stale records."""
+    from . import geoip
+    wf = _cache_file(name, "working")
+    entries = _load_json(wf)
+    if not isinstance(entries, list) or not entries:
+        log.error(f"enrich: no hosts in {wf}")
+        return
+    try:
+        looked, matched = geoip.enrich_records(entries)
+    except Exception as e:
+        log.error(f"enrich: {e}")
+        return
+    _save_json_atomic(wf, entries)
+    log.info(f"enrich: {len(entries)} hosts in {os.path.basename(wf)}, "
+             f"{looked} looked up, {matched} matched")
+
+
 # ---- Gradio classification -------------------------------------------------
 # The gradio icon (icon_hash 55115683) is not one app — it is every Gradio app
 # anyone exposed. There is no shared inference API, so the *check* for a gradio
@@ -1828,29 +1894,34 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
     parser.add_argument("-f", "--fid", dest="fids", help="comma-separated FID values to filter by")
     parser.add_argument("-i", "--id", dest="session", help="resume a previous session by providing its run timestamp (the run_ts from the log)")
-    parser.add_argument("-n", "--name", help="cache file name prefix (default: image-gen); a named query (e.g. gradio) also selects its built-in FOFA query for fetch")
+    parser.add_argument("-n", "--name", help="cache file name prefix (default: image-gen); a named query (e.g. gradio) also selects its built-in FOFA query for fetch; 'all' runs the action across every service (for cron automation), same as -s all")
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
     parser.add_argument("-r", "--random", dest="shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
     parser.add_argument("-t", "--site", choices=["fofa", "shodan"], default="fofa", help="site to scrape (default: fofa)")
     parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG) + ["all"],
-                        help="service to search for; 'all' re-surveys every service (check-working only)")
+                        help="service to search for; 'all' runs the action across every service (each gets its own <service>-*.json cache), for automating the full pipeline")
     parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")
     parser.add_argument("-z", "--sleep", type=int, default=SLEEP_DEFAULT, help=f"seconds to sleep between requests (default: {SLEEP_DEFAULT})")
+    parser.add_argument("enrich_args", nargs="*", metavar="FILE [KEY] [refresh]",
+                        help="for -a enrich: a JSON file to geo-enrich in place, optionally the "
+                             "field holding the host (server/url/host; auto-detected when omitted), "
+                             "and the literal 'refresh' to re-stamp already-enriched records (e.g. "
+                             "to backfill city/lat/lon over a country-only pass). Without a file, "
+                             "-a enrich runs over the per-service working files (use -s all).")
     args = parser.parse_args()
 
     if args.query and not args.name:
         parser.error("--query requires --name")
-    if not args.service and not args.query and not args.name:
+    if (not args.service and not args.query and not args.name
+            and not (args.action == "enrich" and args.enrich_args)):
         parser.error("either --service, --query, or --name is required")
-    if args.service == "all" and args.action != "check-working":
-        parser.error("--service all is only supported with -a check-working")
     if args.site == "shodan":
         if args.fids:
             log.warning("-f/--fid is ignored with --site shodan")
@@ -1859,16 +1930,36 @@ def main():
     check_new = args.action == "check-new"
     check_all = args.action == "check-all"
 
+    # "all services" for the whole pipeline, so the 5-day cron run is one
+    # invocation per action. Triggered by `-s all` or `-n all` (the user reaches
+    # for both spellings). Each service has its own query/ports/working file, so
+    # this is just the single-service path run once per service, with name left
+    # to each service's own defaults.
+    all_services = args.service == "all" or (args.name or "").strip().lower() == "all"
+    pipe_services = list(SERVICE_CONFIG) if all_services else [args.service]
+    if args.query and all_services:
+        parser.error("--query cannot be combined with 'all' services")
+
+    # `-a enrich <file> [key]`: geo-enrich an arbitrary JSON file in place. The
+    # catch-all for foreign-source hosts (run it on free-ollama.json after a
+    # dyva refresh) and for ragged legacy files whose host field isn't `server`.
+    if args.action == "enrich" and args.enrich_args:
+        fargs = args.enrich_args
+        rest = fargs[1:]
+        refresh = "refresh" in rest
+        keyarg = next((x for x in rest if x != "refresh"), None)
+        sys.exit(enrich_file(fargs[0], keyarg, refresh=refresh))
+
     if args.action == "check-working":
         log.info("--- check-working ---")
         # "-s all" re-surveys every service in turn — each has its own working
         # file, so this is just the single-service pass run once per service.
-        services = list(SERVICE_CONFIG) if args.service == "all" else [args.service]
+        services = pipe_services
         try:
             for svc in services:
-                if args.service == "all":
+                if all_services:
                     log.info(f"--- check-working: {svc} ---")
-                check_working(service=svc, name=(None if args.service == "all" else args.name),
+                check_working(service=svc, name=(None if all_services else args.name),
                               check_timeout=args.check_timeout, workers=args.workers,
                               session=args.session)
         except KeyboardInterrupt:
@@ -1880,32 +1971,42 @@ def main():
         return
 
     try:
-        if args.action == "fetch-check":
-            log.info("--- fetch-check (interleaved) ---")
+        for _svc in pipe_services:
+            # Use the service as the cache-file prefix for all-services runs.
+            # check/check_working fall back name->service internally, but fetch
+            # does not, so without this every service's fetch would collide into
+            # image-gen-hosts.json. Each service gets its own <svc>-*.json.
+            _nm = _svc if all_services else args.name
+            if all_services:
+                log.info(f"=== service: {_svc} ===")
+            if args.action == "fetch-check":
+                log.info("--- fetch-check (interleaved) ---")
 
-            def batch_cb(fresh_hosts):
-                batch = fresh_hosts[:args.workers]
-                log.info(f"  check batch: {len(batch)} new host(s) (interleaved)")
-                check_batch(batch, args.service, args.name, args.check_timeout, args.workers, args.session)
+                def batch_cb(fresh_hosts, _svc=_svc, _nm=_nm):
+                    batch = fresh_hosts[:args.workers]
+                    log.info(f"  check batch: {len(batch)} new host(s) (interleaved)")
+                    check_batch(batch, _svc, _nm, args.check_timeout, args.workers, args.session)
 
-            fetch(dry=args.dry, curlify=args.curlify, service=args.service, query=args.query,
-                  name=args.name, servers=args.servers, ports=args.ports, countries=args.countries,
-                  fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle,
-                  site=args.site, check_batch_fn=batch_cb)
+                fetch(dry=args.dry, curlify=args.curlify, service=_svc, query=args.query,
+                      name=_nm, servers=args.servers, ports=args.ports, countries=args.countries,
+                      fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle,
+                      site=args.site, check_batch_fn=batch_cb)
 
-            if not args.dry and not args.curlify:
-                log.info("--- drain remaining new hosts ---")
-                check(service=args.service, name=args.name, check_timeout=args.check_timeout,
-                      check_new=True, check_all=False, workers=args.workers, session=args.session)
-        else:
-            for step in parts:
-                log.info(f"--- {step} ---")
-                if step == "fetch":
-                    fetch(dry=args.dry, curlify=args.curlify, service=args.service, query=args.query, name=args.name, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
-                elif step == "check":
-                    check(service=args.service, name=args.name, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers, session=args.session)
-                elif step == "classify":
-                    classify(name=args.name)
+                if not args.dry and not args.curlify:
+                    log.info("--- drain remaining new hosts ---")
+                    check(service=_svc, name=_nm, check_timeout=args.check_timeout,
+                          check_new=True, check_all=False, workers=args.workers, session=args.session)
+            else:
+                for step in parts:
+                    log.info(f"--- {step} ---")
+                    if step == "fetch":
+                        fetch(dry=args.dry, curlify=args.curlify, service=_svc, query=args.query, name=_nm, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
+                    elif step == "check":
+                        check(service=_svc, name=_nm, check_timeout=args.check_timeout, check_new=check_new, check_all=check_all, workers=args.workers, session=args.session)
+                    elif step == "classify":
+                        classify(name=_nm)
+                    elif step == "enrich":
+                        enrich(name=_nm or _svc)
     except SystemExit as e:
         sys.exit(e.code)
     except KeyboardInterrupt:

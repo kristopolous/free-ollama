@@ -206,6 +206,51 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 .modellist .model-item:hover{background:var(--accent-bg)}
 .host-name{font-family:var(--font-mono);font-size:var(--fs-sm);flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:none}
 a.host-name:hover{color:var(--accent);text-decoration:underline}
+#hostDetailTitle{font-family:var(--font-mono);font-size:.92rem;overflow-wrap:anywhere}
+:root{--map-land:#26262b;--map-coast:#3a3a42;--map-dot:#1fc7d4;--map-blue:#1fc7d4;--map-pink:#ff3fa8}
+.map-inner{height:auto;max-height:none}
+.map-head{display:flex;align-items:center;gap:12px;margin-bottom:var(--sp-3);flex-wrap:wrap}
+.map-meta{font-size:.8rem;color:var(--text-dim)}
+.map-head .seg{margin-left:auto}
+.map-wrap{display:flex;flex-direction:column;gap:var(--sp-5)}
+.map-view{position:relative;width:100%;border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:var(--bg-sunken)}
+.map-view svg{width:100%;display:block}
+.map-view path{stroke:var(--map-coast);stroke-width:.5}
+.map-view path:hover{stroke:var(--text);stroke-width:1}
+.map-tip{position:fixed;z-index:300;display:none;pointer-events:none;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 9px;font-size:.8rem;color:var(--text-2);box-shadow:var(--shadow-pop);max-width:240px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden}
+.seg button{font:inherit;font-size:.78rem;padding:4px 11px;cursor:pointer;background:var(--surface);color:var(--text-2);border:none;border-left:1px solid var(--border)}
+.seg button:first-child{border-left:none}
+.seg button[aria-pressed="true"]{background:var(--accent-bg-active);color:var(--text)}
+.zoombtns{position:absolute;top:8px;left:8px;display:flex;flex-direction:column;gap:4px}
+.zoombtns button{width:28px;height:28px;padding:0;display:flex;align-items:center;justify-content:center;font-size:17px;line-height:1;cursor:pointer;background:var(--surface);color:var(--text-2);border:1px solid var(--border);border-radius:var(--r-sm)}
+.zoombtns button:hover{color:var(--text);background:var(--accent-bg)}
+.map-compare{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;margin-bottom:var(--sp-3)}
+.map-compare input{flex:1 1 0;min-width:0;font:inherit;font-size:.85rem;padding:4px 8px;background:var(--bg-sunken);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm)}
+.map-compare .mc-vs{color:var(--text-dim);font-size:.8rem;flex:0 0 auto}
+.map-compare button{flex:0 0 auto;font:inherit;font-size:.8rem;padding:4px 11px;cursor:pointer;background:var(--surface);color:var(--text-2);border:1px solid var(--border);border-radius:var(--r-sm)}
+.map-compare button:hover{color:var(--text);background:var(--accent-bg)}
+.map-ramp{display:flex;align-items:center;gap:8px;font-size:.78rem;color:var(--text-dim);margin-bottom:var(--sp-3);min-height:1.2em}
+.map-ramp i{width:120px;height:11px;border-radius:2px;display:inline-block}
+.map-lists{display:flex;flex-direction:row;flex-wrap:wrap;gap:var(--sp-5)}
+.map-lists>div{flex:1 1 240px;min-width:0}
+.map-lists h3{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint);margin:0 0 .3em}
+.map-bar{display:flex;align-items:center;gap:6px;font-size:.8rem;padding:2px 0}
+.map-bar .mb-k{width:6.5em;color:var(--text-2);flex:0 0 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.map-bar .mb-track{flex:1 1 auto;height:8px;background:var(--card);border-radius:4px;overflow:hidden}
+.map-bar .mb-fill{height:100%;background:var(--accent)}
+.map-bar .mb-n{flex:0 0 auto;color:var(--text-dim);font-variant-numeric:tabular-nums;font-size:.72rem}
+@media(max-width:640px){.map-lists{flex:1 1 100%}}
+.hd-badges{display:flex;gap:6px;flex-wrap:wrap;margin:.6em 0}
+.hd-badge{font-size:.72rem;padding:2px 9px;border-radius:20px;background:var(--card);border:1px solid var(--border);color:var(--text-2);white-space:nowrap}
+.hd-badge.hd-prov{background:var(--accent-bg);border-color:transparent;color:var(--accent);text-transform:capitalize}
+.hd-row{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px solid var(--border);font-size:.84rem}
+.hd-row .hd-k{color:var(--text-dim);flex:0 0 auto}
+.hd-row .hd-v{color:var(--text-2);text-align:right;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:.8rem}
+.hd-sec{margin:.9em 0 .2em;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint)}
+.hd-item{display:flex;justify-content:space-between;gap:10px;font-family:var(--font-mono);font-size:.78rem;padding:2px 0;color:var(--text-2)}
+.hd-st-good{color:#39d353}.hd-st-bad{color:var(--err)}.hd-st-maybe_good{color:var(--accent)}
+.hd-attr{margin-top:1em;font-size:.64rem;color:var(--text-faint)}
 .host-checked{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap;font-size:var(--fs-xs)}
 .host-model{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-dim);max-width:50%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skip-link{opacity:0;color:var(--accent);font-size:var(--fs-xs);text-decoration:underline;margin:0 var(--sp-3);flex-shrink:0;transition:opacity .1s}
@@ -794,6 +839,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button class="tab active" data-tab="serverroom">Servers</button>
 <button class="tab" data-tab="chat">Chat</button>
 <button class="tab" data-tab="media">Media</button>
+<button class="tab" data-tab="map">Map</button>
 <button class="tab" data-tab="settings">Settings</button>
 </div>
 
@@ -818,6 +864,14 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="modelListImage" class="modellist"></div>
 </div>
 </div>
+</div>
+<div class="card" id="hostCard" style="display:none">
+<h2 id="hostCardTitle">Hosts</h2>
+<div class="card-inner"><div id="hostList"></div></div>
+</div>
+<div class="card" id="hostDetailCard" style="display:none">
+<h2><span id="hostDetailTitle">Host</span></h2>
+<div class="card-inner"><div id="hostDetailBody"></div></div>
 </div>
 <div class="card">
 <h2>Hosts</h2>
@@ -848,10 +902,6 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="workersList"></div>
 </div>
 </div>
-</div>
-<div class="card" id="hostCard" style="display:none">
-<h2 id="hostCardTitle">Hosts</h2>
-<div class="card-inner"><div id="hostList"></div></div>
 </div>
 </div>
 </div>
@@ -1135,6 +1185,24 @@ __SD_MODELS__
 <div id="vidGallery" class="media-gallery"></div>
 </div>
 </div>
+</div>
+
+<div id="map" class="panel">
+<div class="card"><div class="card-inner map-inner">
+<div class="map-head"><h2>Host population</h2><span id="mapMeta" class="map-meta"></span><div id="mapMode" class="seg"></div></div>
+<div class="map-wrap">
+<div id="mapView" class="map-view"></div>
+</div>
+<span id="mapRamp" class="map-ramp"></span>
+<div class="map-compare">
+<input id="mapGlobA" placeholder="qwen" autocomplete="off" spellcheck="false">
+<span class="mc-vs">vs</span>
+<input id="mapGlobB" placeholder="mistral" autocomplete="off" spellcheck="false">
+<button id="mapCompareBtn">Go</button>
+<button id="mapClearBtn" style="display:none">Clear</button>
+</div>
+<div id="mapLists" class="map-lists"></div>
+</div></div>
 </div>
 
 <div id="settings" class="panel">
@@ -1467,6 +1535,65 @@ function hostLink(host){
   a.target='_blank';a.rel='noopener noreferrer';
   a.addEventListener('click',function(ev){ev.stopPropagation()});
   return a;
+}
+// country code -> flag emoji (regional-indicator letters)
+function flagEmoji(cc){
+  if(!cc||cc.length!==2)return '';
+  var A=0x1F1E6,c=cc.toUpperCase();
+  return String.fromCodePoint(A+c.charCodeAt(0)-65)+String.fromCodePoint(A+c.charCodeAt(1)-65);
+}
+// The host detail renders as its own card beside the host-list card — the list
+// stays put; clicking another host just updates this card.
+var _selHostRow=null;
+function selectHostRow(d){
+  if(_selHostRow)_selHostRow.style.background='';
+  _selHostRow=d||null;
+  if(_selHostRow)_selHostRow.style.background='var(--accent-bg-active)';
+}
+function closeHostDetailCard(){var c=document.getElementById('hostDetailCard');if(c)c.style.display='none';selectHostRow(null)}
+function openHostDetail(host){
+  var card=document.getElementById('hostDetailCard'),body=document.getElementById('hostDetailBody');
+  if(!card||!body)return;
+  var title=document.getElementById('hostDetailTitle');if(title)title.textContent=host;
+  body.innerHTML='<div class="hd-attr">loading…</div>';
+  card.style.display='';
+  fetch('host-info?host='+encodeURIComponent(host),{cache:'no-store'})
+    .then(function(r){return r.json()})
+    .then(function(j){body.innerHTML=hostDetailHtml(host,j)})
+    .catch(function(){body.innerHTML='<div class="hd-attr">could not load host info</div>'});
+}
+function hostDetailHtml(host,j){
+  var h=[];
+  var url=j.host||host, href=/^https?:\/\//.test(url)?url:('http://'+url);
+  var b=[];
+  if(j.provider)b.push('<span class="hd-badge hd-prov">'+escHtml(j.provider)+'</span>');
+  if(j.country)b.push('<span class="hd-badge">'+flagEmoji(j.country)+' '+escHtml(j.country)+(j.city?' · '+escHtml(j.city):'')+'</span>');
+  if(j.service)b.push('<span class="hd-badge">'+escHtml(j.service)+(j.version?' '+escHtml(j.version):'')+'</span>');
+  if(b.length)h.push('<div class="hd-badges">'+b.join('')+'</div>');
+  function row(k,v){return v?('<div class="hd-row"><span class="hd-k">'+k+'</span><span class="hd-v">'+v+'</span></div>'):''}
+  h.push(row('host','<a href="'+escHtml(href)+'" target="_blank" rel="noopener noreferrer">'+escHtml(url)+' ↗</a>'));
+  if(j.asn)h.push(row('network','AS'+j.asn+(j.as_org?' · '+escHtml(j.as_org):'')));
+  h.push(row('source',j.source?escHtml(j.source):''));
+  h.push(row('tps',(j.tps!=null&&j.tps!=='')?escHtml(String(j.tps)):''));
+  h.push(row('checked',j.lastUpdate?escHtml(String(j.lastUpdate)):''));
+  var models=j.models||[],rep={};(j.reputation||[]).forEach(function(r){rep[r.model]=r});
+  if(models.length){
+    h.push('<div class="hd-sec">models ('+models.length+')</div>');
+    models.slice(0,50).forEach(function(m){
+      var r=rep[m],st=r?('<span class="hd-st-'+escHtml(r.state)+'">'+escHtml(r.state)+'</span>'):'';
+      h.push('<div class="hd-item"><span>'+escHtml(String(m).replace(/\\/g,'/').split('/').pop())+'</span>'+st+'</div>');
+    });
+    if(models.length>50)h.push('<div class="hd-attr">… and '+(models.length-50)+' more</div>');
+  }
+  if((j.capabilities||[]).length){
+    h.push('<div class="hd-sec">capabilities</div>');
+    j.capabilities.forEach(function(c){
+      var extra=(c.voices&&c.voices.length)?(' · '+c.voices.length+' voices'):'';
+      h.push('<div class="hd-item"><span>'+escHtml((c.capability||'').replace(/^__|__$/g,''))+'</span><span>'+escHtml(c.node||'')+extra+'</span></div>');
+    });
+  }
+  if(!j.found)h.push('<div class="hd-attr">not in the current host cache — reputation only</div>');
+  return h.join('');
 }
 function hostRow(host,model,skipHref){
   var d=document.createElement('div');d.className='model-item';
@@ -1821,20 +1948,27 @@ document.getElementById('serverroom').addEventListener('click',function(e){
     _currentModel=null;
     refreshUseBtn();
     document.getElementById('hostCard').style.display='none';
+    closeHostDetailCard();
     return;
   }
   el.style.background='var(--accent-bg-active)';_currentModel=name;
   refreshUseBtn();
-  var hosts=(modelHosts[_currentModel]||[]).slice().sort(function(a,b){
+  renderHostListFor();
+});
+// The host list for the selected model. Extracted so the host-detail card's
+// "back" link can restore it without re-running the model click.
+function renderHostListFor(){
+  var model=_currentModel;if(!model)return;
+  var hosts=(modelHosts[model]||[]).slice().sort(function(a,b){
     var ta=hostChecked[a]?Date.parse(hostChecked[a]):NaN,tb=hostChecked[b]?Date.parse(hostChecked[b]):NaN;
     if(isNaN(ta))ta=-Infinity;if(isNaN(tb))tb=-Infinity;
     return tb-ta||(a<b?-1:a>b?1:0);
   });
   var card=document.getElementById('hostCard');card.style.display='';
-  document.getElementById('hostCardTitle').textContent=_currentModel+' ('+hosts.length+' hosts)';
+  document.getElementById('hostCardTitle').textContent=model+' ('+hosts.length+' hosts)';
   var list=document.getElementById('hostList');list.innerHTML='';
-  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';d.appendChild(hostLink(h));var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}list.appendChild(d)});
-});
+  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';d.style.cursor='pointer';d.title='host details';var n=document.createElement('span');n.className='host-name';n.textContent=h;d.appendChild(n);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}d.addEventListener('click',function(){if(_selHostRow===d){closeHostDetailCard();return}selectHostRow(d);openHostDetail(h)});list.appendChild(d)});
+}
 loadDashboard();
 </script>
 <script>
@@ -5654,6 +5788,146 @@ chatLog.addEventListener('click',function(e){
   });
 });
 
+// ---- Map tab: self-contained world map (ported from the woahllama site) ----
+// Custom equirectangular SVG — country polygons from /world.json, coloured by
+// host count (By country), or city bubbles at lat/lon sized by count (By city).
+// No external map lib.
+var _MAP_NS='http://www.w3.org/2000/svg';
+var _worldGeo=null,_mapMode='country';
+function _mkel(tag,attrs){var e=document.createElementNS(_MAP_NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e}
+function _mapTip(){var t=document.getElementById('mapTip');if(!t){t=document.createElement('div');t.id='mapTip';t.className='map-tip';document.body.appendChild(t)}return t}
+function _showTip(html,ev){var t=_mapTip();t.innerHTML=html;t.style.display='block';var x=ev.clientX+14,y=ev.clientY+14;t.style.left=Math.min(x,innerWidth-t.offsetWidth-8)+'px';t.style.top=Math.min(y,innerHeight-t.offsetHeight-8)+'px'}
+function _hideTip(){var t=document.getElementById('mapTip');if(t)t.style.display='none'}
+var _mapData=null,_mapCmp=null,_mapWired=false;
+function openMap(){
+  if(!_mapWired){
+    _mapWired=true;
+    var cb=document.getElementById('mapCompareBtn'),clr=document.getElementById('mapClearBtn');
+    if(cb)cb.onclick=runMapCompare;
+    if(clr)clr.onclick=function(){_mapCmp=null;clr.style.display='none';drawMap()};
+    ['mapGlobA','mapGlobB'].forEach(function(id){var e=document.getElementById(id);if(e)e.addEventListener('keydown',function(ev){if(ev.key==='Enter')runMapCompare()})});
+  }
+  fetch('geo-summary',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
+    _mapData=d;renderMapLists(d);
+    (_worldGeo?Promise.resolve(_worldGeo):fetch('world.json').then(function(r){return r.json()}).then(function(g){_worldGeo=g;return g}))
+      .then(drawMap)
+      .catch(function(){var v=document.getElementById('mapView');if(v)v.innerHTML='<div class="hd-attr" style="padding:1em">could not load map geometry</div>'});
+  }).catch(function(){});
+}
+function drawMap(){if(_worldGeo&&_mapData)renderWorldMap(_worldGeo,_mapData,_mapCmp)}
+function runMapCompare(){
+  var a=((document.getElementById('mapGlobA')||{}).value||'').trim();
+  var b=((document.getElementById('mapGlobB')||{}).value||'').trim();
+  var clr=document.getElementById('mapClearBtn');
+  if(!a&&!b){_mapCmp=null;if(clr)clr.style.display='none';drawMap();return}
+  fetch('geo-compare?a='+encodeURIComponent(a)+'&b='+encodeURIComponent(b),{cache:'no-store'})
+    .then(function(r){return r.json()}).then(function(c){_mapCmp=c;if(clr)clr.style.display='';drawMap()})
+    .catch(function(){});
+}
+function _lerpHex(a,b,t){var h='#';for(var i=0;i<3;i++){var av=parseInt(a.substr(1+i*2,2),16),bv=parseInt(b.substr(1+i*2,2),16),v=Math.round(av+(bv-av)*t);h+=('0'+v.toString(16)).slice(-2)}return h}
+function renderMapLists(d){
+  var meta=document.getElementById('mapMeta');
+  if(meta)meta.textContent=(d.with_geo||0)+' of '+(d.total||0)+' hosts located';
+  var el=document.getElementById('mapLists');if(!el)return;
+  function bars(title,obj){
+    var es=Object.keys(obj||{}).map(function(k){return [k,obj[k]]}).sort(function(a,b){return b[1]-a[1]}).slice(0,12);
+    if(!es.length)return '';
+    var max=es[0][1]||1,h='<h3>'+title+'</h3>';
+    es.forEach(function(e){h+='<div class="map-bar"><span class="mb-k">'+escHtml(e[0])+'</span><span class="mb-track"><span class="mb-fill" style="width:'+Math.round(e[1]/max*100)+'%"></span></span><span class="mb-n">'+e[1]+'</span></div>'});
+    return '<div>'+h+'</div>';
+  }
+  el.innerHTML=bars('Top countries',d.countries)+bars('Providers',d.providers);
+}
+function _heatFill(t){var a=[35,55,75],b=[122,162,247],h='#';for(var i=0;i<3;i++){var vv=Math.round(a[i]+(b[i]-a[i])*t);h+=('0'+vv.toString(16)).slice(-2)}return h}
+function _pathD(f,X,Y){return f.g.map(function(r){return r.map(function(p,i){return (i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1)}).join('')+'Z'}).join('')}
+function renderWorldMap(world,d,cmp){
+  var host=document.getElementById('mapView');if(!host)return;
+  host.innerHTML='';
+  // Resolve theme colors to literal hex — var() is not honored in SVG
+  // presentation *attributes* (only in CSS), so the land/dots would render black.
+  var cs=getComputedStyle(document.documentElement);
+  var LAND=(cs.getPropertyValue('--map-land')||'').trim()||'#26262b';
+  var COAST=(cs.getPropertyValue('--map-coast')||'').trim()||'#3a3a42';
+  var DOT=(cs.getPropertyValue('--map-dot')||'').trim()||'#1fc7d4';
+  var BLUE=(cs.getPropertyValue('--map-blue')||'').trim()||'#1fc7d4';
+  var PINK=(cs.getPropertyValue('--map-pink')||'').trim()||'#ff3fa8';
+  var W=host.clientWidth||1000,H=Math.round(W*0.5),LAT0=84,LAT1=-58;
+  var X=function(lon){return (lon+180)/360*W},Y=function(lat){return (LAT0-lat)/(LAT0-LAT1)*H};
+  var svg=_mkel('svg',{viewBox:'0 0 '+W+' '+H,height:H});
+  svg.innerHTML='<defs><pattern id="nodata" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="'+LAND+'"/><line x1="0" y1="0" x2="0" y2="6" stroke="'+COAST+'" stroke-width="2"/></pattern></defs>';
+  var diverge=function(a,b){var t=0.5+0.5*Math.tanh(((b-a)/((a+b)||1))*2.2);return _lerpHex(BLUE,PINK,t)};
+  var cmpC=cmp?(cmp.countries||{}):null,la=cmp?(cmp.a||'A'):'',lb=cmp?(cmp.b||'B'):'';
+  var counts=d.countries||{},cvals=[];for(var k in counts)cvals.push(counts[k]);
+  var cmax=cvals.length?Math.max.apply(null,cvals):1,clmax=Math.log(cmax)||1;
+  // country layer
+  var gC=_mkel('g',{});
+  world.forEach(function(f){
+    var fill,op=1,tip;
+    if(cmpC){
+      var r=cmpC[f.cc],tot=r?r.a+r.b:0;
+      fill=tot?diverge(r.a,r.b):'url(#nodata)';op=tot?Math.min(1,0.25+tot/120):1;
+      tip='<b>'+escHtml(f.n)+'</b><br>'+(tot?escHtml(la)+': '+r.a+' · '+escHtml(lb)+': '+r.b:'no matches');
+    }else{
+      var n=counts[f.cc]||0;
+      fill=n?_heatFill(cmax>1?Math.log(n)/clmax:1):'url(#nodata)';
+      tip='<b>'+escHtml(f.n)+'</b><br>'+n+' host'+(n===1?'':'s');
+    }
+    var p=_mkel('path',{d:_pathD(f,X,Y),fill:fill,'fill-opacity':op,'vector-effect':'non-scaling-stroke'});
+    (function(t){p.addEventListener('mousemove',function(ev){_showTip(t,ev)})})(tip);
+    p.addEventListener('mouseleave',_hideTip);
+    gC.appendChild(p);
+  });
+  // land backdrop + city bubbles for city mode
+  var gLand=_mkel('g',{display:'none'});
+  world.forEach(function(f){gLand.appendChild(_mkel('path',{d:_pathD(f,X,Y),fill:LAND,stroke:COAST,'stroke-width':0.5,'vector-effect':'non-scaling-stroke'}))});
+  var gCity=_mkel('g',{display:'none'});
+  var cityList=cmp?(cmp.cities||[]):(d.cities||[]),citymax=1;
+  cityList.forEach(function(c){var tot=cmp?(c.a+c.b):c.count;if(tot>citymax)citymax=tot});
+  cityList.forEach(function(c){
+    var tot=cmp?(c.a+c.b):c.count;if(!tot)return;
+    var fill=cmp?diverge(c.a,c.b):DOT;
+    var tip=cmp?('<b>'+escHtml(c.city||'?')+(c.cc?', '+escHtml(c.cc):'')+'</b><br>'+escHtml(la)+': '+c.a+' · '+escHtml(lb)+': '+c.b)
+               :('<b>'+escHtml(c.city||'(unknown city)')+(c.cc?', '+escHtml(c.cc):'')+'</b><br>'+c.count+' host'+(c.count===1?'':'s'));
+    var circ=_mkel('circle',{cx:X(c.lon).toFixed(1),cy:Y(c.lat).toFixed(1),r:(2+Math.sqrt(tot/citymax)*18).toFixed(1),fill:fill,'fill-opacity':0.6,stroke:LAND,'stroke-width':0.6,'vector-effect':'non-scaling-stroke'});
+    (function(t){circ.addEventListener('mousemove',function(ev){_showTip(t,ev)})})(tip);
+    circ.addEventListener('mouseleave',_hideTip);
+    gCity.appendChild(circ);
+  });
+  svg.appendChild(gLand);svg.appendChild(gC);svg.appendChild(gCity);
+  host.appendChild(svg);
+  _mapZoom(host,svg,W,H);
+  var ramp=document.getElementById('mapRamp');
+  if(ramp)ramp.innerHTML=cmp
+    ?('<b style="color:'+BLUE+'">'+escHtml(la)+'</b><i style="background:linear-gradient(90deg,'+BLUE+','+PINK+')"></i><b style="color:'+PINK+'">'+escHtml(lb)+'</b>')
+    :'';
+  var mh=document.getElementById('mapMode');
+  if(mh){
+    mh.className='seg';
+    mh.innerHTML='<button data-mode="country">Country</button><button data-mode="city">City</button>';
+    var applyMode=function(){
+      gC.setAttribute('display',_mapMode==='country'?'block':'none');
+      gLand.setAttribute('display',_mapMode==='city'?'block':'none');
+      gCity.setAttribute('display',_mapMode==='city'?'block':'none');
+      mh.querySelectorAll('button').forEach(function(b){b.setAttribute('aria-pressed',b.dataset.mode===_mapMode)});
+    };
+    mh.onclick=function(e){var b=e.target.closest('button');if(!b)return;_mapMode=b.dataset.mode;applyMode()};
+    applyMode();
+  }
+}
+function _mapZoom(host,svg,W,H){
+  var k=1,cx=W/2,cy=H/2;
+  function apply(){k=Math.max(1,Math.min(14,k));var vw=W/k,vh=H/k;cx=Math.max(vw/2,Math.min(W-vw/2,cx));cy=Math.max(vh/2,Math.min(H-vh/2,cy));svg.setAttribute('viewBox',(cx-vw/2)+' '+(cy-vh/2)+' '+vw+' '+vh)}
+  var btns=document.createElement('div');btns.className='zoombtns';
+  btns.innerHTML='<button aria-label="zoom in">+</button><button aria-label="zoom out">−</button>';
+  btns.children[0].onclick=function(){k*=1.6;apply()};btns.children[1].onclick=function(){k/=1.6;apply()};
+  host.appendChild(btns);
+  svg.style.cursor='grab';
+  svg.addEventListener('wheel',function(e){e.preventDefault();k*=(e.deltaY<0?1.15:1/1.15);apply()},{passive:false});
+  var drag=null;
+  svg.addEventListener('mousedown',function(e){drag={x:e.clientX,y:e.clientY,cx:cx,cy:cy};svg.style.cursor='grabbing'});
+  window.addEventListener('mousemove',function(e){if(!drag)return;var vw=W/k,vh=H/k,sc=host.clientWidth/W;cx=drag.cx-(e.clientX-drag.x)/sc*(vw/W);cy=drag.cy-(e.clientY-drag.y)/sc*(vh/H);apply()});
+  window.addEventListener('mouseup',function(){if(drag){drag=null;svg.style.cursor='grab'}});
+}
 function activateTab(name,chatId,pane,mode){
   document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x.getAttribute('data-tab')===name)});
   document.querySelectorAll('.panel').forEach(function(x){x.classList.toggle('active',x.id===name)});
@@ -5670,6 +5944,7 @@ function activateTab(name,chatId,pane,mode){
     }
   }
   if(name==='settings'){injectSettingsPwFields();loadSettings();}
+  if(name==='map')openMap();
   // Lazy-load the image gallery only when its tab is first opened — building a
   // node per image on every page load (even in the Server Room) is wasteful.
   if(name==='media'){
@@ -5929,7 +6204,7 @@ function tabFromHash(){
     var seg=h.slice(6).split('/');
     return{tab:'media',pane:seg[0],mode:seg[1]};
   }
-  if(h==='serverroom'||h==='chat'||h==='media'||h==='settings')return{tab:h};
+  if(h==='serverroom'||h==='chat'||h==='media'||h==='map'||h==='settings')return{tab:h};
   return{tab:'serverroom'};
 }
 document.querySelectorAll('.tab').forEach(function(t){
