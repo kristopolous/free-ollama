@@ -519,7 +519,7 @@ details.toolbox>summary{cursor:pointer;color:var(--accent);font-size:var(--fs-2x
 .doc-select{flex:1;min-width:0}
 .doc-type{color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);flex-shrink:0}
 .doc-ver{display:flex;align-items:center;gap:2px;flex-shrink:0}
-.doc-ver-btn{padding:2px 6px;line-height:1;font-size:var(--fs-md)}
+.doc-ver-btn{padding:0;line-height:1;font-size:var(--fs-md);width:32px;height:32px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
 .doc-ver-btn:disabled{opacity:.35;cursor:default}
 .doc-ver-label{color:var(--text-dim);font-size:var(--fs-2xs);min-width:3.4em;text-align:center;white-space:nowrap}
 .doc-ver.old .doc-ver-label{color:var(--accent);font-weight:600}
@@ -4475,6 +4475,65 @@ function _docCommitVersion(doc){
   doc.versions.push({content:doc.content,ts:doc.updated||Date.now()});
   if(doc.versions.length>60)doc.versions.shift();
 }
+// Every document edit the model made this chat is already recorded in the
+// transcript — as tool calls (create/edit/replace/rename_document) or as inline
+// <document> blocks. Pull them out in order so history can be replayed.
+function _docOpsFromChat(chat){
+  var ops=[];
+  (chat.messages||[]).forEach(function(m){
+    if(!m||m.role!=='assistant')return;
+    if(m.tool_calls)m.tool_calls.forEach(function(tc){
+      var fn=(tc&&tc.function)||{},nm=fn.name;
+      if(['create_document','edit_document','replace_in_document','rename_document'].indexOf(nm)<0)return;
+      var a=fn.arguments;
+      if(typeof a==='string'){try{a=JSON.parse(a)}catch(e){a={}}}
+      ops.push({name:nm,args:a||{}});
+    });
+    if(typeof m.content==='string'&&m.content.indexOf('<document')>=0){
+      splitDocBlocks(m.content).docs.forEach(function(d){
+        if(!d.closed)return;                     // a half-written block isn't a version
+        ops.push({name:'inline',args:{id:d.ref||'',title:d.title,content:d.content}});
+      });
+    }
+  });
+  return ops;
+}
+// Rebuild doc.versions for each document by replaying those ops. Runs once per
+// chat per session — it recovers history for documents edited before versioning
+// existed, and reproduces what the live capture would have recorded anyway.
+function rebuildDocVersions(chat){
+  if(!chat||!chat.documents||!chat.documents.length)return;
+  var ops=_docOpsFromChat(chat);
+  if(!ops.length)return;
+  chat.documents.forEach(function(doc){
+    var alias={};alias[doc.id]=1;if(doc.title)alias[doc.title]=1;
+    // renames chain a document's later titles back to it
+    ops.forEach(function(op){
+      if(op.name!=='rename_document')return;
+      var h=(op.args.id!=null&&op.args.id!=='')?op.args.id:op.args.title;
+      if(h!=null&&alias[h]&&op.args.new_title)alias[op.args.new_title]=1;
+    });
+    var running='',versions=[],seen=false;
+    ops.forEach(function(op){
+      if(op.name==='rename_document')return;
+      var byId=op.args.id!=null&&op.args.id!==''&&alias[op.args.id];
+      var byTitle=op.args.title&&alias[op.args.title];
+      if(!byId&&!byTitle)return;
+      if(op.name==='replace_in_document'){
+        var tmp={content:running,title:doc.title};
+        var rr=replaceInDoc(tmp,op.args.old_text,op.args.new_text,!!op.args.all);
+        if(!rr.error)running=tmp.content;         // a failed replace left the text as-is
+      }else{                                       // create / edit / inline all set full content
+        running=String(op.args.content||'');
+      }
+      seen=true;versions.push(running);
+    });
+    if(!seen)return;
+    if(!versions.length||versions[versions.length-1]!==doc.content)versions.push(doc.content);
+    var out=[];versions.forEach(function(c){if(!out.length||out[out.length-1]!==c)out.push(c)});
+    doc.versions=out.map(function(c){return {content:c,ts:doc.updated||Date.now()}});
+  });
+}
 function applyDocOp(chatId,name,args){
   var ctx=docCtx(chatId);
   if(!ctx)return {text:'Error: conversation not found'};
@@ -4720,6 +4779,7 @@ function docPreviewOn(doc){
   return _docView[doc.id]!=='source';
 }
 function renderDocPanel(streaming){
+  if(currentChat&&!currentChat._vrb){rebuildDocVersions(currentChat);currentChat._vrb=1;}
   var docs=currentDocs();
   if(!docs.length){closeDoc();return;}
   if(!findDoc(docs,activeDocId))activeDocId=docs[docs.length-1].id;
@@ -4736,7 +4796,7 @@ function renderDocPanel(streaming){
   if(vw.total>1&&!doc.streaming){
     verEl.style.display='';
     verEl.classList.toggle('old',!vw.latest);
-    document.getElementById('docVerLabel').textContent='v'+(vw.cur+1)+'/'+vw.total;
+    document.getElementById('docVerLabel').textContent=(vw.cur+1)+'/'+vw.total;
     document.getElementById('docVerPrev').disabled=vw.cur<=0;
     document.getElementById('docVerNext').disabled=vw.latest;
   }else{verEl.style.display='none';}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #set -euo pipefail
 
-SLEEP=10
+SLEEP=9
 SERVICE="${1:-ollama}"
 CMD="$0"
 shift 2>/dev/null || true
@@ -33,7 +33,7 @@ case "$SERVICE" in
 
     jq -s 'add' ~/.cache/free-ollama/*-notworking.json > ~/.cache/free-ollama/notworking-consolidated.json
 
-    ./dyva.py --refresh $_SOURCE
+    ./dyva.py --refresh 
     exit
     ;;
 

@@ -33,7 +33,7 @@ def _cache_file(name, suffix):
     return os.path.join(CACHE_DIR, f"{prefix}-{suffix}.json")
 
 TIMEOUT = 60
-BACKOFF = 15
+BACKOFF = 11
 MAX_BACKOFF = 300
 SLEEP_DEFAULT = 4
 STATS_EVERY = 50
@@ -186,6 +186,53 @@ def _check_snapshot_exists(host, port, run_ts):
     resumed -i run skips hosts it already checked."""
     ident = _tag(f"{host}:{port}")
     return os.path.exists(os.path.join("/tmp/graflex", run_ts, "check", f"{ident}.json"))
+
+
+def _check_failed_path(run_ts):
+    """Session-scoped record of hosts that failed their check, alongside the
+    per-host success snapshots under /tmp/graflex/{run_ts}/."""
+    from datetime import datetime, timezone
+    date = run_ts or _RUN_TS or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    return os.path.join("/tmp/graflex", date, "failed.json")
+
+
+def _save_check_failure(host, port, reason):
+    """Record a host that failed its check this session (unreachable, auth
+    required, bad JSON, ...) so a resumed (-i) run skips it instead of
+    re-probing a box already known bad for this run — the failure counterpart of
+    _save_check_snapshot. Only successes were remembered before, so failed hosts
+    were the whole cost of every resume. Called under the caller's write-lock,
+    so the read-modify-write of the single file is safe."""
+    if not _RUN_TS:
+        return
+    path = _check_failed_path(_RUN_TS)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    failed = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                failed = json.load(f)
+            if not isinstance(failed, dict):
+                failed = {}
+        except (ValueError, OSError):
+            failed = {}
+    failed[f"{host}:{port}"] = {"reason": reason, "check_time": time.time()}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(failed, f, indent=2)
+
+
+def _load_check_failed(run_ts):
+    """Set of host:port strings that already failed this session (empty if the
+    file is absent or unreadable)."""
+    path = _check_failed_path(run_ts)
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return set(data.keys()) if isinstance(data, dict) else set()
+    except (ValueError, OSError):
+        return set()
 
 
 def _save_json_atomic(path, data):
@@ -369,6 +416,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
             url = f"{current_scheme}://{current_host}:{current_port}{current_path}"
             base_url = f"{current_scheme}://{current_host}:{current_port}/"
             try:
+                start_time = time.time()
                 resp = await asyncio.wait_for(
                     session.get(url, allow_redirects=False), timeout=timeout
                 )
@@ -702,6 +750,8 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
         if got_http_response:
             break
 
+    if last_error is not None:
+        last_error['lapse'] = time.time() - start_time
     return last_error
 
 
@@ -1306,6 +1356,11 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     global _RUN_TS
     if session:
         _RUN_TS = session
+    elif not _RUN_TS:
+        # A bare check(-all) run gets a stable session id too, so its success
+        # snapshots and failure records land in one dir and it can be resumed.
+        _RUN_TS = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        log.info(f"check session {_RUN_TS} — resume with -i {_RUN_TS}")
 
     if name is None:
         name = service
@@ -1350,7 +1405,10 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
 
     to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
-        resumed = 0
+        failed_set = _load_check_failed(session)
+        if failed_set:
+            log.info(f"check: {len(failed_set)} failed hosts recorded in session {session}")
+        resumed = failed = 0
         kept = []
         for h in to_check:
             host_port = h["host"].split(":")
@@ -1359,10 +1417,15 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
                 resumed += 1
                 continue
+            if f"{hh}:{pp}" in failed_set:   # already failed this session — don't re-probe
+                failed += 1
+                continue
             kept.append(h)
         to_check = kept
-        if resumed:
-            log.info(f"check: skipping {resumed} hosts already snapshot in session {session}")
+        if resumed or failed:
+            log.info(f"check: skipping {resumed} hosts already snapshot"
+                     + (f" and {failed} that already failed" if failed else "")
+                     + f" in session {session}")
     if not to_check:
         log.info(f"check: all {len(hosts)} hosts already have model data")
         existing_working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
@@ -1386,11 +1449,11 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
     to_check = hosts
     sem = asyncio.Semaphore(workers)
     wlock = asyncio.Lock()
-    start = time.time()
     completed = 0
 
     async def check_one(entry):
         nonlocal completed
+        start = time.time()
         async with sem:
             host_port = entry["host"].split(":")
             h = host_port[0]
@@ -1444,6 +1507,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                 nkey = entry["host"]
                 notworking[nkey] = nr
                 _save_json_atomic(notworking_file, notworking)
+                _save_check_failure(h, p, reason)   # so -i resume skips it too
                 log.info(f"  {entry['host']}: {reason}")
         completed += 1
         if completed % STATS_EVERY == 0:
@@ -1496,12 +1560,15 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
 
     to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
+        failed_set = _load_check_failed(session)
         kept = []
         for h in to_check:
             host_port = h["host"].split(":")
             hh = host_port[0]
             pp = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
             if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
+                continue
+            if f"{hh}:{pp}" in failed_set:
                 continue
             kept.append(h)
         to_check = kept
@@ -2033,7 +2100,7 @@ def main():
             log.warning(f"\ninterrupted — already-fetched pages are saved; resume with: {hint}")
         elif step == "check":
             hint = f"{base} -a check{f' -i {ts}' if ts else ''}"
-            log.warning(f"\ninterrupted — tag snapshots are saved; resume with: {hint}")
+            log.warning(f"\ninterrupted — checked hosts (working snapshots and failures) are saved; resume with: {hint}")
         else:
             log.warning("\ninterrupted")
         sys.exit(130)
