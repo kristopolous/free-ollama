@@ -12,6 +12,7 @@ dependencies = [
     "aiohttp-swagger3>=0.10.0",
     "Pillow>=10.0.0",
     "maxminddb>=2.0.0",
+    "tiktoken>=0.7.0",
 ]
 
 [tool.setuptools]

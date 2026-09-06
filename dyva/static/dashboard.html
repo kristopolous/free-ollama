@@ -187,7 +187,7 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 .card{background:transparent;border-radius:var(--r-lg);padding:0;box-shadow:none;overflow:visible}
 .card-inner{background:var(--surface);border-radius:var(--r-lg);padding:var(--sp-5);box-shadow:var(--shadow-card);height:var(--card-h);overflow:hidden;display:flex;flex-direction:column}
 /* the click-to-view host card fits its content instead of a fixed height */
-#hostCard .card-inner{height:auto;max-height:var(--card-h)}
+#hostCard .card-inner,#hostDetailCard .card-inner{height:auto;max-height:var(--card-h);overflow:auto}
 /* tabs + filter stay pinned; only the list scrolls */
 #mpane-text,#mpane-image,#pane-last,#pane-good,#pane-maybe,#pane-bad,#hostList{flex:1;min-height:0;overflow-y:auto}
 .card h2{font-size:var(--fs-xl);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:10px}
@@ -463,7 +463,8 @@ details.toolbox{margin:.15em 0 .55em;border-left:3px solid var(--border-accent);
 details.toolbox>summary{cursor:pointer;color:var(--accent);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none;font-family:var(--font-mono)}
 .toolbox .tc-item{margin:.4em 0 .2em}
 .toolbox .tc-fn{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-2)}
-.toolbox .tc-args{white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-3);background:var(--bg-inset);border-radius:var(--r-sm);padding:.4em .5em;margin:.2em 0 0;max-height:280px;overflow:auto}
+.toolbox pre.tc-args{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--fs-2xs);border:0;background:var(--bg-inset);border-radius:var(--r-sm);padding:.4em .5em;margin:.2em 0 0;max-height:280px;overflow:auto}
+.toolbox pre.tc-args code{white-space:inherit;overflow-wrap:inherit;background:none;padding:0}
 .think-body{white-space:pre-wrap;color:var(--text-3);font-size:var(--fs-sm);line-height:var(--line-body);font-style:italic;margin-top:.3em;max-height:320px;overflow:auto}
 
 .chat-status{display:flex;align-items:center;gap:.45em;color:var(--text-dim);font-size:var(--fs-xs);font-style:italic;margin:.15em 0 .3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1811,7 +1812,10 @@ function renderWorkers(workers){
     var kind=w.kind||'text';
     var k=document.createElement('span');k.className='worker-kind kind-'+kind;k.textContent=kind;
     sub.appendChild(k);
-    if(!w.done&&!w.phase){
+    var _showStop=!w.done&&!w.phase;                       // stop: only while still racing
+    var _showSkip=!w.done&&(!w.phase||w.kind==='video');   // skip also works during a long video render
+    if(_showStop||_showSkip){
+     if(_showStop){
       var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
       // A stop isn't instant — the race has to unwind and the in-flight upstream
       // request has to be cancelled — so the button latches into "stopping…"
@@ -1830,6 +1834,8 @@ function renderWorkers(workers){
         });
       });
       sub.appendChild(stop);
+     }
+     if(_showSkip){
       // skip: abandon the host being tried right now and let the race move on
       // to the next server, without killing the whole job the way stop does.
       var skb=document.createElement('button');skb.type='button';skb.className='worker-skip';
@@ -1842,6 +1848,7 @@ function renderWorkers(workers){
         });
       });
       sub.appendChild(skb);
+     }
     }
     var where=w.host?String(w.host).replace(/^https?:\/\//,''):'';
     var rm=w.rmodel?String(w.rmodel).replace(/\\/g,'/').split('/').pop():'';
@@ -2482,7 +2489,7 @@ function toolCallHtml(tcs,open){
     // inspector stays readable
     if(pretty&&pretty.length>1200)pretty=pretty.slice(0,1200)+'\n… (truncated)';
     return '<div class="tc-item"><span class="tc-fn">'+escHtml(name)+'</span>'
-         + '<pre class="tc-args">'+escHtml(pretty||'{}')+'</pre></div>';
+         + '<pre class="tc-args"><code class="language-json">'+escHtml(pretty||'{}')+'</code></pre></div>';
   }).join('');
   var names=tcs.map(function(tc){return ((tc&&tc.function)||{}).name||'?'}).join(', ');
   return '<details class="toolbox"'+(open?' open':'')+'><summary>tool call \u00b7 '
@@ -3716,10 +3723,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           results.push({text:'Error generating speech: '+ex.message});
         }
       }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'
-               ||fn.name==='replace_in_document'||fn.name==='search_document'||fn.name==='read_document'){
+               ||fn.name==='replace_in_document'||fn.name==='search_document'||fn.name==='read_document'
+               ||fn.name==='take_notes'){
         var dverb={create_document:'making',edit_document:'rewriting',rename_document:'renaming',
-                   replace_in_document:'editing',search_document:'searching',read_document:'reading'}[fn.name];
-        setStatus(dverb+' \u201c'+String(args.title||args.new_title||'document')+'\u201d\u2026');
+                   replace_in_document:'editing',search_document:'searching',read_document:'reading',
+                   take_notes:'jotting'}[fn.name];
+        setStatus(dverb+' \u201c'+String(args.title||args.new_title||(fn.name==='take_notes'?'scratchpad':'document'))+'\u201d\u2026');
         var dr=applyDocOp(chatId,fn.name,args);
         results.push({text:dr.text,md:dr.md});
       }else results.push({text:'Error: unknown tool '+fn.name});
@@ -4253,7 +4262,8 @@ var DOC_TOOLS=[
   {type:'function',function:{name:'rename_document',description:'Rename an existing document. Identify it by id (preferred) or current title.',parameters:{type:'object',properties:{id:{type:'string'},title:{type:'string',description:'current title if id unknown'},new_title:{type:'string',description:'the new title'}},required:['new_title']}}},
   {type:'function',function:{name:'search_document',description:'Search inside a document and get back the matching lines with their line numbers and surrounding context. Use this to find the exact text you want to change before calling replace_in_document, so you never have to hold the whole document in mind.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},query:{type:'string',description:'Text to look for (case-insensitive)'},regex:{type:'boolean',description:'Treat query as a regular expression'},context:{type:'integer',description:'Lines of context around each match (default 2)'}},required:['query']}}},
   {type:'function',function:{name:'read_document',description:'Read a range of lines from a document. The result includes the requested lines (numbered) AND the document’s total line count, so you can tell whether there is more to read and page through a long document with start_line/line_count.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},start_line:{type:'integer',description:'1-based line to start reading from (default 1)'},line_count:{type:'integer',description:'How many lines to return (default 100)'}},required:[]}}},
-  {type:'function',function:{name:'replace_in_document',description:'Change PART of a document: replace an exact snippet with new text, leaving the rest untouched. Prefer this over edit_document for anything short of a total rewrite. old_text must appear EXACTLY ONCE — copy it verbatim from the document, including indentation, and include enough surrounding lines to make it unique. Do not use line numbers.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},old_text:{type:'string',description:'The exact text to replace, copied verbatim from the document'},new_text:{type:'string',description:'What to put in its place. Empty string deletes the snippet.'},all:{type:'boolean',description:'Replace every occurrence instead of requiring exactly one'}},required:['old_text','new_text']}}}
+  {type:'function',function:{name:'replace_in_document',description:'Change PART of a document: replace an exact snippet with new text, leaving the rest untouched. Prefer this over edit_document for anything short of a total rewrite. old_text must appear EXACTLY ONCE — copy it verbatim from the document, including indentation, and include enough surrounding lines to make it unique. Do not use line numbers.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},old_text:{type:'string',description:'The exact text to replace, copied verbatim from the document'},new_text:{type:'string',description:'What to put in its place. Empty string deletes the snippet.'},all:{type:'boolean',description:'Replace every occurrence instead of requiring exactly one'}},required:['old_text','new_text']}}},
+  {type:'function',function:{name:'take_notes',description:'Jot to your scratchpad — a running space to think out loud, track findings, or keep a to-do list across tool calls and turns. Notes are APPENDED by default so the scratchpad accumulates; pass replace:true to rewrite it from scratch. It is a document in the side panel (titled "Scratchpad") the user can read, but it is your working memory: it does not appear in your reply, so use it freely.',parameters:{type:'object',properties:{notes:{type:'string',description:'Text to add to the scratchpad (markdown allowed)'},replace:{type:'boolean',description:'Overwrite the whole scratchpad instead of appending'}},required:['notes']}}}
 ];
 var chatToolsBtn=document.getElementById('chatTools');
 var toolsPop=document.getElementById('toolsPop');
@@ -4573,6 +4583,18 @@ function applyDocOp(chatId,name,args){
     if(!doc)return {text:'Error: document not found'};
     doc.title=String(args.new_title||args.title||doc.title).slice(0,120);doc.updated=Date.now();
     out={text:'Renamed document to "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Renamed to **'+doc.title+'**'};
+  }else if(name==='take_notes'){
+    // The scratchpad is just a document with a fixed title; find or make it.
+    doc=findDoc(docs,'Scratchpad');
+    if(!doc){
+      doc={id:_docId(),title:'Scratchpad',type:'markdown',language:'',content:'',updated:Date.now(),versions:[]};
+      docs.push(doc);
+    }
+    var note=String(args.notes||'');
+    doc.content=(args.replace||!doc.content)?note:(doc.content+'\n\n'+note);
+    doc.updated=Date.now();_docCommitVersion(doc);
+    out={text:(args.replace?'Rewrote':'Added to')+' the scratchpad. It is now '
+              +_docLines(doc.content).length+' lines.',docId:doc.id,md:'\ud83d\udcdd Scratchpad'};
   }else return {text:'Error: unknown document tool '+name};
   ctx.commit();
   if(ctx.inView){refreshDocUI();if(out.docId)openDoc(out.docId);}
@@ -6145,7 +6167,7 @@ function renderWorldMap(world,d,cmp){
     var tip=cmp?(single?('<b>'+cnm+'</b><br>'+escHtml(soleLabel)+': '+tot)
                        :('<b>'+cnm+'</b><br>'+escHtml(la)+': '+c.a+' · '+escHtml(lb)+': '+c.b))
                :('<b>'+cnm+'</b><br>'+c.count+' host'+(c.count===1?'':'s'));
-    var circ=_mkel('circle',{cx:X(c.lon).toFixed(1),cy:Y(c.lat).toFixed(1),r:6.4,fill:fill,'fill-opacity':op,stroke:LAND,'stroke-width':0.15,'vector-effect':'non-scaling-stroke'});
+    var circ=_mkel('circle',{cx:X(c.lon).toFixed(1),cy:Y(c.lat).toFixed(1),r:3.2,fill:fill,'fill-opacity':op,stroke:LAND,'stroke-width':0.15,'vector-effect':'non-scaling-stroke'});
     (function(t){circ.addEventListener('mousemove',function(ev){_showTip(t,ev)})})(tip);
     circ.addEventListener('mouseleave',_hideTip);
     gCity.appendChild(circ);
@@ -6156,7 +6178,7 @@ function renderWorldMap(world,d,cmp){
   // the zoom so they don't balloon when you zoom in.
   var cityCircles=gCity.childNodes;
   _mapZoom(host,svg,W,H,function(k){
-    var r=(6.4/k).toFixed(3);
+    var r=(3.2/k).toFixed(3);
     for(var i=0;i<cityCircles.length;i++)cityCircles[i].setAttribute('r',r);
   });
   var ramp=document.getElementById('mapRamp');

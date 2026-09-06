@@ -201,6 +201,19 @@ def classify_model(model):
     return None
 
 
+# Pipeline support files — VAEs, text-encoders, upscalers, ControlNet/IP-Adapter,
+# TAESD, refiners, embeddings — usually carry a family name (wan2.1_vae,
+# ltx_upscaler, sdxl_refiner), so the loose bucket regexes tag them as the
+# *generative* class of that family and they inflate the candidate pool. They
+# are never the thing you sample with. This mirrors _NOT_A_MODEL (which the
+# /v1/videos/models listing already applies) but at the classifier stage, so
+# _host_has_class / _pick_video_model / _find_*_hosts all honour it.
+_SUPPORT_ASSET = re.compile(
+    r"(?i)(^|[/\\_.-])(vae|encoder|upscaler|upsampler|taesd|refiner|"
+    r"controlnet|ipadapter|preview|embed)")
+_GENERATIVE_CLASSES = frozenset({"image", "edit", "image_edit", "video", "music", "audio"})
+
+
 def model_classes(model):
     """Every capability class a model belongs to, as a set.
 
@@ -214,6 +227,8 @@ def model_classes(model):
     c = classify_model(model)
     if c is None:
         return frozenset()
+    if c in _GENERATIVE_CLASSES and _SUPPORT_ASSET.search(model or ""):
+        return frozenset()          # a VAE / encoder / upscaler is not a generator
     if c == "image_edit":
         return frozenset({"image", "edit"})
     return frozenset({c})
@@ -2663,40 +2678,136 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     return result, errors, stopped
 
 
+# Ollama defaults every request to a 4096-token window (num_ctx) and silently
+# truncates anything past it — so a long chat or a big tool payload loses its
+# head with no error. num_ctx is settable per request in options (and an API
+# value beats the model default), but only on the native /api/chat shape; the
+# OpenAI /v1 schema has no field for it. We can't tokenize per model here, so we
+# estimate from the text we're sending, pad it, add room to answer, and snap to
+# a 2048 bucket — the bucketing also keeps the value stable so Ollama isn't
+# forced to reload the model for a window that wobbles a few tokens each turn.
+NUM_CTX_PAD = 1.05             # small headroom for tokenizer disagreement
+NUM_CTX_REPLY = 1024           # tokens reserved for the model's own reply
+NUM_CTX_STEP = 2048            # snap to this bucket
+NUM_CTX_MIN = 4096             # never below Ollama's own default
+NUM_CTX_MAX = 32768            # ceiling, so a runaway input can't ask for the moon
+
+# The upstream models are Llama/Qwen/etc., whose tokenizers we don't ship, so an
+# exact count is impossible here. tiktoken's cl100k is a close *proxy* (within
+# ~10% for English, and reasonable for CJK) — far better than a flat chars/token
+# ratio, whose error is systematic: English is ~4 chars/token but CJK is ~1–2,
+# so one constant silently under-counts Chinese prompts and truncates them. If
+# tiktoken can't load (not installed, or offline on first use — it fetches its
+# vocab once), we fall back to a script-aware char heuristic that at least keeps
+# CJK from blowing the estimate.
+_CJK_RE = re.compile(r"[　-鿿가-힣＀-￯]")
+_tok_enc = None
+_tok_tried = False
+
+
+def _token_encoder():
+    global _tok_enc, _tok_tried
+    if not _tok_tried:
+        _tok_tried = True
+        try:
+            import tiktoken
+            _tok_enc = tiktoken.get_encoding("cl100k_base")
+        except Exception as e:      # not installed, or vocab fetch failed offline
+            log.debug(f"tiktoken unavailable, using script-aware token estimate: {e}")
+            _tok_enc = None
+    return _tok_enc
+
+
+def _count_tokens(text):
+    if not text:
+        return 0
+    enc = _token_encoder()
+    if enc is not None:
+        try:
+            return len(enc.encode(text, disallowed_special=()))
+        except Exception:
+            pass
+    cjk = len(_CJK_RE.findall(text))          # ~1 token/char
+    return int(cjk / 1.3 + (len(text) - cjk) / 4.0)   # Latin ~4 chars/token
+
+
+def _estimate_prompt_tokens(payload):
+    tokens = 0
+    for m in (payload.get("messages") or []):
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, str):
+            tokens += _count_tokens(c)
+        elif isinstance(c, list):          # OpenAI-style multimodal parts
+            for part in c:
+                if isinstance(part, dict):
+                    tokens += _count_tokens(part.get("text") or "")
+    if payload.get("tools"):               # the tool schemas cost real tokens
+        try:
+            tokens += _count_tokens(json.dumps(payload["tools"], ensure_ascii=False))
+        except (TypeError, ValueError):
+            pass
+    return tokens
+
+
+def _auto_num_ctx(payload):
+    want = _estimate_prompt_tokens(payload) * NUM_CTX_PAD + NUM_CTX_REPLY
+    stepped = ((int(want) + NUM_CTX_STEP - 1) // NUM_CTX_STEP) * NUM_CTX_STEP  # round up
+    return max(NUM_CTX_MIN, min(NUM_CTX_MAX, stepped))
+
+
+def _with_num_ctx(payload):
+    """Return payload with an auto-sized options.num_ctx, unless the caller
+    already pinned one (an explicit request always wins)."""
+    opts = dict(payload.get("options") or {})
+    if "num_ctx" in opts:
+        return payload
+    opts["num_ctx"] = _auto_num_ctx(payload)
+    return dict(payload, options=opts)
+
+
 async def _try_one(session, host, model, full_model, opayload, remote=None):
     wid = asyncio.current_task().get_name()
     await broadcast_activity(host, model, "trying",
         f"trying: {host} for {model}", wid=wid)
     tag = f"{host} {full_model}"
     start = time.time()
-    payload = dict(opayload, model=full_model, stream=False)
-    _curlify("POST", f"{host}/api/chat", payload)
-    try:
-        resp = await asyncio.wait_for(
-            session.post(f"{host}/api/chat", json=payload),
-            timeout=TIMEOUT,
-        )
-    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-        dur = time.time() - start
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-        return None, None
-
-    if resp.status != 200:
-        dur = time.time() - start
-        err_msg = None
+    payload = _with_num_ctx(dict(opayload, model=full_model, stream=False))
+    # See _try_host: a 400 that carried tools is Ollama refusing tool calling on
+    # a model that can't do it \u2014 retry the same host once without tools.
+    tried_no_tools = False
+    while True:
+        _curlify("POST", f"{host}/api/chat", payload)
         try:
-            raw = await resp.read()
-            err_msg = raw.decode('utf-8', errors='replace')[:500]
-            log_upstream(resp.status, host, "/api/chat", err_msg, remote=remote)
-        except Exception:
-            pass
-        await resp.release()
-        log.debug(f"  \u2717 {tag}  (status {resp.status})")
-        add_bad(host, model)
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
-        return None, err_msg
+            resp = await asyncio.wait_for(
+                session.post(f"{host}/api/chat", json=payload),
+                timeout=TIMEOUT,
+            )
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            dur = time.time() - start
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
+            return None, None
+
+        if resp.status != 200:
+            dur = time.time() - start
+            err_msg = None
+            try:
+                raw = await resp.read()
+                err_msg = raw.decode('utf-8', errors='replace')[:500]
+                log_upstream(resp.status, host, "/api/chat", err_msg, remote=remote)
+            except Exception:
+                pass
+            await resp.release()
+            if resp.status == 400 and payload.get("tools") and not tried_no_tools:
+                payload = dict(payload); payload.pop("tools", None)
+                tried_no_tools = True
+                continue
+            log.debug(f"  \u2717 {tag}  (status {resp.status})")
+            add_bad(host, model)
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
+            return None, err_msg
+        break
 
     try:
         data = await resp.json()
@@ -2736,33 +2847,46 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
     tag = f"{host} {full_model}"
     start = time.time()
     p = dict(payload, model=full_model, stream=do_stream)
-    _curlify("POST", f"{host}{endpoint}", p)
-    try:
-        resp = await asyncio.wait_for(
-            session.post(f"{host}{endpoint}", json=p),
-            timeout=TIMEOUT,
-        )
-    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-        dur = time.time() - start
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-        return None, None
-
-    if resp.status != 200:
-        dur = time.time() - start
-        err_msg = None
+    if endpoint.endswith("/api/chat"):   # num_ctx is Ollama-native; /v1 has no such field
+        p = _with_num_ctx(p)
+    # Ollama rejects the whole request with 400 when the model can't do tool
+    # calling ("... does not support tools"). Nothing in /api/tags tells us that
+    # ahead of time, so on a 400 that carried tools we drop them and try the
+    # same host once more \u2014 a non-tool model can still answer as a plain chat.
+    tried_no_tools = False
+    while True:
+        _curlify("POST", f"{host}{endpoint}", p)
         try:
-            raw = await resp.read()
-            err_msg = raw.decode('utf-8', errors='replace')[:500]
-            log_upstream(resp.status, host, endpoint, err_msg, remote=remote)
-        except Exception:
-            pass
-        await resp.release()
-        log.debug(f"  \u2717 {tag}  (status {resp.status})")
-        add_bad(host, model)
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
-        return None, err_msg
+            resp = await asyncio.wait_for(
+                session.post(f"{host}{endpoint}", json=p),
+                timeout=TIMEOUT,
+            )
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+            dur = time.time() - start
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
+            return None, None
+
+        if resp.status != 200:
+            dur = time.time() - start
+            err_msg = None
+            try:
+                raw = await resp.read()
+                err_msg = raw.decode('utf-8', errors='replace')[:500]
+                log_upstream(resp.status, host, endpoint, err_msg, remote=remote)
+            except Exception:
+                pass
+            await resp.release()
+            if resp.status == 400 and p.get("tools") and not tried_no_tools:
+                p = dict(p); p.pop("tools", None)
+                tried_no_tools = True
+                continue                      # same host, plain chat this time
+            log.debug(f"  \u2717 {tag}  (status {resp.status})")
+            add_bad(host, model)
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
+            return None, err_msg
+        break
 
     try:
         it = resp.content
@@ -6879,13 +7003,34 @@ async def _run_video_job(session, jid):
         # same worker, now rendering
         mark_worker_found(job_wid, host, plan.get("model"))
         _set_worker_phase(job_wid, "rendering")
+        def _phase(w):
+            _set_worker_phase(job_wid, w)
+            job["phase"] = w      # so the polling client can show it too
+            _video_job_save()
+        # The race's own skip only reaches the (already-finished) submit phase.
+        # Rendering is the long part, so install a skip that abandons *this*
+        # render and lets the loop re-race the remaining hosts — the host is
+        # already in tried_hosts, so it won't be picked again.
+        poll_task = asyncio.ensure_future(_poll_video_result(
+            session, host, prompt_id, job, on_status=_phase))
+        skip_flag = {"want": False}
+        def _skip_render():
+            skip_flag["want"] = True
+            if not poll_task.done():
+                poll_task.cancel()
+        _workers.get(job_wid, {})["skip"] = _skip_render
         try:
-            def _phase(w):
-                _set_worker_phase(job_wid, w)
-                job["phase"] = w      # so the polling client can show it too
-                _video_job_save()
-            content, filename = await _poll_video_result(
-                session, host, prompt_id, job, on_status=_phase)
+            content, filename = await poll_task
+        except asyncio.CancelledError:
+            if not skip_flag["want"]:
+                raise                 # a real stop / shutdown, not a user skip
+            record_verdict(host, vkey, skip("skipped by user"))
+            errors.append(f"{host}: skipped by user")
+            log.info(f"video: {host}: render skipped by user")
+            await broadcast_activity(host, vkey, "failed",
+                f"skipped: {host} for {label}")
+            _set_worker_phase(job_wid, None)
+            continue                  # race the rest, minus this host
         except (_VideoError, ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             outcome = render_verdict(e)
             record_verdict(host, vkey, outcome)
@@ -6898,7 +7043,7 @@ async def _run_video_job(session, jid):
                 bad_models.add(plan["model"])
                 # remember it past this request, so tomorrow's job doesn't
                 # rediscover the same incompatible pairing from scratch
-                remember_bad_pair(host, "edit", plan["model"])
+                remember_bad_pair(host, "video", plan["model"])
                 tried_hosts.discard(host)
             _set_worker_phase(job_wid, None)
             continue
@@ -7415,7 +7560,8 @@ async def _submit_video_workflow(session, host, job):
     # The model is chosen here, from what the host can actually load — the
     # name carried on the job is only a hint.
     plan = _video_plan(info, job.get("model_filter") or None,
-                       exclude=set(job.get("exclude_models") or ()))
+                       exclude=set(job.get("exclude_models") or ())
+                               | bad_pairs_for(host, "video"))
     if not plan:
         raise _VideoError("no usable video model on this host")
     model_path = plan["model"]
@@ -8171,6 +8317,10 @@ def fit_dims(w, h, max_mp=EDIT_MAX_MP, step=EDIT_ROUND):
 # fail the same way — so the engine should hand the job to someone else.
 _RENDER_UNSUITABLE = re.compile(
     r"(?i)VAE is invalid|shapes cannot be multiplied|size mismatch"
+    # a text-encoder whose embedding width doesn't match the model's cross-
+    # attention shows up as a torch.cat failure, not a matmul one — a permanent
+    # model/encoder incompatibility (e.g. a 2048-dim encoder on a 4096-dim LTX)
+    r"|Sizes of tensors must match|Expected size \d+ but got size \d+"
     r"|not found|no such file|missing|out of memory|CUDA error"
     r"|has no attribute|unexpected key")
 
