@@ -189,7 +189,7 @@ body.chat{height:100vh;height:100dvh;overflow:hidden}
 /* the click-to-view host card fits its content instead of a fixed height */
 #hostCard .card-inner,#hostDetailCard .card-inner{height:auto;max-height:var(--card-h);overflow:auto}
 /* tabs + filter stay pinned; only the list scrolls */
-#mpane-text,#mpane-image,#pane-last,#pane-good,#pane-maybe,#pane-bad,#hostList{flex:1;min-height:0;overflow-y:auto}
+#mpane-text,#mpane-image,#pane-last,#pane-good,#pane-maybe,#pane-bad,#pane-workers,#hostList{flex:1;min-height:0;overflow-y:auto}
 .card h2{font-size:var(--fs-xl);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:10px}
 .status-line{padding:2px 0;font-size:var(--fs-xs)}
 .status-searching{color:var(--text-dim)}
@@ -308,7 +308,7 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .wk-seg.nofind{border-bottom-color:var(--border-strong)}
 .workers-empty{color:var(--text-muted);font-size:var(--fs-md);text-align:center;padding:2.5rem 0}
 .workers-done-hdr{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint);margin:var(--sp-3) 0 var(--sp-2)}
-.workers-done-scroll{max-height:50vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
+/* no inner scroll — #pane-workers scrolls at the container level now */
 .workers-idle{color:var(--text-muted);font-size:var(--fs-md);margin-bottom:var(--sp-3)}
 .worker-stop{flex:0 0 auto;background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer}
 .worker-stop:hover{background:var(--accent-bg-active);color:var(--text)}
@@ -350,6 +350,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .speak-btn.busy{color:var(--accent);animation:speakpulse 1s ease-in-out infinite}
 .speak-btn svg{width:12px;height:12px}
 @keyframes speakpulse{50%{opacity:.35}}
+.copy-btn.ok{color:var(--accent)}
 .msg .speak-out{margin-top:var(--sp-2);max-width:420px}
 .msg-time{margin-left:auto;color:var(--text-faint);font-size:var(--fs-2xs);letter-spacing:0;text-transform:none;font-weight:400;flex-shrink:0}
 .msg .body{background:var(--surface);border-radius:var(--r-lg);padding:.7em;font-size:var(--fs-lg);overflow-wrap:anywhere;line-height:var(--line-body)}
@@ -676,6 +677,9 @@ body.img-edit .img-main > #imgResult{order:10}
 .tool-opt .tool-txt{display:flex;flex-direction:column}
 .tool-opt .tool-txt b{font-weight:500;font-size:var(--fs-md);color:var(--text)}
 .tool-opt .tool-txt small{color:var(--text-dim);font-size:var(--fs-2xs);margin-top:1px}
+.tool-subrow{padding:2px var(--sp-2) 7px;margin:-3px 0 2px 30px}
+.tool-subinput{width:100%;box-sizing:border-box;font-size:var(--fs-xs);padding:5px 7px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);color:var(--text)}
+.tool-subinput::placeholder{color:var(--text-dim)}
 .field{margin-bottom:var(--sp-4)}
 .img-params{display:grid;grid-template-columns:2.2fr 1fr;gap:var(--sp-4);margin-bottom:var(--sp-4)}
 .img-dims{display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--sp-4);row-gap:var(--sp-2);margin-bottom:var(--sp-4)}
@@ -955,6 +959,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Make a short video (takes minutes)</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Speak dialog out loud</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolWeb"><span class="tool-txt"><b>Web</b><small>Read a page at a URL</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolAgents"><span class="tool-txt"><b>Sub-agents</b><small>Split a task across parallel agents</small></span></label>
+<div class="tool-subrow"><input type="text" id="subAgentModel" class="tool-subinput" placeholder="sub-agent model (blank = chat model)" autocomplete="off" spellcheck="false"></div>
 <label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Write &amp; edit documents in a side panel</small></span></label>
 </div>
 </div>
@@ -1812,8 +1818,9 @@ function renderWorkers(workers){
     var kind=w.kind||'text';
     var k=document.createElement('span');k.className='worker-kind kind-'+kind;k.textContent=kind;
     sub.appendChild(k);
-    var _showStop=!w.done&&!w.phase;                       // stop: only while still racing
-    var _showSkip=!w.done&&(!w.phase||w.kind==='video');   // skip also works during a long video render
+    var _agent=w.kind==='agent';                           // sub-agents stay controllable through every phase
+    var _showStop=!w.done&&(!w.phase||_agent);             // stop while racing, or anytime for a sub-agent
+    var _showSkip=!w.done&&(!w.phase||w.kind==='video'||_agent);  // skip during a long video render, or anytime for a sub-agent
     if(_showStop||_showSkip){
      if(_showStop){
       var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
@@ -2356,6 +2363,28 @@ function clipForSpeech(t,max){
   return (brk>0?cut.slice(0,brk+1):cut).trim();
 }
 var SPEAKER_SVG='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>';
+var COPY_SVG='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+var COPY_OK_SVG='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+// A copy button for the role bar (mirrors makeSpeakBtn). getText returns the raw
+// message text (markdown), read from the record so it reflects later edits.
+function makeCopyBtn(getText){
+  var b=document.createElement('button');
+  b.type='button';b.className='speak-btn copy-btn';b.title='Copy';
+  b.setAttribute('aria-label','Copy this reply');
+  b.innerHTML=COPY_SVG;
+  b.addEventListener('click',async function(ev){
+    ev.stopPropagation();
+    var text=String(getText()||'');
+    if(!text){b.title='nothing to copy';return}
+    try{
+      if(navigator.clipboard&&navigator.clipboard.writeText)await navigator.clipboard.writeText(text);
+      else{var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();document.execCommand('copy');document.body.removeChild(ta);}
+      b.classList.add('ok');b.innerHTML=COPY_OK_SVG;b.title='Copied';
+      setTimeout(function(){b.classList.remove('ok');b.innerHTML=COPY_SVG;b.title='Copy'},1200);
+    }catch(e){b.title='copy failed'}
+  });
+  return b;
+}
 function makeSpeakBtn(getText,msgEl){
   var b=document.createElement('button');
   b.type='button';b.className='speak-btn';b.title='Speak this reply';
@@ -2423,6 +2452,10 @@ function addMsg(role,text,index){
       var m=currentChat.messages[index];
       return (m&&m.content)||text;
     },d));
+    r.appendChild(makeCopyBtn(function(){
+      var m=currentChat.messages[index];
+      return (m&&m.content)||text;
+    }));
   }
   var b=document.createElement('div');b.className='body';
   if(role==='assistant'){
@@ -2485,9 +2518,8 @@ function toolCallHtml(tcs,open){
     if(typeof args==='string'){try{args=JSON.parse(args||'{}')}catch(e){}}
     var pretty;
     try{pretty=JSON.stringify(args,null,2)}catch(e){pretty=String(args)}
-    // long string values (a base64 image, a huge prompt) are trimmed so the
-    // inspector stays readable
-    if(pretty&&pretty.length>1200)pretty=pretty.slice(0,1200)+'\n… (truncated)';
+    // no truncation: the block is max-height + overflow:auto, so long args
+    // (a big spawn_agents call, a huge prompt) just scroll inside their box.
     return '<div class="tc-item"><span class="tc-fn">'+escHtml(name)+'</span>'
          + '<pre class="tc-args"><code class="language-json">'+escHtml(pretty||'{}')+'</code></pre></div>';
   }).join('');
@@ -2952,11 +2984,11 @@ function _extLinks(el){
 }
 var TOOL_LABELS=[
   ['toolsOn','Image generation'],['imgEditOn','Image editing'],['videoOn','Video'],
-  ['speechOn','Speech'],['askOn','Ask me'],['webOn','Web'],['docsOn','Documents']
+  ['speechOn','Speech'],['askOn','Ask me'],['webOn','Web'],['agentsOn','Sub-agents'],['docsOn','Documents']
 ];
 function _toolFlags(){
   return {toolsOn:toolsOn,imgEditOn:imgEditOn,videoOn:videoOn,speechOn:speechOn,
-          askOn:askOn,webOn:webOn,docsOn:docsOn};
+          askOn:askOn,webOn:webOn,agentsOn:agentsOn,docsOn:docsOn};
 }
 function enabledToolNames(){
   var live=_toolFlags();
@@ -3314,7 +3346,7 @@ async function sendChat(){
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
   runStream(chatId,chatCreated,chatTitle,model,msgs,bubble);
 }
-async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
+async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,existingJob){
   chatId=String(chatId);
   depth=depth||0;
   var toolList=(typeof buildTools==='function')?buildTools():[];
@@ -3332,7 +3364,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   function clearInflight(){try{localStorage.removeItem('dyva_inflight')}catch(e){}}
   function keepInflight(){try{var m=JSON.parse(localStorage.getItem('dyva_inflight')||'null');if(!m)return;m.n=(m.n||0)+1;if(m.n<=2)localStorage.setItem('dyva_inflight',JSON.stringify(m));else localStorage.removeItem('dyva_inflight')}catch(e){try{localStorage.removeItem('dyva_inflight')}catch(e2){}}}
   try{sessionStorage.setItem('dyva_own','1')}catch(e){}
-  var full='',think='',tps=null,acc='',toolCalls=[],host='',fmodel=model,gotToken=false;
+  var full='',think='',tps=null,acc='',toolCalls=[],host='',fmodel=model,gotToken=false,service='';
   async function complete(){
     clearInflight();
     if(useTools&&toolCalls.length&&depth<3){
@@ -3434,6 +3466,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
               loadImgHistory();
             }else{
               var wt=(jw2.title?jw2.title+'\n\n':'')+(jw2.text||'');
+              // Record the page as a `web` asset so /list (and list_assets) show
+              // what the model has read, the same way generated media is tracked.
+              assetAdd(liveChat(chatId)||currentChat,
+                       {name:(jw2.title||wurl.replace(/^https?:\/\//,'')).slice(0,80)||'page',
+                        kind:'web',url:(jw2.final_url||wurl),desc:wurl,
+                        src:'read from the web'});
               results.push({text:wt?('Contents of '+(jw2.final_url||wurl)+':\n\n'+wt)
                                   :('The page at '+wurl+' had no readable text.'),
                             md:'`\u2193 '+(jw2.title||wurl).replace(/`/g,"'").slice(0,90)+'`'});
@@ -3722,6 +3760,50 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
           if(ac.signal.aborted)return;
           results.push({text:'Error generating speech: '+ex.message});
         }
+      }else if(fn.name==='spawn_agents'){
+        var aglist=Array.isArray(args.agents)?args.agents.filter(function(a){return a&&a.task}):[];
+        if(!aglist.length){
+          results.push({text:'Error: spawn_agents needs a non-empty "agents" list, each item with a "task".',
+                        md:'`⚠ spawn_agents: no agents given`'});
+        }else{
+          if(aglist.length>12)aglist=aglist.slice(0,12);   // keep the fan-out sane
+          var shared=String(args.context||'').trim();
+          setStatus('running '+aglist.length+' sub-agent'+(aglist.length>1?'s':'')+'…');
+          // Fire each sub-agent as its own server-side job and run them in
+          // parallel; each is isolated ({task, context} only) — the coordinator
+          // (this model) synthesizes their results on the next turn.
+          var outs=await Promise.all(aglist.map(function(ag,ix){
+            var nm=String(ag.name||('agent'+(ix+1))).slice(0,40);
+            // per-agent model wins; else the sub-agent-model setting; else this chat's model
+            var amodel=String(ag.model||'').trim()||subAgentModel||model;
+            var sys='You are '+nm+', a focused sub-agent working one part of a larger task. '
+                  +'You cannot see the main conversation or the other agents. You can read web '
+                  +'pages with the fetch_url tool — call it to gather what you need (its output '
+                  +'stays in your own context, not the caller’s). When done, return ONLY your '
+                  +'result — concise and self-contained.';
+            var uc=(shared?shared+'\n\n':'')+String(ag.task||'');
+            // dyva_agent → the job runner executes fetch_url server-side and loops
+            // (the one shared orchestration), so the sub-agent's fetched bulk
+            // never touches the coordinator's context — only its final answer does.
+            // spread: each sub-agent starts at a different host so N same-model
+            // agents don't all pile onto the sticky host.
+            return runAgentJob({model:amodel,dyva_agent:true,tools:[WEB_TOOL],spread:ix,
+                                messages:[{role:'system',content:sys},
+                                          {role:'user',content:uc}]},ac.signal)
+              .then(function(r){return {name:nm,model:r.model||amodel,text:r.text||'(no output)'};})
+              .catch(function(e){return {name:nm,model:amodel,text:'(failed: '+((e&&e.message)||e)+')'};});
+          }));
+          if(ac.signal.aborted)return;
+          var joined=outs.map(function(o){
+            return '### '+o.name+(o.model?' ('+String(o.model).replace(/\\/g,'/').split('/').pop()+')':'')
+                 +'\n'+o.text;
+          }).join('\n\n');
+          results.push({text:aglist.length+' sub-agent'+(aglist.length>1?'s':'')+' finished. Their '
+                             +'results follow — synthesize them into your answer; do not just '
+                             +'concatenate them.\n\n'+joined,
+                        keep:'['+aglist.length+' sub-agents ran: '+outs.map(function(o){return o.name}).join(', ')+'.]',
+                        md:'`⇄ spawn_agents: '+aglist.length+' agent'+(aglist.length>1?'s':'')+'`'});
+        }
       }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'
                ||fn.name==='replace_in_document'||fn.name==='search_document'||fn.name==='read_document'
                ||fn.name==='take_notes'){
@@ -3775,65 +3857,127 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth){
   gen.statusEl=statusEl;
   if(inView())activeStatus=statusEl;
   try{
-    var resp=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify((useTools&&toolList.length)?{model:model,messages:msgs,stream:true,tools:toolList}:{model:model,messages:msgs,stream:true}),signal:ac.signal});
-    host=resp.headers.get('X-Dyva-Host')||'';gen.host=host;
-    fmodel=resp.headers.get('X-Dyva-Model')||model;gen.fmodel=fmodel;
-    var service=resp.headers.get('X-Dyva-Service')||'';gen.service=service;
-    if(!resp.ok){
-      clearInflight();
-      var msg='HTTP '+resp.status;
-      try{var j=await resp.json();msg=(j.error&&(j.error.message||j.error))||msg}catch(e){}
-      if(live()){
-        gen.bubble.bodyEl.classList.remove('streaming');
-        gen.bubble.bodyEl.removeAttribute('data-stream');
-        gen.bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(msg)+'</span>';
+    // Transport: the generation is a server-side JOB (a print job). We create
+    // it once, then read its durable NDJSON buffer from a cursor. The buffer is
+    // byte-identical to what a live /api/chat stream emits, so the line parser,
+    // the tool loop and doc streaming below are unchanged. Because the job runs
+    // independent of this connection, backgrounding the phone no longer stops
+    // it: a woken tab just asks for bytes past `offset` and catches up.
+    var jobId=existingJob||null,offset=0;
+    if(!jobId){
+      var _payload=(useTools&&toolList.length)?{model:model,messages:msgs,stream:true,tools:toolList}:{model:model,messages:msgs,stream:true};
+      var sresp=await fetch('api/chat/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_payload),signal:ac.signal});
+      if(!sresp.ok){
+        clearInflight();
+        var msg='HTTP '+sresp.status;
+        try{var j=await sresp.json();msg=(j.error&&(j.error.message||j.error))||msg}catch(e){}
+        if(live()){
+          gen.bubble.bodyEl.classList.remove('streaming');
+          gen.bubble.bodyEl.removeAttribute('data-stream');
+          gen.bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(msg)+'</span>';
+        }
+        if(inView())saveCurrentChat();
+        renderSidebar();
+        return;
       }
-      if(inView())saveCurrentChat();
-      renderSidebar();
-      return;
+      var sj=await sresp.json();jobId=sj.id;
     }
-    if(live())setAssistantLabel(gen.bubble.roleEl,host,fmodel,undefined,gen.service);
-    var reader=resp.body.getReader();
-    var dec=new TextDecoder();
+    gen.jobId=jobId;
+    // Store the job id so a reconnect SUBSCRIBES to this same running generation
+    // (streams from its offset) rather than restarting it. msgs stay too, for
+    // the client-side tool loop's next leg.
+    try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs,job:jobId}))}catch(e){}
     while(true){
-      var step=await reader.read();
-      if(step.done)break;
-      acc+=dec.decode(step.value,{stream:true});
-      var idx;
-      while((idx=acc.indexOf('\n'))>=0){
-        var line=acc.slice(0,idx).trim();
-        acc=acc.slice(idx+1);
-        if(!line)continue;
-        var d;
-        try{d=JSON.parse(line)}catch(e){continue}
-        if(d.message&&d.message.content){
-          full+=d.message.content;
-          gen.raw=full;
-          if(!gotToken){gotToken=true;setStatus('generating\u2026')}
-          if(live())scheduleRender(gen);
+      if(ac.signal.aborted)throw new DOMException('aborted','AbortError');
+      var presp=await fetch('api/chat/jobs/'+encodeURIComponent(jobId)+'?offset='+offset,{signal:ac.signal});
+      if(presp.status===404){
+        clearInflight();
+        if(live()){
+          gen.bubble.bodyEl.classList.remove('streaming');
+          gen.bubble.bodyEl.removeAttribute('data-stream');
+          gen.bubble.bodyEl.innerHTML='<span class="error">Error: generation not found</span>';
         }
-        if(d.message&&d.message.thinking){
-          think+=d.message.thinking;
-          if(!gotToken)setStatus('thinking\u2026');
-          gen.think=think;
-          if(live())scheduleRender(gen);
-        }
-        if(d.message&&d.message.tool_calls){
-          d.message.tool_calls.forEach(function(t){toolCalls.push(t)});
-          setStatus('tool: '+(((d.message.tool_calls[0]||{}).function||{}).name||'')+'\u2026');
-        }
-        if(d.done){
-          if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
-          gen.tps=tps;
-          await complete();
-          return;
-        }
+        if(inView())saveCurrentChat();renderSidebar();
+        return;
       }
+      var pj=await presp.json();
+      if(pj.host){host=pj.host;gen.host=host;}
+      if(pj.model){fmodel=pj.model;gen.fmodel=fmodel;}
+      service=pj.service||service||'';gen.service=service;
+      if(live()&&host)setAssistantLabel(gen.bubble.roleEl,host,fmodel,undefined,gen.service);
+      if(pj.output){
+        acc+=pj.output;offset=pj.offset;
+        var idx;
+        while((idx=acc.indexOf('\n'))>=0){
+          var line=acc.slice(0,idx).trim();
+          acc=acc.slice(idx+1);
+          if(!line)continue;
+          var d;
+          try{d=JSON.parse(line)}catch(e){continue}
+          if(d.message&&d.message.content){
+            full+=d.message.content;
+            gen.raw=full;
+            if(!gotToken){gotToken=true;setStatus('generating\u2026')}
+            if(live())scheduleRender(gen);
+          }
+          if(d.message&&d.message.thinking){
+            think+=d.message.thinking;
+            if(!gotToken)setStatus('thinking\u2026');
+            gen.think=think;
+            if(live())scheduleRender(gen);
+          }
+          if(d.message&&d.message.tool_calls){
+            d.message.tool_calls.forEach(function(t){toolCalls.push(t)});
+            setStatus('tool: '+(((d.message.tool_calls[0]||{}).function||{}).name||'')+'\u2026');
+          }
+          if(d.done){
+            if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
+            gen.tps=tps;
+            await complete();
+            return;
+          }
+        }
+      }else{offset=(pj.offset!==undefined?pj.offset:offset);}
+      if(pj.status==='failed'){
+        clearInflight();
+        var em=pj.error||'all servers failed';
+        if(live()){
+          gen.bubble.bodyEl.classList.remove('streaming');
+          gen.bubble.bodyEl.removeAttribute('data-stream');
+          gen.bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(em)+'</span>';
+        }
+        if(inView())saveCurrentChat();renderSidebar();
+        return;
+      }
+      if(pj.status==='canceled'){
+        // stopped by the user: keep whatever we have
+        clearInflight();
+        if(full){
+          if(live()){gen.bubble.bodyEl.classList.remove('streaming');gen.bubble.bodyEl.removeAttribute('data-stream');}
+          finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full,gen.service);
+        }else if(live()){
+          gen.bubble.bodyEl.classList.remove('streaming');
+          gen.bubble.bodyEl.textContent='Generation stopped.';
+        }
+        if(inView())saveCurrentChat();renderSidebar();
+        return;
+      }
+      if(pj.done)break;
+      // pull cadence: ask again shortly. A frozen background tab simply pauses
+      // here and picks up from `offset` on resume.
+      await new Promise(function(res){var t=setTimeout(res,450);try{ac.signal.addEventListener('abort',function(){clearTimeout(t);res()},{once:true})}catch(e){}});
     }
     await complete();
   }catch(ex){
     var stopped=ac.signal.aborted;
-    if(stopped||!document.hidden)clearInflight();else keepInflight();
+    // A user stop cancels the job server-side too (don't leave it running on a
+    // host). A background interruption instead KEEPS the inflight job id so the
+    // tab reconnects and streams from its offset when it returns — unlimited,
+    // because the job has terminal states that end the poll cleanly.
+    if(stopped){
+      clearInflight();
+      if(gen.jobId){try{fetch('api/chat/jobs/'+encodeURIComponent(gen.jobId)+'/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'cancel'}),keepalive:true})}catch(e){}}
+    }else if(!document.hidden){clearInflight();}
     if(stopped){
       if(full){
         if(live()){gen.bubble.bodyEl.classList.remove('streaming');gen.bubble.bodyEl.removeAttribute('data-stream');}
@@ -3915,8 +4059,13 @@ function tryResume(){
   if(!r)return;
   var j=null;try{j=JSON.parse(r)}catch(e){}
   try{localStorage.removeItem('dyva_inflight')}catch(e2){}
-  if(!j||!j.model||!j.msgs||!j.msgs.length)return;
-  if((j.n||0)>=2)return;
+  if(!j||!j.model)return;
+  // Job path (the backgrounding fix): reconnect to the still-running server-side
+  // job and stream from offset 0, replaying its buffer to rebuild the message.
+  // No retry cap — the job ends on its own terminal state, so resuming is safe
+  // to repeat. The legacy msgs-only path (pre-upgrade inflight) keeps its cap.
+  if(!j.job&&(!j.msgs||!j.msgs.length))return;
+  if(!j.job&&(j.n||0)>=2)return;
   fetchChat(j.id,function(c){
     if(!c)return;
     currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}})};
@@ -3927,7 +4076,7 @@ function tryResume(){
     bubble.bodyEl.classList.add('streaming');
     showRummage(bubble.bodyEl);
     setSendButton('streaming');
-    runStream(String(j.id),currentChat.createdAt,currentChat.title,j.model,j.msgs,bubble);
+    runStream(String(j.id),currentChat.createdAt,currentChat.title,j.model,j.msgs||[],bubble,0,j.job);
   });
 }
 document.addEventListener('visibilitychange',function(){if(!document.hidden)setTimeout(tryResume,300)});
@@ -4064,7 +4213,7 @@ async function assetBlob(chat,a){
 }
 // Images can show themselves; a clip or a video gets a glyph rather than a
 // broken <img>, since their URLs are not images.
-var _ASSET_GLYPH={audio:'\u266a',video:'\u25b6',file:'\u25a6'};
+var _ASSET_GLYPH={audio:'\u266a',video:'\u25b6',file:'\u25a6',web:'\ud83c\udf10'};
 function assetThumb(chat,a){
   if(a.kind==='image'){
     if(a.url)return a.url;
@@ -4256,6 +4405,41 @@ function askUser(question,options,signal){
 var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. It can start from a picture (image-to-video) \u2014 if the user says "this cat/dog/photo" or attached an image, pass that image\'s name in `image` and the video animates from it. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a man petting a cat" or "the dog chases its tail". Describe the motion, not just the subject.'},seconds:{type:'number',description:'Desired length in seconds, e.g. 5. Optional \u2014 leave blank for the model\'s default (usually a few seconds). Keep it short; these are brief clips.'},image:{type:'string',description:'Optional start frame: the name of an image already in this conversation (from list_assets, an upload, or a generated image) to animate FROM. Use this whenever the user refers to "this" picture or attached one. Omit for a video made purely from the text prompt.'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'The video model to use. If the user names one, put it HERE as a substring or glob \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a name; use search_models (type "video").'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var TTS_TOOL_MAX=600;   // hard ceiling on what the chat tool will speak
 var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "hello_world.mp3". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['text','name']}}};
+var SPAWN_TOOL={type:'function',function:{name:'spawn_agents',description:'Run several sub-agents in parallel to divide a large task, then read back what each returned. Each agent is an independent generation that sees ONLY the task and context you give it — not this conversation — so make every task self-contained. Each agent can READ WEB PAGES itself with fetch_url, and crucially the pages it reads stay in ITS context, not yours — so this is the right tool when the inputs are big (give each agent a URL to fetch and digest, e.g. one web page or API endpoint per agent). Use it for work that splits into independent pieces (e.g. "fetch and summarize each of these 20 pages", "research X from 5 angles"). You are the coordinator: give each agent a focused task, then synthesize their short answers into your own reply — do not just paste them. Agents run server-side and keep going even if the app is backgrounded.',parameters:{type:'object',properties:{agents:{type:'array',description:'The sub-agents to run in parallel (each self-contained). Prefer a handful; a dozen is the max.',items:{type:'object',properties:{name:{type:'string',description:'Short label for this agent, e.g. "story-42" or "skeptic".'},task:{type:'string',description:'The complete instruction for this agent. Include everything it needs — it cannot see the conversation or the other agents.'},model:{type:'string',description:'Optional model for this agent (glob ok, e.g. "qwen*"). Leave blank to use the sub-agent model setting, or this chat’s model if none is set.'}},required:['task']}},context:{type:'string',description:'Optional shared background prepended to every agent’s task.'}},required:['agents']}}};
+// Run one generation as a server-side JOB to completion and return its text.
+// Reuses the same job transport as the main chat, so each sub-agent survives
+// backgrounding and shows up in the worker panel (stoppable). Job output is
+// whole NDJSON lines and the offset always lands on a line boundary, so each
+// poll's chunk splits cleanly without a persistent partial-line buffer.
+async function runAgentJob(payload,signal){
+  var sr=await fetch('api/chat/jobs',{method:'POST',headers:{'Content-Type':'application/json'},
+                     body:JSON.stringify(Object.assign({stream:true},payload)),signal:signal});
+  if(!sr.ok){var em='HTTP '+sr.status;try{var je=await sr.json();em=(je.error&&(je.error.message||je.error))||em}catch(e){}throw new Error(em);}
+  var jid=(await sr.json()).id;
+  var off=0,full='',host='',fmodel=payload.model||'';
+  while(true){
+    if(signal&&signal.aborted)throw new DOMException('aborted','AbortError');
+    var pr=await fetch('api/chat/jobs/'+encodeURIComponent(jid)+'?offset='+off,{signal:signal});
+    if(pr.status===404)throw new Error('job lost');
+    var pj=await pr.json();
+    if(pj.host)host=pj.host;
+    if(pj.model)fmodel=pj.model;
+    if(pj.output){
+      off=pj.offset;
+      pj.output.split('\n').forEach(function(line){
+        line=line.trim();if(!line)return;
+        var d;try{d=JSON.parse(line)}catch(e){return}
+        if(d.message&&d.message.content)full+=d.message.content;
+      });
+    }
+    if(pj.status==='failed')throw new Error(pj.error||'all servers failed');
+    if(pj.status==='canceled')break;
+    if(pj.done)break;
+    await new Promise(function(res){var t=setTimeout(res,450);try{signal&&signal.addEventListener('abort',function(){clearTimeout(t);res()},{once:true})}catch(e){}});
+  }
+  var sp=(typeof splitThink==='function')?splitThink(full):{c:full};
+  return {text:(sp.c||full).trim(),host:host,model:fmodel,jid:jid};
+}
 var DOC_TOOLS=[
   {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
   {type:'function',function:{name:'edit_document',description:'Replace the ENTIRE contents of an existing document. Only for a wholesale rewrite — to change part of one, use replace_in_document instead. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
@@ -4274,7 +4458,20 @@ var toolEditChk=document.getElementById('toolImageEdit');
 var toolVideoChk=document.getElementById('toolVideo');
 var toolAskChk=document.getElementById('toolAsk');
 var toolWebChk=document.getElementById('toolWeb');
-var toolsOn=false,docsOn=false,speechOn=false,imgEditOn=false,videoOn=false,askOn=false,webOn=false;
+var toolAgentsChk=document.getElementById('toolAgents');
+var subAgentModelInput=document.getElementById('subAgentModel');
+var subAgentModel='';
+try{subAgentModel=localStorage.getItem('dyva_subagent_model')||''}catch(e){}
+if(subAgentModelInput){
+  subAgentModelInput.value=subAgentModel;
+  subAgentModelInput.addEventListener('input',function(){
+    subAgentModel=this.value.trim();
+    try{localStorage.setItem('dyva_subagent_model',subAgentModel)}catch(e){}
+  });
+  // keep the popup open when interacting with the field
+  subAgentModelInput.addEventListener('click',function(e){e.stopPropagation()});
+}
+var toolsOn=false,docsOn=false,speechOn=false,imgEditOn=false,videoOn=false,askOn=false,webOn=false,agentsOn=false;
 try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
 try{docsOn=localStorage.getItem('dyva_tools_docs')==='1'}catch(e){}
 try{speechOn=localStorage.getItem('dyva_tools_speech')==='1'}catch(e){}
@@ -4282,7 +4479,8 @@ try{imgEditOn=localStorage.getItem('dyva_tools_imgedit')==='1'}catch(e){}
 try{videoOn=localStorage.getItem('dyva_tools_video')==='1'}catch(e){}
 try{askOn=localStorage.getItem('dyva_tools_ask')==='1'}catch(e){}
 try{webOn=localStorage.getItem('dyva_tools_web')==='1'}catch(e){}
-function anyToolsOn(){return toolsOn||docsOn||speechOn||imgEditOn||videoOn||askOn||webOn}
+try{agentsOn=localStorage.getItem('dyva_tools_agents')==='1'}catch(e){}
+function anyToolsOn(){return toolsOn||docsOn||speechOn||imgEditOn||videoOn||askOn||webOn||agentsOn}
 function buildTools(){
   var t=[];
   if(toolsOn)t.push(IMG_TOOL);
@@ -4291,6 +4489,7 @@ function buildTools(){
   if(askOn)t.push(ASK_TOOL);
   if(speechOn)t.push(SPEECH_TOOL);
   if(webOn)t.push(WEB_TOOL);
+  if(agentsOn)t.push(SPAWN_TOOL);
   if(docsOn)t=t.concat(DOC_TOOLS);
   // No toggle of its own: it is the index for whatever media tools are on,
   // and useless without them.
@@ -4308,6 +4507,7 @@ function paintTools(){
   if(toolVideoChk)toolVideoChk.checked=videoOn;
   if(toolAskChk)toolAskChk.checked=askOn;
   if(toolWebChk)toolWebChk.checked=webOn;
+  if(toolAgentsChk)toolAgentsChk.checked=agentsOn;
   chatToolsBtn.title=anyToolsOn()?'Tools on':'Tools';
 }
 function placeToolsPop(){
@@ -4333,6 +4533,11 @@ toolImageChk.addEventListener('change',function(){
 if(toolWebChk)toolWebChk.addEventListener('change',function(){
   webOn=this.checked;
   try{localStorage.setItem('dyva_tools_web',webOn?'1':'0')}catch(e){}
+  paintTools();
+});
+if(toolAgentsChk)toolAgentsChk.addEventListener('change',function(){
+  agentsOn=this.checked;
+  try{localStorage.setItem('dyva_tools_agents',agentsOn?'1':'0')}catch(e){}
   paintTools();
 });
 if(toolAskChk)toolAskChk.addEventListener('change',function(){

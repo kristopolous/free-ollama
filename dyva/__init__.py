@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -100,6 +101,11 @@ IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
 THUMB_DIR = os.path.join(IMG_DIR, "thumbs")
 CHATS_FILE = os.path.join(CACHE_DIR, "chats.json")   # legacy blob, migrated into CHATS_DB
 CHATS_DB = os.path.join(CACHE_DIR, "chats.db")
+# Generation jobs — a generic, host-independent "print queue" for proxied
+# generations (see the jobs section below). Deliberately NOT tied to chats.db:
+# a job is router-level delivery state, and this table is keyed by `kind`
+# (text/video/…) so every generation kind can share it.
+JOBS_DB = os.path.join(CACHE_DIR, "jobs.db")
 IMG_HISTORY_MAX = 100
 CAP_REFRESH_TTL = 3600
 _last_cache = None
@@ -1316,6 +1322,27 @@ def _get_db():
             _status_db.execute("ALTER TABLE host_nodes ADD COLUMN rev INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass        # already there
+        # Cumulative outcome counters per (host, model) — pure record-keeping for
+        # now, recorded ALONGSIDE the existing tier `state`, which still drives
+        # routing. Unlike `failure_streak` (resets on success), these never reset,
+        # so we can later see the real success/failure shape before deciding how
+        # to order on it. Start at 0 and accumulate real outcomes going forward.
+        for _col in ("success INTEGER NOT NULL DEFAULT 0",
+                     "failure INTEGER NOT NULL DEFAULT 0",
+                     # failures broken out by kind — the survey wants to know
+                     # whether timeouts are noise while 5xx/unreachable predict
+                     # real badness. NOT per-kind timestamps (recency by kind
+                     # doesn't matter); just one coarse last_fail alongside.
+                     "fail_timeout INTEGER NOT NULL DEFAULT 0",
+                     "fail_4xx INTEGER NOT NULL DEFAULT 0",
+                     "fail_5xx INTEGER NOT NULL DEFAULT 0",
+                     "fail_conn INTEGER NOT NULL DEFAULT 0",
+                     "fail_other INTEGER NOT NULL DEFAULT 0",
+                     "last_fail TEXT"):
+            try:
+                _status_db.execute(f"ALTER TABLE host_status ADD COLUMN {_col}")
+            except sqlite3.OperationalError:
+                pass    # already there
         _status_db.commit()
         if need_migrate:
             _migrate_status_from_txt()
@@ -1382,19 +1409,45 @@ def add_good(host, model):
     model = canon_pattern(model)
     db = _get_db()
     db.execute(
-        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
-        " VALUES(?,?, 'good', ?, 0)"
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak,success)"
+        " VALUES(?,?, 'good', ?, 0, 1)"
         " ON CONFLICT(host,model) DO UPDATE SET"
-        " state='good', last_good=excluded.last_good, failure_streak=0",
+        " state='good', last_good=excluded.last_good, failure_streak=0,"
+        " success=success+1",
         (host, model, _now_iso()))
     db.execute("DELETE FROM host_status WHERE host=? AND model=?", (host, UNREACHABLE_KEY))
     db.commit()
 
 
-def add_bad(host, model):
+# Failure-kind -> counter column. Whitelisted so the kind can be interpolated
+# into the SQL safely. "conn" = connection-level (refused/unreachable), "other" =
+# empty/bad response, unsuitable, error-in-body, anything unclassified.
+_FAIL_COLS = {"timeout": "fail_timeout", "4xx": "fail_4xx", "5xx": "fail_5xx",
+              "conn": "fail_conn", "other": "fail_other"}
+
+
+def _failure_kind(verdict, detail):
+    """Bucket a failure for the survey counters. Derived from the verdict and the
+    (controlled) detail string so we don't have to thread a kind through every
+    failure site."""
+    if verdict == V_TIMEOUT:
+        return "timeout"
+    d = detail or ""
+    if d.startswith("status 4"):
+        return "4xx"
+    if d.startswith("status 5"):
+        return "5xx"
+    dl = d.lower()
+    if "connect" in dl or "errno" in dl or "unreachable" in dl:
+        return "conn"
+    return "other"
+
+
+def add_bad(host, model, kind="other"):
     """Failure: good -> maybe_good, maybe_good stays, unknown -> bad, bad stays.
-    failure_streak is incremented in every case (recorded for later analysis;
-    no secondary downgrade action is taken yet)."""
+    failure_streak is incremented in every case. Also bumps the cumulative
+    `failure` total plus the per-kind counter and stamps `last_fail` — survey
+    data, recorded alongside the tier state that still drives routing."""
     model = canon_pattern(model)
     db = _get_db()
     cur = _state_of(host, model)
@@ -1404,12 +1457,14 @@ def add_bad(host, model):
         new_state = "maybe_good"
     else:
         new_state = cur
+    col = _FAIL_COLS.get(kind, "fail_other")
     db.execute(
-        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
-        " VALUES(?,?,?,NULL,1)"
-        " ON CONFLICT(host,model) DO UPDATE SET"
-        " state=?, failure_streak=failure_streak+1",
-        (host, model, new_state, new_state))
+        f"INSERT INTO host_status(host,model,state,last_good,failure_streak,failure,{col},last_fail)"
+        f" VALUES(?,?,?,NULL,1,1,1,?)"
+        f" ON CONFLICT(host,model) DO UPDATE SET"
+        f" state=?, failure_streak=failure_streak+1, failure=failure+1,"
+        f" {col}={col}+1, last_fail=excluded.last_fail",
+        (host, model, new_state, _now_iso(), new_state))
     db.commit()
 
 
@@ -1437,10 +1492,12 @@ def mark_unreachable(host):
     every distinct model query."""
     db = _get_db()
     db.execute(
-        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
-        " VALUES(?,?, 'bad', NULL, 1)"
-        " ON CONFLICT(host,model) DO UPDATE SET state='bad', failure_streak=failure_streak+1",
-        (host, UNREACHABLE_KEY))
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak,failure,fail_conn,last_fail)"
+        " VALUES(?,?, 'bad', NULL, 1, 1, 1, ?)"
+        " ON CONFLICT(host,model) DO UPDATE SET state='bad',"
+        " failure_streak=failure_streak+1, failure=failure+1,"
+        " fail_conn=fail_conn+1, last_fail=excluded.last_fail",
+        (host, UNREACHABLE_KEY, _now_iso()))
     db.commit()
 
 
@@ -2124,6 +2181,34 @@ def _curlify(method, url, json_body):
         logging.debug(f"curlify failed: {e}")
 
 
+# Dump of the exact request bodies we POST upstream, as JSONL, so a malformed-body
+# suspicion ("status 400: can't find closing '}'") can be checked against what we
+# actually sent. EVERY request is logged; only the rotation check is sampled
+# (~1 in 100) so we're not counting the file's lines on every write. When it
+# passes SENT_LOG_ROTATE lines it's truncated wholesale.
+SENT_LOG_PATH = "/tmp/graflex/dyva-sent.jsonl"
+SENT_LOG_ROTATE = 5000
+
+
+def _log_sent(url, body):
+    try:
+        os.makedirs(os.path.dirname(SENT_LOG_PATH), exist_ok=True)
+        # roughly every 100th write, see if it's grown past the cap and reset it
+        if random.randint(0, 99) == 0:
+            try:
+                with open(SENT_LOG_PATH, encoding="utf-8") as f:
+                    over = sum(1 for _ in f) >= SENT_LOG_ROTATE
+                if over:
+                    open(SENT_LOG_PATH, "w").close()
+            except OSError:
+                pass
+        with open(SENT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": _now_iso(), "url": url, "body": body},
+                               ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 # ---- What a capability reports back about one host -----------------------
 # The engine hands out hosts and the job judges them; a bool can't carry the
 # distinction the reputation store (and the survey behind it) actually wants.
@@ -2174,9 +2259,9 @@ def record_verdict(host, key, outcome):
     elif v == V_UNREACHABLE:
         # host-wide, so it isn't re-probed as "unknown" for every other key...
         mark_unreachable(host)
-        add_bad(host, key)          # ...plus the per-key mark, so looking at
+        add_bad(host, key, "conn")  # ...plus the per-key mark, so looking at
     elif v in (V_UNSUITABLE, V_FAILED, V_TIMEOUT):   # this key shows who failed it
-        add_bad(host, key)
+        add_bad(host, key, _failure_kind(v, outcome.detail))
     # V_SKIP records nothing on purpose
 
 
@@ -2543,6 +2628,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 if attempt_oai:
                     p = openai_payload(p)
                 _curlify("POST", f"{host}{ep}", p)
+                _log_sent(f"{host}{ep}", p)
                 resp = await asyncio.wait_for(
                     session.post(f"{host}{ep}", json=p), timeout=TIMEOUT)
                 if resp.status not in (404, 405, 501):
@@ -2558,10 +2644,15 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 log.debug(f"{host}: {ep} -> {peek[:80]}; trying the other dialect")
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             dur = time.time() - start
+            # str(e) carries the real reason for connection/client errors
+            # ("Cannot connect to host ... Connect call failed"); TimeoutError's
+            # is empty, so fall back to the name (the [50.00s] duration already
+            # says it was a read timeout, not an instant refusal).
+            detail = " ".join(str(e).split())[:200] or type(e).__name__
             await broadcast_activity(host, model, "failed",
-                f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-            return (timed_out(type(e).__name__) if isinstance(e, asyncio.TimeoutError)
-                    else failed(type(e).__name__))
+                f"failure: {host} for {model} - {detail}", duration=dur, wid=wid)
+            return (timed_out(detail) if isinstance(e, asyncio.TimeoutError)
+                    else failed(detail))
         if resp is None:
             dur = time.time() - start
             await broadcast_activity(host, model, "failed",
@@ -2572,22 +2663,38 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         if resp.status != 200:
             dur = time.time() - start
             code = resp.status
+            body = ""
             try:
                 raw = await resp.read()
                 body = raw.decode('utf-8', errors='replace')[:500]
                 log_upstream(code, host, ep, body, remote=remote)
                 await _collect_err(f"{host}: {body}")
+            except asyncio.CancelledError:
+                # a losing attempt cancelled mid-read must drop its connection,
+                # or it leaks out of the pool (CancelledError is BaseException,
+                # so `except Exception` below never catches it)
+                if resp is not None:
+                    resp.close()
+                raise
             except Exception:
                 pass
             await resp.release()
             resp = None
+            # Surface the ACTUAL upstream error, not a bare status: the body is
+            # what says "model not found", the OOM trace behind a 500, etc.
+            snippet = " ".join(body.split())[:200]
+            detail = f"status {code}" + (f": {snippet}" if snippet else "")
             await broadcast_activity(host, model, "failed",
-                f"failure: {host} for {model} - status {code}", duration=dur, wid=wid)
-            return failed(f"status {code}")
+                f"failure: {host} for {model} - {detail}", duration=dur, wid=wid)
+            return failed(detail)
 
         if not do_stream:
             try:
                 data = await resp.json()
+            except asyncio.CancelledError:
+                if resp is not None:
+                    resp.close()          # drop the connection, don't leak it
+                raise
             except asyncio.TimeoutError:
                 dur = time.time() - start
                 await resp.release()
@@ -2631,6 +2738,10 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                     first_line = await resp.content.readline()
                     if not first_line:
                         break
+        except asyncio.CancelledError:
+            if resp is not None:
+                resp.close()              # drop the connection, don't leak it
+            raise
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
             await resp.release()
             resp = None
@@ -3111,6 +3222,23 @@ def _info_response(model_in, info, do_stream=False, openai_format=False):
     return web.Response(
         text=json.dumps(first) + "\n" + json.dumps(last) + "\n",
         content_type="application/x-ndjson")
+
+
+def _info_ndjson(model_in, info):
+    """The same two-line Ollama NDJSON `_info_response` streams, as a plain
+    string — so an info turn (`__dyva_info__`) can be dropped straight into a
+    job buffer as a pre-completed 'generation' the dashboard renders as usual."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}Z"
+    first = {"model": model_in, "created_at": now,
+             "message": {"role": "assistant", "content": json.dumps(info)},
+             "done": False}
+    last = {"model": model_in, "created_at": now,
+            "message": {"role": "assistant", "content": ""},
+            "done": True, "done_reason": "stop",
+            "total_duration": 0, "load_duration": 0,
+            "prompt_eval_count": 0, "prompt_eval_duration": 0,
+            "eval_count": 0, "eval_duration": 0, "dyva_info": info}
+    return json.dumps(first) + "\n" + json.dumps(last) + "\n"
 
 
 def _quick_test_answer_ok(content):
@@ -4688,6 +4816,194 @@ async def handle_ollama_chat(request):
         _coerce_tool_args(opayload.get("messages"))
         log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
         return await _proxy_chat(request, session, model, opayload, do_stream, openai_format=False)
+
+
+# ---- Chat job endpoints: the print queue over HTTP -------------------------
+# Submit a generation that runs server-side regardless of the client, then poll
+# it from an offset to stream the buffer (survives the phone backgrounding), and
+# drive it with the print-queue operations (hold/release/cancel/skip/restart).
+
+def _job_public(job, offset=None):
+    """The client-facing view of a job. When `offset` is given, include only the
+    output past it plus the new length, so a reconnecting client streams cheaply."""
+    out = {
+        "id": job["id"], "kind": job["kind"], "status": job["status"],
+        "phase": job.get("phase"), "host": job.get("host"),
+        "model": job.get("model"), "service": job.get("service"),
+        "error": job.get("error"), "created": job.get("created"),
+        "updated": job.get("updated"),
+        "done": job["status"] in JOB_TERMINAL,
+        "running": str(job["id"]) in _JOB_TASKS,
+    }
+    if offset is None:
+        out["output"] = job.get("output") or ""
+        out["offset"] = len(out["output"])
+    else:
+        chunk, total = _job_output_from(job["id"], offset)
+        out["output"] = chunk or ""
+        out["offset"] = total
+    return out
+
+
+async def handle_chat_job_submit(request):
+    """
+    Start a background chat job
+    ---
+    tags: [Chat]
+    summary: POST /api/chat/jobs — run a chat generation server-side (survives disconnect)
+    responses:
+      '200': {description: Job created (id + polling_url)}
+      '400': {description: Invalid request}
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response(err_obj("invalid JSON"), status=400)
+    model = body.get("model", "")
+    if not model:
+        return web.json_response(err_obj("model is required", "missing_model"), status=400)
+    _coerce_tool_args(body.get("messages"))
+
+    # `__dyva_info__` (/info, /next, /test) is a synchronous routing report, not
+    # a generation — it must not be raced onto a host. Resolve it here and store
+    # the result as a pre-completed job so the client's uniform job flow renders
+    # it exactly as _proxy_chat's streamed info reply would.
+    if _has_info_tag(body):
+        session = request.app["session"]
+        model0 = model.split("/")[0] if "/" in model else model
+        if _info_wants_test(body):
+            info = await _run_info_test(session, model0, tools=body.get("tools"))
+            if info is None:
+                return web.json_response(err_obj(
+                    f"no server for '{model}' passed the quick test",
+                    "model_not_found"), status=404)
+        else:
+            exclude = None
+            if _info_wants_next(body):
+                prev = get_last(model0)
+                exclude = prev[0] if prev else None
+                _drop_last_host(model0)
+            req_caps = needs_caps(body.get("messages", []))
+            if body.get("tools"):
+                req_caps = sorted(set(req_caps) | {"tools"})
+            info = _would_use(model0, req_caps, exclude=exclude)
+            if info is None:
+                return web.json_response(err_obj(
+                    f"no available servers for '{model}'",
+                    "model_not_found"), status=404)
+        jid = _job_new("text", body, model=model)
+        _job_append(jid, _info_ndjson(model0, info))
+        _job_set(jid, status=JOB_COMPLETED, phase=None)
+        return web.json_response({"id": jid, "status": JOB_COMPLETED,
+                                 "polling_url": f"/api/chat/jobs/{jid}"})
+
+    jid = _job_new("text", body, model=model)
+    _job_dispatch(request.app, jid)
+    return web.json_response({"id": jid, "status": JOB_PENDING,
+                             "polling_url": f"/api/chat/jobs/{jid}"})
+
+
+async def handle_chat_jobs_list(request):
+    """
+    List chat jobs
+    ---
+    tags: [Chat]
+    summary: GET /api/chat/jobs — recent jobs, newest first
+    responses:
+      '200': {description: Job list (metadata + short output)}
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jobs = _job_list(kind="text", limit=100)
+    return web.json_response({"jobs": [_job_public(j) for j in jobs]})
+
+
+async def handle_chat_job_get(request):
+    """
+    Poll a chat job (stream from an offset)
+    ---
+    tags: [Chat]
+    summary: GET /api/chat/jobs/{id}?offset=N — status + output past N
+    responses:
+      '200': {description: Job status and buffered output}
+      '404': {description: Unknown job}
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jid = request.match_info.get("id")
+    job = _job_get(jid)
+    if not job:
+        return web.json_response({"error": "unknown job"}, status=404)
+    offset = request.query.get("offset")
+    off = int(offset) if (offset and offset.isdigit()) else (None if offset is None else 0)
+    return web.json_response(_job_public(job, offset=off))
+
+
+async def handle_chat_job_control(request):
+    """
+    Drive a chat job (the print-queue operations)
+    ---
+    tags: [Chat]
+    summary: POST /api/chat/jobs/{id}/control — {op: cancel|skip}
+    responses:
+      '200': {description: New job state}
+      '404': {description: Unknown job}
+      '400': {description: Unknown op}
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jid = request.match_info.get("id")
+    job = _job_get(jid)
+    if not job:
+        return web.json_response({"error": "unknown job"}, status=404)
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        body = {}
+    op = (body.get("op") or "").lower()
+    ctl = _job_ctl(jid)
+    running = str(jid) in _JOB_TASKS
+
+    # Only two real ops for a live proxied generation: cancel (stop) and skip
+    # (= move to another host). No pause (can't pause a remote host) and no
+    # reissue (resend the message — it's still in the composer).
+    if op in ("cancel", "stop"):
+        if running:
+            ctl["cancel"] = True
+        else:
+            _job_set(jid, status=JOB_CANCELED, phase=None, host=None)
+    elif op in ("skip", "move"):          # "move to another host" is a skip
+        if running:
+            ctl["skip"] = True            # abandon current host, re-race the rest
+    else:
+        return web.json_response({"error": f"unknown op '{op}'"}, status=400)
+
+    return web.json_response(_job_public(_job_get(jid)))
+
+
+async def handle_chat_job_delete(request):
+    """
+    Delete a chat job
+    ---
+    tags: [Chat]
+    summary: POST /api/chat/jobs/{id}/delete — cancel if running, then remove
+    responses:
+      '200': {description: Deleted}
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    jid = request.match_info.get("id")
+    if str(jid) in _JOB_TASKS:
+        _job_ctl(jid)["cancel"] = True
+    deleted = _job_delete(jid)
+    return web.json_response({"deleted": bool(deleted)})
 
 
 async def handle_openai_chat(request):
@@ -6844,6 +7160,494 @@ def _find_video_hosts(target_host=None):
     if last and last[0]:
         hosts = [last[0]] + [h for h in hosts if h != last[0]]
     return _idle_first(hosts)
+
+
+# ---- Generic generation jobs: a host-independent print queue --------------
+#
+# A generation is a *print job*: the job (its params + accumulated output) is the
+# document, and a host is a printer it is temporarily assigned to — not its
+# identity. That is what lets a job survive the client disconnecting, be canceled,
+# or be moved to another host (a skip), exactly like a print job.
+#
+# The lifecycle is a trimmed print queue — only the states/ops that are real and
+# functional for a LIVE proxied generation:
+#   pending    — queued, no host assigned yet (the scheduler = dyva's race engine)
+#   processing — assigned to a host and generating
+#   completed  — finished; full text in `output`
+#   failed     — no host could complete it (or interrupted by a dyva restart)
+#   canceled   — stopped by the user
+# Only two operations exist, and both already existed as worker controls:
+#   cancel = stop; and skip = move-to-another-host (abandon the current host and
+#   re-race the remaining pool for this same generation). There is deliberately
+#   NO pause/hold (you can't pause a remote host mid-generation) and NO
+#   reissue/restart (the prompt is still in the composer — resending is a fresh
+#   message, not a job op).
+#
+# Storage is SQLite (WAL), like host-status.db and chats.db: a job is high-churn,
+# incrementally-appended, concurrently-read state (tokens stream in, a
+# reconnecting client reads from an offset) — a poor fit for rewriting a JSON
+# index per token. The table is keyed by `kind` so video (currently on its own
+# JSON path) can later fold onto it.
+
+JOB_PENDING, JOB_PROCESSING = "pending", "processing"
+JOB_COMPLETED, JOB_FAILED, JOB_CANCELED = "completed", "failed", "canceled"
+JOB_ACTIVE = frozenset({JOB_PENDING, JOB_PROCESSING})
+JOB_TERMINAL = frozenset({JOB_COMPLETED, JOB_FAILED, JOB_CANCELED})
+JOBS_KEEP = 300          # retain the newest N jobs; older ones are purged
+# A job flagged `dyva_agent` runs a server-side tool loop (currently read-only:
+# fetch_url via the in-process web_fetch). This is the ONE orchestration engine
+# sub-agents use; the main chat can migrate onto it later. Kept minimal on
+# purpose — the long-term home for orchestration is a separate composable tool,
+# not dyva. A round is one completion + its tool results.
+AGENT_MAX_ROUNDS = 6
+
+_jobs_db = None
+_JOB_ID_CTR = 0
+_jobs_lock = threading.Lock()
+
+
+def _get_jobs_db():
+    global _jobs_db, _JOB_ID_CTR
+    if _jobs_db is None:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        _jobs_db = sqlite3.connect(JOBS_DB, check_same_thread=False)
+        _jobs_db.execute("PRAGMA journal_mode=WAL")
+        _jobs_db.execute("PRAGMA synchronous=NORMAL")
+        _jobs_db.execute(
+            "CREATE TABLE IF NOT EXISTS jobs("
+            "id TEXT PRIMARY KEY,"
+            "kind TEXT NOT NULL,"          # text | video | generate | …
+            "status TEXT NOT NULL,"        # the print-queue states above
+            "phase TEXT,"                  # host-reported detail: 'queued #3', …
+            "host TEXT, model TEXT, service TEXT,"
+            "params TEXT NOT NULL,"        # JSON: the original request payload
+            "output TEXT NOT NULL DEFAULT '',"  # streamed buffer (append-only)
+            "content_path TEXT,"           # binary artifacts (video, later)
+            "error TEXT,"
+            "created REAL NOT NULL, updated REAL NOT NULL)")
+        _jobs_db.commit()
+        row = _jobs_db.execute(
+            "SELECT id FROM jobs WHERE id GLOB 'j[0-9]*'").fetchall()
+        for (jid,) in row:
+            m = re.match(r"^j(\d+)$", jid)
+            if m:
+                _JOB_ID_CTR = max(_JOB_ID_CTR, int(m.group(1)))
+        # Orphans: a job left `processing` was mid-generation when the previous
+        # process died, so no task is advancing it. There is no pausing a remote
+        # generation, so mark it failed (its partial output stays in `output`) —
+        # same as the video path does with an interrupted render.
+        n = _jobs_db.execute(
+            "UPDATE jobs SET status=?, phase=NULL, error=?, updated=? WHERE status=?",
+            (JOB_FAILED, "interrupted by a dyva restart", time.time(),
+             JOB_PROCESSING)).rowcount
+        if n:
+            _jobs_db.commit()
+            log.info(f"jobs: marked {n} interrupted job(s) failed after restart")
+    return _jobs_db
+
+
+def _job_row_to_dict(r):
+    keys = ("id", "kind", "status", "phase", "host", "model", "service",
+            "params", "output", "content_path", "error", "created", "updated")
+    d = dict(zip(keys, r))
+    try:
+        d["params"] = json.loads(d["params"]) if d["params"] else {}
+    except Exception:
+        d["params"] = {}
+    return d
+
+
+def _job_new(kind, params, model=None):
+    """Create a pending job and return its id. The scheduler (runner) assigns a
+    host later, so a fresh job has no host — it is queued, exactly like lpr."""
+    global _JOB_ID_CTR
+    db = _get_jobs_db()
+    with _jobs_lock:
+        _JOB_ID_CTR += 1
+        jid = f"j{_JOB_ID_CTR}"
+    now = time.time()
+    db.execute(
+        "INSERT INTO jobs(id,kind,status,phase,model,params,output,created,updated)"
+        " VALUES(?,?,?,?,?,?,'',?,?)",
+        (jid, kind, JOB_PENDING, None, model,
+         json.dumps(params, ensure_ascii=False), now, now))
+    # count-based retention, mirroring the image gallery / video keep policy
+    db.execute(
+        "DELETE FROM jobs WHERE id NOT IN "
+        "(SELECT id FROM jobs ORDER BY created DESC LIMIT ?)", (JOBS_KEEP,))
+    db.commit()
+    return jid
+
+
+def _job_get(jid):
+    r = _get_jobs_db().execute(
+        "SELECT id,kind,status,phase,host,model,service,params,output,"
+        "content_path,error,created,updated FROM jobs WHERE id=?",
+        (str(jid),)).fetchone()
+    return _job_row_to_dict(r) if r else None
+
+
+def _job_list(kind=None, limit=100):
+    q = ("SELECT id,kind,status,phase,host,model,service,params,output,"
+         "content_path,error,created,updated FROM jobs")
+    args = []
+    if kind:
+        q += " WHERE kind=?"
+        args.append(kind)
+    q += " ORDER BY created DESC LIMIT ?"
+    args.append(limit)
+    return [_job_row_to_dict(r) for r in _get_jobs_db().execute(q, args).fetchall()]
+
+
+def _job_set(jid, **fields):
+    """Update job columns (status/phase/host/model/service/content_path/error).
+    `updated` is always bumped so pollers see progress."""
+    if not fields:
+        return
+    allowed = {"status", "phase", "host", "model", "service",
+               "content_path", "error"}
+    cols = [k for k in fields if k in allowed]
+    if not cols:
+        return
+    sets = ", ".join(f"{c}=?" for c in cols) + ", updated=?"
+    args = [fields[c] for c in cols] + [time.time(), str(jid)]
+    db = _get_jobs_db()
+    db.execute(f"UPDATE jobs SET {sets} WHERE id=?", args)
+    db.commit()
+
+
+def _job_append(jid, text):
+    """Append streamed text to the buffer and return the new total length.
+    Uses SQL string concat so we never rewrite the whole buffer; callers should
+    batch (a flush every ~N tokens / ~50ms) rather than call this per token."""
+    if not text:
+        r = _get_jobs_db().execute(
+            "SELECT length(output) FROM jobs WHERE id=?", (str(jid),)).fetchone()
+        return (r[0] if r else 0)
+    db = _get_jobs_db()
+    db.execute("UPDATE jobs SET output = output || ?, updated=? WHERE id=?",
+               (text, time.time(), str(jid)))
+    db.commit()
+    r = db.execute("SELECT length(output) FROM jobs WHERE id=?",
+                   (str(jid),)).fetchone()
+    return (r[0] if r else 0)
+
+
+def _job_output_from(jid, offset):
+    """Return (chunk, total_len) for output past `offset` — the stream-from-offset
+    read a reconnecting client uses. offset is a character index into `output`."""
+    off = max(0, int(offset or 0))
+    r = _get_jobs_db().execute(
+        "SELECT substr(output, ?), length(output) FROM jobs WHERE id=?",
+        (off + 1, str(jid))).fetchone()
+    if not r:
+        return None, 0
+    return (r[0] or ""), (r[1] or 0)
+
+
+def _job_delete(jid):
+    db = _get_jobs_db()
+    row = _get_jobs_db().execute(
+        "SELECT content_path FROM jobs WHERE id=?", (str(jid),)).fetchone()
+    if row and row[0]:
+        try:
+            os.remove(row[0])
+        except OSError:
+            pass
+    db.execute("DELETE FROM jobs WHERE id=?", (str(jid),))
+    db.commit()
+    return bool(row)
+
+
+# ---- The job runner: dispatch a job onto the pool, stream into its buffer -----
+#
+# The runner is the "printer driver": it takes a queued (or held) job, races it
+# onto a capable host via the SAME engine everything else uses, and pumps the
+# upstream tokens into the job's durable buffer instead of a client socket. That
+# decoupling is the whole point — the client can be gone; the job keeps going.
+#
+# Control (cancel/hold/skip/move) is a small in-memory flag dict per running job,
+# set by the HTTP control endpoints and checked between chunks. It is in-memory
+# because it only matters while a task is actively running in THIS process; the
+# durable truth (status, buffer) lives in the DB.
+
+_JOB_CTL = {}            # jid -> {"cancel":bool, "skip":bool}
+_JOB_TASKS = {}          # jid -> asyncio.Task, so we can find a running job
+
+
+def _job_ctl(jid):
+    return _JOB_CTL.setdefault(str(jid), {"cancel": False, "skip": False})
+
+
+# how much text to accumulate before flushing to SQLite — batching keeps us from
+# an UPDATE per token while still landing tokens promptly for a reconnecting
+# client (a flush also happens on any pause in the stream via the char threshold)
+_JOB_FLUSH_CHARS = 48
+
+
+def _job_seed_messages(params, prior_output):
+    """Build the message list for a (re)dispatch. For a continuation (resume /
+    move-host) the already-streamed `prior_output` is fed back as an assistant
+    turn so a new host picks up where the last left off. Honest seam: a different
+    model will not continue byte-identically — relocation is best-effort."""
+    msgs = list(params.get("messages") or [])
+    if prior_output:
+        msgs = msgs + [{"role": "assistant", "content": prior_output}]
+    return msgs
+
+
+async def _run_chat_job(session, jid):
+    """Run a text generation job to completion, independent of any client.
+
+    Re-enterable: if the job already has buffered output (a resumed/moved job),
+    it continues from there; new tokens are appended after the existing buffer.
+    """
+    job = _job_get(jid)
+    if not job or job["status"] in JOB_TERMINAL:
+        return
+    ctl = _job_ctl(jid)
+    ctl["cancel"] = ctl["skip"] = False
+    params = job["params"] or {}
+    model_in = params.get("model") or job.get("model") or "*"
+
+    opayload = dict(params)
+    if isinstance(opayload.get("messages"), list):
+        opayload["messages"] = _flatten_content(opayload["messages"])
+    # continue from whatever we already streamed (empty for a fresh job)
+    prior = job.get("output") or ""
+    opayload["messages"] = _job_seed_messages(
+        {**opayload, "messages": opayload.get("messages")}, prior)
+    opayload["stream"] = True
+
+    req_caps = needs_caps(opayload.get("messages", []))
+    if opayload.get("tools"):
+        req_caps = sorted(set(req_caps) | {"tools"})
+
+    _job_set(jid, status=JOB_PROCESSING, phase="dispatching", error=None)
+    model_list = model_in.split("/") if "/" in model_in else [model_in]
+    servers = find_servers(model_in, req_caps)
+    if not servers:
+        _job_set(jid, status=JOB_FAILED, phase=None,
+                 error=f"no available servers for '{model_in}'")
+        return
+
+    agentic = bool(params.get("dyva_agent"))
+    # Sub-agents register as kind "agent" so the worker panel keeps stop/skip on
+    # them even while they're in a phase (e.g. fetching) — a plain "text" worker
+    # loses its controls once it has a phase, which hid them for the whole fetch.
+    job_wid = await _register_worker(model_list[0], len(servers),
+                                     lambda: None,
+                                     kind=("agent" if agentic else "text"))
+
+    # Wire the worker's stop/skip buttons to this job's control flags, so the
+    # existing dashboard controls drive the job without a second mechanism.
+    def _do_stop():
+        ctl["cancel"] = True
+    def _do_skip():
+        ctl["skip"] = True
+    w = _workers.get(job_wid)
+    if w:
+        w["stop"] = _do_stop
+        w["skip"] = _do_skip
+
+    errors = []
+    max_rounds = AGENT_MAX_ROUNDS if agentic else 1
+    # Batch spread: a `spread` index rotates this job's host order so parallel
+    # same-model sub-agents each hedge on a DIFFERENT host instead of all racing
+    # to the sticky one. Job-local — global routing/reputation is untouched.
+    try:
+        spread = int(params.get("spread"))
+    except (TypeError, ValueError):
+        spread = None
+    def _spread(hosts):
+        if spread is None or not hosts:
+            return hosts
+        k = spread % len(hosts)
+        return hosts[k:] + hosts[:k]
+
+    async def _run_agent_tools(tcs):
+        """Execute a sub-agent's tool calls INSIDE dyva and append the assistant
+        turn + tool results to the running transcript, so the next round sees
+        them. Read-only scope: only fetch_url, via the in-process web_fetch (the
+        same engine /v1/web/fetch uses). Returns True if any tool actually ran."""
+        assistant_msg = {"role": "assistant", "content": "", "tool_calls": tcs}
+        tool_msgs = []
+        ran = False
+        for tc in tcs:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            a = fn.get("arguments")
+            if isinstance(a, str):
+                try:
+                    a = json.loads(a or "{}")
+                except Exception:
+                    a = {}
+            a = a or {}
+            if name == "fetch_url":
+                url = str(a.get("url") or "").strip()
+                try:
+                    out = await web_fetch(session, url) or {}
+                    if out.get("kind") == "image":
+                        text = f"(fetched an image from {url}; a text sub-agent can't use it)"
+                    else:
+                        text = ((out.get("title") + "\n\n") if out.get("title") else "") + (out.get("text") or "")
+                        if not text.strip():
+                            text = f"(the page at {url} had no readable text)"
+                except Exception as e:
+                    text = f"Error fetching {url}: {e}"
+                ran = True
+            else:
+                text = f"(tool '{name}' is not available to sub-agents)"
+            tool_msgs.append({"role": "tool", "name": name,
+                              "tool_call_id": tc.get("id") or "", "content": text})
+        opayload["messages"] = list(opayload["messages"]) + [assistant_msg] + tool_msgs
+        return ran
+
+    try:
+        # Outer loop = agent tool rounds (one completion + its tool results).
+        # Non-agent jobs run exactly once, so behaviour there is unchanged.
+        for _round in range(max_rounds):
+            round_tcs = []
+            servers = _spread(find_servers(model_in, req_caps))
+            if not servers:
+                errors.append(f"no available servers for '{model_in}'")
+                break
+            status = "nohost"
+            for model in model_list:
+                # Inner loop = the print-queue "move to another printer": a skip
+                # abandons the current host and re-races the REMAINING servers
+                # for this same generation, until one completes or the pool is
+                # exhausted.
+                while servers:
+                    result, errs, stopped = await _race_servers(
+                        session, model, servers, dict(opayload),
+                        do_stream=True, remote=None, caps=req_caps,
+                        job_wid=job_wid, hedge_delay=HEDGE_DELAY)
+                    errors += errs or []
+                    if not result:
+                        if stopped:      # a worker-level stop during the race
+                            _job_set(jid, status=JOB_CANCELED, phase=None)
+                            await _unregister_worker(job_wid)
+                            return
+                        break            # no host for this model; try next model
+                    _tag, host, full, resp, first_line, _first, oai = result
+                    mark_worker_found(job_wid, host, full)
+                    _job_set(jid, host=re.sub(r"^https?://", "", host), model=full,
+                             service=service_of(host), phase="generating")
+                    # The race installs its OWN stop/skip on the worker during
+                    # the race; re-point them at this job's control flags for the
+                    # long generation (same re-install the video render path does).
+                    w = _workers.get(job_wid)
+                    if w:
+                        w["stop"] = _do_stop
+                        w["skip"] = _do_skip
+
+                    pending = []          # unflushed NDJSON lines
+
+                    def _flush(force=False):
+                        if pending and (force or sum(len(x) for x in pending) >= _JOB_FLUSH_CHARS):
+                            _job_append(jid, "".join(pending))
+                            pending.clear()
+
+                    def _line_from(line_bytes):
+                        """Normalize one upstream line to a single Ollama NDJSON
+                        line (a JSON string; caller adds the newline). An
+                        OpenAI-SSE host is converted first, so the buffer is the
+                        SAME NDJSON the dashboard already parses off a live
+                        /api/chat stream. Also harvests tool_calls for the agent
+                        loop. Returns (json_line_or_None, done)."""
+                        if oai:
+                            obj = openai_stream_to_ollama(line_bytes, full)
+                            if obj is None:
+                                return None, False
+                        else:
+                            try:
+                                obj = json.loads(line_bytes)
+                            except Exception:
+                                return None, False
+                        tcs = (obj.get("message") or {}).get("tool_calls")
+                        if tcs:
+                            round_tcs.extend(tcs)
+                        return json.dumps(obj, ensure_ascii=False), bool(obj.get("done"))
+
+                    async def _pump():
+                        # first_line was already read off the socket by the race
+                        jl, done = _line_from(first_line)
+                        if jl is not None:
+                            pending.append(jl + "\n")
+                        if not done:
+                            async for raw in resp.content:
+                                if not raw or raw == b"\n":
+                                    continue
+                                raw = raw.rstrip(b"\n\r")
+                                # respond to controls between chunks
+                                if ctl["cancel"] or ctl["skip"]:
+                                    raise asyncio.CancelledError()
+                                jl, done = _line_from(raw)
+                                if jl is not None:
+                                    pending.append(jl + "\n")
+                                    _flush()
+                                if done:
+                                    break
+                        _flush(force=True)
+
+                    skipped = False
+                    try:
+                        await _pump()
+                    except asyncio.CancelledError:
+                        _flush(force=True)
+                        if ctl["skip"]:
+                            record_verdict(host, model, skip("skipped by user"))
+                            errors.append(f"{host}: skipped by user")
+                            servers = [s for s in servers if s[1] != host]
+                            _set_worker_phase(job_wid, None)
+                            ctl["skip"] = False
+                            skipped = True
+                        else:
+                            _job_set(jid, status=JOB_CANCELED, phase=None)
+                            await _unregister_worker(job_wid)
+                            return
+                    finally:
+                        await resp.release()
+
+                    if skipped:
+                        continue         # re-race remaining hosts for this model
+                    status = "ok"
+                    break
+                if status == "ok":
+                    break
+
+            if status != "ok":
+                break   # no host completed this round -> fail below
+
+            # A completed turn. If this is an agent job that asked for tools and
+            # rounds remain, run them in dyva and loop; otherwise it's the final
+            # answer. (The last allowed round never runs tools, so it always
+            # yields a final answer.)
+            if agentic and round_tcs and _round < max_rounds - 1:
+                _set_worker_phase(job_wid, "running tools")
+                _job_set(jid, phase="running tools")
+                if await _run_agent_tools(round_tcs):
+                    continue
+                # nothing executable -> treat this turn as final
+            _job_set(jid, status=JOB_COMPLETED, phase=None)
+            await _unregister_worker(job_wid, ok=True)
+            return
+
+        # rounds exhausted or no host completed a round
+        msg = "; ".join(dict.fromkeys(errors)) or "all servers failed"
+        _job_set(jid, status=JOB_FAILED, phase=None, error=msg)
+        await _unregister_worker(job_wid)
+    finally:
+        _JOB_TASKS.pop(str(jid), None)
+
+
+def _job_dispatch(app, jid):
+    """Launch (or relaunch) a job's runner as a background task."""
+    session = app["session"]
+    task = asyncio.get_event_loop().create_task(_run_chat_job(session, jid))
+    _JOB_TASKS[str(jid)] = task
+    return task
 
 
 # ---- Async ComfyUI video-generation jobs (OpenRouter /v1/videos shape) ----
@@ -9793,6 +10597,12 @@ def make_app():
     app.router.add_get("/api/chats/{cid}", handle_chat_get)
     app.router.add_post("/api/chats/{cid}", handle_chat_post)
     app.router.add_post("/api/chats/{cid}/delete", handle_chat_delete)
+    # Chat jobs (the print queue). Plain router: path params + control bodies.
+    app.router.add_post("/api/chat/jobs", handle_chat_job_submit)
+    app.router.add_get("/api/chat/jobs", handle_chat_jobs_list)
+    app.router.add_post("/api/chat/jobs/{id}/control", handle_chat_job_control)
+    app.router.add_post("/api/chat/jobs/{id}/delete", handle_chat_job_delete)
+    app.router.add_get("/api/chat/jobs/{id}", handle_chat_job_get)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
     app.router.add_post("/v1/videos", handle_videos_post)
