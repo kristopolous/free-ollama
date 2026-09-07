@@ -879,7 +879,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
-<input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter — name, *glob*, or size e.g. &gt;10gb" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?)&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;Combine a name and a size in any order: 'qwen &gt;10gb' or '&gt;10gb qwen'. A half-typed size (just '&gt;' or '&gt;10') is ignored until it has a unit. A model whose size the survey doesn't know is hidden by a size filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
 <button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
 </div>
 <div id="mpane-text">
@@ -953,9 +953,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button id="chatTools" class="mp-tool" title="Tools" aria-haspopup="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></button>
 <div id="toolsPop" class="tools-pop">
 <div class="tools-pop-title">Tools</div>
-<label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Create images on request</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolImageEdit"><span class="tool-txt"><b>Image editing</b><small>Edit an image already in the chat</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolAsk"><span class="tool-txt"><b>Ask me</b><small>Ask a multiple-choice question</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image</b><small>Generate and edit images</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Make a short video</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Speak dialog out loud</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolWeb"><span class="tool-txt"><b>Web</b><small>Read a page at a URL</small></span></label>
@@ -3030,12 +3028,12 @@ function _extLinks(el){
   });
 }
 var TOOL_LABELS=[
-  ['toolsOn','Image generation'],['imgEditOn','Image editing'],['videoOn','Video'],
-  ['speechOn','Speech'],['askOn','Ask me'],['webOn','Web'],['agentsOn','Sub-agents'],['docsOn','Documents']
+  ['imageOn','Image'],['videoOn','Video'],
+  ['speechOn','Speech'],['webOn','Web'],['agentsOn','Sub-agents'],['docsOn','Documents']
 ];
 function _toolFlags(){
-  return {toolsOn:toolsOn,imgEditOn:imgEditOn,videoOn:videoOn,speechOn:speechOn,
-          askOn:askOn,webOn:webOn,agentsOn:agentsOn,docsOn:docsOn};
+  return {imageOn:imageOn,videoOn:videoOn,speechOn:speechOn,
+          webOn:webOn,agentsOn:agentsOn,docsOn:docsOn};
 }
 function enabledToolNames(){
   var live=_toolFlags();
@@ -3048,7 +3046,7 @@ function disabledToolNames(){
 // Tools with no toggle, pulled in automatically when any media tool is on.
 function alwaysOnToolNames(){
   var live=_toolFlags();
-  if(live.toolsOn||live.imgEditOn||live.videoOn||live.speechOn||live.webOn)
+  if(live.imageOn||live.videoOn||live.speechOn||live.webOn)
     return ['list_assets','search_models'];
   return [];
 }
@@ -4948,7 +4946,7 @@ function applyDocOp(chatId,name,args){
     doc.content=(args.replace||!doc.content)?note:(doc.content+'\n\n'+note);
     doc.updated=Date.now();_docCommitVersion(doc);
     out={text:(args.replace?'Rewrote':'Added to')+' the scratchpad. It is now '
-              +_docLines(doc.content).length+' lines.',docId:doc.id,md:'\ud83d\udcdd Scratchpad'};
+              +_docLines(doc.content).length+' lines.',docId:doc.id,md:'Scratchpad'};
   }else return {text:'Error: unknown document tool '+name};
   ctx.commit();
   if(ctx.inView){refreshDocUI();if(out.docId)openDoc(out.docId);}
