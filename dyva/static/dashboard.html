@@ -163,7 +163,7 @@ a{color:var(--text-muted)}
 .ap-offline{flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sp-3);min-height:6rem;margin:var(--sp-3) 0;padding:var(--sp-5);border:1px dashed var(--border-hover);border-radius:var(--r-lg);background:var(--bg-sunken)}
 .ap-offline-msg{font-size:var(--fs-md);color:var(--text-dim)}
 .ap-offline .pager-btn{font-size:var(--fs-md);padding:var(--sp-2) var(--sp-5)}
-.ap-workers{flex-shrink:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0;padding-bottom:var(--sp-3);border-bottom:1px solid var(--border)}
+.ap-workers{flex-shrink:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0;padding-bottom:var(--sp-3);border-bottom:1px solid var(--border);max-height:min(30vh,240px);overflow-y:auto}
 @media (max-width:520px){.ap-workers{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .ap-worker{min-width:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-sunken);padding:var(--sp-2) var(--sp-3)}
 .ap-worker .apw-model{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

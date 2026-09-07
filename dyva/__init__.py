@@ -2553,8 +2553,11 @@ def _messages_openai(messages):
                 new_tcs.append({"id": cid, "type": "function",
                                 "function": {"name": fn.get("name", ""), "arguments": args}})
             mm = dict(m, tool_calls=new_tcs)
-            if mm.get("content") == "":
-                mm["content"] = None   # OpenAI wants null content alongside tool_calls
+            # content must be a string or array of objects — NEVER null/missing
+            # (some OpenAI hosts reject null even alongside tool_calls, and a
+            # thinking-only assistant turn arrives with no content).
+            if not isinstance(mm.get("content"), (str, list)):
+                mm["content"] = ""
             out.append(mm)
         elif role == "tool":
             mm = dict(m)
@@ -2565,6 +2568,10 @@ def _messages_openai(messages):
             if not isinstance(mm.get("content"), str):
                 mm["content"] = str(mm.get("content") or "")
             out.append(mm)
+        elif not isinstance(m.get("content"), (str, list)):
+            # any other message with null/missing content -> "" (OpenAI rejects
+            # null); copy so the shared original isn't mutated.
+            out.append(dict(m, content=""))
         else:
             out.append(m)
     return out
