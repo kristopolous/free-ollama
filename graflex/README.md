@@ -312,6 +312,42 @@ warning.
 | `-r`, `--random` | Shuffle the combination list (countries × ports × servers plus the FID follow-ups) so the fetch cycles in random order |
 | `-t`, `--site` | Site to scrape: `fofa` (default) or `shodan`; recorded as `site` on each host entry |
 
+## Field notes: host exposure patterns
+
+Observations from characterising the discovered population. They matter because a
+host that *appears* gated to the survey often is not, which changes how we count
+"exposed." These are descriptive research notes, and the project's stance holds:
+an auth-gated endpoint is **recorded and left alone, never targeted** — graflex
+and dyva do not use these observations to defeat anyone's access controls, and an
+auth-required vector stays a pass.
+
+1. **Reverse proxies in front.** Many hosts sit behind nginx / apache / etc., so
+   the service answers on a proxy port (commonly :443) rather than its native
+   one. (Already known; the checker speaks both the proxied and native shapes.)
+
+2. **The native port is often also open.** On many of these, the underlying
+   service port is *also* directly reachable — e.g. :443 proxies to :11434 while
+   :11434 itself is open. The proxy is not the only door.
+
+3. **The gate is often only on the proxy.** Some hosts put auth (a login page /
+   basic-auth) on the proxied port but leave the native port ungated, so a host
+   that looks protected on :443 is open on :11434. For the survey this means
+   "gated on the proxy" is not the same as "gated": the true exposure is the
+   least-protected vector.
+
+4. **vhost auth keyed by hostname, not address.** Some nginx / apache configs
+   apply auth inside a *name-based* virtual host. A request that arrives as
+   `somesite.net` matches that vhost and is served the login page; a request to
+   the bare IP `1.2.3.4` matches no vhost, falls through to the default server,
+   and is served the backend without the gate. The protection is bound to the
+   hostname, not the address.
+
+**Implication for the survey:** exposure has to be assessed per *vector*
+(address × port × `Host` header), not per host. One machine can present as
+"gated" on one vector and "open" on another; record the vector, and let the
+woahllama analysis reason over the least-protected one. None of this authorises
+acting on a gated vector — it only makes the survey's exposure accounting honest.
+
 ## Common errors
 
 | Error | Cause | Fix |

@@ -8028,6 +8028,17 @@ async def _run_video_job(session, jid):
     label = f"video: {job.get('prompt', '')[:40]}"
     vkey = video_key(job.get("model_filter"))
     hosts = _find_video_hosts(job.get("target_host"))
+    # The survey already knows which shortlisted host carries which model. If the
+    # request names a model, race ONLY the hosts the survey records as having a
+    # MATCHING video model — don't spray all the vetted hosts and log a failure
+    # (and a reputation ding) on every one that merely runs a different model.
+    # Fall back to the full list only when the survey knows of no match at all,
+    # so a stale survey can't block the request outright.
+    mf = job.get("model_filter")
+    if mf and not job.get("target_host") and hosts:
+        matching = [h for h in hosts if _pick_video_model(h, mf)]
+        if matching:
+            hosts = matching
     if not hosts:
         job["status"] = "failed"
         job["error"] = "no video-capable hosts available"
@@ -8636,10 +8647,16 @@ async def _submit_video_workflow(session, host, job):
 
     # The model is chosen here, from what the host can actually load — the
     # name carried on the job is only a hint.
-    plan = _video_plan(info, job.get("model_filter") or None,
-                       exclude=set(job.get("exclude_models") or ())
-                               | bad_pairs_for(host, "video"))
+    mf = job.get("model_filter") or None
+    excl = set(job.get("exclude_models") or ()) | bad_pairs_for(host, "video")
+    plan = _video_plan(info, mf, exclude=excl)
     if not plan:
+        # Distinguish "this host can't do video at all" from "it HAS video
+        # models, just none matching the specific model you asked for". The
+        # latter read as the former, so a host with 40GB of Wan models looked
+        # broken when the real cause was a model filter it couldn't satisfy.
+        if mf and _video_plan(info, None, exclude=excl):
+            raise _VideoError(f"has video models, but none match {mf!r}")
         raise _VideoError("no usable video model on this host")
     model_path = plan["model"]
     family = plan["family"]

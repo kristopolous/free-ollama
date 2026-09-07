@@ -271,8 +271,9 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .host-model{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-dim);max-width:50%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skip-link{opacity:0;color:var(--accent);font-size:var(--fs-xs);text-decoration:underline;margin:0 var(--sp-3);flex-shrink:0;transition:opacity .1s}
 .model-item:hover .skip-link{opacity:1}
-.host-tabs{display:flex;gap:var(--sp-1);border-bottom:1px solid var(--border);margin-bottom:var(--sp-4);flex-shrink:0}
-.htab{background:transparent;color:var(--text-muted);border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 14px;font-size:var(--fs-sm);cursor:pointer;display:inline-flex;align-items:center;gap:5px;border-radius:var(--r-md) var(--r-md) 0 0}
+.host-tabs{display:flex;gap:var(--sp-1);border-bottom:1px solid var(--border);margin-bottom:var(--sp-4);flex-shrink:0;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.host-tabs::-webkit-scrollbar{display:none}
+.htab{background:transparent;color:var(--text-muted);border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 14px;font-size:var(--fs-sm);cursor:pointer;display:inline-flex;align-items:center;gap:5px;border-radius:var(--r-md) var(--r-md) 0 0;flex-shrink:0;white-space:nowrap}
 .htab:hover{color:var(--text-2);background:var(--surface-hover);border-bottom-color:var(--border-hover)}
 .htab.active{color:var(--text);background:var(--surface);border-bottom-color:var(--border-accent)}
 .htab-count{background:var(--accent-bg);color:var(--text-3);border-radius:var(--r-lg);padding:1px var(--sp-2);font-size:var(--fs-2xs);font-family:var(--font-mono);min-width:1.4em;text-align:center;line-height:1.4}
@@ -875,11 +876,11 @@ body.dragging-image .hist-item{cursor:grabbing}
 <h2>Models</h2>
 <div class="card-inner">
 <div class="host-tabs">
-<button type="button" class="htab active" data-mpane="text" title="Text models">📖<span class="htab-count" id="cnt-mtext"></span></button>
-<button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
+<button type="button" class="htab active" data-mpane="text" title="Text models">📖 Text<span class="htab-count" id="cnt-mtext"></span></button>
+<button type="button" class="htab" data-mpane="image" title="Image models">🖼️ Image<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
-<input type="text" id="modelFilter" oninput="filterModels()" placeholder="filter — name, *glob*, or size e.g. &gt;10gb" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?)&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;Combine a name and a size in any order: 'qwen &gt;10gb' or '&gt;10gb qwen'. A half-typed size (just '&gt;' or '&gt;10') is ignored until it has a unit. A model whose size the survey doesn't know is hidden by a size filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, or size e.g. &gt;10gb" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?)&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;Combine a name and a size in any order: 'qwen &gt;10gb' or '&gt;10gb qwen'. A half-typed size (just '&gt;' or '&gt;10') is ignored until it has a unit. A model whose size the survey doesn't know is hidden by a size filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
 <button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
 </div>
 <div id="mpane-text">
@@ -902,11 +903,11 @@ body.dragging-image .hist-item{cursor:grabbing}
 <h2>Hosts</h2>
 <div class="card-inner">
 <div class="host-tabs">
-<button type="button" class="htab active" data-pane="last" title="Recent">🎉<span class="htab-count" id="cnt-last"></span></button>
-<button type="button" class="htab" data-pane="good" title="Good">👍<span class="htab-count" id="cnt-good"></span></button>
-<button type="button" class="htab" data-pane="maybe" title="Maybe">🤷<span class="htab-count" id="cnt-maybe"></span></button>
-<button type="button" class="htab" data-pane="bad" title="Bad">💀<span class="htab-count" id="cnt-bad"></span></button>
-<button type="button" class="htab" data-pane="workers" title="Workers">🛠️<span class="htab-count" id="cnt-workers">0</span></button>
+<button type="button" class="htab active" data-pane="last" title="Recent">🎉 Recent<span class="htab-count" id="cnt-last"></span></button>
+<button type="button" class="htab" data-pane="good" title="Good">👍 Good<span class="htab-count" id="cnt-good"></span></button>
+<button type="button" class="htab" data-pane="maybe" title="Maybe">🤷 Maybe<span class="htab-count" id="cnt-maybe"></span></button>
+<button type="button" class="htab" data-pane="bad" title="Bad">💀 Bad<span class="htab-count" id="cnt-bad"></span></button>
+<button type="button" class="htab" data-pane="workers" title="Workers">🛠️ Workers<span class="htab-count" id="cnt-workers">0</span></button>
 </div>
 <div id="pane-last">
 <div id="lastList"></div>
@@ -2155,6 +2156,7 @@ function serializeChat(c){
             aid:a.aid,host:a.host,model:a.model};
   });
   if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}});
+  if(c.tools)o.tools=c.tools;   // per-chat tool selection
   return o;
 }
 // Per-chat saves: async, debounced, coalesced by id (latest wins), non-blocking.
@@ -2922,12 +2924,13 @@ function loadChatById(id){
   if(g&&g.chat){currentChat=g.chat;afterLoadChat(String(id));return;}
   fetchChat(id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',tools:c.tools||null,system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}})};
     afterLoadChat(String(id));
   });
 }
 function afterLoadChat(id){
   assetBackfill(currentChat);
+  _applyChatTools();   // restore this chat's saved tool selection
   document.getElementById('chatModel').value=currentChat.model||'*';
   updateModelCount();
   renderMessages();
@@ -4148,8 +4151,9 @@ function tryResume(){
   if(!j.job&&(j.n||0)>=2)return;
   fetchChat(j.id,function(c){
     if(!c)return;
-    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}})};
+    currentChat={id:c.id,createdAt:c.createdAt,title:c.title,model:c.model||'*',tools:c.tools||null,system:c.system||'',assets:(c.assets||[]).slice(),messages:(c.messages||[]).slice(),documents:(c.documents||[]).map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}})};
     touchIndex(currentChat);
+    _applyChatTools();   // restore this chat's saved tool selection
     renderMessages();
     renderSidebar();
     var bubble=addMsg('assistant','');
@@ -4674,35 +4678,50 @@ window.addEventListener('resize',function(){
   if(toolsPop.classList.contains('open'))placeToolsPop();
 });
 toolsPop.addEventListener('click',function(e){e.stopPropagation()});
+// Tool selection is remembered PER CHAT: the flags are saved onto the chat and
+// restored when it is reopened (a chat with the web tool on keeps it on). A new
+// chat falls back to the global last-used defaults in localStorage.
+function _persistChatTools(){
+  if(!currentChat)return;
+  currentChat.tools=_toolFlags();
+  saveCurrentChat();
+}
+function _applyChatTools(){
+  var t=currentChat&&currentChat.tools;
+  if(!t||typeof t!=='object')return;   // no per-chat setting -> keep the default
+  imageOn=!!t.imageOn;docsOn=!!t.docsOn;speechOn=!!t.speechOn;
+  videoOn=!!t.videoOn;webOn=!!t.webOn;agentsOn=!!t.agentsOn;
+  paintTools();
+}
 toolImageChk.addEventListener('change',function(){
   imageOn=this.checked;
   try{localStorage.setItem('dyva_tools',imageOn?'1':'0')}catch(e){}
-  paintTools();
+  paintTools();_persistChatTools();
 });
 if(toolWebChk)toolWebChk.addEventListener('change',function(){
   webOn=this.checked;
   try{localStorage.setItem('dyva_tools_web',webOn?'1':'0')}catch(e){}
-  paintTools();
+  paintTools();_persistChatTools();
 });
 if(toolAgentsChk)toolAgentsChk.addEventListener('change',function(){
   agentsOn=this.checked;
   try{localStorage.setItem('dyva_tools_agents',agentsOn?'1':'0')}catch(e){}
-  paintTools();
+  paintTools();_persistChatTools();
 });
 if(toolVideoChk)toolVideoChk.addEventListener('change',function(){
   videoOn=this.checked;
   try{localStorage.setItem('dyva_tools_video',videoOn?'1':'0')}catch(e){}
-  paintTools();
+  paintTools();_persistChatTools();
 });
 if(toolSpeechChk)toolSpeechChk.addEventListener('change',function(){
   speechOn=this.checked;
   try{localStorage.setItem('dyva_tools_speech',speechOn?'1':'0')}catch(e){}
-  paintTools();
+  paintTools();_persistChatTools();
 });
 if(toolDocsChk)toolDocsChk.addEventListener('change',function(){
   docsOn=this.checked;
   try{localStorage.setItem('dyva_tools_docs',docsOn?'1':'0')}catch(e){}
-  paintTools();
+  paintTools();_persistChatTools();
 });
 document.addEventListener('click',function(){toolsPop.classList.remove('open')});
 document.addEventListener('keydown',function(e){if(e.key==='Escape')toolsPop.classList.remove('open')});
