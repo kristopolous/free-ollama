@@ -32,6 +32,10 @@ def _cache_file(name, suffix):
     prefix = name or "image-gen"
     return os.path.join(CACHE_DIR, f"{prefix}-{suffix}.json")
 
+# Model knowledge base mined from the probe logs (shared with dyva, which loads
+# it read-only). Keyed by model name; general/extensible — currently size+digest.
+SURVEY_FILE = os.path.join(CACHE_DIR, "survey.json")
+
 TIMEOUT = 60
 BACKOFF = 11
 MAX_BACKOFF = 300
@@ -1950,6 +1954,95 @@ def _classify_gradio(summary, taxonomy=None):
     return "unknown"
 
 
+def survey(run_ts=None):
+    """Mine the saved model-list probe snapshots into survey.json — a per-model
+    knowledge base built from real observations in the logs, not guessed from
+    names. Records disk size (bytes) and digest per model from the ollama
+    /api/tags payloads; extensible for more derived facts (quantization, etc.)
+    later. survey.json ACCUMULATES, so with `-i <session>` it folds in just that
+    sweep's fresh snapshots (the normal case, right after a check); with no -i it
+    rescans every session for a full rebuild."""
+    import glob
+    _SHA = re.compile(r'^(sha256:)?[0-9a-f]{64}$', re.I)
+    # Incremental (-i) merges into the existing survey; a full rebuild (no -i)
+    # starts fresh so earlier pollution is dropped.
+    data = {}
+    if run_ts and os.path.exists(SURVEY_FILE):
+        try:
+            with open(SURVEY_FILE, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (ValueError, OSError):
+            data = {}
+    files = glob.glob(os.path.join("/tmp/graflex", run_ts if run_ts else "*", "check", "*.json"))
+    obs = 0
+    skipped_dyva = 0
+    for path in files:
+        try:
+            with open(path, encoding="utf-8") as f:
+                snap = json.load(f)
+        except (ValueError, OSError):
+            continue
+        payload = (snap or {}).get("payload")
+        # payloads come in several shapes: ollama /api/tags -> {"models":[…]},
+        # openai/vllm/lmstudio/llama.cpp /v1/models -> {"data":[…]}, and some are
+        # a bare list. Normalise to a list of model dicts.
+        if isinstance(payload, dict):
+            items = payload.get("models") or payload.get("data") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+        if not isinstance(items, list) or not items:
+            continue
+        # ouroboros guard: a real ollama host's digests are sha256 hex; a dyva
+        # instance (many run in the wild) echoes the pool back with ASCII-art
+        # "digests" and byte-sized "sizes". If this snapshot's present digests
+        # are mostly non-hex, it's a dyva/proxy — skip it so we don't survey
+        # ourselves.
+        digs = [str(m.get("digest")) for m in items if isinstance(m, dict) and m.get("digest")]
+        if digs and sum(1 for d in digs if not _SHA.match(d)) >= len(digs) / 2:
+            skipped_dyva += 1
+            continue
+        for m in items:
+            if not isinstance(m, dict):
+                continue
+            name = m.get("name") or m.get("id") or m.get("model") or m.get("model_name")
+            if not name:
+                continue
+            rec = data.setdefault(name, {})
+            rec["seen"] = int(rec.get("seen") or 0) + 1
+            obs += 1
+            sz = m.get("size")
+            dg = m.get("digest")
+            # A size only counts from a real (sha256) entry that's plausibly
+            # large (≥1MB — no real model is smaller). Each size bucket carries
+            # its digest, so near-identical sizes that are really the same build
+            # (metadata-layer noise) can be told apart from genuinely different
+            # weights. The reported `size`/`digest` is the MODE bucket, so a
+            # stray value can't beat the majority.
+            if isinstance(sz, (int, float)) and sz >= 1_000_000 and dg and _SHA.match(str(dg)):
+                hist = rec.setdefault("sizes", {})
+                key = str(int(sz))
+                b = hist.get(key)
+                if not isinstance(b, dict):   # tolerate a legacy int bucket
+                    b = {"count": int(b) if isinstance(b, int) else 0, "digest": dg}
+                    hist[key] = b
+                b["count"] = int(b.get("count") or 0) + 1
+                b["digest"] = str(dg)
+                mode = max(hist, key=lambda k: hist[k].get("count", 0) if isinstance(hist[k], dict) else (hist[k] or 0))
+                rec["size"] = int(mode)
+                mb = hist.get(mode)
+                rec["digest"] = mb.get("digest") if isinstance(mb, dict) else rec.get("digest")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    _save_json_atomic(SURVEY_FILE, data)
+    sized = sum(1 for r in data.values() if isinstance(r, dict) and r.get("size"))
+    log.info(f"survey: {len(data)} models ({sized} with size), {obs} observations "
+             f"across {len(files)} snapshots ({skipped_dyva} dyva/proxy skipped) -> {SURVEY_FILE}")
+    return data
+
+
 def main():
     load_dotenv()
 
@@ -1974,7 +2067,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -1996,6 +2089,12 @@ def main():
                              "to backfill city/lat/lon over a country-only pass). Without a file, "
                              "-a enrich runs over the per-service working files (use -s all).")
     args = parser.parse_args()
+
+    # survey mines the saved probe logs into survey.json — no service/name needed.
+    # -i <session> folds in just that sweep's snapshots; no -i rescans everything.
+    if args.action == "survey":
+        survey(run_ts=args.session)
+        return
 
     if args.query and not args.name:
         parser.error("--query requires --name")

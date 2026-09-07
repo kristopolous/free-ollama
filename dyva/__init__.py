@@ -695,9 +695,10 @@ def hosts_cli(argv):
         print(f"no hosts marked '{state}'")
         return 0
 
-    # --hosts <state> : the keys in that state
+    # --hosts <state> : the keys in that state, ascending by key name
     if not words:
         total = sum(c for _, c in rows)
+        rows = sorted(rows, key=lambda r: (r[1], (_key_label(r[0]) or "").lower()))
         print(f"{total} host mark{'' if total == 1 else 's'} in '{state}', "
               f"across {len(rows)} key{'' if len(rows) == 1 else 's'}:\n")
         _print_key_table(rows)
@@ -1796,6 +1797,58 @@ async def refresh_host_caps(session, host):
     save_knowns()
 
 
+# Model knowledge base built by `graflex survey` from the probe logs (real
+# /api/tags sizes etc.), loaded read-only. Keyed by model name; currently holds
+# {size, ...} and is extensible (quantization, digest, …). dyva does NOT collect
+# this itself — a graflex survey pass is the systematic, comprehensive source.
+SURVEY_FILE = os.path.join(CACHE_DIR, "survey.json")
+_survey_cache = None
+
+
+def load_survey():
+    global _survey_cache
+    if _survey_cache is None:
+        _survey_cache = {}
+        if os.path.exists(SURVEY_FILE):
+            try:
+                with open(SURVEY_FILE, encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    _survey_cache = d
+            except (ValueError, OSError):
+                pass
+    return _survey_cache
+
+
+def _model_size(model):
+    """Recorded disk size (bytes) for a model from the survey, or None."""
+    rec = load_survey().get(model)
+    return rec.get("size") if isinstance(rec, dict) else None
+
+
+_SIZE_MULT = {"k": 1e3, "m": 1e6, "g": 1e9, "t": 1e12}
+_SIZE_RE = re.compile(r"([<>]=?)\s*([\d.]+)\s*([kmgt])b?\b", re.I)
+
+
+def _split_size_filter(sub):
+    """Pull a size predicate like '>3gb' / '<=700mb' out of a model query.
+    Returns (name_query_without_it, (comparator, threshold_bytes) | None). Units
+    are decimal (gb=1e9), an approximation — model heft, not exact bytes."""
+    import operator
+    s = sub or ""
+    m = _SIZE_RE.search(s)
+    if not m:
+        return sub, None
+    op, num, unit = m.group(1), m.group(2), m.group(3).lower()
+    try:
+        thresh = float(num) * _SIZE_MULT[unit]
+    except (ValueError, KeyError):
+        return sub, None
+    name = (s[:m.start()] + s[m.end():]).strip()
+    cmp = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}[op]
+    return name, (cmp, thresh)
+
+
 def _known_has(host, model, cap):
     caps_map = (load_knowns().get(host) or {}).get("models", {})
     return cap in (caps_map.get(model) or [])
@@ -1926,6 +1979,25 @@ def _checked_rank(s):
 
 
 def find_servers(sub, caps=None):
+    # A size predicate (">3gb") is a query modifier, not part of the model name.
+    # Strip it, match on the name as usual, then keep only candidates whose
+    # recorded size satisfies it — models with an UNKNOWN size are kept (the
+    # filter only drops ones known to fail, so a backend that reports no size
+    # isn't silently excluded).
+    sub, size_pred = _split_size_filter(sub)
+    result = _find_servers_raw(sub, caps)
+    if not size_pred:
+        return result
+    cmp, thresh = size_pred
+    out = []
+    for prio, host, ms in result:
+        ms2 = [m for m in ms if (_model_size(m) is None) or cmp(_model_size(m), thresh)]
+        if ms2:
+            out.append((prio, host, ms2))
+    return out
+
+
+def _find_servers_raw(sub, caps=None):
     if '/' in sub:
         res = []
         for model in sub.split('/'):
@@ -2567,6 +2639,33 @@ def _coerce_tool_args(messages):
                 fn["arguments"] = _tool_args_obj(fn["arguments"])
 
 
+def _coerced_messages(messages):
+    """Like _coerce_tool_args but NON-destructive: return a messages list whose
+    tool_call arguments are objects, copying only the messages/tool_calls that
+    need changing. Used at the ollama send boundary in the race — string args
+    get reintroduced after submit (agent re-race, dialect conversion, replayed
+    history), and we can't mutate the shared list because an OpenAI retry of the
+    same attempt needs the arguments as a *string*."""
+    if not isinstance(messages, list):
+        return messages
+    out = []
+    for m in messages:
+        tcs = m.get("tool_calls") if isinstance(m, dict) else None
+        if not tcs:
+            out.append(m)
+            continue
+        new_tcs, changed = [], False
+        for tc in tcs:
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                new_tcs.append(dict(tc, function=dict(fn, arguments=_tool_args_obj(fn["arguments"]))))
+                changed = True
+            else:
+                new_tcs.append(tc)
+        out.append(dict(m, tool_calls=new_tcs) if changed else m)
+    return out
+
+
 def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -2627,6 +2726,12 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 p = dict(payload, model=full, stream=do_stream)
                 if attempt_oai:
                     p = openai_payload(p)
+                elif p.get("messages"):
+                    # ollama-native wants tool_call arguments as objects; the
+                    # agent re-race / dialect conversion / replayed history can
+                    # carry them as strings. Fix non-destructively (the OpenAI
+                    # retry of this same attempt still needs the string form).
+                    p = dict(p, messages=_coerced_messages(p["messages"]))
                 _curlify("POST", f"{host}{ep}", p)
                 _log_sent(f"{host}{ep}", p)
                 resp = await asyncio.wait_for(
@@ -3779,7 +3884,10 @@ async def handle_dashboard_models(request):
         if ck:
             entry["checked"] = ck
         out.append(entry)
-    body = json.dumps({"servers": out})
+    # ship the survey's per-model sizes so the client filter understands ">10gb"
+    sizes = {name: rec["size"] for name, rec in load_survey().items()
+             if isinstance(rec, dict) and rec.get("size")}
+    body = json.dumps({"servers": out, "sizes": sizes})
     # This payload is large but changes slowly; serve it with an ETag so the
     # browser revalidates and gets a tiny 304 instead of re-downloading it.
     etag = '"' + hashlib.md5(body.encode("utf-8")).hexdigest() + '"'
@@ -4748,7 +4856,9 @@ def _check_local(request):
     remote = request.remote
     if remote in ("127.0.0.1", "::1", "localhost"):
         return None
-    return web.json_response({"error": f"{GITHUB_URL} — Or execute 'uvx dyva' to run your own"}, status=403)
+    return web.json_response({"error":
+        "Running with localhost restrictions. Restart without the -l option, or "
+        f"run your own here: {GITHUB_URL} — or execute 'uvx dyva'"}, status=403)
 
 
 def _hash_pw(pw):
@@ -5004,6 +5114,22 @@ async def handle_chat_job_delete(request):
         _job_ctl(jid)["cancel"] = True
     deleted = _job_delete(jid)
     return web.json_response({"deleted": bool(deleted)})
+
+
+async def handle_scratch_get(request):
+    """
+    Read a spawn batch's shared scratchpad
+    ---
+    tags: [Chat]
+    summary: GET /api/chat/scratch/{bid} — the sub-agents' shared notes, with provenance
+    responses:
+      '200': {description: Scratchpad entries, oldest first}
+    """
+    resp = _check_local(request)
+    if resp:
+        return resp
+    bid = request.match_info.get("bid")
+    return web.json_response({"entries": _scratch_read(bid)})
 
 
 async def handle_openai_chat(request):
@@ -7374,6 +7500,30 @@ def _job_delete(jid):
 _JOB_CTL = {}            # jid -> {"cancel":bool, "skip":bool}
 _JOB_TASKS = {}          # jid -> asyncio.Task, so we can find a running job
 
+# Sub-agent blackboard: a shared scratchpad per spawn BATCH. Agents write notes
+# (with provenance — who wrote it) and read the others' notes; the coordinator
+# and the user's Scratchpad document mirror it. In-memory only: it's live
+# working state for a running batch, not an archived artifact.
+_SCRATCH = {}            # batch_id -> [{"who", "ts", "text"}]
+_SCRATCH_MAX = 500       # cap entries per batch
+_SCRATCH_BATCHES = 100   # cap number of live batches
+
+
+def _scratch_write(bid, who, text):
+    if not bid:
+        return
+    if bid not in _SCRATCH and len(_SCRATCH) >= _SCRATCH_BATCHES:
+        # drop the oldest batch to stay bounded
+        _SCRATCH.pop(next(iter(_SCRATCH)), None)
+    lst = _SCRATCH.setdefault(bid, [])
+    lst.append({"who": who or "agent", "ts": time.time(), "text": str(text or "")})
+    if len(lst) > _SCRATCH_MAX:
+        del lst[:len(lst) - _SCRATCH_MAX]
+
+
+def _scratch_read(bid):
+    return list(_SCRATCH.get(bid) or [])
+
 
 def _job_ctl(jid):
     return _JOB_CTL.setdefault(str(jid), {"cancel": False, "skip": False})
@@ -7495,6 +7645,23 @@ async def _run_chat_job(session, jid):
                             text = f"(the page at {url} had no readable text)"
                 except Exception as e:
                     text = f"Error fetching {url}: {e}"
+                ran = True
+            elif name == "write_scratch":
+                # shared blackboard for this spawn batch, attributed to this agent
+                _scratch_write(params.get("scratch"),
+                               params.get("agent_name"),
+                               a.get("text") or a.get("note") or "")
+                text = "Noted on the shared scratchpad."
+                ran = True
+            elif name == "read_scratch":
+                entries = _scratch_read(params.get("scratch"))
+                if entries:
+                    text = "\n\n".join(f"[{e['who']}] {e['text']}" for e in entries)
+                else:
+                    text = ("The scratchpad is empty right now — nothing from the "
+                            "other agents yet. Keep working and check back later, or "
+                            "leave a note with write_scratch (e.g. ask for what you "
+                            "need from the others).")
                 ran = True
             else:
                 text = f"(tool '{name}' is not available to sub-agents)"
@@ -8405,6 +8572,17 @@ async def _submit_video_workflow(session, host, job):
     else:
         raise _VideoError(f"unsupported video model family for {model_path!r}")
 
+    # If a start image was requested, every builder only wires it via a
+    # LoadImage node on its i2v path; a host missing that family's i2v node
+    # silently falls back to text-to-video and drops the image. Don't ship a
+    # t2v graph for an i2v request — reject so the race finds an i2v-capable
+    # host instead of returning a video that ignores the picture.
+    if params.get("start_image") and not any(
+            (n or {}).get("class_type") == "LoadImage" for n in workflow.values()):
+        raise _VideoError(
+            f"{family} on this host can't do image-to-video (no i2v node); "
+            "trying another host")
+
     return await comfy_submit(session, host, workflow), plan
 
 
@@ -8629,6 +8807,10 @@ async def handle_videos_list(request):
       '200':
         description: Job list
     """
+    # _VIDEO_JOBS is loaded lazily; without this the gallery comes up EMPTY when
+    # GET /v1/videos is the first video endpoint hit after a restart (before a
+    # poll/submit has triggered the load) — the "gallery doesn't always load" bug.
+    _load_video_jobs()
     out = []
     for jid, job in _VIDEO_JOBS.items():
         out.append({
@@ -10603,6 +10785,7 @@ def make_app():
     app.router.add_post("/api/chat/jobs/{id}/control", handle_chat_job_control)
     app.router.add_post("/api/chat/jobs/{id}/delete", handle_chat_job_delete)
     app.router.add_get("/api/chat/jobs/{id}", handle_chat_job_get)
+    app.router.add_get("/api/chat/scratch/{bid}", handle_scratch_get)
 
     app.router.add_route("*", "/comfyui/{tail:.*}", handle_comfyui_proxy)
     app.router.add_post("/v1/videos", handle_videos_post)

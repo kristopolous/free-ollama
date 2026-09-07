@@ -13,6 +13,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mathjs@13/lib/browser/math.js"></script>
 <style>
 /* ============================================================
    design tokens
@@ -366,6 +367,8 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.note{margin:.4em 0 .8em}
 .msg.note .body{background:transparent;border-left:2px solid var(--border-accent);border-radius:0;padding:.15em 0 .15em .7em;font-size:var(--fs-md);color:var(--text-dim)}
 .msg.note .note-cmd{display:block;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--accent);letter-spacing:0;margin-bottom:.1em}
+.msg.note.err .body{border-left-color:var(--err)}
+.msg.note.err .note-cmd{color:var(--err)}
 .msg.note .note-text p{margin:.15em 0}
 .msg.note .note-text ul{margin:.25em 0;padding-left:1.2em}
 .msg.note .note-text li{margin:.1em 0}
@@ -461,7 +464,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 details.thinkbox{margin:.15em 0 .55em;border-left:3px solid var(--border-strong);background:#232323;border-radius:var(--r-sm);padding:.25em .65em}
 details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none}
 details.toolbox{margin:.15em 0 .55em;border-left:3px solid var(--border-accent);background:#232323;border-radius:var(--r-sm);padding:.25em .65em}
-details.toolbox>summary{cursor:pointer;color:var(--accent);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none;font-family:var(--font-mono)}
+details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none}
 .toolbox .tc-item{margin:.4em 0 .2em}
 .toolbox .tc-fn{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-2)}
 .toolbox pre.tc-args{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--fs-2xs);border:0;background:var(--bg-inset);border-radius:var(--r-sm);padding:.4em .5em;margin:.2em 0 0;max-height:280px;overflow:auto}
@@ -608,7 +611,7 @@ details.toolbox>summary{cursor:pointer;color:var(--accent);font-size:var(--fs-2x
 .doc-body table{border-collapse:collapse;margin:.6em 0}
 .doc-body th,.doc-body td{border:1px solid var(--border-strong);padding:.3em .5em}
 #docToggle{min-width:var(--ctl-h);padding:.5rem}
-.doc-chip{display:inline-flex;align-items:center;gap:.45em;border:1px solid var(--border-strong);border-radius:var(--r-md);padding:.25em .6em;margin:.2em 0;background:var(--bg-inset);cursor:pointer;font-size:var(--fs-sm);max-width:100%}
+.doc-chip{display:inline-flex;align-items:center;gap:.45em;border:1px solid var(--border-strong);border-radius:var(--r-md);padding:.5rem;margin:.2em 0;background:var(--bg-inset);cursor:pointer;font-size:var(--fs-sm);max-width:100%}
 .doc-chip:hover{border-color:var(--accent)}
 .doc-chip .dc-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .doc-chip .dc-note{color:var(--text-dim);font-style:normal;font-size:var(--fs-xs);flex-shrink:0}
@@ -677,9 +680,6 @@ body.img-edit .img-main > #imgResult{order:10}
 .tool-opt .tool-txt{display:flex;flex-direction:column}
 .tool-opt .tool-txt b{font-weight:500;font-size:var(--fs-md);color:var(--text)}
 .tool-opt .tool-txt small{color:var(--text-dim);font-size:var(--fs-2xs);margin-top:1px}
-.tool-subrow{padding:2px var(--sp-2) 7px;margin:-3px 0 2px 30px}
-.tool-subinput{width:100%;box-sizing:border-box;font-size:var(--fs-xs);padding:5px 7px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);color:var(--text)}
-.tool-subinput::placeholder{color:var(--text-dim)}
 .field{margin-bottom:var(--sp-4)}
 .img-params{display:grid;grid-template-columns:2.2fr 1fr;gap:var(--sp-4);margin-bottom:var(--sp-4)}
 .img-dims{display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--sp-4);row-gap:var(--sp-2);margin-bottom:var(--sp-4)}
@@ -955,13 +955,12 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="tools-pop-title">Tools</div>
 <label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image generation</b><small>Create images on request</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolImageEdit"><span class="tool-txt"><b>Image editing</b><small>Edit an image already in the chat</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolAsk"><span class="tool-txt"><b>Ask me</b><small>Ask a multiple-choice question before answering</small></span></label>
-<label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Make a short video (takes minutes)</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolAsk"><span class="tool-txt"><b>Ask me</b><small>Ask a multiple-choice question</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Make a short video</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Speak dialog out loud</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolWeb"><span class="tool-txt"><b>Web</b><small>Read a page at a URL</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolAgents"><span class="tool-txt"><b>Sub-agents</b><small>Split a task across parallel agents</small></span></label>
-<div class="tool-subrow"><input type="text" id="subAgentModel" class="tool-subinput" placeholder="sub-agent model (blank = chat model)" autocomplete="off" spellcheck="false"></div>
-<label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Write &amp; edit documents in a side panel</small></span></label>
+<label class="tool-opt"><input type="checkbox" id="toolDocs"><span class="tool-txt"><b>Documents</b><small>Write &amp; edit documents</small></span></label>
 </div>
 </div>
 <button id="docToggle" class="mp-tool" title="Documents" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></button>
@@ -1465,8 +1464,34 @@ function _globToRe(pat){
   return new RegExp('^'+out+'$');
 }
 var _globCache={};
+// Per-model sizes (bytes) from the survey, sent with dashboard-models. Lets the
+// filter understand a size token like ">10gb" — see _splitSizePred / matchModel.
+var _modelSizes={};
+var _SIZE_MULT_JS={k:1e3,m:1e6,g:1e9,t:1e12};
+function _splitSizePred(pattern){
+  var m=String(pattern).match(/([<>]=?)\s*([\d.]+)\s*([kmgt])b?\b/i);
+  if(!m)return {name:pattern,pred:null};
+  var op=m[1],thresh=parseFloat(m[2])*_SIZE_MULT_JS[m[3].toLowerCase()];
+  var name=(pattern.slice(0,m.index)+pattern.slice(m.index+m[0].length)).trim();
+  var pred=function(sz){return op==='<'?sz<thresh:op==='<='?sz<=thresh:op==='>='?sz>=thresh:sz>thresh};
+  return {name:name,pred:pred};
+}
+function _sizeOf(name){
+  if(_modelSizes[name]!=null)return _modelSizes[name];
+  return _modelSizes[String(name).split(/\s+/).pop()];   // "host model" -> model
+}
 function matchModel(name,pattern){
   if(!pattern)return true;
+  // a size predicate (">10gb") is a filter modifier, not part of the name: only
+  // models with a KNOWN size that satisfies it pass (unknown size is excluded —
+  // a positive "show me >10gb" can't include what we can't measure).
+  var sp=_splitSizePred(pattern);
+  if(sp.pred){
+    var sz=_sizeOf(name);
+    if(sz==null||!sp.pred(sz))return false;
+    pattern=sp.name;
+    if(!pattern)return true;
+  }
   var p=String(pattern).toLowerCase(),n=String(name||'').toLowerCase();
   if(/[*?[]/.test(p)){
     var re=_globCache[p];
@@ -1742,9 +1767,9 @@ function renderActivityWorkers(all){
 var _CHECK_EMOJI=['\uD83E\uDD14','\uD83D\uDD0E','\uD83E\uDDD0','\uD83D\uDC40','\uD83E\uDD1E','\uD83C\uDFC3\u200D\u2640\uFE0F'];
 function _checkGlyph(w,findSecs){
   // Cycle the emoji only while a host is actually being hunted for. The instant
-  // one is found (findSecs set) the search is over, so it becomes "checked" —
-  // the same word a finished job shows.
-  if(w.done||findSecs!=null)return 'checked';
+  // one is found (findSecs set) the search is over, so it settles on a plain
+  // check mark (U+2713 — deliberately the monochrome glyph, not the colored ✅).
+  if(w.done||findSecs!=null)return '✓';
   return _CHECK_EMOJI[Math.floor(Date.now()/1350)%_CHECK_EMOJI.length];
 }
 // One card's two segments, both reading "<time> - <what>" for consistency: the
@@ -1980,6 +2005,7 @@ function loadDashboard(){
   ]).then(function(res){
     var mv=res[0]||{},dv=res[1]||{};
     _good=new Set(dv.good||[]);_bad=new Set(dv.bad||[]);
+    _modelSizes=mv.sizes||{};
     renderModels(mv.servers||[]);
     renderHostLists(dv);
     hideSnack();
@@ -2524,7 +2550,7 @@ function toolCallHtml(tcs,open){
          + '<pre class="tc-args"><code class="language-json">'+escHtml(pretty||'{}')+'</code></pre></div>';
   }).join('');
   var names=tcs.map(function(tc){return ((tc&&tc.function)||{}).name||'?'}).join(', ');
-  return '<details class="toolbox"'+(open?' open':'')+'><summary>tool call \u00b7 '
+  return '<details class="toolbox"'+(open?' open':'')+'><summary>'
        + escHtml(names)+'</summary>'+rows+'</details>';
 }
 function renderFiles(b,files){
@@ -2715,8 +2741,8 @@ function scheduleRender(gen){
 }
 // A system-style note in the transcript (same look as /list), for informational
 // tool outcomes like "no models matching X" — not an assistant error.
-function addNote(label,md){
-  var d=document.createElement('div');d.className='msg note';
+function addNote(label,md,kind){
+  var d=document.createElement('div');d.className='msg note'+(kind?' '+kind:'');
   var b=document.createElement('div');b.className='body';
   if(label){var l=document.createElement('span');l.className='note-cmd';l.textContent=label;b.appendChild(l)}
   var t=document.createElement('div');t.className='note-text';t.innerHTML=mdRender(md||'');
@@ -2727,7 +2753,7 @@ function renderMessages(){
   chatLog.innerHTML='';
   currentChat.messages.forEach(function(m,i){
     if(m&&m._meta&&m._meta.hidden)return;
-    if(m&&m._meta&&m._meta.note){addNote(m._meta.note,m.content);return}
+    if(m&&m._meta&&m._meta.note!==undefined){addNote(m._meta.note,m.content);return}
     addMsg(m.role,m.content,i);
   });
   updateTokEst();
@@ -3361,6 +3387,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
   function inView(){return chatInView(chatId)}
   function live(){return inView()&&gen.bubble&&gen.bubble.bodyEl.isConnected}
   function setStatus(t){if(gen.statusEl&&gen.statusEl.parentNode)gen.statusEl.textContent=t}
+  // Errors belong in the transcript as system-style notes (the /list look), not
+  // as an assistant bubble full of red text. Drop the empty streaming bubble and
+  // drop a note in its place.
+  function _dropBubble(){var m=gen.bubble&&gen.bubble.bodyEl&&gen.bubble.bodyEl.parentNode;if(m&&m.parentNode)m.parentNode.removeChild(m)}
+  function errNote(msg){if(inView()){_dropBubble();addNote('error',String(msg),'err');scrollChat()}}
   function clearInflight(){try{localStorage.removeItem('dyva_inflight')}catch(e){}}
   function keepInflight(){try{var m=JSON.parse(localStorage.getItem('dyva_inflight')||'null');if(!m)return;m.n=(m.n||0)+1;if(m.n<=2)localStorage.setItem('dyva_inflight',JSON.stringify(m));else localStorage.removeItem('dyva_inflight')}catch(e){try{localStorage.removeItem('dyva_inflight')}catch(e2){}}}
   try{sessionStorage.setItem('dyva_own','1')}catch(e){}
@@ -3392,6 +3423,16 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       var tc=toolCalls[i]||{},fn=tc.function||{};
       var args={};
       try{args=typeof fn.arguments==='string'?JSON.parse(fn.arguments||'{}'):(fn.arguments||{})}catch(e){}
+      // read_docs gate: a gated tool won't run without the right token; a wrong
+      // one bounces back the docs AND the token so the retry succeeds.
+      if(GATED_TOOLS[fn.name]&&String(args.token||'')!==TOOL_TOKENS[fn.name]){
+        var _gt=TOOL_DEFS[fn.name]||{},_gp=(_gt.parameters&&_gt.parameters.properties)||{},_gr=(_gt.parameters&&_gt.parameters.required)||[];
+        var _dl=['You sent the wrong token, so '+fn.name+' did NOT run. Read the docs below, then call '+fn.name+' again including "token".','',(_gt.name||fn.name)+': '+(_gt.description||'')];
+        Object.keys(_gp).forEach(function(k){var p=_gp[k]||{};_dl.push('- '+k+(_gr.indexOf(k)>=0?' (required)':'')+' ['+(p.type||'any')+(p.enum?': '+p.enum.join('|'):'')+']: '+(p.description||''));});
+        _dl.push('- token (required) [string]: pass the exact value below.','','token: '+TOOL_TOKENS[fn.name]);
+        results.push({text:_dl.join('\n'),md:'`🔒 '+fn.name+': token required`'});
+        continue;
+      }
       if(fn.name==='generate_image'){
         setStatus('generating image\u2026');
         try{
@@ -3760,6 +3801,28 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           if(ac.signal.aborted)return;
           results.push({text:'Error generating speech: '+ex.message});
         }
+      }else if(fn.name==='calc'){
+        var _cx=String(args.expression||'').trim();
+        var _cr;
+        try{_cr=_calcEval(_cx)}catch(e){_cr='Error: '+((e&&e.message)||e)}
+        results.push({text:(_cx?_cx+' = ':'')+_cr,
+                      md:'`= '+String(_cr).slice(0,160).replace(/`/g,"'")+'`'});
+      }else if(fn.name==='read_docs'){
+        var _t=TOOL_DEFS[args.tool];
+        if(!_t){
+          results.push({text:'No such tool "'+String(args.tool)+'". Available: '+Object.keys(TOOL_DEFS).join(', '),md:'`⚠ read_docs`'});
+        }else{
+          var _lines=[_t.name+': '+_t.description];
+          var _props=(_t.parameters&&_t.parameters.properties)||{};
+          var _req=(_t.parameters&&_t.parameters.required)||[];
+          Object.keys(_props).forEach(function(k){var p=_props[k]||{};
+            _lines.push('- '+k+(_req.indexOf(k)>=0?' (required)':'')+' ['+(p.type||'any')+(p.enum?': '+p.enum.join('|'):'')+']: '+(p.description||''));});
+          if(GATED_TOOLS[args.tool]){
+            _lines.push('- token (required) [string]: pass the exact value below.','',
+                        'token: '+TOOL_TOKENS[args.tool]);
+          }
+          results.push({text:_lines.join('\n'),md:'📖 read_docs '+String(args.tool)});
+        }
       }else if(fn.name==='spawn_agents'){
         var aglist=Array.isArray(args.agents)?args.agents.filter(function(a){return a&&a.task}):[];
         if(!aglist.length){
@@ -3769,30 +3832,38 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           if(aglist.length>12)aglist=aglist.slice(0,12);   // keep the fan-out sane
           var shared=String(args.context||'').trim();
           setStatus('running '+aglist.length+' sub-agent'+(aglist.length>1?'s':'')+'…');
+          // Shared scratchpad for this batch — a buffer the agents write to (with
+          // provenance) and read from, mirrored live into the Scratchpad doc so
+          // the user can watch it fill.
+          var batchId='b'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+          var _scratchTimer=setInterval(function(){pollScratch(chatId,batchId)},1500);
           // Fire each sub-agent as its own server-side job and run them in
           // parallel; each is isolated ({task, context} only) — the coordinator
           // (this model) synthesizes their results on the next turn.
           var outs=await Promise.all(aglist.map(function(ag,ix){
             var nm=String(ag.name||('agent'+(ix+1))).slice(0,40);
-            // per-agent model wins; else the sub-agent-model setting; else this chat's model
-            var amodel=String(ag.model||'').trim()||subAgentModel||model;
+            // model is chosen at invocation (per-agent); default to this chat's
+            var amodel=String(ag.model||'').trim()||model;
             var sys='You are '+nm+', a focused sub-agent working one part of a larger task. '
-                  +'You cannot see the main conversation or the other agents. You can read web '
-                  +'pages with the fetch_url tool — call it to gather what you need (its output '
-                  +'stays in your own context, not the caller’s). When done, return ONLY your '
-                  +'result — concise and self-contained.';
+                  +'You cannot see the main conversation. You can read web pages with fetch_url '
+                  +'(its output stays in your own context, not the caller’s). You also share a '
+                  +'scratchpad with the other agents: write_scratch(text) leaves a note for them '
+                  +'(and the user sees it), read_scratch() shows what they have posted so far. '
+                  +'When done, return ONLY your result — concise and self-contained.';
             var uc=(shared?shared+'\n\n':'')+String(ag.task||'');
-            // dyva_agent → the job runner executes fetch_url server-side and loops
-            // (the one shared orchestration), so the sub-agent's fetched bulk
-            // never touches the coordinator's context — only its final answer does.
-            // spread: each sub-agent starts at a different host so N same-model
-            // agents don't all pile onto the sticky host.
-            return runAgentJob({model:amodel,dyva_agent:true,tools:[WEB_TOOL],spread:ix,
+            // dyva_agent → the job runner executes the tools server-side and loops
+            // (the one shared orchestration); scratch/agent_name give the batch
+            // blackboard its identity; spread → each starts at a different host.
+            return runAgentJob({model:amodel,dyva_agent:true,spread:ix,
+                                scratch:batchId,agent_name:nm,
+                                tools:[WEB_TOOL,WRITE_SCRATCH_TOOL,READ_SCRATCH_TOOL],
                                 messages:[{role:'system',content:sys},
                                           {role:'user',content:uc}]},ac.signal)
               .then(function(r){return {name:nm,model:r.model||amodel,text:r.text||'(no output)'};})
               .catch(function(e){return {name:nm,model:amodel,text:'(failed: '+((e&&e.message)||e)+')'};});
           }));
+          clearInterval(_scratchTimer);
+          pollScratch(chatId,batchId);   // final mirror of the finished board
           if(ac.signal.aborted)return;
           var joined=outs.map(function(o){
             return '### '+o.name+(o.model?' ('+String(o.model).replace(/\\/g,'/').split('/').pop()+')':'')
@@ -3835,8 +3906,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                               _meta:Object.keys(_meta).length?_meta:undefined});
     results.forEach(function(res){
       if(!res.md)return;
+      // Tool-call results are SYSTEM events, not the assistant talking — render
+      // as a note (no Assistant label, no speak/copy). res.note is an optional
+      // label; '' means a bare note line.
       appendMsgRecord(chatId,{role:'assistant',content:res.md,
-                              _meta:res.note?{note:res.note}:undefined});
+                              _meta:{note:res.note||''}});
     });
     var nb=null;
     if(inView()){
@@ -3871,11 +3945,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         clearInflight();
         var msg='HTTP '+sresp.status;
         try{var j=await sresp.json();msg=(j.error&&(j.error.message||j.error))||msg}catch(e){}
-        if(live()){
-          gen.bubble.bodyEl.classList.remove('streaming');
-          gen.bubble.bodyEl.removeAttribute('data-stream');
-          gen.bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(msg)+'</span>';
-        }
+        errNote(msg);
         if(inView())saveCurrentChat();
         renderSidebar();
         return;
@@ -3892,11 +3962,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       var presp=await fetch('api/chat/jobs/'+encodeURIComponent(jobId)+'?offset='+offset,{signal:ac.signal});
       if(presp.status===404){
         clearInflight();
-        if(live()){
-          gen.bubble.bodyEl.classList.remove('streaming');
-          gen.bubble.bodyEl.removeAttribute('data-stream');
-          gen.bubble.bodyEl.innerHTML='<span class="error">Error: generation not found</span>';
-        }
+        errNote('generation not found');
         if(inView())saveCurrentChat();renderSidebar();
         return;
       }
@@ -3940,12 +4006,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       }else{offset=(pj.offset!==undefined?pj.offset:offset);}
       if(pj.status==='failed'){
         clearInflight();
-        var em=pj.error||'all servers failed';
-        if(live()){
-          gen.bubble.bodyEl.classList.remove('streaming');
-          gen.bubble.bodyEl.removeAttribute('data-stream');
-          gen.bubble.bodyEl.innerHTML='<span class="error">Error: '+escHtml(em)+'</span>';
-        }
+        errNote(pj.error||'all servers failed');
         if(inView())saveCurrentChat();renderSidebar();
         return;
       }
@@ -3988,11 +4049,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       }
       if(inView())saveCurrentChat();
       renderSidebar();
-    }else if(live()){
-      gen.bubble.bodyEl.classList.remove('streaming');
-      gen.bubble.bodyEl.removeAttribute('data-stream');
-      var em=document.hidden?'Interrupted while in background - will resume when you return':'Error: '+escHtml(ex.message);
-      gen.bubble.bodyEl.innerHTML='<span class="error">'+em+'</span>';
+    }else if(inView()){
+      // background interruption is informational (the job survives and the tab
+      // reconnects); a real error is an error note.
+      if(document.hidden){_dropBubble();addNote(null,'Interrupted while in background — will resume when you return');scrollChat();}
+      else errNote(ex.message);
       if(inView())saveCurrentChat();
       renderSidebar();
     }
@@ -4318,9 +4379,27 @@ function _resultMetaMd(name,model,service,host){
   if(!bits.length)return '';
   return '\n\n<span class="result-meta">'+bits.map(escHtml).join(' \u00b7 ')+'</span>';
 }
-var SEARCH_MODELS_TOOL={type:'function',function:{name:'search_models',description:'Search the models actually available across the discovered hosts for a given kind of generation \u2014 to tell the user what they can make things with, or to find one matching what they asked for. Read-only. Call it for questions like "what models can you make images with" or "any cartoon image models" (pass substring "cartoon"). Returns matching model names with how many hosts have each.',parameters:{type:'object',properties:{type:{type:'string',enum:['image','edit','video','speech','text'],description:'Which capability: image (generate), edit (image editing), video, speech (TTS voices), or text (chat LLMs).'},substring:{type:'string',description:'Optional filter \u2014 plain text matches as a case-insensitive substring ("cartoon", "flux"), and globs work too ("z*image" matches z-image / zImage / z_image, "flux*2" matches flux.2 and flux-2). Only matching model names are returned.'},page:{type:'integer',description:'1-based page number when there are more than 50 matches; the result says how many pages there are. Defaults to 1.'}},required:['type']}}};
+var SEARCH_MODELS_TOOL={type:'function',function:{name:'search_models',description:'List the models available across discovered hosts for a kind of generation, optionally filtered. Read-only; returns names and how many hosts have each.',parameters:{type:'object',properties:{type:{type:'string',enum:['image','edit','video','speech','text'],description:'Which capability: image (generate), edit (image editing), video, speech (TTS voices), or text (chat LLMs).'},substring:{type:'string',description:'Optional filter \u2014 plain text matches as a case-insensitive substring ("cartoon", "flux"), and globs work too ("z*image" matches z-image / zImage / z_image, "flux*2" matches flux.2 and flux-2). Only matching model names are returned.'},page:{type:'integer',description:'1-based page number when there are more than 50 matches; the result says how many pages there are. Defaults to 1.'}},required:['type']}}};
 var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created, plus any documents written in the side panel. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
-var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a detailed text description using Stable Diffusion. Use whenever the user asks you to create, draw, render or imagine a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'The checkpoint to render with. If the user names a model, family, or style \u2014 e.g. "dreamshaper", "flux", "juggernaut" \u2014 put it HERE, as a substring or glob ("dreamshaper*" matches dreamshaper_8.safetensors), and do NOT mention the model in the prompt. Leave blank only when the user did not name one, to auto-pick the best available. Never invent a model name; use search_models if unsure what exists.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
+var CALC_TOOL={type:'function',function:{name:'calc',description:'Evaluate a math expression EXACTLY (high precision) and get the precise result — use it instead of doing arithmetic in your head whenever precision matters: large numbers, many decimals, or multi-step calculation. It is a math language (mathjs): + - * / ^ %, parentheses, and functions like sqrt, abs, log, exp, sin/cos, gcd, factorial, plus variables and matrices. Not a general programming language — no loops, no I/O. Report the returned value to the user; do not recompute it yourself.',parameters:{type:'object',properties:{expression:{type:'string',description:'The expression to evaluate, e.g. "sqrt(19310)", "2^64", "(1+0.05)^30 * 1000", "det([[1,2],[3,4]])".'}},required:['expression']}}};
+// A locked-down mathjs instance for calc: BigNumber precision, and the
+// expression-level functions that mathjs's own security guide flags as able to
+// reach JS (import/createUnit/evaluate/parse/simplify/derivative) are disabled.
+var _calcMath=null;
+function _calcEval(expr){
+  if(!window.math)throw new Error('calculator is still loading, try again');
+  if(!_calcMath){
+    _calcMath=window.math.create(window.math.all,{number:'BigNumber',precision:64});
+    // Disable ONLY the instance-mutating escape vectors mathjs flags (import,
+    // createUnit). Do NOT touch evaluate/parse — those are what we call to run
+    // the expression; overriding them is what broke calc with "disabled".
+    var _no=function(){throw new Error('disabled')};
+    try{_calcMath.import({'import':_no,'createUnit':_no},{override:true})}catch(e){}
+  }
+  var r=_calcMath.evaluate(String(expr||''));
+  return (r&&r.toString)?r.toString():String(r);
+}
+var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a text description. Use when the user asks to create, draw, or render a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'The checkpoint to render with. If the user names a model, family, or style \u2014 e.g. "dreamshaper", "flux", "juggernaut" \u2014 put it HERE, as a substring or glob ("dreamshaper*" matches dreamshaper_8.safetensors), and do NOT mention the model in the prompt. Leave blank only when the user did not name one, to auto-pick the best available. Never invent a model name; use search_models if unsure what exists.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, combine several, or generate a fresh image on an edit-class model (Flux.2 and similar do text-to-image too \u2014 no reference needed). Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image (an incremental tweak), or when there is no image at all to generate from the prompt. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'The edit model to use. If the user names one, put it HERE as a substring or glob (globs work, e.g. "flux*2") \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a model name; use search_models (type "edit") if unsure.'}},required:['prompt','name']}}};
 // The image to edit is known deterministically, so the model never picks it:
 // walk back through the conversation and take whichever came last, a generated
@@ -4405,7 +4484,29 @@ function askUser(question,options,signal){
 var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. It can start from a picture (image-to-video) \u2014 if the user says "this cat/dog/photo" or attached an image, pass that image\'s name in `image` and the video animates from it. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a man petting a cat" or "the dog chases its tail". Describe the motion, not just the subject.'},seconds:{type:'number',description:'Desired length in seconds, e.g. 5. Optional \u2014 leave blank for the model\'s default (usually a few seconds). Keep it short; these are brief clips.'},image:{type:'string',description:'Optional start frame: the name of an image already in this conversation (from list_assets, an upload, or a generated image) to animate FROM. Use this whenever the user refers to "this" picture or attached one. Omit for a video made purely from the text prompt.'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'The video model to use. If the user names one, put it HERE as a substring or glob \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a name; use search_models (type "video").'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var TTS_TOOL_MAX=600;   // hard ceiling on what the chat tool will speak
 var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "hello_world.mp3". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['text','name']}}};
-var SPAWN_TOOL={type:'function',function:{name:'spawn_agents',description:'Run several sub-agents in parallel to divide a large task, then read back what each returned. Each agent is an independent generation that sees ONLY the task and context you give it — not this conversation — so make every task self-contained. Each agent can READ WEB PAGES itself with fetch_url, and crucially the pages it reads stay in ITS context, not yours — so this is the right tool when the inputs are big (give each agent a URL to fetch and digest, e.g. one web page or API endpoint per agent). Use it for work that splits into independent pieces (e.g. "fetch and summarize each of these 20 pages", "research X from 5 angles"). You are the coordinator: give each agent a focused task, then synthesize their short answers into your own reply — do not just paste them. Agents run server-side and keep going even if the app is backgrounded.',parameters:{type:'object',properties:{agents:{type:'array',description:'The sub-agents to run in parallel (each self-contained). Prefer a handful; a dozen is the max.',items:{type:'object',properties:{name:{type:'string',description:'Short label for this agent, e.g. "story-42" or "skeptic".'},task:{type:'string',description:'The complete instruction for this agent. Include everything it needs — it cannot see the conversation or the other agents.'},model:{type:'string',description:'Optional model for this agent (glob ok, e.g. "qwen*"). Leave blank to use the sub-agent model setting, or this chat’s model if none is set.'}},required:['task']}},context:{type:'string',description:'Optional shared background prepended to every agent’s task.'}},required:['agents']}}};
+var SPAWN_TOOL={type:'function',function:{name:'spawn_agents',description:'Run several sub-agents in parallel to divide a large task, then read back what each returned. Each agent is an independent generation that sees ONLY the task and context you give it — not this conversation — so make every task self-contained. Each agent can READ WEB PAGES itself with fetch_url, and crucially the pages it reads stay in ITS context, not yours — so this is the right tool when the inputs are big (give each agent a URL to fetch and digest, e.g. one web page or API endpoint per agent). Use it for work that splits into independent pieces (e.g. "fetch and summarize each of these 20 pages", "research X from 5 angles"). You are the coordinator: give each agent a focused task, then synthesize their short answers into your own reply — do not just paste them. Agents run server-side and keep going even if the app is backgrounded.',parameters:{type:'object',properties:{agents:{type:'array',description:'The sub-agents to run in parallel (each self-contained). Prefer a handful; a dozen is the max.',items:{type:'object',properties:{name:{type:'string',description:'Short label for this agent, e.g. "story-42" or "skeptic".'},task:{type:'string',description:'The complete instruction for this agent. Include everything it needs — it cannot see the conversation or the other agents.'},model:{type:'string',description:'Optional model for this agent (glob ok, e.g. "qwen*"). Leave blank to use this chat’s model.'}},required:['task']}},context:{type:'string',description:'Optional shared background prepended to every agent’s task.'}},required:['agents']}}};
+var WRITE_SCRATCH_TOOL={type:'function',function:{name:'write_scratch',description:'Leave a note on the shared scratchpad the other sub-agents (and the user) can see. Use it to post a finding, flag a dead end, or ask the others for something. Notes are attributed to you.',parameters:{type:'object',properties:{text:{type:'string',description:'The note to post (markdown allowed).'}},required:['text']}}};
+var READ_SCRATCH_TOOL={type:'function',function:{name:'read_scratch',description:'Read the shared scratchpad — the notes the other sub-agents have posted so far, each attributed to its author. Check it before duplicating work or when you need something another agent may have found.',parameters:{type:'object',properties:{}}}};
+// Mirror a spawn batch's shared scratchpad into the "Scratchpad" document so the
+// user can watch it fill live. Read-only view of server-side buffer state; we
+// replace the doc content each poll and only commit when it actually changed.
+function renderScratchDoc(chatId,entries){
+  var ctx=docCtx(chatId);if(!ctx)return;
+  var doc=findDoc(ctx.docs,'Scratchpad');
+  if(!doc){doc={id:_docId(),title:'Scratchpad',type:'markdown',language:'',content:'',updated:Date.now(),versions:[]};ctx.docs.push(doc);}
+  var md=(entries&&entries.length)
+    ? entries.map(function(e){return '**'+(e.who||'agent')+'**'+(e.ts?' · '+_ttsWhen(e.ts*1000):'')+'\n\n'+(e.text||'');}).join('\n\n---\n\n')
+    : '_(waiting for the agents to jot something…)_';
+  if(doc.content===md)return;
+  doc.content=md;doc.updated=Date.now();_docCommitVersion(doc);ctx.commit();
+  if(ctx.inView){refreshDocUI();openDoc(doc.id);}
+}
+function pollScratch(chatId,batchId){
+  fetch('api/chat/scratch/'+encodeURIComponent(batchId),{cache:'no-store'})
+    .then(function(r){return r.json()})
+    .then(function(j){renderScratchDoc(chatId,(j&&j.entries)||[])})
+    .catch(function(){});
+}
 // Run one generation as a server-side JOB to completion and return its text.
 // Reuses the same job transport as the main chat, so each sub-agent survives
 // backgrounding and shows up in the worker panel (stoppable). Job output is
@@ -4441,7 +4542,7 @@ async function runAgentJob(payload,signal){
   return {text:(sp.c||full).trim(),host:host,model:fmodel,jid:jid};
 }
 var DOC_TOOLS=[
-  {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
+  {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies. Markdown, HTML and SVG documents RENDER live for the user in the panel (formatted prose, a real web page, a drawn vector graphic) — so reach for those when the output is meant to be SEEN, not just read as source. Prose renders with type "markdown"; for HTML or SVG use type "code" and give the title an .html or .svg extension (e.g. "page.html", "chart.svg") so it displays rather than showing as source.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
   {type:'function',function:{name:'edit_document',description:'Replace the ENTIRE contents of an existing document. Only for a wholesale rewrite — to change part of one, use replace_in_document instead. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
   {type:'function',function:{name:'rename_document',description:'Rename an existing document. Identify it by id (preferred) or current title.',parameters:{type:'object',properties:{id:{type:'string'},title:{type:'string',description:'current title if id unknown'},new_title:{type:'string',description:'the new title'}},required:['new_title']}}},
   {type:'function',function:{name:'search_document',description:'Search inside a document and get back the matching lines with their line numbers and surrounding context. Use this to find the exact text you want to change before calling replace_in_document, so you never have to hold the whole document in mind.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},query:{type:'string',description:'Text to look for (case-insensitive)'},regex:{type:'boolean',description:'Treat query as a regular expression'},context:{type:'integer',description:'Lines of context around each match (default 2)'}},required:['query']}}},
@@ -4459,18 +4560,6 @@ var toolVideoChk=document.getElementById('toolVideo');
 var toolAskChk=document.getElementById('toolAsk');
 var toolWebChk=document.getElementById('toolWeb');
 var toolAgentsChk=document.getElementById('toolAgents');
-var subAgentModelInput=document.getElementById('subAgentModel');
-var subAgentModel='';
-try{subAgentModel=localStorage.getItem('dyva_subagent_model')||''}catch(e){}
-if(subAgentModelInput){
-  subAgentModelInput.value=subAgentModel;
-  subAgentModelInput.addEventListener('input',function(){
-    subAgentModel=this.value.trim();
-    try{localStorage.setItem('dyva_subagent_model',subAgentModel)}catch(e){}
-  });
-  // keep the popup open when interacting with the field
-  subAgentModelInput.addEventListener('click',function(e){e.stopPropagation()});
-}
 var toolsOn=false,docsOn=false,speechOn=false,imgEditOn=false,videoOn=false,askOn=false,webOn=false,agentsOn=false;
 try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
 try{docsOn=localStorage.getItem('dyva_tools_docs')==='1'}catch(e){}
@@ -4481,6 +4570,40 @@ try{askOn=localStorage.getItem('dyva_tools_ask')==='1'}catch(e){}
 try{webOn=localStorage.getItem('dyva_tools_web')==='1'}catch(e){}
 try{agentsOn=localStorage.getItem('dyva_tools_agents')==='1'}catch(e){}
 function anyToolsOn(){return toolsOn||docsOn||speechOn||imgEditOn||videoOn||askOn||webOn||agentsOn}
+// Full docs live on the tool defs; read_docs serves them on demand so the tool
+// list sent every turn can carry only a terse one-liner per tool. TOOL_DEFS maps
+// name -> the full function object (kept intact); buildTools terses a COPY.
+var _ALL_TOOL_DEFS=[IMG_TOOL,EDIT_TOOL,VIDEO_TOOL,ASK_TOOL,SPEECH_TOOL,WEB_TOOL,
+                    SPAWN_TOOL,CALC_TOOL,LIST_ASSETS_TOOL,SEARCH_MODELS_TOOL].concat(DOC_TOOLS);
+var TOOL_DEFS={};_ALL_TOOL_DEFS.forEach(function(t){if(t&&t.function)TOOL_DEFS[t.function.name]=t.function});
+// Tools gated behind read_docs: a REQUIRED `token` the model can only learn from
+// read_docs, so a small model can't guess a valid call — a wrong token bounces
+// back the docs + the token, so the retry succeeds. Per-session random so it
+// can't be memorised or hallucinated. Keep to tools where detail/cost matters.
+var GATED_TOOLS={generate_image:1,edit_image:1,generate_video:1,generate_speech:1,spawn_agents:1};
+var TOOL_TOKENS={};Object.keys(GATED_TOOLS).forEach(function(n){TOOL_TOKENS[n]='tok_'+Math.random().toString(36).slice(2,9)});
+var READ_DOCS_TOOL={type:'function',function:{name:'read_docs',description:'Get the FULL usage docs (description + every parameter, and the required token for gated tools) for another tool. Other tools’ descriptions are deliberately terse — call read_docs with a tool’s name before using it.',parameters:{type:'object',properties:{tool:{type:'string',enum:Object.keys(TOOL_DEFS),description:'Which tool to read the docs for'}},required:['tool']}}};
+function _terseDesc(name,full){
+  var s=String(full||'');
+  var m=s.match(/^[\s\S]*?[.!?](?:\s|$)/);   // first sentence
+  var lead=(m?m[0]:s).trim();
+  if(lead.length>180)lead=lead.slice(0,180).replace(/\s+\S*$/,'')+'…';
+  if(GATED_TOOLS[name])return lead+' — you MUST call read_docs "'+name+'" first for its usage and required token.';
+  return lead+' — call read_docs "'+name+'" for full usage.';
+}
+function _terseTool(tool){
+  if(!tool||!tool.function||tool.function.name==='read_docs')return tool;
+  var f=tool.function,name=f.name,params=f.parameters;
+  if(GATED_TOOLS[name]){
+    // require a `token` in the SENT schema without mutating the source const
+    var props={},src=(params&&params.properties)||{},k;
+    for(k in src)props[k]=src[k];
+    props.token={type:'string',description:'Required. The token from read_docs "'+name+'".'};
+    var req=((params&&params.required)||[]).slice();if(req.indexOf('token')<0)req.push('token');
+    params={type:'object',properties:props,required:req};
+  }
+  return {type:'function',function:{name:name,description:_terseDesc(name,f.description),parameters:params}};
+}
 function buildTools(){
   var t=[];
   if(toolsOn)t.push(IMG_TOOL);
@@ -4495,7 +4618,11 @@ function buildTools(){
   // and useless without them.
   if(toolsOn||imgEditOn||videoOn||speechOn||webOn)t.push(LIST_ASSETS_TOOL);
   if(toolsOn||imgEditOn||videoOn||speechOn)t.push(SEARCH_MODELS_TOOL);
-  return t;
+  if(t.length)t.push(CALC_TOOL);   // exact math, useful alongside anything
+  if(!t.length)return t;
+  // terse every description (COPIES — TOOL_DEFS keeps the full text), and add
+  // read_docs so the model can pull the full docs for anything above.
+  return t.map(_terseTool).concat([READ_DOCS_TOOL]);
 }
 // wrench stays lit whenever any tool is enabled
 function paintTools(){
