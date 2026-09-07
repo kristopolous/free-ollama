@@ -2519,6 +2519,11 @@ def chat_endpoint(host, ollama_endpoint="/api/chat"):
 _OLLAMA_ONLY = ("options", "keep_alive", "format", "template", "context", "raw",
                 "system", "think", "images")
 
+# dyva-internal routing hints attached to a job's params (sub-agent orchestration
+# and host-spread). They must be stripped before a request goes to any upstream
+# host — they mean nothing there, and a strict OpenAI host 400s on unknown fields.
+_DYVA_INTERNAL = ("dyva_agent", "spread", "scratch", "agent_name")
+
 
 def _messages_openai(messages):
     """Reshape ollama-style tool history into what strict OpenAI hosts (e.g. LM
@@ -2783,8 +2788,16 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         resp = None
         try:
             for attempt_oai in (oai, not oai):
-                ep = chat_endpoint(host, endpoint) if attempt_oai else endpoint
-                p = dict(payload, model=full, stream=do_stream)
+                # The endpoint must match the dialect we speak THIS attempt, not
+                # the host's recorded label. Deriving it from chat_endpoint(host)
+                # meant the fallback "other dialect" try sent an OpenAI-shaped
+                # body (string tool args) to /api/chat, which Ollama 400s with
+                # "Value looks like object, but can't find closing '}' symbol".
+                ep = (("/v1/completions" if endpoint == "/api/generate"
+                       else "/v1/chat/completions") if attempt_oai else endpoint)
+                # dyva-internal routing hints must never reach an upstream host.
+                p = {k: v for k, v in payload.items() if k not in _DYVA_INTERNAL}
+                p["model"], p["stream"] = full, do_stream
                 if attempt_oai:
                     p = openai_payload(p)
                 elif p.get("messages"):

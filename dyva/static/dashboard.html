@@ -3594,7 +3594,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       }else if(fn.name==='list_assets'){
         setStatus('listing assets\u2026');
         results.push({text:assetListText(liveChat(chatId)||currentChat)});
-      }else if(fn.name==='ask_user'){
+      }else if(fn.name==='ask_question'){
         setStatus('waiting for you\u2026');
         var q=String(args.question||'').trim();
         var opts=Array.isArray(args.options)?args.options.map(String).filter(Boolean):[];
@@ -4454,7 +4454,7 @@ async function _editSourceBlob(src){
 // and steps are fixed at sane values; a model guessing 3 frames or 150 steps
 // helps nobody.
 var VIDEO_FRAMES=100,VIDEO_STEPS=20,VIDEO_TOOL_WAIT=600000;   // give it ten minutes
-var ASK_TOOL={type:'function',function:{name:'ask_user',description:'Ask the user one multiple-choice question when their request is genuinely underspecified and different answers would lead to materially different work \u2014 "write me a story" (what kind?), "make me a logo" (for what?). Do NOT use it for things you can reasonably decide yourself, and ask at most one question before getting on with the task.',parameters:{type:'object',properties:{question:{type:'string',description:'The question, in one short sentence'},options:{type:'array',items:{type:'string'},description:'Two to four short, mutually exclusive choices. The user can also type their own answer, so do not add an "other" option.'}},required:['question','options']}}};
+var ASK_TOOL={type:'function',function:{name:'ask_question',description:'Ask the user one multiple-choice question when their request is genuinely underspecified and different answers would lead to materially different work \u2014 "write me a story" (what kind?), "make me a logo" (for what?). Do NOT use it for things you can reasonably decide yourself, and ask at most one question before getting on with the task.',parameters:{type:'object',properties:{question:{type:'string',description:'The question, in one short sentence'},options:{type:'array',items:{type:'string'},description:'Two to four short, mutually exclusive choices. The user can also type their own answer, so do not add an "other" option.'}},required:['question','options']}}};
 // The model asks, the turn stops, the user clicks, the turn resumes with the
 // answer as the tool result. Nothing else in the tool loop blocks on a human,
 // so this owns its own promise and has to settle on abort as well as on click.
@@ -4574,21 +4574,22 @@ var toolsPop=document.getElementById('toolsPop');
 var toolImageChk=document.getElementById('toolImage');
 var toolDocsChk=document.getElementById('toolDocs');
 var toolSpeechChk=document.getElementById('toolSpeech');
-var toolEditChk=document.getElementById('toolImageEdit');
 var toolVideoChk=document.getElementById('toolVideo');
-var toolAskChk=document.getElementById('toolAsk');
 var toolWebChk=document.getElementById('toolWeb');
 var toolAgentsChk=document.getElementById('toolAgents');
-var toolsOn=false,docsOn=false,speechOn=false,imgEditOn=false,videoOn=false,askOn=false,webOn=false,agentsOn=false;
-try{toolsOn=localStorage.getItem('dyva_tools')==='1'}catch(e){}
+var imageOn=false,docsOn=false,speechOn=false,videoOn=false,webOn=false,agentsOn=false;
+// One "Image" toggle drives BOTH generate_image and edit_image (the tools stay
+// separate — we just expose a single control). Reuses the old dyva_tools key and
+// falls back to the legacy image-edit key so a prior setting carries over.
+try{imageOn=localStorage.getItem('dyva_tools')==='1'||localStorage.getItem('dyva_tools_imgedit')==='1'}catch(e){}
 try{docsOn=localStorage.getItem('dyva_tools_docs')==='1'}catch(e){}
 try{speechOn=localStorage.getItem('dyva_tools_speech')==='1'}catch(e){}
-try{imgEditOn=localStorage.getItem('dyva_tools_imgedit')==='1'}catch(e){}
 try{videoOn=localStorage.getItem('dyva_tools_video')==='1'}catch(e){}
-try{askOn=localStorage.getItem('dyva_tools_ask')==='1'}catch(e){}
 try{webOn=localStorage.getItem('dyva_tools_web')==='1'}catch(e){}
 try{agentsOn=localStorage.getItem('dyva_tools_agents')==='1'}catch(e){}
-function anyToolsOn(){return toolsOn||docsOn||speechOn||imgEditOn||videoOn||askOn||webOn||agentsOn}
+// ask_question has no toggle — it is always available (see buildTools), so it is
+// deliberately excluded from anyToolsOn (it must not keep the wrench lit).
+function anyToolsOn(){return imageOn||docsOn||speechOn||videoOn||webOn||agentsOn}
 // Full docs live on the tool defs; read_docs serves them on demand so the tool
 // list sent every turn can carry only a terse one-liner per tool. TOOL_DEFS maps
 // name -> the full function object (kept intact); buildTools terses a COPY.
@@ -4625,34 +4626,35 @@ function _terseTool(tool){
 }
 function buildTools(){
   var t=[];
-  if(toolsOn)t.push(IMG_TOOL);
-  if(imgEditOn)t.push(EDIT_TOOL);
+  // One "Image" control turns on both image tools (they stay separate tools).
+  if(imageOn){t.push(IMG_TOOL);t.push(EDIT_TOOL);}
   if(videoOn)t.push(VIDEO_TOOL);
-  if(askOn)t.push(ASK_TOOL);
   if(speechOn)t.push(SPEECH_TOOL);
   if(webOn)t.push(WEB_TOOL);
   if(agentsOn)t.push(SPAWN_TOOL);
   if(docsOn)t=t.concat(DOC_TOOLS);
   // No toggle of its own: it is the index for whatever media tools are on,
   // and useless without them.
-  if(toolsOn||imgEditOn||videoOn||speechOn||webOn)t.push(LIST_ASSETS_TOOL);
-  if(toolsOn||imgEditOn||videoOn||speechOn)t.push(SEARCH_MODELS_TOOL);
+  if(imageOn||videoOn||speechOn||webOn)t.push(LIST_ASSETS_TOOL);
+  if(imageOn||videoOn||speechOn)t.push(SEARCH_MODELS_TOOL);
   if(t.length)t.push(CALC_TOOL);   // exact math, useful alongside anything
-  if(!t.length)return t;
-  // terse every description (COPIES — TOOL_DEFS keeps the full text), and add
-  // read_docs so the model can pull the full docs for anything above.
-  return t.map(_terseTool).concat([READ_DOCS_TOOL]);
+  // terse the opt-in tools (COPIES — TOOL_DEFS keeps the full text) and add
+  // read_docs so the model can pull full docs for them — but only when there ARE
+  // opt-in tools to read about.
+  var out=t.length?t.map(_terseTool).concat([READ_DOCS_TOOL]):[];
+  // ask_question has no toggle: clarifying a genuinely ambiguous request is core
+  // assistant behaviour, not an opt-in capability, so it is always available.
+  // Kept full (not tersed) — it is short and self-explanatory.
+  return out.concat([ASK_TOOL]);
 }
 // wrench stays lit whenever any tool is enabled
 function paintTools(){
   chatToolsBtn.classList.toggle('active',anyToolsOn());
   if(typeof updateTokEst==='function')updateTokEst();   // tools change the token estimate
-  toolImageChk.checked=toolsOn;
+  toolImageChk.checked=imageOn;
   if(toolDocsChk)toolDocsChk.checked=docsOn;
   if(toolSpeechChk)toolSpeechChk.checked=speechOn;
-  if(toolEditChk)toolEditChk.checked=imgEditOn;
   if(toolVideoChk)toolVideoChk.checked=videoOn;
-  if(toolAskChk)toolAskChk.checked=askOn;
   if(toolWebChk)toolWebChk.checked=webOn;
   if(toolAgentsChk)toolAgentsChk.checked=agentsOn;
   chatToolsBtn.title=anyToolsOn()?'Tools on':'Tools';
@@ -4673,8 +4675,8 @@ window.addEventListener('resize',function(){
 });
 toolsPop.addEventListener('click',function(e){e.stopPropagation()});
 toolImageChk.addEventListener('change',function(){
-  toolsOn=this.checked;
-  try{localStorage.setItem('dyva_tools',toolsOn?'1':'0')}catch(e){}
+  imageOn=this.checked;
+  try{localStorage.setItem('dyva_tools',imageOn?'1':'0')}catch(e){}
   paintTools();
 });
 if(toolWebChk)toolWebChk.addEventListener('change',function(){
@@ -4687,19 +4689,9 @@ if(toolAgentsChk)toolAgentsChk.addEventListener('change',function(){
   try{localStorage.setItem('dyva_tools_agents',agentsOn?'1':'0')}catch(e){}
   paintTools();
 });
-if(toolAskChk)toolAskChk.addEventListener('change',function(){
-  askOn=this.checked;
-  try{localStorage.setItem('dyva_tools_ask',askOn?'1':'0')}catch(e){}
-  paintTools();
-});
 if(toolVideoChk)toolVideoChk.addEventListener('change',function(){
   videoOn=this.checked;
   try{localStorage.setItem('dyva_tools_video',videoOn?'1':'0')}catch(e){}
-  paintTools();
-});
-if(toolEditChk)toolEditChk.addEventListener('change',function(){
-  imgEditOn=this.checked;
-  try{localStorage.setItem('dyva_tools_imgedit',imgEditOn?'1':'0')}catch(e){}
   paintTools();
 });
 if(toolSpeechChk)toolSpeechChk.addEventListener('change',function(){
