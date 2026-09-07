@@ -2519,6 +2519,57 @@ _OLLAMA_ONLY = ("options", "keep_alive", "format", "template", "context", "raw",
                 "system", "think", "images")
 
 
+def _messages_openai(messages):
+    """Reshape ollama-style tool history into what strict OpenAI hosts (e.g. LM
+    Studio) require: assistant tool_calls need an `id`, `type:"function"`, and
+    STRING `arguments`; each following `tool` message needs a `tool_call_id`
+    matching one. Our agentic loop / native history carry none of that, so an
+    un-reshaped payload gets "Invalid 'messages'". Non-destructive (copies)."""
+    if not isinstance(messages, list):
+        return messages
+    out = []
+    pending = []   # ids of the most recent assistant tool_calls, in order
+    ctr = 0
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            new_tcs, pending = [], []
+            for tc in m["tool_calls"]:
+                fn = (tc or {}).get("function") or {}
+                args = fn.get("arguments")
+                if not isinstance(args, str):
+                    try:
+                        args = json.dumps(args if args is not None else {})
+                    except Exception:
+                        args = "{}"
+                cid = (tc or {}).get("id")
+                if not cid:
+                    ctr += 1
+                    cid = f"call_{ctr}"
+                pending.append(cid)
+                new_tcs.append({"id": cid, "type": "function",
+                                "function": {"name": fn.get("name", ""), "arguments": args}})
+            mm = dict(m, tool_calls=new_tcs)
+            if mm.get("content") == "":
+                mm["content"] = None   # OpenAI wants null content alongside tool_calls
+            out.append(mm)
+        elif role == "tool":
+            mm = dict(m)
+            if not mm.get("tool_call_id"):
+                mm["tool_call_id"] = pending.pop(0) if pending else "call_0"
+            elif mm["tool_call_id"] in pending:
+                pending.remove(mm["tool_call_id"])
+            if not isinstance(mm.get("content"), str):
+                mm["content"] = str(mm.get("content") or "")
+            out.append(mm)
+        else:
+            out.append(m)
+    return out
+
+
 def openai_payload(p):
     out = {k: v for k, v in p.items() if k not in _OLLAMA_ONLY}
     opts = p.get("options") or {}
@@ -2527,6 +2578,8 @@ def openai_payload(p):
                      ("stop", "stop")):
         if src in opts:
             out[dst] = opts[src]
+    if isinstance(out.get("messages"), list):
+        out["messages"] = _messages_openai(out["messages"])
     return out
 
 
