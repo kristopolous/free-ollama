@@ -27,6 +27,7 @@ import sqlite3
 import importlib.metadata
 
 import aiohttp
+import aiosqlite
 from aiohttp import web, web_log
 from aiohttp_swagger3 import SwaggerDocs, SwaggerInfo, SwaggerUiSettings
 
@@ -4993,9 +4994,11 @@ async def handle_ollama_chat(request):
 # it from an offset to stream the buffer (survives the phone backgrounding), and
 # drive it with the print-queue operations (hold/release/cancel/skip/restart).
 
-def _job_public(job, offset=None):
+def _job_public(job, offset=None, chunk=None, total=None):
     """The client-facing view of a job. When `offset` is given, include only the
-    output past it plus the new length, so a reconnecting client streams cheaply."""
+    output past it plus the new length, so a reconnecting client streams cheaply.
+    The caller does the (async) stream-from-offset read and passes `chunk`/`total`
+    in — this stays a pure sync shaper."""
     out = {
         "id": job["id"], "kind": job["kind"], "status": job["status"],
         "phase": job.get("phase"), "host": job.get("host"),
@@ -5009,9 +5012,8 @@ def _job_public(job, offset=None):
         out["output"] = job.get("output") or ""
         out["offset"] = len(out["output"])
     else:
-        chunk, total = _job_output_from(job["id"], offset)
         out["output"] = chunk or ""
-        out["offset"] = total
+        out["offset"] = total or 0
     return out
 
 
@@ -5064,13 +5066,13 @@ async def handle_chat_job_submit(request):
                 return web.json_response(err_obj(
                     f"no available servers for '{model}'",
                     "model_not_found"), status=404)
-        jid = _job_new("text", body, model=model)
-        _job_append(jid, _info_ndjson(model0, info))
-        _job_set(jid, status=JOB_COMPLETED, phase=None)
+        jid = await _job_new("text", body, model=model)
+        await _job_append(jid, _info_ndjson(model0, info))
+        await _job_set(jid, status=JOB_COMPLETED, phase=None)
         return web.json_response({"id": jid, "status": JOB_COMPLETED,
                                  "polling_url": f"/api/chat/jobs/{jid}"})
 
-    jid = _job_new("text", body, model=model)
+    jid = await _job_new("text", body, model=model)
     _job_dispatch(request.app, jid)
     return web.json_response({"id": jid, "status": JOB_PENDING,
                              "polling_url": f"/api/chat/jobs/{jid}"})
@@ -5088,7 +5090,7 @@ async def handle_chat_jobs_list(request):
     resp = _check_local(request)
     if resp:
         return resp
-    jobs = _job_list(kind="text", limit=100)
+    jobs = await _job_list(kind="text", limit=100)
     return web.json_response({"jobs": [_job_public(j) for j in jobs]})
 
 
@@ -5106,12 +5108,15 @@ async def handle_chat_job_get(request):
     if resp:
         return resp
     jid = request.match_info.get("id")
-    job = _job_get(jid)
+    job = await _job_get(jid)
     if not job:
         return web.json_response({"error": "unknown job"}, status=404)
     offset = request.query.get("offset")
     off = int(offset) if (offset and offset.isdigit()) else (None if offset is None else 0)
-    return web.json_response(_job_public(job, offset=off))
+    if off is None:
+        return web.json_response(_job_public(job))
+    chunk, total = await _job_output_from(jid, off)
+    return web.json_response(_job_public(job, offset=off, chunk=chunk, total=total))
 
 
 async def handle_chat_job_control(request):
@@ -5129,7 +5134,7 @@ async def handle_chat_job_control(request):
     if resp:
         return resp
     jid = request.match_info.get("id")
-    job = _job_get(jid)
+    job = await _job_get(jid)
     if not job:
         return web.json_response({"error": "unknown job"}, status=404)
     try:
@@ -5147,14 +5152,14 @@ async def handle_chat_job_control(request):
         if running:
             ctl["cancel"] = True
         else:
-            _job_set(jid, status=JOB_CANCELED, phase=None, host=None)
+            await _job_set(jid, status=JOB_CANCELED, phase=None, host=None)
     elif op in ("skip", "move"):          # "move to another host" is a skip
         if running:
             ctl["skip"] = True            # abandon current host, re-race the rest
     else:
         return web.json_response({"error": f"unknown op '{op}'"}, status=400)
 
-    return web.json_response(_job_public(_job_get(jid)))
+    return web.json_response(_job_public(await _job_get(jid)))
 
 
 async def handle_chat_job_delete(request):
@@ -5172,7 +5177,7 @@ async def handle_chat_job_delete(request):
     jid = request.match_info.get("id")
     if str(jid) in _JOB_TASKS:
         _job_ctl(jid)["cancel"] = True
-    deleted = _job_delete(jid)
+    deleted = await _job_delete(jid)
     return web.json_response({"deleted": bool(deleted)})
 
 
@@ -7391,15 +7396,30 @@ _jobs_db = None
 _JOB_ID_CTR = 0
 _jobs_lock = threading.Lock()
 
+# The jobs.db connection is an aiosqlite connection: aiosqlite runs the real
+# sqlite3 connection on a single dedicated background thread and marshals every
+# operation to it over a queue, returning results to the awaiting coroutine via
+# the event loop (call_soon_threadsafe). That keeps the blocking part of a commit
+# / WAL-checkpoint fsync OFF the asyncio event-loop thread — otherwise a slow
+# fsync freezes the whole server (no response to even GET /), which is the lock-up
+# we hit. One connection = one owner thread, so there is no cross-thread sharing
+# of a sqlite connection either. Lazy async init is guarded so concurrent first
+# callers don't open two connections.
+_jobs_db_init_lock = asyncio.Lock()
 
-def _get_jobs_db():
+
+async def _get_jobs_db():
     global _jobs_db, _JOB_ID_CTR
-    if _jobs_db is None:
+    if _jobs_db is not None:
+        return _jobs_db
+    async with _jobs_db_init_lock:
+        if _jobs_db is not None:
+            return _jobs_db
         os.makedirs(CACHE_DIR, exist_ok=True)
-        _jobs_db = sqlite3.connect(JOBS_DB, check_same_thread=False)
-        _jobs_db.execute("PRAGMA journal_mode=WAL")
-        _jobs_db.execute("PRAGMA synchronous=NORMAL")
-        _jobs_db.execute(
+        db = await aiosqlite.connect(JOBS_DB)
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute(
             "CREATE TABLE IF NOT EXISTS jobs("
             "id TEXT PRIMARY KEY,"
             "kind TEXT NOT NULL,"          # text | video | generate | …
@@ -7411,10 +7431,11 @@ def _get_jobs_db():
             "content_path TEXT,"           # binary artifacts (video, later)
             "error TEXT,"
             "created REAL NOT NULL, updated REAL NOT NULL)")
-        _jobs_db.commit()
-        row = _jobs_db.execute(
-            "SELECT id FROM jobs WHERE id GLOB 'j[0-9]*'").fetchall()
-        for (jid,) in row:
+        await db.commit()
+        async with db.execute(
+                "SELECT id FROM jobs WHERE id GLOB 'j[0-9]*'") as cur:
+            rows = await cur.fetchall()
+        for (jid,) in rows:
             m = re.match(r"^j(\d+)$", jid)
             if m:
                 _JOB_ID_CTR = max(_JOB_ID_CTR, int(m.group(1)))
@@ -7422,13 +7443,15 @@ def _get_jobs_db():
         # process died, so no task is advancing it. There is no pausing a remote
         # generation, so mark it failed (its partial output stays in `output`) —
         # same as the video path does with an interrupted render.
-        n = _jobs_db.execute(
+        cur = await db.execute(
             "UPDATE jobs SET status=?, phase=NULL, error=?, updated=? WHERE status=?",
             (JOB_FAILED, "interrupted by a dyva restart", time.time(),
-             JOB_PROCESSING)).rowcount
+             JOB_PROCESSING))
+        n = cur.rowcount
         if n:
-            _jobs_db.commit()
+            await db.commit()
             log.info(f"jobs: marked {n} interrupted job(s) failed after restart")
+        _jobs_db = db
     return _jobs_db
 
 
@@ -7443,37 +7466,39 @@ def _job_row_to_dict(r):
     return d
 
 
-def _job_new(kind, params, model=None):
+async def _job_new(kind, params, model=None):
     """Create a pending job and return its id. The scheduler (runner) assigns a
     host later, so a fresh job has no host — it is queued, exactly like lpr."""
     global _JOB_ID_CTR
-    db = _get_jobs_db()
+    db = await _get_jobs_db()
     with _jobs_lock:
         _JOB_ID_CTR += 1
         jid = f"j{_JOB_ID_CTR}"
     now = time.time()
-    db.execute(
+    await db.execute(
         "INSERT INTO jobs(id,kind,status,phase,model,params,output,created,updated)"
         " VALUES(?,?,?,?,?,?,'',?,?)",
         (jid, kind, JOB_PENDING, None, model,
          json.dumps(params, ensure_ascii=False), now, now))
     # count-based retention, mirroring the image gallery / video keep policy
-    db.execute(
+    await db.execute(
         "DELETE FROM jobs WHERE id NOT IN "
         "(SELECT id FROM jobs ORDER BY created DESC LIMIT ?)", (JOBS_KEEP,))
-    db.commit()
+    await db.commit()
     return jid
 
 
-def _job_get(jid):
-    r = _get_jobs_db().execute(
-        "SELECT id,kind,status,phase,host,model,service,params,output,"
-        "content_path,error,created,updated FROM jobs WHERE id=?",
-        (str(jid),)).fetchone()
+async def _job_get(jid):
+    db = await _get_jobs_db()
+    async with db.execute(
+            "SELECT id,kind,status,phase,host,model,service,params,output,"
+            "content_path,error,created,updated FROM jobs WHERE id=?",
+            (str(jid),)) as cur:
+        r = await cur.fetchone()
     return _job_row_to_dict(r) if r else None
 
 
-def _job_list(kind=None, limit=100):
+async def _job_list(kind=None, limit=100):
     q = ("SELECT id,kind,status,phase,host,model,service,params,output,"
          "content_path,error,created,updated FROM jobs")
     args = []
@@ -7482,10 +7507,13 @@ def _job_list(kind=None, limit=100):
         args.append(kind)
     q += " ORDER BY created DESC LIMIT ?"
     args.append(limit)
-    return [_job_row_to_dict(r) for r in _get_jobs_db().execute(q, args).fetchall()]
+    db = await _get_jobs_db()
+    async with db.execute(q, args) as cur:
+        rows = await cur.fetchall()
+    return [_job_row_to_dict(r) for r in rows]
 
 
-def _job_set(jid, **fields):
+async def _job_set(jid, **fields):
     """Update job columns (status/phase/host/model/service/content_path/error).
     `updated` is always bumped so pollers see progress."""
     if not fields:
@@ -7497,51 +7525,56 @@ def _job_set(jid, **fields):
         return
     sets = ", ".join(f"{c}=?" for c in cols) + ", updated=?"
     args = [fields[c] for c in cols] + [time.time(), str(jid)]
-    db = _get_jobs_db()
-    db.execute(f"UPDATE jobs SET {sets} WHERE id=?", args)
-    db.commit()
+    db = await _get_jobs_db()
+    await db.execute(f"UPDATE jobs SET {sets} WHERE id=?", args)
+    await db.commit()
 
 
-def _job_append(jid, text):
+async def _job_append(jid, text):
     """Append streamed text to the buffer and return the new total length.
     Uses SQL string concat so we never rewrite the whole buffer; callers should
     batch (a flush every ~N tokens / ~50ms) rather than call this per token."""
+    db = await _get_jobs_db()
     if not text:
-        r = _get_jobs_db().execute(
-            "SELECT length(output) FROM jobs WHERE id=?", (str(jid),)).fetchone()
+        async with db.execute(
+                "SELECT length(output) FROM jobs WHERE id=?", (str(jid),)) as cur:
+            r = await cur.fetchone()
         return (r[0] if r else 0)
-    db = _get_jobs_db()
-    db.execute("UPDATE jobs SET output = output || ?, updated=? WHERE id=?",
-               (text, time.time(), str(jid)))
-    db.commit()
-    r = db.execute("SELECT length(output) FROM jobs WHERE id=?",
-                   (str(jid),)).fetchone()
+    await db.execute("UPDATE jobs SET output = output || ?, updated=? WHERE id=?",
+                     (text, time.time(), str(jid)))
+    await db.commit()
+    async with db.execute("SELECT length(output) FROM jobs WHERE id=?",
+                          (str(jid),)) as cur:
+        r = await cur.fetchone()
     return (r[0] if r else 0)
 
 
-def _job_output_from(jid, offset):
+async def _job_output_from(jid, offset):
     """Return (chunk, total_len) for output past `offset` — the stream-from-offset
     read a reconnecting client uses. offset is a character index into `output`."""
     off = max(0, int(offset or 0))
-    r = _get_jobs_db().execute(
-        "SELECT substr(output, ?), length(output) FROM jobs WHERE id=?",
-        (off + 1, str(jid))).fetchone()
+    db = await _get_jobs_db()
+    async with db.execute(
+            "SELECT substr(output, ?), length(output) FROM jobs WHERE id=?",
+            (off + 1, str(jid))) as cur:
+        r = await cur.fetchone()
     if not r:
         return None, 0
     return (r[0] or ""), (r[1] or 0)
 
 
-def _job_delete(jid):
-    db = _get_jobs_db()
-    row = _get_jobs_db().execute(
-        "SELECT content_path FROM jobs WHERE id=?", (str(jid),)).fetchone()
+async def _job_delete(jid):
+    db = await _get_jobs_db()
+    async with db.execute(
+            "SELECT content_path FROM jobs WHERE id=?", (str(jid),)) as cur:
+        row = await cur.fetchone()
     if row and row[0]:
         try:
             os.remove(row[0])
         except OSError:
             pass
-    db.execute("DELETE FROM jobs WHERE id=?", (str(jid),))
-    db.commit()
+    await db.execute("DELETE FROM jobs WHERE id=?", (str(jid),))
+    await db.commit()
     return bool(row)
 
 
@@ -7612,7 +7645,7 @@ async def _run_chat_job(session, jid):
     Re-enterable: if the job already has buffered output (a resumed/moved job),
     it continues from there; new tokens are appended after the existing buffer.
     """
-    job = _job_get(jid)
+    job = await _job_get(jid)
     if not job or job["status"] in JOB_TERMINAL:
         return
     ctl = _job_ctl(jid)
@@ -7633,12 +7666,12 @@ async def _run_chat_job(session, jid):
     if opayload.get("tools"):
         req_caps = sorted(set(req_caps) | {"tools"})
 
-    _job_set(jid, status=JOB_PROCESSING, phase="dispatching", error=None)
+    await _job_set(jid, status=JOB_PROCESSING, phase="dispatching", error=None)
     model_list = model_in.split("/") if "/" in model_in else [model_in]
     servers = find_servers(model_in, req_caps)
     if not servers:
-        _job_set(jid, status=JOB_FAILED, phase=None,
-                 error=f"no available servers for '{model_in}'")
+        await _job_set(jid, status=JOB_FAILED, phase=None,
+                       error=f"no available servers for '{model_in}'")
         return
 
     agentic = bool(params.get("dyva_agent"))
@@ -7753,14 +7786,14 @@ async def _run_chat_job(session, jid):
                     errors += errs or []
                     if not result:
                         if stopped:      # a worker-level stop during the race
-                            _job_set(jid, status=JOB_CANCELED, phase=None)
+                            await _job_set(jid, status=JOB_CANCELED, phase=None)
                             await _unregister_worker(job_wid)
                             return
                         break            # no host for this model; try next model
                     _tag, host, full, resp, first_line, _first, oai = result
                     mark_worker_found(job_wid, host, full)
-                    _job_set(jid, host=re.sub(r"^https?://", "", host), model=full,
-                             service=service_of(host), phase="generating")
+                    await _job_set(jid, host=re.sub(r"^https?://", "", host), model=full,
+                                   service=service_of(host), phase="generating")
                     # The race installs its OWN stop/skip on the worker during
                     # the race; re-point them at this job's control flags for the
                     # long generation (same re-install the video render path does).
@@ -7771,9 +7804,9 @@ async def _run_chat_job(session, jid):
 
                     pending = []          # unflushed NDJSON lines
 
-                    def _flush(force=False):
+                    async def _flush(force=False):
                         if pending and (force or sum(len(x) for x in pending) >= _JOB_FLUSH_CHARS):
-                            _job_append(jid, "".join(pending))
+                            await _job_append(jid, "".join(pending))
                             pending.clear()
 
                     def _line_from(line_bytes):
@@ -7813,16 +7846,16 @@ async def _run_chat_job(session, jid):
                                 jl, done = _line_from(raw)
                                 if jl is not None:
                                     pending.append(jl + "\n")
-                                    _flush()
+                                    await _flush()
                                 if done:
                                     break
-                        _flush(force=True)
+                        await _flush(force=True)
 
                     skipped = False
                     try:
                         await _pump()
                     except asyncio.CancelledError:
-                        _flush(force=True)
+                        await _flush(force=True)
                         if ctl["skip"]:
                             record_verdict(host, model, skip("skipped by user"))
                             errors.append(f"{host}: skipped by user")
@@ -7831,7 +7864,7 @@ async def _run_chat_job(session, jid):
                             ctl["skip"] = False
                             skipped = True
                         else:
-                            _job_set(jid, status=JOB_CANCELED, phase=None)
+                            await _job_set(jid, status=JOB_CANCELED, phase=None)
                             await _unregister_worker(job_wid)
                             return
                     finally:
@@ -7853,17 +7886,17 @@ async def _run_chat_job(session, jid):
             # yields a final answer.)
             if agentic and round_tcs and _round < max_rounds - 1:
                 _set_worker_phase(job_wid, "running tools")
-                _job_set(jid, phase="running tools")
+                await _job_set(jid, phase="running tools")
                 if await _run_agent_tools(round_tcs):
                     continue
                 # nothing executable -> treat this turn as final
-            _job_set(jid, status=JOB_COMPLETED, phase=None)
+            await _job_set(jid, status=JOB_COMPLETED, phase=None)
             await _unregister_worker(job_wid, ok=True)
             return
 
         # rounds exhausted or no host completed a round
         msg = "; ".join(dict.fromkeys(errors)) or "all servers failed"
-        _job_set(jid, status=JOB_FAILED, phase=None, error=msg)
+        await _job_set(jid, status=JOB_FAILED, phase=None, error=msg)
         await _unregister_worker(job_wid)
     finally:
         _JOB_TASKS.pop(str(jid), None)

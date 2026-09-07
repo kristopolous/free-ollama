@@ -1469,12 +1469,21 @@ var _globCache={};
 var _modelSizes={};
 var _SIZE_MULT_JS={k:1e3,m:1e6,g:1e9,t:1e12};
 function _splitSizePred(pattern){
-  var m=String(pattern).match(/([<>]=?)\s*([\d.]+)\s*([kmgt])b?\b/i);
-  if(!m)return {name:pattern,pred:null};
-  var op=m[1],thresh=parseFloat(m[2])*_SIZE_MULT_JS[m[3].toLowerCase()];
-  var name=(pattern.slice(0,m.index)+pattern.slice(m.index+m[0].length)).trim();
-  var pred=function(sz){return op==='<'?sz<thresh:op==='<='?sz<=thresh:op==='>='?sz>=thresh:sz>thresh};
-  return {name:name,pred:pred};
+  var s=String(pattern),pred=null;
+  // A COMPLETE size token (operator + number + unit) becomes a filter and is
+  // lifted out of the name.
+  var m=s.match(/([<>]=?)\s*([\d.]+)\s*([kmgt])b?\b/i);
+  if(m){
+    var op=m[1],thresh=parseFloat(m[2])*_SIZE_MULT_JS[m[3].toLowerCase()];
+    pred=function(sz){return op==='<'?sz<thresh:op==='<='?sz<=thresh:op==='>='?sz>=thresh:sz>thresh};
+    s=s.slice(0,m.index)+s.slice(m.index+m[0].length);
+  }
+  // Strip any INCOMPLETE size fragment too — a lone "<"/">" or an operator with
+  // digits but no unit yet ("<", ">10"). While the user is mid-type the token
+  // isn't a filter yet, but it must NOT fall through and be matched as a literal
+  // model-name substring (which matches nothing and blanks the whole list).
+  s=s.replace(/[<>]=?\s*[\d.]*\s*[kmgt]?b?/gi,'');
+  return {name:s.trim(),pred:pred};
 }
 function _sizeOf(name){
   if(_modelSizes[name]!=null)return _modelSizes[name];
@@ -1489,9 +1498,11 @@ function matchModel(name,pattern){
   if(sp.pred){
     var sz=_sizeOf(name);
     if(sz==null||!sp.pred(sz))return false;
-    pattern=sp.name;
-    if(!pattern)return true;
   }
+  // Always use the cleaned name: size fragments (complete OR half-typed) are
+  // removed, so a bare ">" leaves nothing to match and shows everything.
+  pattern=sp.name;
+  if(!pattern)return true;
   var p=String(pattern).toLowerCase(),n=String(name||'').toLowerCase();
   if(/[*?[]/.test(p)){
     var re=_globCache[p];
@@ -2767,12 +2778,22 @@ function _tokEst(){
   var w=0;
   if(currentChat){
     w+=_wc(currentChat.system);
-    (currentChat.messages||[]).forEach(function(m){if(m&&m.content)w+=_wc(m.content)});
+    (currentChat.messages||[]).forEach(function(m){if(m&&m.content)w+=_wc(typeof m.content==='string'?m.content:JSON.stringify(m.content))});
     (currentChat.documents||[]).forEach(function(d){if(d&&d.content)w+=_wc(d.content)});
     var g=(typeof gens!=='undefined')&&currentChat&&gens[currentChat.id];
     if(g){w+=_wc(g.raw);w+=_wc(g.think)}
   }
-  return Math.round(w*1.33);
+  var t=Math.round(w*1.33);
+  // The tools schema is sent on EVERY turn when tools are enabled — usually the
+  // biggest chunk the transcript doesn't show. Estimate it straight from its
+  // JSON (dense, so ~chars/4 rather than the prose word ratio).
+  try{
+    if(typeof buildTools==='function'){
+      var tj=JSON.stringify(buildTools()||[]);
+      if(tj&&tj.length>2)t+=Math.round(tj.length/4);
+    }
+  }catch(e){}
+  return t;
 }
 function updateTokEst(){
   var el=document.getElementById('tokEst');if(!el)return;
@@ -4627,6 +4648,7 @@ function buildTools(){
 // wrench stays lit whenever any tool is enabled
 function paintTools(){
   chatToolsBtn.classList.toggle('active',anyToolsOn());
+  if(typeof updateTokEst==='function')updateTokEst();   // tools change the token estimate
   toolImageChk.checked=toolsOn;
   if(toolDocsChk)toolDocsChk.checked=docsOn;
   if(toolSpeechChk)toolSpeechChk.checked=speechOn;
