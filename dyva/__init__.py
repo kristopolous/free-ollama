@@ -1348,6 +1348,29 @@ def refresh_cache(source=None, cleanse=True):
             _geoip.enrich_records(records)
     except Exception as _e:
         log.debug(f"geo re-enrich after refresh skipped: {_e}")
+    # Cleanse the MERGED pool (all sources) unless --refresh-only. Junk arrives
+    # from several sources, so this can't be a per-source graflex fix. Culled
+    # hosts are quarantined (moved, not deleted) to free-ollama.cleansed.json.
+    if cleanse:
+        import collections as _collections
+        kept, culled = _cleanse_records(records)
+        if culled:
+            prior = []
+            if os.path.exists(CLEANSED_FILE):
+                try:
+                    with open(CLEANSED_FILE, encoding="utf-8") as cf:
+                        prior = json.load(cf)
+                except Exception:
+                    prior = []
+            seen = {_host_of(x) for x in prior}
+            prior += [c for c in culled if _host_of(c) not in seen]
+            _save_json_atomic(CLEANSED_FILE, prior)
+            by = _collections.Counter(c.get("_cleanse") for c in culled)
+            log.info(f"cleanse: quarantined {len(culled)} hosts (" +
+                     ", ".join(f"{k}={v}" for k, v in by.most_common()) +
+                     f") -> {CLEANSED_FILE}")
+        records = kept
+
     with open(_db, 'w', encoding="utf-8") as f:
       json.dump(records, f)
 
