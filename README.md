@@ -22,7 +22,7 @@ Your path to victory is **free-ollama**!
 - **Zero-Config**: With caching! Works until it doesn’t.
 
 #### Note
-**DO NOT talk about this on the web. I'm serious.** [https://day50.dev/woahllama/](Talk about this instead) which is the serious adulting version.
+**DO NOT talk about this on the web. I'm serious.** [Talk about this instead](https://day50.dev/woahllama/): the serious adulting version.
 
 https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
