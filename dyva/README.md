@@ -389,6 +389,66 @@ The dashboard's Image tab has a **Generate / Edit** toggle; in Edit mode the
 negative prompt is hidden (edit models don't take one) and a drop zone accepts
 reference images.
 
+### Text-to-Video, and the reference-graph strategy
+
+Video is the capability where hand-building a graph from a model *family* breaks
+down: the architecture moves faster than any hardcoded builder can. LTX-2.3
+needs a materially different graph from LTX-0.9 — a Gemma-3 text encoder instead
+of T5, and a two-stage audio+video latent path — so a builder that assumes "it's
+LTX, wire T5" fails minutes into the render with the same
+`mat1 and mat2 shapes cannot be multiplied` matmul error as the Flux.2 encoder
+mismatch above. MiniMax-H3 is worse still: it is a bespoke node family
+(`MiniMaxH3ReferenceToVideo`, `MiniMaxH3SigmaShift`) that no generic builder
+knows exists.
+
+So dyva prefers to **run the operator's own kind of workflow** rather than
+synthesize one. Verified, API-format ComfyUI graphs live as repo assets in
+[`dyva/workflows/`](workflows/), one per `<family>-<mode>.json` (e.g.
+`ltx-2.3-t2v.json`, `ltx-2.3-i2v.json`, `minimax-h3-t2v.json`). For the host that
+won the race, at submit time:
+
+1. **Fit** — every node's `class_type` must exist in the host's live
+   `/object_info`. A host missing a node the graph needs is not a candidate.
+2. **Remap** — each loader's file input (`unet_name`, `clip_name`, `vae_name`,
+   `text_encoder`, …) is repointed at the host's own installed variant of the
+   same class, matched by the file's leading token (`ltx` / `gemma` / `qwen3vl` /
+   `umt5` …). A file with no host variant means the host can't run the graph —
+   except a **LoRA**, an optional style adapter: a missing one is *bypassed* (its
+   consumers rewired back to the loader's model/clip source) rather than sinking
+   the whole graph.
+3. **Patch** — the request's prompt and seed (and, for i2v, the uploaded start
+   image) are set into the graph; everything else is left as the verified
+   template wired it.
+4. **Fall back** — if no reference fits the host, or the host rejects the patched
+   graph, dyva falls back to the hand-built family builders
+   (`_build_ltx_workflow`, `_build_wan_workflow`, …).
+
+Mode is inferred from the graph itself: a `LoadImage` node means
+image-to-video, otherwise text-to-video, and a request carrying a start image is
+only sent to a host that fits an i2v graph.
+
+**Adding a family is dropping a verified `<family>-<mode>.json` into
+`dyva/workflows/`.** It should be a real, working API-format export (ComfyUI's
+*Save (API format)*): the file names in it are remapped anyway, but the *wiring*
+is trusted verbatim. Two ways to obtain one when the exact variant isn't
+published as a template:
+
+- **Derive a t2v from a verified i2v** by engaging the graph's own
+  image-conditioning bypass and pruning the now-dead image branch — how
+  `ltx-2.3-t2v.json` was produced from `ltx-2.3-i2v.json`.
+- **Rebuild from a host's live `/object_info` schemas**, using a node pack's
+  example workflow for the wiring. `minimax-h3-t2v.json` is the *base* MiniMax-H3
+  graph (drop the acceleration `MiniMaxH3PDDAccApply` node — present on far fewer
+  hosts — and source sigmas from `BasicScheduler` instead), so it fits the many
+  hosts that run stock MiniMax-H3 rather than only the few with the PDD-Acc pack.
+
+Because the file names are remapped and the node-class fit is checked live, a new
+reference can be **authored and file-validated entirely offline** against the
+recorded survey data — graflex's working caches carry each host's full file tree,
+including the `custom_nodes/…` paths that reveal which pack is installed — and
+then render-confirmed against one live host. There is no need to keep a fleet of
+hosts reachable to build one.
+
 ### Leaving Little Behind
 
 These are strangers' machines, and every job we run writes to their disk.

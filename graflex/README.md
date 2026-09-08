@@ -291,6 +291,29 @@ Categories are evaluated top to bottom, first matching regex wins, and
 anything unmatched lands in `other`. Invalid regexes are skipped with a
 warning.
 
+### The comfy file tree is a downstream input, not just a classifier feed
+
+For a ComfyUI host, the `models` list check records is the host's **full file
+tree** — not just checkpoints but `text_encoders/…`, `vae/…`, `loras/…`,
+`diffusion_models/…`, and the `custom_nodes/…` paths too. Keep it whole. dyva
+reads these working caches to build ComfyUI media workflows against what a host
+*actually* has, and the tree is enough to do that authoring and file-validation
+**offline**, without a live probe:
+
+- the file names tell dyva which model variant, encoder, VAE and LoRA to load
+  (matched by class, so `minimax_h3_ref2va_bf16` and `…_fl2va_pruned_int8` are
+  interchangeable candidates for the same slot);
+- the `custom_nodes/…` paths reveal which **node pack** is installed — e.g.
+  `custom_nodes/ComfyUI-MiniMax-H3-PDD-Acc/…` marks a PDD-Acc host, which needs a
+  different graph from a stock MiniMax-H3 host.
+
+The one thing this survey does **not** capture is ComfyUI `/object_info` (the
+node *classes* and their input schemas). That is deliberate: it is large, it
+changes with every custom node install, and it is only needed at the moment a job
+is submitted — when the host is reachable anyway because it was just selected. So
+graflex records the durable, cheap thing (what files and packs exist) and leaves
+the live, volatile thing (what node classes exist) to submit time.
+
 ## Options
 
 | Flag | Description |

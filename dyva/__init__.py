@@ -8859,6 +8859,12 @@ _REF_WF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflow
 _ref_wf_cache = None
 _WF_FILE_FIELDS = {"ckpt_name", "unet_name", "clip_name", "clip_name1", "clip_name2",
                    "vae_name", "text_encoder", "lora_name", "gguf_name", "model_name"}
+# Quant/format tokens carry no identity — ignore them when scoring a file match so
+# variant tokens (t2v/i2v, high/low noise, 14b/5b) decide which host file wins.
+_WF_FILE_NOISE = {"safetensors", "ckpt", "pth", "gguf", "bin", "pt", "sft",
+                  "fp16", "fp8", "bf16", "fp32", "e4m3fn", "e5m2", "scaled",
+                  "pruned", "int8", "nvfp4", "awq", "convrot", "q4", "q6", "q8",
+                  "k", "km", "ks", "kl", "km0", "quantized", "distill"}
 
 
 def _load_ref_workflows():
@@ -8942,10 +8948,17 @@ def _wf_remap_files(graph, info):
             opts = _enum_options(info, ct, f)
             if not opts or val in opts:
                 continue
-            key = re.split(r"[-_. /\\]", val.split("/")[-1].split("\\")[-1])[0].lower()
+            # Match to a host variant of the same class. The leading token
+            # (ltx / gemma / wan2 …) picks the family; then among those, prefer
+            # the candidate sharing the MOST descriptive tokens — so a `t2v`
+            # model doesn't get swapped for the host's `i2v` one, nor `high_noise`
+            # for `low_noise`, when the coarse family token matches both.
+            toks = [t for t in re.split(r"[-_. /\\]", val.split("/")[-1].split("\\")[-1].lower())
+                    if len(t) >= 2 and t not in _WF_FILE_NOISE]
+            key = toks[0] if toks else ""
             cand = [o for o in opts if len(key) >= 3 and key in o.lower()]
             if cand:
-                inp[f] = cand[0]
+                inp[f] = max(cand, key=lambda o: sum(t in o.lower() for t in toks))
             elif f == "lora_name" and ct in _LORA_BYPASS:
                 bypass.append(nid)
             else:
