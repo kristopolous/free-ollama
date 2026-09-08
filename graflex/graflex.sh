@@ -14,7 +14,6 @@ source .env
 case "$SERVICE" in
   all)
     for i in ollama ollama-shodan comfyui a1111 llama.cpp vllm lmstudio gradio; do
-      echo "--- $i ----"
       $CMD $i ${EXTRA_ARGS[@]}
     done
     exit 0

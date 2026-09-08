@@ -301,13 +301,18 @@ def _is_ip_literal(h):
         return False
 
 
-async def _resolve_ipv4(host):
-    """First IPv4 A record for a hostname, or None. Runs off the event loop via
-    getaddrinfo so a slow resolver never blocks the check pool."""
+async def _resolve_ipv4(host, timeout=None):
+    """First IPv4 A record for a hostname, or None. Runs getaddrinfo off the
+    event loop, BOUNDED by `timeout`: a hostname whose resolver is dead or slow
+    must not hang the check past its --ct. getaddrinfo has no native async
+    cancel, so it is wrapped in wait_for and abandoned (the orphaned lookup
+    finishes on its own) — returning None just means the directip fallback is
+    skipped for this host, not that the host is failed."""
     try:
-        infos = await asyncio.get_event_loop().getaddrinfo(
+        coro = asyncio.get_event_loop().getaddrinfo(
             host, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
-    except (socket.gaierror, OSError, UnicodeError):
+        infos = await (asyncio.wait_for(coro, timeout) if timeout else coro)
+    except (socket.gaierror, OSError, UnicodeError, asyncio.TimeoutError):
         return None
     for info in infos:
         if info[0] == socket.AF_INET:
@@ -333,15 +338,8 @@ async def _doorknock(session, entry, service, check_timeout, existing_working=No
     h = host_port[0]
     p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
     canon = SERVICE_CONFIG[service]["port"]
-    knocks = [(h, p, None)]
-    if not _is_ip_literal(h):
-        ip = await _resolve_ipv4(h)
-        if ip and ip != h:
-            for kp in ([p] if p == canon else [p, canon]):
-                knocks.append((ip, kp, {"strategy": "directip",
-                                        "params": {"hostname": h, "ip": ip, "port": kp}}))
-    default_result = None
-    for idx, (kh, kp, kmethod) in enumerate(knocks):
+
+    async def knock(kh, kp):
         backoff = BACKOFF
         while True:
             result = await _check_host(session, kh, kp, service, timeout=check_timeout)
@@ -349,16 +347,30 @@ async def _doorknock(session, entry, service, check_timeout, existing_working=No
                 reachable = await _is_network_reachable(session, existing_working)
                 if reachable:
                     log.warning(f"~ {entry['host']}: {result['error']} (host unreachable, not offline)")
-                    break
+                    return result
                 log.warning(f"~ {entry['host']}: {result['error']} (offline, retrying in {backoff}s...)")
                 await asyncio.sleep(backoff)
                 backoff = min(int(backoff * 1.2), MAX_BACKOFF)
                 continue
-            break
-        if idx == 0:
-            default_result = result
-        if isinstance(result, dict) and "error" not in result:
-            return result, kmethod
+            return result
+
+    # 1. the claimed host:port (the default). A working host answers here and
+    # never pays for DNS or the fallback ladder below.
+    default_result = await knock(h, p)
+    if isinstance(default_result, dict) and "error" not in default_result:
+        return default_result, None
+
+    # 2/3. only when the claimed NAME didn't answer: it may be gated while the
+    # raw IP is open. Resolve NOW — bounded by check_timeout so a dead resolver
+    # can't hang the check past --ct — then try IP:claimed-port, IP:canonical.
+    if not _is_ip_literal(h):
+        ip = await _resolve_ipv4(h, timeout=check_timeout)
+        if ip and ip != h:
+            for kp in ([p] if p == canon else [p, canon]):
+                result = await knock(ip, kp)
+                if isinstance(result, dict) and "error" not in result:
+                    return result, {"strategy": "directip",
+                                    "params": {"hostname": h, "ip": ip, "port": kp}}
     return default_result, None
 
 
@@ -2331,7 +2343,7 @@ def main():
                           check_new=True, check_all=False, workers=args.workers, session=args.session)
             else:
                 for step in parts:
-                    log.info(f"--- {step} ---")
+                    # log.info(f"--- {step} ---")
                     if step == "fetch":
                         fetch(dry=args.dry, curlify=args.curlify, service=_svc, query=args.query, name=_nm, servers=args.servers, ports=args.ports, countries=args.countries, fids=args.fids, sleep=args.sleep, session=args.session, shuffle=args.shuffle, site=args.site)
                     elif step == "check":

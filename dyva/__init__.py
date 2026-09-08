@@ -4047,6 +4047,20 @@ async def handle_geo_compare(request):
                         return False
                 elif meta != svc and meta != prov:   # a service or a provider
                     return False
+                continue
+            # A token may carry a size predicate (">10gb"), same as the model
+            # filter elsewhere. Split it out; a size token needs a model whose
+            # RECORDED size satisfies it (unknown sizes can't satisfy a positive
+            # "show me >10gb", matching the dashboard's own filter). A token can
+            # be name+size, size-only, or name-only.
+            tname, spred = _split_size_filter(t)
+            if spred:
+                cmp, thresh = spred
+                if not any(
+                        (not tname or model_query_match(m, tname))
+                        and _model_size(m) is not None and cmp(_model_size(m), thresh)
+                        for m in models):
+                    return False
             elif not any(model_query_match(m, t) for m in models):
                 return False
         return True
@@ -6488,10 +6502,29 @@ _COMFY_STRUCTURAL = re.compile(r"prompt_outputs_failed_validation|missing_node_t
                                r"|required_input_missing|return_type_mismatch")
 
 # What "an artifact" means per capability. VHS and friends file video under
-# several keys, so this is a tuple rather than a single name.
+# "gifs"; the current core SaveVideo node reports its mp4 under "images" (verified
+# against live LTX/MiniMax-H3/WAN renders) — so the video collection must include
+# "images", and the picker below prefers an actual video file so a frame-preview
+# PNG in the same list can't win.
 COMFY_AUDIO = ("audio",)
 COMFY_IMAGES = ("images",)
-COMFY_VIDEO = ("gifs", "videos")
+COMFY_VIDEO = ("gifs", "videos", "images")
+_VIDEO_EXT = (".mp4", ".webm", ".mkv", ".mov", ".gif", ".avi", ".m4v")
+_AUDIO_EXT = (".mp3", ".flac", ".wav", ".ogg", ".m4a", ".opus")
+
+
+def _pick_artifact(files, kinds):
+    """Among the output files a graph saved, choose the one that matches the
+    capability. Video and audio collections scan "images" too (that is where the
+    core SaveVideo/SaveAudio nodes report), so prefer a file with the right
+    extension; fall back to the first if none matches."""
+    pref = _VIDEO_EXT if ("videos" in kinds or "gifs" in kinds) else \
+           _AUDIO_EXT if "audio" in kinds else None
+    if pref:
+        for f in files:
+            if str(f.get("filename", "")).lower().endswith(pref):
+                return f
+    return files[0]
 
 
 async def comfy_submit(session, host, workflow, timeout=None):
@@ -6681,7 +6714,7 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
             for k in kinds:
                 files.extend(out.get(k) or [])
         if files:
-            af = files[0]
+            af = _pick_artifact(files, kinds)
             try:
                 v = await session.get(
                     _host_url(host, "/view"),

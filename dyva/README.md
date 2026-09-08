@@ -214,6 +214,26 @@ Notes:
 - `ollama pull` doesn't download anything (models live on remote hosts) — it just refreshes dyva's server cache.
 - `ollama cp` / `ollama rm` are not supported.
 
+### Model names are routing patterns
+
+A model name is a query, not an exact id — the same syntax everywhere a model is
+named (the `model` field of any endpoint, the chat model picker, the dashboard's
+Server-Room filter, and the map's compare boxes):
+
+- **Partials and globs** — `qwen` matches every qwen variant on every host;
+  `*` and `?` wildcards work (`qwen*27b`, `flux*2`, `llama3?70b`); matching is
+  case-insensitive and glob-normalised.
+- **Fallback chains** — `gemma?4/qwen3` tries `gemma?4` first, then `qwen3`.
+- **Size predicates** — `>`, `<`, `>=`, `<=` plus a size filter by a model's
+  recorded disk heft: `>10gb`, `qwen <=4gb`, `<700mb`. The size token can stand
+  alone or ride alongside a name, and sizes are decimal (`gb` = 1e9 bytes). It
+  keeps candidates of **unknown** size when narrowing a name query (a backend
+  that reports no size isn't silently dropped), but a bare positive size filter
+  (`>10gb`) selects only models whose size is actually known to satisfy it — you
+  can't include what hasn't been measured. On the map, `;live`/`;dead`,
+  `;cloud`/`;nocloud`, `;<service>` and `;<provider>` meta tokens combine with
+  these on either side.
+
 ## API Reference
 
 See the Swagger docs at `/docs` on a running instance for the full API reference.
@@ -404,8 +424,8 @@ knows exists.
 So dyva prefers to **run the operator's own kind of workflow** rather than
 synthesize one. Verified, API-format ComfyUI graphs live as repo assets in
 [`dyva/workflows/`](workflows/), one per `<family>-<mode>.json` (e.g.
-`ltx-2.3-t2v.json`, `ltx-2.3-i2v.json`, `minimax-h3-t2v.json`). For the host that
-won the race, at submit time:
+`ltx-2.3-t2v.json`, `ltx-2.3-i2v.json`, `minimax-h3-t2v.json`, `wan2.1-t2v.json`).
+For the host that won the race, at submit time:
 
 1. **Fit** — every node's `class_type` must exist in the host's live
    `/object_info`. A host missing a node the graph needs is not a candidate.
