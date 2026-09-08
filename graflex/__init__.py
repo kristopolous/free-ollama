@@ -1,11 +1,13 @@
 import argparse
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import random
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -288,6 +290,76 @@ def _value_to_host_port(v):
         parts = v.split(":")
         return parts[0], int(parts[1])
     return v, 80
+
+
+def _is_ip_literal(h):
+    """True if h is a bare IP address (v4 or v6), i.e. not a hostname to resolve."""
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return False
+
+
+async def _resolve_ipv4(host):
+    """First IPv4 A record for a hostname, or None. Runs off the event loop via
+    getaddrinfo so a slow resolver never blocks the check pool."""
+    try:
+        infos = await asyncio.get_event_loop().getaddrinfo(
+            host, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except (socket.gaierror, OSError, UnicodeError):
+        return None
+    for info in infos:
+        if info[0] == socket.AF_INET:
+            return info[4][0]
+    return None
+
+
+async def _doorknock(session, entry, service, check_timeout, existing_working=None):
+    """Probe an entry through the doorknock ladder, stopping at the first vector
+    that answers as the real service:
+
+      1. claimed host : claimed port            (the default)
+      2. resolved IP  : claimed port            }  only when the claimed host is
+      3. resolved IP  : canonical service port  }  a NAME that resolves elsewhere
+
+    Reaching the service by IP where the name would gate it is the `directip`
+    strategy (see graflex README "Recording how a host was reached"). Returns
+    (result, method): `method` is the directip tag when a non-default vector won,
+    else None; `result` is the winning probe result, or the claimed host's own
+    error when nothing answered. The offline/back-off retry from the old inline
+    loop is preserved per knock."""
+    host_port = entry["host"].split(":")
+    h = host_port[0]
+    p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+    canon = SERVICE_CONFIG[service]["port"]
+    knocks = [(h, p, None)]
+    if not _is_ip_literal(h):
+        ip = await _resolve_ipv4(h)
+        if ip and ip != h:
+            for kp in ([p] if p == canon else [p, canon]):
+                knocks.append((ip, kp, {"strategy": "directip",
+                                        "params": {"hostname": h, "ip": ip, "port": kp}}))
+    default_result = None
+    for idx, (kh, kp, kmethod) in enumerate(knocks):
+        backoff = BACKOFF
+        while True:
+            result = await _check_host(session, kh, kp, service, timeout=check_timeout)
+            if isinstance(result, dict) and "error" in result and _is_offline_msg(result["error"]):
+                reachable = await _is_network_reachable(session, existing_working)
+                if reachable:
+                    log.warning(f"~ {entry['host']}: {result['error']} (host unreachable, not offline)")
+                    break
+                log.warning(f"~ {entry['host']}: {result['error']} (offline, retrying in {backoff}s...)")
+                await asyncio.sleep(backoff)
+                backoff = min(int(backoff * 1.2), MAX_BACKOFF)
+                continue
+            break
+        if idx == 0:
+            default_result = result
+        if isinstance(result, dict) and "error" not in result:
+            return result, kmethod
+    return default_result, None
 
 
 def _fmt_duration(seconds):
@@ -1459,29 +1531,21 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
         nonlocal completed
         start = time.time()
         async with sem:
-            host_port = entry["host"].split(":")
-            h = host_port[0]
-            p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-            backoff = BACKOFF
-            while True:
-                result = await _check_host(session, h, p, service, timeout=check_timeout)
-                if isinstance(result, dict) and "error" in result and _is_offline_msg(result["error"]):
-                    reachable = await _is_network_reachable(session, existing_working)
-                    if reachable:
-                        log.warning(f"~ {entry['host']}: {result['error']} (host unreachable, not offline)")
-                        break
-                    log.warning(f"~ {entry['host']}: {result['error']} (offline, retrying in {backoff}s...)")
-                    await asyncio.sleep(backoff)
-                    backoff = min(int(backoff * 1.2), MAX_BACKOFF)
-                    continue
-                break
+            result, method = await _doorknock(session, entry, service,
+                                              check_timeout, existing_working)
 
         key = _entry_host(entry)
         ok = False
         async with wlock:
             if isinstance(result, dict) and "error" not in result:
                 result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
+                # Identity stays the claimed host (stable survey key); how it was
+                # actually reached lives in `method` (absent = the default way).
                 result["host"] = entry["host"]
+                if method:
+                    result["method"] = method
+                else:
+                    result.pop("method", None)
                 working = _load_json(working_file, silent=True)
                 found = False
                 for i, w in enumerate(working):
@@ -1632,15 +1696,19 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
     async def probe(entry):
         nonlocal completed
         async with sem:
-            host_port = entry["host"].split(":")
-            h = host_port[0]
-            p = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
+            # Same doorknock ladder as the initial check, so a host recorded via
+            # `directip` (its FQDN is gated, only the IP answers) is re-probed by
+            # IP on rescan and not pruned as dead. `method` is re-derived fresh.
             try:
-                result = await _check_host(session, h, p, service, timeout=check_timeout)
+                result, method = await _doorknock(session, entry, service, check_timeout)
             except Exception as e:
-                result = {"error": str(e)}
+                result, method = {"error": str(e)}, None
             if isinstance(result, dict) and "error" not in result:
                 result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
+                if method:
+                    result["method"] = method
+                else:
+                    result.pop("method", None)
                 return ("keep", entry, result)
             reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
             return ("dead", entry, reason)
@@ -1695,6 +1763,79 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
 
 def check_working(service, name=None, check_timeout=60, workers=10, session=None):
     asyncio.run(_check_working(service, name, check_timeout, workers, session))
+
+
+async def _model_probe(service, name=None, check_timeout=60, workers=10, session=None):
+    """For every working host, POST /api/show for each model it lists and save
+    the results to /tmp/graflex/<run_ts>/models/<ident>.json — one file per
+    host:port, named by the same base16 _tag() as check/, holding
+    {model-name: /api/show result}. /api/show is cheap, so every model is called
+    iteratively (N models -> N calls) with a small sleep. -i <session> resumes:
+    a host whose file already exists is skipped. (ollama-oriented; /api/show is
+    an ollama endpoint.)"""
+    from datetime import datetime, timezone
+    global _RUN_TS
+    if session:
+        _RUN_TS = session
+    elif not _RUN_TS:
+        _RUN_TS = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        log.info(f"model-probe session {_RUN_TS} — resume with -i {_RUN_TS}")
+    if name is None:
+        name = service
+    working = _load_json(_cache_file(name, "working"))
+    hosts = [h for h in (working or [])
+             if isinstance(h, dict) and h.get("host") and h.get("models")]
+    if not hosts:
+        log.warning(f"model-probe: no {service or '?'} working hosts with models — run check first")
+        return
+    out_dir = os.path.join("/tmp/graflex", _RUN_TS, "models")
+    os.makedirs(out_dir, exist_ok=True)
+    sem = asyncio.Semaphore(workers)
+    done = 0
+
+    async def probe(entry, http):
+        nonlocal done
+        hostport = entry["host"]
+        path = os.path.join(out_dir, f"{_tag(hostport)}.json")
+        if os.path.exists(path):          # -i resume: already probed this host
+            return
+        base = (entry.get("url") or f"http://{hostport}").rstrip("/")
+        models = entry.get("models") or []
+        results = {}
+        async with sem:
+            for m in models:
+                try:
+                    r = await asyncio.wait_for(
+                        http.post(base + "/api/show", json={"model": m}),
+                        timeout=check_timeout)
+                    if r.status == 200:
+                        results[m] = await r.json(content_type=None)
+                    else:
+                        body = ""
+                        try:
+                            body = (await r.text())[:300]
+                        except Exception:
+                            pass
+                        results[m] = {"error": f"HTTP {r.status}", "body": body}
+                    await r.release()
+                except Exception as e:
+                    results[m] = {"error": str(e) or type(e).__name__}
+                await asyncio.sleep(0.5)   # be nice
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"host": hostport, "probe_time": time.time(), "models": results},
+                      f, indent=2)
+        done += 1
+        log.info(f"+ {hostport}: /api/show for {len(results)}/{len(models)} models")
+
+    timeout = aiohttp.ClientTimeout(total=check_timeout + 5)
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False),
+                                     timeout=timeout) as http:
+        await asyncio.gather(*[probe(h, http) for h in hosts], return_exceptions=True)
+    log.info(f"model-probe: {done} host(s) probed -> {out_dir}")
+
+
+def model_probe(service, name=None, check_timeout=60, workers=10, session=None):
+    asyncio.run(_model_probe(service, name, check_timeout, workers, session))
 
 
 def _load_classifier():
@@ -2067,7 +2208,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "model-probe"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -2128,6 +2269,19 @@ def main():
         refresh = "refresh" in rest
         keyarg = next((x for x in rest if x != "refresh"), None)
         sys.exit(enrich_file(fargs[0], keyarg, refresh=refresh))
+
+    if args.action == "model-probe":
+        log.info("--- model-probe ---")
+        try:
+            for svc in pipe_services:
+                if all_services:
+                    log.info(f"--- model-probe: {svc} ---")
+                model_probe(service=svc, name=(None if all_services else args.name),
+                            check_timeout=args.check_timeout, workers=args.workers,
+                            session=args.session)
+        except KeyboardInterrupt:
+            log.warning("model-probe interrupted")
+        return
 
     if args.action == "check-working":
         log.info("--- check-working ---")

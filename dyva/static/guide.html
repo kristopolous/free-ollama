@@ -37,7 +37,7 @@ footer{margin-top:3em;color:var(--dim);font-size:.85rem;border-top:1px solid var
 <h1>free-ollama</h1>
 <p class="lead">Instrumentation for surveying the open inference servers sitting on the public internet — and a proxy that routes to them. Two parts: <b>graflex</b> finds and classifies hosts; <b>dyva</b> serves them behind one API.</p>
 <div class="top-links">
-  <span class="pill">API reference</span> <a href="/docs" target="_blank">Swagger / OpenAPI docs →</a>
+  <span class="pill">API reference</span> <a href="docs/" target="_blank">Swagger / OpenAPI docs →</a>
   &nbsp;·&nbsp; <a href="https://github.com/kristopolous/free-ollama" target="_blank">source</a>
 </div>
 <div class="note">This is a research tool. It observes and measures — it never bypasses authentication, and an auth-required server is a recorded pass, not a target. A server exposing someone else's metered API key is documented statistically, never used.</div>
@@ -72,7 +72,7 @@ curl http://THIS-HOST:PORT/api/chat -d '{"model":"gemma3","messages":[{"role":"u
 
 # OpenAI-style
 curl http://THIS-HOST:PORT/v1/chat/completions -d '{"model":"qwen3","messages":[...]}'</code></pre>
-<p>Model names are <b>routing patterns</b>: partials and globs work (<code>qwen*27b</code>, <code>abliterated</code>), as do fallbacks (<code>gemma?4/qwen3</code>). One name covers every matching variant on every host. Media (image / edit / video / TTS) rides the OpenAI-ish endpoints under <code>/v1/…</code> and <code>/sdapi/…</code> — see the <a href="/docs" target="_blank">Swagger docs</a>.</p>
+<p>Model names are <b>routing patterns</b>: partials and globs work (<code>qwen*27b</code>, <code>abliterated</code>), as do fallbacks (<code>gemma?4/qwen3</code>). One name covers every matching variant on every host. Media (image / edit / video / TTS) rides the OpenAI-ish endpoints under <code>/v1/…</code> and <code>/sdapi/…</code> — see the <a href="docs/" target="_blank">Swagger docs</a>.</p>
 
 <h3>Adding a source (settings)</h3>
 <p>dyva's host list comes from one or more <b>sources</b>: the public discovery cache, or a private federation you point it at. Manage them in the dashboard <b>Settings</b> tab (paste a source URL), or from the CLI:</p>
@@ -98,7 +98,7 @@ curl http://THIS-HOST:PORT/v1/chat/completions -d '{"model":"qwen3","messages":[
 ./dyva.py -l                       # localhost-only inference</code></pre>
 
 <footer>
-free-ollama · <a href="/docs" target="_blank">API docs</a> · <a href="https://github.com/kristopolous/free-ollama" target="_blank">github.com/kristopolous/free-ollama</a>
+free-ollama · <a href="docs/" target="_blank">API docs</a> · <a href="https://github.com/kristopolous/free-ollama" target="_blank">github.com/kristopolous/free-ollama</a>
 <br>Host geolocation: IP data by <a href="https://db-ip.com" target="_blank" rel="noopener">DB-IP</a> (CC BY 4.0).
 </footer>
 

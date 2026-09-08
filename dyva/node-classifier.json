@@ -1,4 +1,17 @@
 {
+  "_pairings_doc": "Authoritative model -> text-encoder / VAE / clip_type pairings, from official ComfyUI docs (docs.comfy.org). Encoders match as a CLASS glob, quant-agnostic (fp8/bf16/fp4/gguf/scaled all fine). This is the knowledge base for selecting a compatible encoder from a host's installed text_encoders/ vae/ folders; the builder graph is separate (some newer families still need their own graph, noted below).",
+  "_pairings": [
+    {"family": "wan", "model": "(?i)wan|bernini", "encoder": "(?i)umt5[-_. ]?xxl", "vae": "(?i)wan.*vae", "clip_type": "wan", "kind": "video", "builder": "ok", "source": "docs.comfy.org/tutorials/video/wan/wan2_2"},
+    {"family": "ltx-0.9", "model": "(?i)ltx.*(0\\.9|video-2b)", "encoder": "(?i)t5xxl", "vae": "", "clip_type": "ltxv", "kind": "video", "builder": "ok", "source": "github.com/Lightricks/ComfyUI-LTXVideo"},
+    {"family": "ltx-2.3", "model": "(?i)ltx.*2\\.[23]", "encoder": "(?i)gemma[-_. ]?3", "vae": "(?i)ltx.*vae", "clip_type": null, "kind": "video", "builder": "NEEDS-GRAPH: 2.x graph differs from 0.9; build from docs.comfy.org/tutorials/video/ltx/ltx-2-3", "source": "docs.comfy.org/tutorials/video/ltx/ltx-2-3"},
+    {"family": "ltx-2.5", "model": "(?i)ltx.*2\\.5", "encoder": "(?i)gemma[-_. ]?4", "vae": "(?i)ltx.*vae", "clip_type": null, "kind": "video", "builder": "NEEDS-GRAPH", "source": "github.com/Comfy-Org/ComfyUI issue 15595"},
+    {"family": "minimax-h3", "model": "(?i)minimax.*h3", "encoder": "(?i)qwen3vl.*minimax", "vae": "(?i)minimax.*video.*vae", "vae_audio": "(?i)minimax.*audio.*vae", "clip_type": "minimax", "kind": "video", "builder": "ok", "source": "docs.comfy.org/tutorials/video/minimax/minimax-h3"},
+    {"family": "hunyuan-video", "model": "(?i)hunyuan.*video", "encoder": "(?i)llava_llama3", "encoder2": "(?i)clip_l", "vae": "(?i)hunyuan.*video.*vae", "clip_type": "hunyuan_video", "kind": "video", "builder": "NEEDS-GRAPH", "source": "docs.comfy.org/tutorials/video/hunyuan/hunyuan-video"},
+    {"family": "flux2-dev", "model": "(?i)flux[-_. ]?2(?!.*klein)", "encoder": "(?i)mistral.*flux2|flux2.*mistral|mistral", "vae": "(?i)flux2-vae", "clip_type": null, "kind": "image", "builder": "edit-family", "source": "docs.comfy.org/tutorials/flux/flux-2-klein"},
+    {"family": "flux2-klein", "model": "(?i)flux[-_. ]?2.*klein|klein", "encoder": "(?i)qwen_3_(4b|8b)|qwen[-_. ]?3", "vae": "(?i)flux2-vae", "clip_type": null, "kind": "image", "builder": "edit-family", "source": "docs.comfy.org/tutorials/flux/flux-2-klein"},
+    {"family": "z-image", "model": "(?i)z[-_. ]?image", "encoder": "(?i)qwen_3_4b|qwen[-_. ]?3", "vae": "(?i)^ae\\.safetensors|flux.*vae", "clip_type": null, "kind": "image", "builder": "edit-family", "source": "docs.comfy.org/tutorials/image/z-image/z-image-turbo"},
+    {"family": "magi-2", "model": "(?i)magi[-_. ]?2", "encoder": "(?i)qwen3[._-]?5|qwen_3_5", "vae": "(?i)wan2\\.?2.?vae", "vae_audio": "(?i)stable.?audio", "clip_type": null, "kind": "video", "builder": "PROVISIONAL: no ComfyUI-native nodes yet (SandAI preview); activate when object_info shows its nodes. Reuses Wan2.2 VAE + Qwen3.5-27B encoder.", "source": "github.com/SandAI-org/MAGI-2-preview"}
+  ],
   "tts": [
     {
       "name": "Qwen3TTS-FB-Custom",

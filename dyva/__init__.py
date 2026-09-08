@@ -1096,7 +1096,131 @@ BUILTIN_SOURCES = [
 ]
 
 
-def refresh_cache(source=None):
+def _save_json_atomic(path, data):
+    """Write JSON via a unique temp file + fsync + os.replace, so a concurrent
+    reader (e.g. /reload-hosts re-reading free-ollama.json) never sees a
+    half-written file."""
+    import tempfile
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+CLEANSED_FILE = os.path.join(CACHE_DIR, "free-ollama.cleansed.json")
+
+# Closed-weight / commercial names that are never a real ollama pull — a host
+# advertising ONLY these is a "commercial model imposter" (woahllama 2.2): almost
+# always tinyllama renamed via `ollama cp`, some carrying malware system prompts.
+_FAKE_NAME_RE = re.compile(
+    r'(?i)^(gpt[-_]?[0-9]|o[134](?:[-_]|$)|chatgpt|claude(?:[-_]?[0-9]|[-_]?opus|[-_]?sonnet|[-_]?haiku)'
+    r'|gemini|grok|dall[-_]?e|sora|command[-_]?r|mistral[-_]?large|davinci|text[-_]?embedding[-_]?ada)')
+
+
+def _model_base(m):
+    return str(m).split(" ")[0].split(":")[0].strip().lower()
+
+
+def _is_fake_name(m):
+    return bool(_FAKE_NAME_RE.match(_model_base(m)))
+
+
+def _is_cloud_tag(m):
+    s = str(m).lower()
+    return s.endswith("-cloud") or s.endswith(":cloud") or ":cloud" in s
+
+
+def _cleanse_records(records, phantom_min_hosts=50, phantom_min_models=3):
+    """Split the MERGED pool into (kept, culled) using the woahllama fake-host
+    signals. Cleanse runs here — on the merged multi-source pool — not per-source
+    in graflex, because the junk arrives from several sources.
+
+    Culled (each tagged with `_cleanse` = the signal):
+      - fake_commercial_names: every model on the host is a closed-weight
+        commercial imposter name (2.2).
+      - cloud_proxy: every model is a `-cloud`/`:cloud` proxy to a paid service.
+      - phantom_catalog: the host shares an identical multi-model catalog
+        (>= phantom_min_models) with >= phantom_min_hosts other hosts — the
+        coordinated phantom-responder fleet (2.1).
+    Kept hosts additionally have any fake/cloud model names STRIPPED from their
+    advertised list, so a mixed host stays but stops offering the junk."""
+    import collections
+    catalog = collections.Counter()
+    for r in records:
+        ms = tuple(sorted(_model_base(m) for m in (r.get("models") or [])))
+        if len(ms) >= phantom_min_models:
+            catalog[ms] += 1
+    phantom = {c for c, n in catalog.items() if n >= phantom_min_hosts}
+    kept, culled = [], []
+    for r in records:
+        models = r.get("models") or []
+        clean = [m for m in models if not _is_fake_name(m) and not _is_cloud_tag(m)]
+        ms = tuple(sorted(_model_base(m) for m in models))
+        if models and not clean:               # nothing real left -> imposter/proxy
+            reason = "fake_commercial_names" if any(_is_fake_name(m) for m in models) else "cloud_proxy"
+            culled.append(dict(r, _cleanse=reason))
+        elif len(ms) >= phantom_min_models and ms in phantom:
+            culled.append(dict(r, _cleanse="phantom_catalog"))
+        else:
+            kept.append(dict(r, models=clean) if len(clean) != len(models) else r)
+    return kept, culled
+
+
+def _host_of(rec):
+    return str(rec.get("server") or rec.get("url") or "").rstrip("/")
+
+
+def cleanse_pool(apply=False):
+    """Standalone `--hosts cleanse`: report (dry-run) or quarantine (apply) the
+    fake hosts in the on-disk pool. Quarantine MOVES them to
+    free-ollama.cleansed.json (reversible, keeps the research record) rather than
+    deleting — the caches are observational data, not just a routing list."""
+    if not os.path.exists(CACHE_FILE):
+        print("no free-ollama.json — run --refresh first", file=sys.stderr)
+        return 1
+    with open(CACHE_FILE, encoding="utf-8") as f:
+        records = json.load(f)
+    kept, culled = _cleanse_records(records)
+    import collections
+    by = collections.Counter(c.get("_cleanse") for c in culled)
+    print(f"pool: {len(records)} hosts -> keep {len(kept)}, cleanse {len(culled)}", file=sys.stderr)
+    for sig, n in by.most_common():
+        print(f"  {sig}: {n}", file=sys.stderr)
+        for c in [x for x in culled if x.get('_cleanse') == sig][:5]:
+            print(f"      e.g. {_host_of(c)}  {(c.get('models') or [])[:3]}", file=sys.stderr)
+    if not apply:
+        print("\n(dry run — `--hosts cleanse apply` to quarantine these to "
+              "free-ollama.cleansed.json)", file=sys.stderr)
+        return 0
+    prior = []
+    if os.path.exists(CLEANSED_FILE):
+        try:
+            with open(CLEANSED_FILE, encoding="utf-8") as f:
+                prior = json.load(f)
+        except Exception:
+            prior = []
+    seen = {_host_of(x) for x in prior}
+    prior += [c for c in culled if _host_of(c) not in seen]
+    _save_json_atomic(CLEANSED_FILE, prior)
+    _save_json_atomic(CACHE_FILE, kept)
+    global _servers_cache
+    _servers_cache = None
+    print(f"\nquarantined {len(culled)} to {CLEANSED_FILE}; pool now {len(kept)}", file=sys.stderr)
+    return 0
+
+
+def refresh_cache(source=None, cleanse=True):
     global _servers_cache
     _servers_cache = None
 

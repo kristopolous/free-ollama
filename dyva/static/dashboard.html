@@ -674,7 +674,10 @@ body.img-edit .img-main > #imgResult{order:10}
 .tools-pop::before,.tools-pop::after{content:'';position:absolute;top:100%;right:.75em;width:0;height:0;border:8px solid transparent}
 .tools-pop::before{border-top-color:var(--border-strong)}
 .tools-pop::after{border-top-color:var(--surface);top:calc(100% - 1px)}
-.tools-pop-title{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:var(--sp-3)}
+.tools-pop-title{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:var(--sp-3);display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2)}
+.tools-off{display:inline-flex;align-items:center;gap:.3em;text-transform:none;letter-spacing:0;color:var(--text-dim);cursor:pointer;font-weight:normal}
+.tools-off input{margin:0}
+.tools-pop.all-off .tool-opt{opacity:.4;pointer-events:none}
 .tool-opt{display:flex;align-items:flex-start;gap:9px;padding:7px var(--sp-2);border-radius:var(--r-md);cursor:pointer}
 .tool-opt:hover{background:var(--surface-hover)}
 .tool-opt input[type=checkbox]{width:auto;margin:2px 0 0;accent-color:var(--accent);cursor:pointer}
@@ -953,7 +956,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="tool-menu">
 <button id="chatTools" class="mp-tool" title="Tools" aria-haspopup="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></button>
 <div id="toolsPop" class="tools-pop">
-<div class="tools-pop-title">Tools</div>
+<div class="tools-pop-title">Tools <label class="tools-off" title="Send no tools at all — for models that don't support tool calls"><input type="checkbox" id="toolsOff"> disable all</label></div>
 <label class="tool-opt"><input type="checkbox" id="toolImage"><span class="tool-txt"><b>Image</b><small>Generate and edit images</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolVideo"><span class="tool-txt"><b>Video</b><small>Make a short video</small></span></label>
 <label class="tool-opt"><input type="checkbox" id="toolSpeech"><span class="tool-txt"><b>Speech</b><small>Speak dialog out loud</small></span></label>
@@ -1377,7 +1380,11 @@ function onActivityMessage(e){try{if(paused)return;var d=JSON.parse(e.data);if(!
   // that line so a fan-out resolves in place instead of stacking a row per host.
   var p=d.id?_actLines[d.id]:null;var fresh=!p;
   if(fresh){p=document.createElement('div');if(d.id)_actLines[d.id]=p}
-  p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+d.message;
+  p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';
+  // d.message carries the REAL upstream error body (see the "surface real errors"
+  // rule) which is attacker-controlled — a malicious host can put <script>/<img
+  // onerror> in a 502 body. It must be escaped before it touches innerHTML.
+  p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+escHtml(d.message);
   if(fresh)c.insertBefore(p,c.firstChild);
   while(c.children.length>ACTIVITY_LINES){var gone=c.lastChild;for(var k in _actLines)if(_actLines[k]===gone)delete _actLines[k];c.removeChild(gone)}}catch(ex){}}
 document.getElementById('activityReconnect').addEventListener('click',function(ev){
@@ -2533,6 +2540,9 @@ function addMsg(role,text,index){
   return {roleEl:r,bodyEl:b};
 }
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+// Weak models often double-encode a nested array tool-arg as a JSON STRING
+// ("agents":"[{…}]" instead of the array). Accept either form.
+function _argArray(v){if(Array.isArray(v))return v;if(typeof v==='string'){try{var p=JSON.parse(v);if(Array.isArray(p))return p}catch(e){}}return[]}
 function splitThink(raw){
   var s=String(raw||'');
   var m=s.match(/^\s*<think>([\s\S]*?)(<\/think>|$)/i);
@@ -3036,7 +3046,7 @@ var TOOL_LABELS=[
 ];
 function _toolFlags(){
   return {imageOn:imageOn,videoOn:videoOn,speechOn:speechOn,
-          webOn:webOn,agentsOn:agentsOn,docsOn:docsOn};
+          webOn:webOn,agentsOn:agentsOn,docsOn:docsOn,toolsOff:toolsOff};
 }
 function enabledToolNames(){
   var live=_toolFlags();
@@ -3046,12 +3056,17 @@ function disabledToolNames(){
   var live=_toolFlags();
   return TOOL_LABELS.filter(function(p){return !live[p[0]]}).map(function(p){return p[1]});
 }
-// Tools with no toggle, pulled in automatically when any media tool is on.
+// Tools with no toggle of their own, mirrored from buildTools(): ask_question is
+// always sent; calc + read_docs ride along whenever any opt-in tool is on;
+// list_assets / search_models come in with the media tools.
 function alwaysOnToolNames(){
   var live=_toolFlags();
-  if(live.imageOn||live.videoOn||live.speechOn||live.webOn)
-    return ['list_assets','search_models'];
-  return [];
+  var anyOpt=live.imageOn||live.videoOn||live.speechOn||live.webOn||live.agentsOn||live.docsOn;
+  var names=['ask_question'];
+  if(anyOpt){names.push('calc');names.push('help');}
+  if(live.imageOn||live.videoOn||live.speechOn||live.webOn)names.push('list_assets');
+  if(live.imageOn||live.videoOn||live.speechOn)names.push('search_models');
+  return names;
 }
 // Whoever actually answered last, rather than a sticky host we would have to
 // go and ask the server about — this is a description of the conversation.
@@ -3448,9 +3463,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       // read_docs gate: a gated tool won't run without the right token; a wrong
       // one bounces back the docs AND the token so the retry succeeds.
       if(GATED_TOOLS[fn.name]&&String(args.token||'')!==TOOL_TOKENS[fn.name]){
-        var _gt=TOOL_DEFS[fn.name]||{},_gp=(_gt.parameters&&_gt.parameters.properties)||{},_gr=(_gt.parameters&&_gt.parameters.required)||[];
+        var _gt=TOOL_DEFS[fn.name]||{};
         var _dl=['You sent the wrong token, so '+fn.name+' did NOT run. Read the docs below, then call '+fn.name+' again including "token".','',(_gt.name||fn.name)+': '+(_gt.description||'')];
-        Object.keys(_gp).forEach(function(k){var p=_gp[k]||{};_dl.push('- '+k+(_gr.indexOf(k)>=0?' (required)':'')+' ['+(p.type||'any')+(p.enum?': '+p.enum.join('|'):'')+']: '+(p.description||''));});
+        _docParamLines(_gt.parameters).forEach(function(l){_dl.push(l)});
         _dl.push('- token (required) [string]: pass the exact value below.','','token: '+TOOL_TOKENS[fn.name]);
         results.push({text:_dl.join('\n'),md:'`🔒 '+fn.name+': token required`'});
         continue;
@@ -3600,7 +3615,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       }else if(fn.name==='ask_question'){
         setStatus('waiting for you\u2026');
         var q=String(args.question||'').trim();
-        var opts=Array.isArray(args.options)?args.options.map(String).filter(Boolean):[];
+        var opts=_argArray(args.options).map(String).filter(Boolean);
         if(!q){results.push({text:'Error: no question was given'});}
         else{
           var picked=await askUser(q,opts,ac.signal);
@@ -3694,9 +3709,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           // pictures get combined — and the most recent image when it didn't,
           // which keeps plain "make it night" a one-argument call.
           var echat=liveChat(chatId)||currentChat;
-          var wantNames=Array.isArray(args.images)
-                ? args.images.map(String).map(function(x){return x.trim()}).filter(Boolean).slice(0,4)
-                : [];
+          var wantNames=_argArray(args.images)
+                .map(String).map(function(x){return x.trim()}).filter(Boolean).slice(0,4);
           var picks=[],missing=[];
           wantNames.forEach(function(w){
             var a=assetFind(echat,w);
@@ -3829,27 +3843,27 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         try{_cr=_calcEval(_cx)}catch(e){_cr='Error: '+((e&&e.message)||e)}
         results.push({text:(_cx?_cx+' = ':'')+_cr,
                       md:'`= '+String(_cr).slice(0,160).replace(/`/g,"'")+'`'});
-      }else if(fn.name==='read_docs'){
+      }else if(fn.name==='help'){
         var _t=TOOL_DEFS[args.tool];
         if(!_t){
-          results.push({text:'No such tool "'+String(args.tool)+'". Available: '+Object.keys(TOOL_DEFS).join(', '),md:'`⚠ read_docs`'});
+          results.push({text:'No such tool "'+String(args.tool)+'". Available: '+Object.keys(TOOL_DEFS).join(', '),md:'`⚠ help`'});
         }else{
           var _lines=[_t.name+': '+_t.description];
-          var _props=(_t.parameters&&_t.parameters.properties)||{};
-          var _req=(_t.parameters&&_t.parameters.required)||[];
-          Object.keys(_props).forEach(function(k){var p=_props[k]||{};
-            _lines.push('- '+k+(_req.indexOf(k)>=0?' (required)':'')+' ['+(p.type||'any')+(p.enum?': '+p.enum.join('|'):'')+']: '+(p.description||''));});
+          _docParamLines(_t.parameters).forEach(function(l){_lines.push(l)});
           if(GATED_TOOLS[args.tool]){
             _lines.push('- token (required) [string]: pass the exact value below.','',
                         'token: '+TOOL_TOKENS[args.tool]);
           }
-          results.push({text:_lines.join('\n'),md:'read_docs '+String(args.tool)});
+          results.push({text:_lines.join('\n'),md:'help '+String(args.tool)});
         }
       }else if(fn.name==='spawn_agents'){
-        var aglist=Array.isArray(args.agents)?args.agents.filter(function(a){return a&&a.task}):[];
+        var aglist=_argArray(args.agents).filter(function(a){return a&&a.task});
         if(!aglist.length){
-          results.push({text:'Error: spawn_agents needs a non-empty "agents" list, each item with a "task".',
-                        md:'`⚠ spawn_agents: no agents given`'});
+          // Surface what actually arrived so a malformed call is visible, not
+          // swallowed into a generic error (the point is to surface things).
+          var _gotA=JSON.stringify(args.agents);
+          results.push({text:'Error: spawn_agents needs a non-empty "agents" ARRAY, each item an object with a "task" (not a JSON string). Received agents='+(_gotA||'undefined').slice(0,400),
+                        md:'`⚠ spawn_agents: no usable agents — got '+(typeof args.agents)+' '+(_gotA||'').slice(0,100)+'`'});
         }else{
           if(aglist.length>80)aglist=aglist.slice(0,80);   // sanity ceiling — past this it's a runaway, not intent
           var shared=String(args.context||'').trim();
@@ -3858,12 +3872,23 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           // provenance) and read from, mirrored live into the Scratchpad doc so
           // the user can watch it fill.
           var batchId='b'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
-          var _scratchTimer=setInterval(function(){pollScratch(chatId,batchId)},1500);
+          // Per-agent live status/output, mirrored (with the shared scratchpad)
+          // into the auto-opened "Sub-agents" doc so the run isn't invisible.
+          var agentLog=aglist.map(function(ag,ix){return {name:String(ag.name||('agent'+(ix+1))).slice(0,40),status:'queued',host:'',model:'',text:''};});
+          var scratchEntries=[];
+          function _renderAgents(){renderAgentsDoc(chatId,agentLog,scratchEntries);}
+          var _agTimer=setInterval(function(){
+            fetch('api/chat/scratch/'+encodeURIComponent(batchId),{cache:'no-store'})
+              .then(function(r){return r.json()})
+              .then(function(j){scratchEntries=(j&&j.entries)||[];_renderAgents();})
+              .catch(function(){_renderAgents();});
+          },1500);
+          _renderAgents();
           // Fire each sub-agent as its own server-side job and run them in
           // parallel; each is isolated ({task, context} only) — the coordinator
           // (this model) synthesizes their results on the next turn.
           var outs=await Promise.all(aglist.map(function(ag,ix){
-            var nm=String(ag.name||('agent'+(ix+1))).slice(0,40);
+            var nm=agentLog[ix].name;
             // model is chosen at invocation (per-agent); default to this chat's
             var amodel=String(ag.model||'').trim()||model;
             var sys='You are '+nm+', a focused sub-agent working one part of a larger task. '
@@ -3880,12 +3905,17 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                                 scratch:batchId,agent_name:nm,
                                 tools:[WEB_TOOL,WRITE_SCRATCH_TOOL,READ_SCRATCH_TOOL],
                                 messages:[{role:'system',content:sys},
-                                          {role:'user',content:uc}]},ac.signal)
-              .then(function(r){return {name:nm,model:r.model||amodel,text:r.text||'(no output)'};})
-              .catch(function(e){return {name:nm,model:amodel,text:'(failed: '+((e&&e.message)||e)+')'};});
+                                          {role:'user',content:uc}]},ac.signal,
+                              function(t){var a=agentLog[ix];a.status=t.phase||t.status||'running';
+                                          if(t.host)a.host=t.host;if(t.model)a.model=t.model;a.text=t.text||'';})
+              .then(function(r){var a=agentLog[ix];a.status='done';a.model=r.model||amodel;a.text=r.text||'(no output)';
+                                return {name:nm,model:r.model||amodel,text:r.text||'(no output)'};})
+              .catch(function(e){var a=agentLog[ix];a.status='failed';a.text='(failed: '+((e&&e.message)||e)+')';
+                                 return {name:nm,model:amodel,text:'(failed: '+((e&&e.message)||e)+')'};});
           }));
-          clearInterval(_scratchTimer);
-          pollScratch(chatId,batchId);   // final mirror of the finished board
+          clearInterval(_agTimer);
+          try{var _jf=await (await fetch('api/chat/scratch/'+encodeURIComponent(batchId),{cache:'no-store'})).json();scratchEntries=(_jf&&_jf.entries)||[];}catch(e){}
+          _renderAgents();   // final state of every agent + the finished board
           if(ac.signal.aborted)return;
           var joined=outs.map(function(o){
             return '### '+o.name+(o.model?' ('+String(o.model).replace(/\\/g,'/').split('/').pop()+')':'')
@@ -3897,13 +3927,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                         keep:'['+aglist.length+' sub-agents ran: '+outs.map(function(o){return o.name}).join(', ')+'.]',
                         md:'`⇄ spawn_agents: '+aglist.length+' agent'+(aglist.length>1?'s':'')+'`'});
         }
-      }else if(fn.name==='create_document'||fn.name==='edit_document'||fn.name==='rename_document'
-               ||fn.name==='replace_in_document'||fn.name==='search_document'||fn.name==='read_document'
-               ||fn.name==='take_notes'){
-        var dverb={create_document:'making',edit_document:'rewriting',rename_document:'renaming',
-                   replace_in_document:'editing',search_document:'searching',read_document:'reading',
-                   take_notes:'jotting'}[fn.name];
-        setStatus(dverb+' \u201c'+String(args.title||args.new_title||(fn.name==='take_notes'?'scratchpad':'document'))+'\u201d\u2026');
+      }else if(fn.name==='write_file'||fn.name==='read_file'||fn.name==='edit_file'){
+        var dverb={write_file:'writing',read_file:'reading',edit_file:'editing'}[fn.name];
+        setStatus(dverb+' \u201c'+String(args.name||args.title||'file')+'\u201d\u2026');
         var dr=applyDocOp(chatId,fn.name,args);
         results.push({text:dr.text,md:dr.md});
       }else results.push({text:'Error: unknown tool '+fn.name});
@@ -4403,7 +4429,7 @@ function _resultMetaMd(name,model,service,host){
   return '\n\n<span class="result-meta">'+bits.map(escHtml).join(' \u00b7 ')+'</span>';
 }
 var SEARCH_MODELS_TOOL={type:'function',function:{name:'search_models',description:'List the models available across discovered hosts for a kind of generation, optionally filtered. Read-only; returns names and how many hosts have each.',parameters:{type:'object',properties:{type:{type:'string',enum:['image','edit','video','speech','text'],description:'Which capability: image (generate), edit (image editing), video, speech (TTS voices), or text (chat LLMs).'},substring:{type:'string',description:'Optional filter \u2014 plain text matches as a case-insensitive substring ("cartoon", "flux"), and globs work too ("z*image" matches z-image / zImage / z_image, "flux*2" matches flux.2 and flux-2). Only matching model names are returned.'},page:{type:'integer',description:'1-based page number when there are more than 50 matches; the result says how many pages there are. Defaults to 1.'}},required:['type']}}};
-var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created, plus any documents written in the side panel. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
+var LIST_ASSETS_TOOL={type:'function',function:{name:'list_assets',description:'List the files in this conversation by name — images, videos and audio the user attached or a tool created, plus any files written in the side panel. Call this when you need to work on something from earlier and want its name, for example before combining two pictures with edit_image. Returns names like "garden.jpg" that other tools accept.',parameters:{type:'object',properties:{}}}};
 var CALC_TOOL={type:'function',function:{name:'calc',description:'Evaluate a math expression EXACTLY (high precision) and get the precise result — use it instead of doing arithmetic in your head whenever precision matters: large numbers, many decimals, or multi-step calculation. It is a math language (mathjs): + - * / ^ %, parentheses, and functions like sqrt, abs, log, exp, sin/cos, gcd, factorial, plus variables and matrices. Not a general programming language — no loops, no I/O. Report the returned value to the user; do not recompute it yourself.',parameters:{type:'object',properties:{expression:{type:'string',description:'The expression to evaluate, e.g. "sqrt(19310)", "2^64", "(1+0.05)^30 * 1000", "det([[1,2],[3,4]])".'}},required:['expression']}}};
 // A locked-down mathjs instance for calc: BigNumber precision, and the
 // expression-level functions that mathjs's own security guide flags as able to
@@ -4513,29 +4539,40 @@ var READ_SCRATCH_TOOL={type:'function',function:{name:'read_scratch',description
 // Mirror a spawn batch's shared scratchpad into the "Scratchpad" document so the
 // user can watch it fill live. Read-only view of server-side buffer state; we
 // replace the doc content each poll and only commit when it actually changed.
-function renderScratchDoc(chatId,entries){
+// (The old standalone Scratchpad-doc mirror was folded into renderAgentsDoc,
+// which shows per-agent status/output AND the shared scratchpad in one place.)
+// One live doc for a spawn batch so sub-agents aren't invisible: each agent's
+// status + output so far, with the shared scratchpad folded in at the bottom.
+// Auto-opened while the batch runs (like the old scratchpad mirror). Per-agent
+// output is tail-capped so a big fan-out doesn't build a monster doc.
+function renderAgentsDoc(chatId,log,scratch){
   var ctx=docCtx(chatId);if(!ctx)return;
-  var doc=findDoc(ctx.docs,'Scratchpad');
-  if(!doc){doc={id:_docId(),title:'Scratchpad',type:'markdown',language:'',content:'',updated:Date.now(),versions:[]};ctx.docs.push(doc);}
-  var md=(entries&&entries.length)
-    ? entries.map(function(e){return '**'+(e.who||'agent')+'**'+(e.ts?' · '+_ttsWhen(e.ts*1000):'')+'\n\n'+(e.text||'');}).join('\n\n---\n\n')
-    : '_(waiting for the agents to jot something…)_';
+  var doc=findDoc(ctx.docs,'Sub-agents');
+  if(!doc){doc={id:_docId(),title:'Sub-agents',type:'markdown',language:'',content:'',updated:Date.now(),versions:[]};ctx.docs.push(doc);}
+  var parts=(log||[]).map(function(a){
+    var head='### '+(a.name||'agent')+' — '+(a.status||'…')
+      +(a.host?' · '+String(a.host).replace(/^https?:\/\//,''):'')
+      +(a.model?' · '+String(a.model).replace(/\\/g,'/').split('/').pop():'');
+    var txt=String(a.text||'').trim();
+    if(txt.length>3000)txt='…'+txt.slice(-3000);
+    return head+'\n\n'+(txt||'_(no output yet)_');
+  });
+  var md=parts.length?parts.join('\n\n'):'_(starting sub-agents…)_';
+  if(scratch&&scratch.length){
+    md+='\n\n---\n\n## Shared scratchpad\n\n'+scratch.map(function(e){
+      return '**'+(e.who||'agent')+'**'+(e.ts?' · '+_ttsWhen(e.ts*1000):'')+'\n\n'+(e.text||'');
+    }).join('\n\n');
+  }
   if(doc.content===md)return;
   doc.content=md;doc.updated=Date.now();_docCommitVersion(doc);ctx.commit();
   if(ctx.inView){refreshDocUI();openDoc(doc.id);}
-}
-function pollScratch(chatId,batchId){
-  fetch('api/chat/scratch/'+encodeURIComponent(batchId),{cache:'no-store'})
-    .then(function(r){return r.json()})
-    .then(function(j){renderScratchDoc(chatId,(j&&j.entries)||[])})
-    .catch(function(){});
 }
 // Run one generation as a server-side JOB to completion and return its text.
 // Reuses the same job transport as the main chat, so each sub-agent survives
 // backgrounding and shows up in the worker panel (stoppable). Job output is
 // whole NDJSON lines and the offset always lands on a line boundary, so each
 // poll's chunk splits cleanly without a persistent partial-line buffer.
-async function runAgentJob(payload,signal){
+async function runAgentJob(payload,signal,onTick){
   var sr=await fetch('api/chat/jobs',{method:'POST',headers:{'Content-Type':'application/json'},
                      body:JSON.stringify(Object.assign({stream:true},payload)),signal:signal});
   if(!sr.ok){var em='HTTP '+sr.status;try{var je=await sr.json();em=(je.error&&(je.error.message||je.error))||em}catch(e){}throw new Error(em);}
@@ -4556,6 +4593,8 @@ async function runAgentJob(payload,signal){
         if(d.message&&d.message.content)full+=d.message.content;
       });
     }
+    // report live progress so a caller can surface it (see the Sub-agents doc)
+    if(onTick){try{onTick({status:pj.status,phase:pj.phase,host:host,model:fmodel,text:full})}catch(e){}}
     if(pj.status==='failed')throw new Error(pj.error||'all servers failed');
     if(pj.status==='canceled')break;
     if(pj.done)break;
@@ -4565,13 +4604,9 @@ async function runAgentJob(payload,signal){
   return {text:(sp.c||full).trim(),host:host,model:fmodel,jid:jid};
 }
 var DOC_TOOLS=[
-  {type:'function',function:{name:'create_document',description:'Create a standalone document shown in a side panel. Use for substantial content the user will keep, copy or iterate on (essays, reports, source files). Not for short replies. Markdown, HTML and SVG documents RENDER live for the user in the panel (formatted prose, a real web page, a drawn vector graphic) — so reach for those when the output is meant to be SEEN, not just read as source. Prose renders with type "markdown"; for HTML or SVG use type "code" and give the title an .html or .svg extension (e.g. "page.html", "chart.svg") so it displays rather than showing as source.',parameters:{type:'object',properties:{title:{type:'string',description:'Document title, INCLUDING a file extension for code (e.g. "hanoi.pl", "app.py", "notes.md")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source code'},language:{type:'string',description:'For code documents, the programming language e.g. perl (used for syntax highlighting)'},content:{type:'string',description:'Full document content'}},required:['title','type','content']}}},
-  {type:'function',function:{name:'edit_document',description:'Replace the ENTIRE contents of an existing document. Only for a wholesale rewrite — to change part of one, use replace_in_document instead. Identify it by id (preferred) or title.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},content:{type:'string',description:'New full content'}},required:['content']}}},
-  {type:'function',function:{name:'rename_document',description:'Rename an existing document. Identify it by id (preferred) or current title.',parameters:{type:'object',properties:{id:{type:'string'},title:{type:'string',description:'current title if id unknown'},new_title:{type:'string',description:'the new title'}},required:['new_title']}}},
-  {type:'function',function:{name:'search_document',description:'Search inside a document and get back the matching lines with their line numbers and surrounding context. Use this to find the exact text you want to change before calling replace_in_document, so you never have to hold the whole document in mind.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},query:{type:'string',description:'Text to look for (case-insensitive)'},regex:{type:'boolean',description:'Treat query as a regular expression'},context:{type:'integer',description:'Lines of context around each match (default 2)'}},required:['query']}}},
-  {type:'function',function:{name:'read_document',description:'Read a range of lines from a document. The result includes the requested lines (numbered) AND the document’s total line count, so you can tell whether there is more to read and page through a long document with start_line/line_count.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},start_line:{type:'integer',description:'1-based line to start reading from (default 1)'},line_count:{type:'integer',description:'How many lines to return (default 100)'}},required:[]}}},
-  {type:'function',function:{name:'replace_in_document',description:'Change PART of a document: replace an exact snippet with new text, leaving the rest untouched. Prefer this over edit_document for anything short of a total rewrite. old_text must appear EXACTLY ONCE — copy it verbatim from the document, including indentation, and include enough surrounding lines to make it unique. Do not use line numbers.',parameters:{type:'object',properties:{id:{type:'string',description:'Document id'},title:{type:'string',description:'Document title if id unknown'},old_text:{type:'string',description:'The exact text to replace, copied verbatim from the document'},new_text:{type:'string',description:'What to put in its place. Empty string deletes the snippet.'},all:{type:'boolean',description:'Replace every occurrence instead of requiring exactly one'}},required:['old_text','new_text']}}},
-  {type:'function',function:{name:'take_notes',description:'Jot to your scratchpad — a running space to think out loud, track findings, or keep a to-do list across tool calls and turns. Notes are APPENDED by default so the scratchpad accumulates; pass replace:true to rewrite it from scratch. It is a document in the side panel (titled "Scratchpad") the user can read, but it is your working memory: it does not appear in your reply, so use it freely.',parameters:{type:'object',properties:{notes:{type:'string',description:'Text to add to the scratchpad (markdown allowed)'},replace:{type:'boolean',description:'Overwrite the whole scratchpad instead of appending'}},required:['notes']}}}
+  {type:'function',function:{name:'write_file',description:'Write a file shown in the side panel — creates it, or overwrites/appends if a file with that name already exists. Use for substantial content the user keeps, copies or iterates on (essays, reports, source files, a running scratchpad). Markdown, HTML and SVG RENDER live for the user (a .html/.svg name with type "code" displays as a page/graphic; prose uses type "markdown").',parameters:{type:'object',properties:{name:{type:'string',description:'File name, WITH an extension for code (e.g. "hanoi.pl", "app.py", "notes.md", "page.html")'},type:{type:'string',enum:['markdown','code'],description:'"markdown" for prose, "code" for source / HTML / SVG'},language:{type:'string',description:'For code files, the language e.g. perl (syntax highlighting)'},content:{type:'string',description:'File content'},append:{type:'boolean',description:'Append to the file instead of overwriting — use for a running scratchpad or notes'}},required:['name','content']}}},
+  {type:'function',function:{name:'read_file',description:'Read a file from the side panel: a range of lines (numbered, with the total line count so you can page through with start_line/line_count), or — with `search` — only the lines matching a string plus surrounding context, so you can find what to change without holding the whole file in mind.',parameters:{type:'object',properties:{name:{type:'string',description:'File name'},search:{type:'string',description:'If given, return only lines matching this (with context) instead of a line range'},regex:{type:'boolean',description:'Treat search as a regular expression'},context:{type:'integer',description:'Lines of context around each search match (default 2)'},start_line:{type:'integer',description:'1-based line to start reading from (default 1)'},line_count:{type:'integer',description:'How many lines to return (default 100)'}},required:[]}}},
+  {type:'function',function:{name:'edit_file',description:'Change PART of a file: replace an exact snippet with new text, leaving the rest untouched. old_text must appear EXACTLY ONCE — copy it verbatim, including indentation, with enough surrounding lines to be unique. Do not use line numbers. For a full rewrite, use write_file with the same name.',parameters:{type:'object',properties:{name:{type:'string',description:'File name'},old_text:{type:'string',description:'The exact text to replace, copied verbatim from the file'},new_text:{type:'string',description:'What to put in its place. Empty string deletes the snippet.'},all:{type:'boolean',description:'Replace every occurrence instead of requiring exactly one'}},required:['old_text','new_text']}}}
 ];
 var chatToolsBtn=document.getElementById('chatTools');
 var toolsPop=document.getElementById('toolsPop');
@@ -4581,7 +4616,12 @@ var toolSpeechChk=document.getElementById('toolSpeech');
 var toolVideoChk=document.getElementById('toolVideo');
 var toolWebChk=document.getElementById('toolWeb');
 var toolAgentsChk=document.getElementById('toolAgents');
+var toolsOffChk=document.getElementById('toolsOff');
 var imageOn=false,docsOn=false,speechOn=false,videoOn=false,webOn=false,agentsOn=false;
+// Master override: some pool models don't support tool calls at all, so this
+// sends NO tools (buildTools returns []), regardless of the individual toggles.
+var toolsOff=false;
+try{toolsOff=localStorage.getItem('dyva_tools_off')==='1'}catch(e){}
 // One "Image" toggle drives BOTH generate_image and edit_image (the tools stay
 // separate — we just expose a single control). Reuses the old dyva_tools key and
 // falls back to the legacy image-edit key so a prior setting carries over.
@@ -4593,7 +4633,7 @@ try{webOn=localStorage.getItem('dyva_tools_web')==='1'}catch(e){}
 try{agentsOn=localStorage.getItem('dyva_tools_agents')==='1'}catch(e){}
 // ask_question has no toggle — it is always available (see buildTools), so it is
 // deliberately excluded from anyToolsOn (it must not keep the wrench lit).
-function anyToolsOn(){return imageOn||docsOn||speechOn||videoOn||webOn||agentsOn}
+function anyToolsOn(){return !toolsOff&&(imageOn||docsOn||speechOn||videoOn||webOn||agentsOn)}
 // Full docs live on the tool defs; read_docs serves them on demand so the tool
 // list sent every turn can carry only a terse one-liner per tool. TOOL_DEFS maps
 // name -> the full function object (kept intact); buildTools terses a COPY.
@@ -4606,29 +4646,49 @@ var TOOL_DEFS={};_ALL_TOOL_DEFS.forEach(function(t){if(t&&t.function)TOOL_DEFS[t
 // can't be memorised or hallucinated. Keep to tools where detail/cost matters.
 var GATED_TOOLS={generate_image:1,edit_image:1,generate_video:1,generate_speech:1,spawn_agents:1};
 var TOOL_TOKENS={};Object.keys(GATED_TOOLS).forEach(function(n){TOOL_TOKENS[n]='tok_'+Math.random().toString(36).slice(2,9)});
-var READ_DOCS_TOOL={type:'function',function:{name:'read_docs',description:'Get the FULL usage docs (description + every parameter, and the required token for gated tools) for another tool. Other tools’ descriptions are deliberately terse — call read_docs with a tool’s name before using it.',parameters:{type:'object',properties:{tool:{type:'string',enum:Object.keys(TOOL_DEFS),description:'Which tool to read the docs for'}},required:['tool']}}};
+var READ_DOCS_TOOL={type:'function',function:{name:'help',description:'Get the FULL usage docs (description + every parameter, and the required token for gated tools) for another tool. Other tools’ descriptions are deliberately terse — call help with a tool’s name before using it.',parameters:{type:'object',properties:{tool:{type:'string',enum:Object.keys(TOOL_DEFS),description:'Which tool to get help for'}},required:['tool']}}};
+// Render a tool's parameters as doc lines, expanding nested object / array-item
+// schemas (e.g. spawn_agents' per-agent name/task/model) — the blanked terse
+// schema omits params, so help / the gate are the only place the model can learn
+// them, and a flat top-level listing hid the nested fields.
+function _docParamLines(params,pad){
+  pad=pad||'- ';
+  var props=(params&&params.properties)||{},req=(params&&params.required)||[],out=[];
+  Object.keys(props).forEach(function(k){
+    var p=props[k]||{};
+    out.push(pad+k+(req.indexOf(k)>=0?' (required)':'')+' ['+(p.type||'any')+(p.enum?': '+p.enum.join('|'):'')+']: '+(p.description||''));
+    var sub=(p.type==='array'&&p.items&&p.items.properties)?p.items:(p.properties?p:null);
+    if(sub)out=out.concat(_docParamLines(sub,'  '+pad));
+  });
+  return out;
+}
 function _terseDesc(name,full){
   var s=String(full||'');
   var m=s.match(/^[\s\S]*?[.!?](?:\s|$)/);   // first sentence
   var lead=(m?m[0]:s).trim();
   if(lead.length>180)lead=lead.slice(0,180).replace(/\s+\S*$/,'')+'…';
-  if(GATED_TOOLS[name])return lead+' — you MUST call read_docs "'+name+'" first for its usage and required token.';
-  return lead+' — call read_docs "'+name+'" for full usage.';
+  if(GATED_TOOLS[name])return lead+' — you MUST call help "'+name+'" first for its usage and required token.';
+  return lead+' — call help "'+name+'" for full usage.';
 }
 function _terseTool(tool){
-  if(!tool||!tool.function||tool.function.name==='read_docs')return tool;
+  if(!tool||!tool.function||tool.function.name==='help')return tool;
   var f=tool.function,name=f.name,params=f.parameters;
   if(GATED_TOOLS[name]){
-    // require a `token` in the SENT schema without mutating the source const
-    var props={},src=(params&&params.properties)||{},k;
-    for(k in src)props[k]=src[k];
-    props.token={type:'string',description:'Required. The token from read_docs "'+name+'".'};
-    var req=((params&&params.required)||[]).slice();if(req.indexOf('token')<0)req.push('token');
-    params={type:'object',properties:props,required:req};
+    // A gated tool can't succeed without read_docs, which hands over BOTH the
+    // real parameter schema and the token. So don't ship the full params every
+    // turn — advertise only the token gate; the rest comes from read_docs. This
+    // is the bulk of the tools-schema weight, since the gated tools (image/edit/
+    // video/speech/spawn) carry the longest parameter descriptions.
+    params={type:'object',
+      properties:{token:{type:'string',description:'Required. The token from help "'+name+'".'}},
+      required:['token']};
   }
   return {type:'function',function:{name:name,description:_terseDesc(name,f.description),parameters:params}};
 }
 function buildTools(){
+  // "disable all" — send NO tools (not even ask_question) for models that don't
+  // support tool calls at all.
+  if(toolsOff)return [];
   var t=[];
   // One "Image" control turns on both image tools (they stay separate tools).
   if(imageOn){t.push(IMG_TOOL);t.push(EDIT_TOOL);}
@@ -4661,6 +4721,9 @@ function paintTools(){
   if(toolVideoChk)toolVideoChk.checked=videoOn;
   if(toolWebChk)toolWebChk.checked=webOn;
   if(toolAgentsChk)toolAgentsChk.checked=agentsOn;
+  if(toolsOffChk)toolsOffChk.checked=toolsOff;
+  // when everything's disabled, grey out the per-tool list so it reads as moot
+  if(toolsPop)toolsPop.classList.toggle('all-off',toolsOff);
   chatToolsBtn.title=anyToolsOn()?'Tools on':'Tools';
 }
 function placeToolsPop(){
@@ -4690,12 +4753,17 @@ function _applyChatTools(){
   var t=currentChat&&currentChat.tools;
   if(!t||typeof t!=='object')return;   // no per-chat setting -> keep the default
   imageOn=!!t.imageOn;docsOn=!!t.docsOn;speechOn=!!t.speechOn;
-  videoOn=!!t.videoOn;webOn=!!t.webOn;agentsOn=!!t.agentsOn;
+  videoOn=!!t.videoOn;webOn=!!t.webOn;agentsOn=!!t.agentsOn;toolsOff=!!t.toolsOff;
   paintTools();
 }
 toolImageChk.addEventListener('change',function(){
   imageOn=this.checked;
   try{localStorage.setItem('dyva_tools',imageOn?'1':'0')}catch(e){}
+  paintTools();_persistChatTools();
+});
+if(toolsOffChk)toolsOffChk.addEventListener('change',function(){
+  toolsOff=this.checked;
+  try{localStorage.setItem('dyva_tools_off',toolsOff?'1':'0')}catch(e){}
   paintTools();_persistChatTools();
 });
 if(toolWebChk)toolWebChk.addEventListener('change',function(){
@@ -4785,7 +4853,7 @@ function replaceInDoc(doc, oldText, newText, all){
   if(!oldText)return {error:'old_text was empty. Give the exact snippet to replace.'};
   if(!r.hits.length)
     return {error:'no match for old_text in "'+doc.title+'" (tried exact, then ignoring indentation). '
-      +'Copy the snippet verbatim from the document — call search_document to see the current text.'};
+      +'Copy the snippet verbatim from the file — call read_file with a `search` to see the current text.'};
   if(r.hits.length>1&&!all)
     return {error:'old_text matches '+r.hits.length+' places in "'+doc.title+'". '
       +'Include more surrounding lines so it is unique, or pass all:true to change every one.'};
@@ -4816,7 +4884,7 @@ function searchDoc(doc, query, useRegex, ctx){
   var head='"'+doc.title+'" ('+lines.length+' lines) — '+hits.length+' match'+(hits.length===1?'':'es')
     +(hits.length>CAP?', first '+CAP+' shown':'');
   return {text:head+'\n'+out.join('\n')
-    +'\n(line numbers are for reading only — replace_in_document takes the text itself)'};
+    +'\n(line numbers are for reading only — edit_file takes the text itself)'};
 }
 function readDoc(doc, start, count){
   var lines=_docLines(doc.content), total=lines.length;
@@ -4833,8 +4901,8 @@ function readDoc(doc, start, count){
   // to read and can page with start_line/line_count.
   var head='"'+doc.title+'" — '+total+' line'+(total===1?'':'s')+' total; showing '
     +s+'–'+hi
-    +(more?' ('+(total-hi)+' more after this — call read_document again with start_line '+(hi+1)+')'
-          :' (end of document)')+':';
+    +(more?' ('+(total-hi)+' more after this — call read_file again with start_line '+(hi+1)+')'
+          :' (end of file)')+':';
   return {text:head+'\n'+out.join('\n')};
 }
 // A document keeps a snapshot of every settled edit so the reader can page back
@@ -4848,21 +4916,24 @@ function _docCommitVersion(doc){
   doc.versions.push({content:doc.content,ts:doc.updated||Date.now()});
   if(doc.versions.length>60)doc.versions.shift();
 }
-// Every document edit the model made this chat is already recorded in the
-// transcript — as tool calls (create/edit/replace/rename_document) or as inline
-// <document> blocks. Pull them out in order so history can be replayed.
+// Every file edit the model made this chat is already recorded in the
+// transcript — as tool calls (write_file/edit_file, or the older
+// create/edit/replace/rename_document) or as inline <file>/<document> blocks.
+// Pull them out in order so history can be replayed. Read-only ops are skipped.
+var _DOC_EDIT_OPS=['write_file','edit_file',
+                   'create_document','edit_document','replace_in_document','rename_document'];
 function _docOpsFromChat(chat){
   var ops=[];
   (chat.messages||[]).forEach(function(m){
     if(!m||m.role!=='assistant')return;
     if(m.tool_calls)m.tool_calls.forEach(function(tc){
       var fn=(tc&&tc.function)||{},nm=fn.name;
-      if(['create_document','edit_document','replace_in_document','rename_document'].indexOf(nm)<0)return;
+      if(_DOC_EDIT_OPS.indexOf(nm)<0)return;
       var a=fn.arguments;
       if(typeof a==='string'){try{a=JSON.parse(a)}catch(e){a={}}}
       ops.push({name:nm,args:a||{}});
     });
-    if(typeof m.content==='string'&&m.content.indexOf('<document')>=0){
+    if(typeof m.content==='string'&&(m.content.indexOf('<file')>=0||m.content.indexOf('<document')>=0)){
       splitDocBlocks(m.content).docs.forEach(function(d){
         if(!d.closed)return;                     // a half-written block isn't a version
         ops.push({name:'inline',args:{id:d.ref||'',title:d.title,content:d.content}});
@@ -4890,13 +4961,15 @@ function rebuildDocVersions(chat){
     ops.forEach(function(op){
       if(op.name==='rename_document')return;
       var byId=op.args.id!=null&&op.args.id!==''&&alias[op.args.id];
-      var byTitle=op.args.title&&alias[op.args.title];
-      if(!byId&&!byTitle)return;
-      if(op.name==='replace_in_document'){
+      var byName=(op.args.name&&alias[op.args.name])||(op.args.title&&alias[op.args.title]);
+      if(!byId&&!byName)return;
+      if(op.name==='replace_in_document'||op.name==='edit_file'){
         var tmp={content:running,title:doc.title};
         var rr=replaceInDoc(tmp,op.args.old_text,op.args.new_text,!!op.args.all);
         if(!rr.error)running=tmp.content;         // a failed replace left the text as-is
-      }else{                                       // create / edit / inline all set full content
+      }else if(op.name==='write_file'&&op.args.append){
+        running=(running?running+'\n\n':'')+String(op.args.content||'');
+      }else{                                       // create / edit / inline / write set full content
         running=String(op.args.content||'');
       }
       seen=true;versions.push(running);
@@ -4911,82 +4984,71 @@ function applyDocOp(chatId,name,args){
   var ctx=docCtx(chatId);
   if(!ctx)return {text:'Error: conversation not found'};
   var docs=ctx.docs,doc,out;
-  if(name==='create_document'){
-    doc={id:_docId(),title:String(args.title||'Untitled').slice(0,120),type:(args.type==='code'?'code':'markdown'),language:args.language?String(args.language):'',content:String(args.content||''),updated:Date.now(),versions:[]};
-    docs.push(doc);_docCommitVersion(doc);
-    out={text:'Created '+doc.type+' document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Created **'+doc.title+'**'};
-  }else if(name==='edit_document'){
-    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
-    if(!doc)return {text:'Error: document not found'};
-    doc.content=String(args.content||'');doc.updated=Date.now();_docCommitVersion(doc);
-    out={text:'Updated document "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Updated **'+doc.title+'**'};
-  }else if(name==='replace_in_document'){
-    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
-    if(!doc)return {text:'Error: document not found'};
+  var fname=String(args.name||args.title||'').trim();   // title = inline <file> fallback
+  if(name==='write_file'){
+    doc=fname?findDoc(docs,fname):null;
+    if(doc){                                    // existing file: overwrite or append
+      var body=String(args.content||'');
+      doc.content=args.append?((doc.content?doc.content+'\n\n':'')+body):body;
+      if(args.type)doc.type=(args.type==='code'?'code':'markdown');
+      if(args.language)doc.language=String(args.language);
+      doc.updated=Date.now();_docCommitVersion(doc);
+      out={text:(args.append?'Appended to':'Overwrote')+' file "'+doc.title+'". It is now '
+                +_docLines(doc.content).length+' lines.',docId:doc.id,md:'Updated **'+doc.title+'**'};
+    }else{                                      // new file
+      doc={id:_docId(),title:(fname||'Untitled').slice(0,120),type:(args.type==='code'?'code':'markdown'),language:args.language?String(args.language):'',content:String(args.content||''),updated:Date.now(),versions:[]};
+      docs.push(doc);_docCommitVersion(doc);
+      out={text:'Created '+doc.type+' file "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'Created **'+doc.title+'**'};
+    }
+  }else if(name==='read_file'){
+    doc=(fname&&findDoc(docs,fname))||(docs.length===1?docs[0]:null);
+    if(!doc)return {text:'Error: file not found'};
+    if(args.search){
+      var sr=searchDoc(doc,String(args.search||''),!!args.regex,args.context);
+      return {text:sr.error?('Error: '+sr.error):sr.text};   // read-only
+    }
+    return {text:readDoc(doc,args.start_line,args.line_count).text};   // read-only
+  }else if(name==='edit_file'){
+    doc=(fname&&findDoc(docs,fname))||(docs.length===1?docs[0]:null);
+    if(!doc)return {text:'Error: file not found'};
     var rr=replaceInDoc(doc,args.old_text,args.new_text,!!args.all);
     if(rr.error)return {text:'Error: '+rr.error};
     _docCommitVersion(doc);
     out={text:'Replaced '+rr.count+' occurrence'+(rr.count===1?'':'s')+' in "'+doc.title+'"'
               +(rr.how==='whitespace'?' (matched ignoring indentation)':'')
               +'. It is now '+_docLines(doc.content).length+' lines.',
-         docId:doc.id,md:'\ud83d\udcc4 Edited **'+doc.title+'**'};
-  }else if(name==='search_document'){
-    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
-    if(!doc&&docs.length===1)doc=docs[0];
-    if(!doc)return {text:'Error: document not found'};
-    var sr=searchDoc(doc,String(args.query||''),!!args.regex,args.context);
-    return {text:sr.error?('Error: '+sr.error):sr.text};   // read-only: nothing to commit
-  }else if(name==='read_document'){
-    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
-    if(!doc&&docs.length===1)doc=docs[0];
-    if(!doc)return {text:'Error: document not found'};
-    return {text:readDoc(doc,args.start_line,args.line_count).text};   // read-only
-  }else if(name==='rename_document'){
-    doc=findDoc(docs,args.id)||findDoc(docs,args.title);
-    if(!doc)return {text:'Error: document not found'};
-    doc.title=String(args.new_title||args.title||doc.title).slice(0,120);doc.updated=Date.now();
-    out={text:'Renamed document to "'+doc.title+'" (id: '+doc.id+')',docId:doc.id,md:'\ud83d\udcc4 Renamed to **'+doc.title+'**'};
-  }else if(name==='take_notes'){
-    // The scratchpad is just a document with a fixed title; find or make it.
-    doc=findDoc(docs,'Scratchpad');
-    if(!doc){
-      doc={id:_docId(),title:'Scratchpad',type:'markdown',language:'',content:'',updated:Date.now(),versions:[]};
-      docs.push(doc);
-    }
-    var note=String(args.notes||'');
-    doc.content=(args.replace||!doc.content)?note:(doc.content+'\n\n'+note);
-    doc.updated=Date.now();_docCommitVersion(doc);
-    out={text:(args.replace?'Rewrote':'Added to')+' the scratchpad. It is now '
-              +_docLines(doc.content).length+' lines.',docId:doc.id,md:'Scratchpad'};
-  }else return {text:'Error: unknown document tool '+name};
+         docId:doc.id,md:'Edited **'+doc.title+'**'};
+  }else return {text:'Error: unknown file tool '+name};
   ctx.commit();
   if(ctx.inView){refreshDocUI();if(out.docId)openDoc(out.docId);}
   return out;
 }
-// ---- inline <document> blocks -------------------------------------------
-// A tool call's arguments only arrive once the whole call is parsed, so a
-// document written that way lands in one lump with nothing to watch. Instead
-// the model writes documents inline in its normal content:
-//   <document title="hanoi.pl" type="code" language="perl"> ... </document>
+// ---- inline <file> blocks -----------------------------------------------
+// A tool call's arguments only arrive once the whole call is parsed, so a file
+// written that way lands in one lump with nothing to watch. Instead the model
+// writes files inline in its normal content:
+//   <file name="hanoi.pl" type="code" language="perl"> ... </file>
 // which streams token by token. The bubble shows a chip, the body goes to the
-// side panel and grows as it arrives. The document tools stay registered as a
+// side panel and grows as it arrives. The file tools stay registered as a
 // fallback for models that reach for them anyway.
 var DOC_SYSTEM='When you produce something the user will keep, copy, or iterate on '
-  +'(an essay, a report, a source file), write it as a document block inside your normal reply:\n\n'
-  +'<document title="hanoi.pl" type="code" language="perl">\n...the full contents...\n</document>\n\n'
-  +'Rules: give "title" a file extension for code (hanoi.pl, app.py, notes.md); "type" is either '
+  +'(an essay, a report, a source file), write it as a file block inside your normal reply:\n\n'
+  +'<file name="hanoi.pl" type="code" language="perl">\n...the full contents...\n</file>\n\n'
+  +'Rules: give "name" a file extension for code (hanoi.pl, app.py, notes.md); "type" is either '
   +'"code" or "markdown"; put nothing else on the opening and closing tag lines, and never wrap the '
-  +'block in a code fence. To revise a document, emit the whole block again with the same title. '
-  +'Prefer this inline form over the document tools — it lets the user watch the document being '
-  +'written. Keep ordinary conversational replies outside document blocks.\n\n'
-  +'To CHANGE a document you already wrote, do not repeat the whole thing: use search_document to '
-  +'find the text, then replace_in_document with that exact snippet. Re-emit a full block only for a '
-  +'total rewrite.';
-var DOC_OPEN_RE=/<document\b([^>]*)>/i;
-var DOC_CLOSE_RE=/<\/document\s*>/i;
+  +'block in a code fence. To revise a file, emit the whole block again with the same name. '
+  +'Prefer this inline form over the file tools — it lets the user watch the file being '
+  +'written. Keep ordinary conversational replies outside file blocks.\n\n'
+  +'To CHANGE a file you already wrote, do not repeat the whole thing: use read_file with a '
+  +'`search` to find the text, then edit_file with that exact snippet. Re-emit a full block only '
+  +'for a total rewrite.';
+// `<file>` is the current block; `<document>` is still accepted so older chats
+// (whose stored content used it) keep rendering.
+var DOC_OPEN_RE=/<(?:file|document)\b([^>]*)>/i;
+var DOC_CLOSE_RE=/<\/(?:file|document)\s*>/i;
 // a tag still being typed shouldn't flash into the bubble as literal text
-var DOC_OPEN_PARTIAL=/<(?:d|do|doc|docu|docum|docume|documen|document(?:\s[^>]*)?)$/i;
-var DOC_CLOSE_PARTIAL=/<\/(?:d|do|doc|docu|docum|docume|documen|document)?$/i;
+var DOC_OPEN_PARTIAL=/<(?:f|fi|fil|file(?:\s[^>]*)?|d|do|doc|docu|docum|docume|documen|document(?:\s[^>]*)?)$/i;
+var DOC_CLOSE_PARTIAL=/<\/(?:f|fi|fil|file|d|do|doc|docu|docum|docume|documen|document)?$/i;
 function _docAttrs(str){
   var a={},re=/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g,m;
   while((m=re.exec(str)))a[m[1].toLowerCase()]=m[2]!==undefined?m[2]:(m[3]!==undefined?m[3]:m[4]);
@@ -4994,7 +5056,7 @@ function _docAttrs(str){
 }
 function _docTypeOf(a){
   if(a.type==='code'||a.type==='markdown')return a.type;
-  var t=String(a.title||'');
+  var t=String(a.name||a.title||'');
   if(/\.(md|markdown|txt|text|rst)$/i.test(t))return 'markdown';
   return /\.\w+$/.test(t)?'code':'markdown';
 }
@@ -5012,7 +5074,7 @@ function splitDocBlocks(text){
     var content=closed?body.slice(0,cm.index):body.replace(DOC_CLOSE_PARTIAL,'');
     content=content.replace(/^\r?\n/,'');                       // newline after the open tag
     if(closed)content=content.replace(/\r?\n[ \t]*$/,'');        // and before the closing one
-    docs.push({ref:a.id||'',title:String(a.title||a.name||'Untitled').slice(0,120),
+    docs.push({ref:a.id||'',title:String(a.name||a.title||'Untitled').slice(0,120),
                type:_docTypeOf(a),language:a.language||a.lang||'',content:content,closed:closed});
     chat+='\n\ndyvadocblock'+(docs.length-1)+'\n\n';
     if(!closed)break;
@@ -5587,7 +5649,7 @@ async function editImage(){
     if(!resp.ok){
       var msg='HTTP '+resp.status;
       try{var j=await resp.json();msg=j.error||msg}catch(e){}
-      result.innerHTML='<div class="error">Error: '+msg+'</div>';return;
+      _mediaError(result,msg);return;
     }
     var d=await resp.json();
     var data=d.data||[];
@@ -5599,7 +5661,7 @@ async function editImage(){
       result.appendChild(img);
     });
     loadImgHistory();
-  }catch(ex){result.innerHTML='<div class="error">Error: '+ex.message+'</div>'}
+  }catch(ex){_mediaError(result,ex.message)}
   finally{btn.disabled=false;if(activeImgStatus===st)activeImgStatus=null;hideSnack()}
 }
 
@@ -5630,7 +5692,7 @@ async function generateImage(){
     if(!resp.ok){
       var msg='HTTP '+resp.status;
       try{var j=await resp.json();msg=j.error||msg}catch(e){}
-      result.innerHTML='<div class="error">Error: '+msg+'</div>';
+      _mediaError(result,msg);
       return;
     }
     var d=await resp.json();
@@ -5643,7 +5705,7 @@ async function generateImage(){
       result.appendChild(img);
     });
     loadImgHistory();
-  }catch(ex){result.innerHTML='<div class="error">Error: '+ex.message+'</div>';}
+  }catch(ex){_mediaError(result,ex.message);}
   finally{btn.disabled=false;if(activeImgStatus===st)activeImgStatus=null;hideSnack();}
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);

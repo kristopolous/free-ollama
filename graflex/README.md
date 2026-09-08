@@ -348,6 +348,34 @@ auth-required vector stays a pass.
 woahllama analysis reason over the least-protected one. None of this authorises
 acting on a gated vector — it only makes the survey's exposure accounting honest.
 
+### Recording how a host was reached: the `method` contract
+
+The frozen, forever data-model commitment for recording *how* access was obtained
+is a single open, extensible shape:
+
+```json
+"method": { "strategy": "<uniquename>", "params": { <custom> } }
+```
+
+Rules:
+
+- **Absent when it just works.** A host reached the plain/default way (its own
+  address on its own port, nothing in the way) carries **no `method` key**. The
+  absence *is* the signal.
+- **Present only when a strategy was used** that the default wouldn't have
+  achieved. `strategy` is an **open vocabulary** (a short unique name); `params`
+  is a **strategy-specific bag** — its fields may differ per strategy.
+- Because the shape never changes, new strategies added months from now slot in
+  with no migration, and historical data stays analysable with a simple
+  `GROUP BY method.strategy`.
+
+The first strategy is **`directip`** — access obtained via the IP address where a
+name-based (vhost) gate on the hostname would otherwise have blocked it (see
+field-note #4). Established as not penetration testing: the IP is already in the
+survey result and an ordinary request to it circumvents nothing. Its `params`
+carry the specifics (e.g. the source hostname and the ip/port that answered).
+More strategies are expected; the contract exists to leave room for them.
+
 ## Common errors
 
 | Error | Cause | Fix |
