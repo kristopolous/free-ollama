@@ -4147,7 +4147,18 @@ function finishStream(bubble,isLive,host,fmodel,tps,chatId,chatCreated,chatTitle
   if(_dyvaInfo){
     _dyvaInfo=false;
     var infoText=full.trim();
-    try{if(JSON.parse(infoText))content='```json\n'+infoText+'\n```';}catch(e){}
+    var infoMd=infoText;
+    try{if(JSON.parse(infoText))infoMd='```json\n'+infoText+'\n```';}catch(e){}
+    // A routing report (/info, /test) is a SYSTEM event, not the assistant
+    // talking — render and persist it as a note, with no assistant bubble.
+    appendMsgRecord(chatId,{role:'assistant',content:infoMd,_meta:{note:''}});
+    if(isLive){
+      var _im=bubble&&bubble.bodyEl&&bubble.bodyEl.parentNode;
+      if(_im&&_im.parentNode)_im.parentNode.removeChild(_im);
+      addNote('',infoMd);
+      scrollChat();
+    }
+    return;
   }
   if(isLive){
     setAssistantLabel(bubble.roleEl,host,fmodel,tps,service);

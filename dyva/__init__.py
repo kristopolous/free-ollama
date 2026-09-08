@@ -609,8 +609,7 @@ def _hosts_usage():
     print("  dyva --hosts STATE KEY        the hosts carrying that mark", file=sys.stderr)
     print("  dyva --hosts STATE KEY del    clear those marks", file=sys.stderr)
     print("                                STATE/KEY works too, e.g. bad/__tts__", file=sys.stderr)
-    print("  dyva --hosts cleanse          report fake/imposter/phantom hosts to prune (dry run)", file=sys.stderr)
-    print("  dyva --hosts cleanse apply    quarantine them to free-ollama.cleansed.json", file=sys.stderr)
+    print("  (to prune fake models, see `dyva --cleanse`)", file=sys.stderr)
     print(f"\n  STATE is one of: {', '.join(_STATES)}", file=sys.stderr)
 
 
@@ -649,10 +648,6 @@ def hosts_cli(argv):
     there is deliberately no way to clear a whole state at once.
     """
     words = [str(a) for a in argv]
-    # `--hosts cleanse` prunes fake/imposter/phantom hosts from the merged pool
-    # (woahllama 2.1/2.2). Dry-run by default; `apply` quarantines them.
-    if words and words[0].lower() == "cleanse":
-        return cleanse_pool(apply=any(w.lower() in ("apply", "do", "yes") for w in words[1:]))
     if words and words[0].lower() in ("list", "show"):
         words = words[1:]          # tolerated, from the older syntax
     # `bad/__edit__` reads more directly than `bad __edit__`; split it only when
@@ -1129,9 +1124,16 @@ CLEANSED_FILE = os.path.join(CACHE_DIR, "free-ollama.cleansed.json")
 # Closed-weight / commercial names that are never a real ollama pull — a host
 # advertising ONLY these is a "commercial model imposter" (woahllama 2.2): almost
 # always tinyllama renamed via `ollama cp`, some carrying malware system prompts.
-_FAKE_NAME_RE = re.compile(
-    r'(?i)^(gpt[-_]?[0-9]|o[134](?:[-_]|$)|chatgpt|claude(?:[-_]?[0-9]|[-_]?opus|[-_]?sonnet|[-_]?haiku)'
-    r'|gemini|grok|dall[-_]?e|sora|command[-_]?r|mistral[-_]?large|davinci|text[-_]?embedding[-_]?ada)')
+# Model names CONFIRMED 100% fake (a real ~638 MB tinyllama renamed via `ollama cp`).
+# EXACT full-name match only — deliberately NOT a pattern: a training cutoff can't
+# tell a real new model from a fake, so a real `claude-3.7-…-gemma3-12b` fine-tune,
+# `grok`, `command-r`, `laguna`, etc. must never be caught. Grow this set only with
+# names confirmed fake from the data, never by guessing a family.
+_FAKE_EXACT = {
+    "claude-3-opus:latest",
+    "gpt-4:latest",
+    "gpt-4o:latest",
+}
 
 
 def _model_base(m):
@@ -1139,7 +1141,7 @@ def _model_base(m):
 
 
 def _is_fake_name(m):
-    return bool(_FAKE_NAME_RE.match(_model_base(m)))
+    return str(m).strip().lower() in _FAKE_EXACT
 
 
 def _is_cloud_tag(m):
@@ -1147,68 +1149,85 @@ def _is_cloud_tag(m):
     return s.endswith("-cloud") or s.endswith(":cloud") or ":cloud" in s
 
 
-def _cleanse_records(records, phantom_min_hosts=50, phantom_min_models=3):
-    """Split the MERGED pool into (kept, culled) using the woahllama fake-host
-    signals. Cleanse runs here — on the merged multi-source pool — not per-source
-    in graflex, because the junk arrives from several sources.
+# A model NAME that is really a host/URL or an attack path — never a real pull.
+# Catches the ransomware/exfil entries seen in the wild: 127.0.0.1:11434/test/model,
+# 8.8.4.4:9999/evil/model, localhost/attacker/leak_model, 127.0.0.1:8080/rce/payload.
+# hf.co/org/repo:tag stays legit (no IP, no localhost, no attack word).
+_JUNK_MODEL_RE = re.compile(
+    r'(?i)(\b\d{1,3}(?:\.\d{1,3}){3}\b|\blocalhost\b|/(?:evil|attacker|rce|payload|leak|exploit)\b|/test/model)')
 
-    Culled (each tagged with `_cleanse` = the signal):
-      - fake_commercial_names: every model on the host is a closed-weight
-        commercial imposter name (2.2).
-      - cloud_proxy: every model is a `-cloud`/`:cloud` proxy to a paid service.
-      - phantom_catalog: the host shares an identical multi-model catalog
-        (>= phantom_min_models) with >= phantom_min_hosts other hosts — the
-        coordinated phantom-responder fleet (2.1).
-    Kept hosts additionally have any fake/cloud model names STRIPPED from their
-    advertised list, so a mixed host stays but stops offering the junk."""
-    import collections
-    catalog = collections.Counter()
+
+def _is_junk_model(m):
+    return bool(_JUNK_MODEL_RE.search(str(m)))
+
+
+# The cleanse reasons a model entry can carry, and their CLI aliases. This is a
+# MODEL cleanse (not host cleanse): hosts stay, only fake/ransomware/proxy model
+# ENTRIES are expunged. Runs on dyva's MERGED multi-source pool (not per-source
+# in graflex) because the junk arrives from several sources.
+_CLEANSE_KINDS = {
+    "fake": "fake_commercial_name",    # EXACT confirmed-fake names (_FAKE_EXACT): tinyllama renamed as gpt-4:latest / claude-3-opus:latest / gpt-4o:latest
+    "cloud": "cloud_proxy",            # -cloud/:cloud proxy to a paid service (unambiguous)
+    "junk": "junk_selfref",            # a model NAME that's literally a host/URL/attack path (127.0.0.1, localhost, .../rce/payload, attacker/leak_model, /test/model) — never a real pull
+}
+_CLEANSE_REASONS = set(_CLEANSE_KINDS.values())
+# DELIBERATELY NO name-based "fake commercial model" signal and NO "phantom fleet"
+# signal here. Both footgun: a training cutoff can't tell a real new model from a
+# fake (laguna, BlossomsAI GGUF, grok, command-r, a `claude-3.7-…-gemma3-12b`
+# fine-tune are all REAL), and a coordinated fake host still lists real names, so
+# "expunge everything on it" throws out legit models. The tinyllama ransomware
+# fakes are caught DATA-DRIVEN instead — size ≈637.7 MB + a digest shared across
+# many hosts under different premium names — which lives in graflex's
+# check/model-probe snapshots (dyva's pool has only names), a separate pass. Here
+# we expunge only the two things that are unambiguous from the name alone.
+
+
+def _cleanse_scan(records):
+    """Classify every model in the merged pool WITHOUT mutating. Returns a list of
+    {host, model, reason} for each unambiguously-junk model entry — purely
+    per-model and name-unambiguous, so a real model is never touched."""
+    out = []
     for r in records:
-        ms = tuple(sorted(_model_base(m) for m in (r.get("models") or [])))
-        if len(ms) >= phantom_min_models:
-            catalog[ms] += 1
-    phantom = {c for c, n in catalog.items() if n >= phantom_min_hosts}
-    kept, culled = [], []
+        host = _host_of(r)
+        for m in (r.get("models") or []):
+            if _is_fake_name(m):
+                reason = "fake_commercial_name"
+            elif _is_cloud_tag(m):
+                reason = "cloud_proxy"
+            elif _is_junk_model(m):
+                reason = "junk_selfref"
+            else:
+                continue
+            out.append({"host": host, "model": m, "reason": reason})
+    return out
+
+
+def _cleanse_apply(records, reasons=None):
+    """Expunge model entries whose reason is in `reasons` (None = all). Mutates
+    each record's `models` in place; hosts are NOT removed. Returns the list of
+    expunged {host, model, reason}."""
+    scan = _cleanse_scan(records)
+    todo = [e for e in scan if reasons is None or e["reason"] in reasons]
+    rm = collections.defaultdict(set)
+    for e in todo:
+        rm[e["host"]].add(e["model"])
     for r in records:
         models = r.get("models") or []
-        clean = [m for m in models if not _is_fake_name(m) and not _is_cloud_tag(m)]
-        ms = tuple(sorted(_model_base(m) for m in models))
-        if models and not clean:               # nothing real left -> imposter/proxy
-            reason = "fake_commercial_names" if any(_is_fake_name(m) for m in models) else "cloud_proxy"
-            culled.append(dict(r, _cleanse=reason))
-        elif len(ms) >= phantom_min_models and ms in phantom:
-            culled.append(dict(r, _cleanse="phantom_catalog"))
-        else:
-            kept.append(dict(r, models=clean) if len(clean) != len(models) else r)
-    return kept, culled
+        drop = rm.get(_host_of(r))
+        if drop:
+            kept = [m for m in models if m not in drop]
+            if len(kept) != len(models):
+                r["models"] = kept
+    return todo
 
 
 def _host_of(rec):
     return str(rec.get("server") or rec.get("url") or "").rstrip("/")
 
 
-def cleanse_pool(apply=False):
-    """Standalone `--hosts cleanse`: report (dry-run) or quarantine (apply) the
-    fake hosts in the on-disk pool. Quarantine MOVES them to
-    free-ollama.cleansed.json (reversible, keeps the research record) rather than
-    deleting — the caches are observational data, not just a routing list."""
-    if not os.path.exists(CACHE_FILE):
-        print("no free-ollama.json — run --refresh first", file=sys.stderr)
-        return 1
-    with open(CACHE_FILE, encoding="utf-8") as f:
-        records = json.load(f)
-    kept, culled = _cleanse_records(records)
-    import collections
-    by = collections.Counter(c.get("_cleanse") for c in culled)
-    print(f"pool: {len(records)} hosts -> keep {len(kept)}, cleanse {len(culled)}", file=sys.stderr)
-    for sig, n in by.most_common():
-        print(f"  {sig}: {n}", file=sys.stderr)
-        for c in [x for x in culled if x.get('_cleanse') == sig][:5]:
-            print(f"      e.g. {_host_of(c)}  {(c.get('models') or [])[:3]}", file=sys.stderr)
-    if not apply:
-        print("\n(dry run — `--hosts cleanse apply` to quarantine these to "
-              "free-ollama.cleansed.json)", file=sys.stderr)
-        return 0
+def _log_expunged(expunged):
+    """Append expunged {host,model,reason} entries to free-ollama.cleansed.json
+    (the research record of what was removed), deduped by (host,model,reason)."""
     prior = []
     if os.path.exists(CLEANSED_FILE):
         try:
@@ -1216,14 +1235,82 @@ def cleanse_pool(apply=False):
                 prior = json.load(f)
         except Exception:
             prior = []
-    seen = {_host_of(x) for x in prior}
-    prior += [c for c in culled if _host_of(c) not in seen]
+    seen = {(x.get("host"), x.get("model"), x.get("reason")) for x in prior}
+    ts = time.time()
+    for e in expunged:
+        k = (e["host"], e["model"], e["reason"])
+        if k not in seen:
+            seen.add(k)
+            prior.append(dict(e, ts=ts))
     _save_json_atomic(CLEANSED_FILE, prior)
-    _save_json_atomic(CACHE_FILE, kept)
+
+
+def cleanse_pool(kind=None, apply=False):
+    """`--cleanse [TYPE] [apply]`: report (dry-run) or expunge (apply) fake MODEL
+    entries in the on-disk pool. MODEL cleanse — hosts stay; only their fake model
+    entries go, and every removal is logged to free-ollama.cleansed.json (the
+    research record — these are ransomware/honeypot artifacts worth keeping).
+    `kind` is a canonical reason to act on, or None for all. The report lists
+    EVERY entry it will remove — no truncation."""
+    if not os.path.exists(CACHE_FILE):
+        print("no free-ollama.json — run --refresh first", file=sys.stderr)
+        return 1
+    with open(CACHE_FILE, encoding="utf-8") as f:
+        records = json.load(f)
+    scan = _cleanse_scan(records)
+    sel = _CLEANSE_REASONS if kind is None else {kind}
+    todo = [e for e in scan if e["reason"] in sel]
+    import collections
+    by = collections.Counter(e["reason"] for e in scan)
+    print(f"cleanse ({'APPLY' if apply else 'dry run'}): "
+          f"{'expunging' if apply else 'would expunge'} {len(todo)} model entries "
+          f"(of {len(scan)} flagged); hosts are never removed")
+    for reason in sorted(sel):
+        ents = [e for e in scan if e["reason"] == reason]
+        if not ents:
+            continue
+        names = collections.Counter(e["model"] for e in ents)
+        print(f"\n{reason} ({len(ents)} entries, {len(names)} distinct names):")
+        for name, cnt in names.most_common():   # the model NAMES, not every instance
+            print(f"  {name}  ({cnt})")
+    unsel = sorted(r for r in (_CLEANSE_REASONS - sel) if by.get(r))
+    if unsel:
+        print("\nnot selected: " + ", ".join(f"{r}={by[r]}" for r in unsel))
+    if not apply:
+        print("\n(dry run — add `apply`, e.g. `--cleanse fake apply`, to remove these)")
+        return 0
+    expunged = _cleanse_apply(records, sel)
+    _log_expunged(expunged)
+    _save_json_atomic(CACHE_FILE, records)
     global _servers_cache
     _servers_cache = None
-    print(f"\nquarantined {len(culled)} to {CLEANSED_FILE}; pool now {len(kept)}", file=sys.stderr)
+    print(f"\nexpunged {len(expunged)} model entries; logged to {CLEANSED_FILE}")
+    # `--cleanse apply` is a separate process; poke a running server so it re-reads
+    # free-ollama.json in place instead of waiting for a restart.
+    try:
+        requests.get(f"http://127.0.0.1:{PORT}/reload-hosts", timeout=5)
+        print(f"reloaded the running server on :{PORT}")
+    except Exception:
+        print(f"(no running server reachable on :{PORT} to reload — it'll pick up "
+              "the change on next start or --refresh)")
     return 0
+
+
+def cleanse_from_argv(argv):
+    """Parse `--cleanse [TYPE] [apply]` and run it. TYPE is fake/cloud/junk (or the
+    canonical reason) or 'all'; bare `--cleanse` is a dry run of all types."""
+    words = [str(a).lower() for a in (argv or [])]
+    apply = "apply" in words
+    rest = [w for w in words if w != "apply"]
+    kind = None
+    if rest and rest[0] not in ("all", "*"):
+        k = rest[0]
+        kind = _CLEANSE_KINDS.get(k, k if k in _CLEANSE_REASONS else None)
+        if kind is None:
+            print("unknown cleanse type '%s' (want: %s, or all)"
+                  % (rest[0], ", ".join(sorted(_CLEANSE_KINDS))), file=sys.stderr)
+            return 1
+    return cleanse_pool(kind=kind, apply=apply)
 
 
 def refresh_cache(source=None, cleanse=True):
@@ -1355,27 +1442,18 @@ def refresh_cache(source=None, cleanse=True):
     except Exception as _e:
         log.debug(f"geo re-enrich after refresh skipped: {_e}")
     # Cleanse the MERGED pool (all sources) unless --refresh-only. Junk arrives
-    # from several sources, so this can't be a per-source graflex fix. Culled
-    # hosts are quarantined (moved, not deleted) to free-ollama.cleansed.json.
+    # from several sources, so this can't be a per-source graflex fix. This is a
+    # MODEL cleanse — hosts stay, only fake/ransomware/proxy model entries are
+    # expunged, and the removals are logged to free-ollama.cleansed.json.
     if cleanse:
         import collections as _collections
-        kept, culled = _cleanse_records(records)
-        if culled:
-            prior = []
-            if os.path.exists(CLEANSED_FILE):
-                try:
-                    with open(CLEANSED_FILE, encoding="utf-8") as cf:
-                        prior = json.load(cf)
-                except Exception:
-                    prior = []
-            seen = {_host_of(x) for x in prior}
-            prior += [c for c in culled if _host_of(c) not in seen]
-            _save_json_atomic(CLEANSED_FILE, prior)
-            by = _collections.Counter(c.get("_cleanse") for c in culled)
-            log.info(f"cleanse: quarantined {len(culled)} hosts (" +
+        expunged = _cleanse_apply(records)
+        if expunged:
+            _log_expunged(expunged)
+            by = _collections.Counter(e["reason"] for e in expunged)
+            log.info(f"cleanse: expunged {len(expunged)} fake model entries (" +
                      ", ".join(f"{k}={v}" for k, v in by.most_common()) +
                      f") -> {CLEANSED_FILE}")
-        records = kept
 
     with open(_db, 'w', encoding="utf-8") as f:
       json.dump(records, f)
@@ -8769,11 +8847,179 @@ def _build_mochi_workflow(params, model_path, steps, cfg, width, height, length,
     return workflow
 
 
+# ---- Reference-graph video path -----------------------------------------
+# Verified API-format ComfyUI graphs (repo assets under dyva/workflows/). Each is
+# a known-good graph exported from a real host; at runtime we validate it against
+# THIS host (all class_types present), remap its file inputs to the host's own
+# installed variants (class glob), patch prompt/seed, and submit — instead of
+# hand-building a graph from families. This is the "run the operator's own kind of
+# workflow" path decided empirically; the hand-built _build_* builders remain the
+# fallback. Add a family by dropping another verified <family>-<mode>.json here.
+_REF_WF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflows")
+_ref_wf_cache = None
+_WF_FILE_FIELDS = {"ckpt_name", "unet_name", "clip_name", "clip_name1", "clip_name2",
+                   "vae_name", "text_encoder", "lora_name", "gguf_name", "model_name"}
+
+
+def _load_ref_workflows():
+    global _ref_wf_cache
+    if _ref_wf_cache is not None:
+        return _ref_wf_cache
+    out = []
+    try:
+        names = sorted(os.listdir(_REF_WF_DIR))
+    except OSError:
+        names = []
+    for fn in names:
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(_REF_WF_DIR, fn), encoding="utf-8") as f:
+                g = json.load(f)
+        except Exception as e:
+            log.warning(f"ref workflow {fn}: {e}")
+            continue
+        if not (isinstance(g, dict) and any(
+                isinstance(v, dict) and "class_type" in v for v in g.values())):
+            continue
+        mode = "i2v" if any((v or {}).get("class_type") == "LoadImage"
+                            for v in g.values() if isinstance(v, dict)) else "t2v"
+        out.append({"name": fn[:-5], "graph": g, "mode": mode})
+    _ref_wf_cache = out
+    return out
+
+
+# A LoRA is an optional style adapter, not a structural requirement: if the host
+# lacks the graph's specific LoRA we bypass the loader (rewire its consumers back to
+# its model/clip source) rather than failing the whole graph. The checkpoint, text
+# encoder and VAE are NOT bypassable — a missing one of those means fall back.
+_LORA_BYPASS = {"LoraLoader": {0: "model", 1: "clip"},
+                "LoraLoaderModelOnly": {0: "model"},
+                "LoraTagLoader": {0: "model", 1: "clip"}}
+
+
+def _wf_bypass(g, nid):
+    """Remove LoRA node `nid`, redirecting every link that read its outputs to the
+    node's own model/clip inputs. Returns False if it can't be cleanly bypassed."""
+    node = g.get(nid)
+    slots = _LORA_BYPASS.get((node or {}).get("class_type"))
+    if not slots:
+        return False
+    inp = node.get("inputs") or {}
+    src = {}
+    for oi, field in slots.items():
+        s = inp.get(field)
+        if not (isinstance(s, list) and len(s) == 2):
+            return False
+        src[oi] = s
+    for onode in g.values():
+        if not isinstance(onode, dict):
+            continue
+        oin = onode.get("inputs") or {}
+        for f, v in list(oin.items()):
+            if isinstance(v, list) and len(v) == 2 and v[0] == nid and v[1] in src:
+                oin[f] = src[v[1]]
+    del g[nid]
+    return True
+
+
+def _wf_remap_files(graph, info):
+    """Point every loader file input at a host-installed variant of the same class,
+    matched by the file's leading token (ltx / gemma / umt5 / t5xxl / wan …).
+    Missing LoRAs are bypassed. Returns (new_graph, unresolved) — a non-empty
+    unresolved means this host lacks a required file and can't run the graph."""
+    g = json.loads(json.dumps(graph))
+    unresolved = []
+    bypass = []
+    for nid, node in list(g.items()):
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type")
+        inp = node.get("inputs") or {}
+        for f, val in list(inp.items()):
+            if f not in _WF_FILE_FIELDS or not isinstance(val, str):
+                continue
+            opts = _enum_options(info, ct, f)
+            if not opts or val in opts:
+                continue
+            key = re.split(r"[-_. /\\]", val.split("/")[-1].split("\\")[-1])[0].lower()
+            cand = [o for o in opts if len(key) >= 3 and key in o.lower()]
+            if cand:
+                inp[f] = cand[0]
+            elif f == "lora_name" and ct in _LORA_BYPASS:
+                bypass.append(nid)
+            else:
+                unresolved.append((ct, f, val))
+    for nid in bypass:
+        if not _wf_bypass(g, nid):
+            unresolved.append(("<lora>", "lora_name", nid))
+    return g, unresolved
+
+
+def _wf_patch(graph, prompt, seed, start_image=None):
+    """Set the request's prompt/seed (and start image for i2v) into a reference
+    graph, leaving its wiring intact. Prompt goes to the PrimitiveStringMultiline
+    the positive encoder reads; seeds to the noise nodes; negative prompt is left
+    as the template's."""
+    g = json.loads(json.dumps(graph))
+    for nid, node in g.items():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type")
+        inp = node.get("inputs")
+        if not isinstance(inp, dict):
+            continue
+        if ct == "PrimitiveStringMultiline" and isinstance(inp.get("value"), str) and prompt:
+            inp["value"] = prompt
+        elif "noise_seed" in inp and not isinstance(inp["noise_seed"], list):
+            inp["noise_seed"] = seed
+        elif ct in ("KSampler", "KSamplerAdvanced") and "seed" in inp and not isinstance(inp["seed"], list):
+            inp["seed"] = seed
+        elif ct == "LoadImage" and start_image and "image" in inp and not isinstance(inp["image"], list):
+            inp["image"] = start_image
+    return g
+
+
+def _ref_ckpt(graph):
+    for node in graph.values():
+        if isinstance(node, dict):
+            for f, val in (node.get("inputs") or {}).items():
+                if f in ("ckpt_name", "unet_name") and isinstance(val, str):
+                    return val
+    return None
+
+
+async def _ref_video_submit(session, host, job, params, info, seed):
+    """Try the verified reference graphs on THIS host. First one that (a) matches
+    the request mode (i2v iff a start image), (b) has all its nodes on the host,
+    (c) can remap every file to a host variant, and (d) matches the model_filter,
+    gets patched and submitted. Returns (prompt_id, plan) or None to fall back."""
+    prompt = str(params.get("prompt") or "").strip()
+    mf = job.get("model_filter") or None
+    want_i2v = bool(params.get("start_image"))
+    for ref in _load_ref_workflows():
+        if (ref["mode"] == "i2v") != want_i2v:
+            continue
+        if any(isinstance(v, dict) and v.get("class_type") not in info for v in ref["graph"].values()):
+            continue
+        g, unresolved = _wf_remap_files(ref["graph"], info)
+        if unresolved:
+            continue
+        ckpt = _ref_ckpt(g)
+        if mf and not (ckpt and model_query_match(ckpt, mf)):
+            continue
+        graph = _wf_patch(g, prompt, seed, params.get("start_image"))
+        log.info(f"video: {host}: using reference graph '{ref['name']}' (model {ckpt})")
+        pid = await comfy_submit(session, host, graph)
+        return pid, {"family": ref["name"], "model": ckpt or ref["name"], "spec": {}}
+    return None
+
+
 async def _submit_video_workflow(session, host, job):
     """Build and submit a text-to-video ComfyUI workflow for the model. Returns
-    the ComfyUI prompt_id, or None on submission failure. The builder is chosen
-    by the model's family (wan/ltx/mochi); unrecognized families fail cleanly
-    rather than sending a garbage graph."""
+    the ComfyUI prompt_id, or None on submission failure. Tries a verified
+    reference graph first (validated + remapped to this host), then falls back to
+    the family builders (wan/ltx/mochi)."""
     params = dict(job.get("params") or {})   # per-host copy; never mutate the job
     seed = int(params.get("seed", -1))
     if seed == -1:
@@ -8797,6 +9043,16 @@ async def _submit_video_workflow(session, host, job):
             # the not-found error. Fall back to text-to-video on this host.
             log.warning(f"video: {host}: start image upload failed: {e}")
             params.pop("start_image", None)
+
+    # Preferred path: run a verified reference graph (validated + file-remapped to
+    # this host) rather than a hand-built one. If none fit this host, fall back to
+    # the family builders below. A rejected reference graph also falls back.
+    try:
+        ref = await _ref_video_submit(session, host, job, params, info, seed)
+        if ref:
+            return ref
+    except Exception as e:
+        log.info(f"video: {host}: reference graph didn't take ({e}); using builder")
 
     # The model is chosen here, from what the host can actually load — the
     # name carried on the job is only a hint.
@@ -11103,6 +11359,7 @@ def main():
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
     parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache (and cleanse fake/junk hosts), optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
     parser.add_argument("--refresh-only", nargs="?", const=True, default=False, metavar="SOURCE", help="like --refresh but do NOT cleanse — keep everything, including the fake/imposter/phantom hosts")
+    parser.add_argument("--cleanse", nargs="*", metavar="TYPE", help="expunge fake MODEL entries from the pool (hosts are never removed; removals logged to free-ollama.cleansed.json): '--cleanse' dry-run report of all; '--cleanse fake|cloud|junk|all [apply]' to act on one type")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
     parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
     parser.add_argument("--source", nargs="+", metavar=("CMD"),
@@ -11117,12 +11374,16 @@ def main():
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
+    PORT = args.port     # so early ops (e.g. --cleanse apply's reload poke) target the right port
 
     if args.source:
         sys.exit(source_cli(args.source))
 
     if args.hosts is not None:
         sys.exit(hosts_cli(args.hosts))
+
+    if args.cleanse is not None:
+        sys.exit(cleanse_from_argv(args.cleanse))
 
     if args.refresh or args.refresh_only:
         cleanse = not args.refresh_only        # --refresh cleanses; --refresh-only keeps everything
