@@ -609,6 +609,8 @@ def _hosts_usage():
     print("  dyva --hosts STATE KEY        the hosts carrying that mark", file=sys.stderr)
     print("  dyva --hosts STATE KEY del    clear those marks", file=sys.stderr)
     print("                                STATE/KEY works too, e.g. bad/__tts__", file=sys.stderr)
+    print("  dyva --hosts cleanse          report fake/imposter/phantom hosts to prune (dry run)", file=sys.stderr)
+    print("  dyva --hosts cleanse apply    quarantine them to free-ollama.cleansed.json", file=sys.stderr)
     print(f"\n  STATE is one of: {', '.join(_STATES)}", file=sys.stderr)
 
 
@@ -647,6 +649,10 @@ def hosts_cli(argv):
     there is deliberately no way to clear a whole state at once.
     """
     words = [str(a) for a in argv]
+    # `--hosts cleanse` prunes fake/imposter/phantom hosts from the merged pool
+    # (woahllama 2.1/2.2). Dry-run by default; `apply` quarantines them.
+    if words and words[0].lower() == "cleanse":
+        return cleanse_pool(apply=any(w.lower() in ("apply", "do", "yes") for w in words[1:]))
     if words and words[0].lower() in ("list", "show"):
         words = words[1:]          # tolerated, from the older syntax
     # `bad/__edit__` reads more directly than `bad __edit__`; split it only when
@@ -11095,7 +11101,8 @@ def main():
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
-    parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache, optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
+    parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache (and cleanse fake/junk hosts), optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
+    parser.add_argument("--refresh-only", nargs="?", const=True, default=False, metavar="SOURCE", help="like --refresh but do NOT cleanse — keep everything, including the fake/imposter/phantom hosts")
     parser.add_argument("-w", "--workers",  type=int, default=3, help="number of workers (default: 3)")
     parser.add_argument("-l", "--local",    action="store_true", help="restrict inference endpoints to localhost only")
     parser.add_argument("--source", nargs="+", metavar=("CMD"),
@@ -11117,9 +11124,12 @@ def main():
     if args.hosts is not None:
         sys.exit(hosts_cli(args.hosts))
 
-    if args.refresh:
-        ok = refresh_cache(args.refresh if isinstance(args.refresh, str) else None)
-        log.info("Refreshed cache" if ok else "Refresh failed")
+    if args.refresh or args.refresh_only:
+        cleanse = not args.refresh_only        # --refresh cleanses; --refresh-only keeps everything
+        picked = args.refresh_only if args.refresh_only else args.refresh
+        src = picked if isinstance(picked, str) else None
+        ok = refresh_cache(src, cleanse=cleanse)
+        log.info(("Refreshed cache" + ("" if cleanse else " (no cleanse)")) if ok else "Refresh failed")
         sys.exit(0 if ok else 1)
 
     banner()
