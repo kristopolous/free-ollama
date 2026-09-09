@@ -4377,7 +4377,7 @@ async def handle_settings_post(request):
         description: Updated settings
     """
     global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY
-    resp = _check_local(request) or _check_admin(request)
+    resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
     try:
@@ -4441,7 +4441,7 @@ async def handle_settings_test(request):
       '200':
         description: Per-source results
     """
-    resp = _check_local(request) or _check_admin(request)
+    resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
     try:
@@ -4518,7 +4518,7 @@ async def handle_settings_import(request):
       '200':
         description: The fetched list of sources
     """
-    resp = _check_local(request) or _check_admin(request)
+    resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
     try:
@@ -4618,7 +4618,7 @@ async def handle_v1_models(request):
                         items:
                           type: string
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     models = listed_models()
@@ -5233,7 +5233,7 @@ async def handle_ollama_stop(request):
                 status:
                   type: string
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     loop = asyncio.get_event_loop()
@@ -5262,15 +5262,39 @@ async def handle_api_pull(request):
     return web.json_response({"status": "success"})
 
 
-def _check_local(request):
+FAILED_PAYLOAD_LOG = "/tmp/dyva/failed-payloads.txt"
+
+
+async def _check_local(request):
     if not _LOCAL:
         return None
     remote = request.remote
     if remote in ("127.0.0.1", "::1", "localhost"):
         return None
-    return web.json_response({"error":
-        "Running with localhost restrictions. Restart without the -l option, or "
-        f"run your own here: {GITHUB_URL} — or execute 'uvx dyva'"}, status=403)
+    # Only non-localhost requests reach here (localhost returned above), so under -l
+    # this is only ever an unwanted remote caller. Stash what they sent — the wild
+    # scanners spraying /api/generate are interesting to look at — then answer a bland
+    # 404 that mimics a bare Ollama/Go not-found rather than a 403. A 403 advertises
+    # "something's here but you can't have it," inviting the probe to keep hammering;
+    # a 404 gives an adversary nothing to see and no reason to retry.
+    try:
+        body = await request.read()
+    except Exception:
+        body = b""
+    try:
+        os.makedirs(os.path.dirname(FAILED_PAYLOAD_LOG), exist_ok=True)
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        ua = request.headers.get("User-Agent", "-")
+        with open(FAILED_PAYLOAD_LOG, "a", encoding="utf-8") as f:
+            f.write("[%s] %s %s %s UA=%r %db\n" %
+                    (ts, remote, request.method, request.path_qs, ua, len(body)))
+            if body:
+                f.write(body.decode("utf-8", "replace").rstrip() + "\n")
+            f.write("\n")
+    except Exception:
+        pass
+    return web.Response(text="404 page not found\n", status=404,
+                        content_type="text/plain")
 
 
 def _hash_pw(pw):
@@ -5319,7 +5343,7 @@ async def handle_ollama_chat(request):
       '502':
         description: All servers failed
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     async with request.app["semaphore"]:
@@ -5378,7 +5402,7 @@ async def handle_chat_job_submit(request):
       '200': {description: Job created (id + polling_url)}
       '400': {description: Invalid request}
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     try:
@@ -5438,7 +5462,7 @@ async def handle_chat_jobs_list(request):
     responses:
       '200': {description: Job list (metadata + short output)}
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jobs = await _job_list(kind="text", limit=100)
@@ -5455,7 +5479,7 @@ async def handle_chat_job_get(request):
       '200': {description: Job status and buffered output}
       '404': {description: Unknown job}
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jid = request.match_info.get("id")
@@ -5481,7 +5505,7 @@ async def handle_chat_job_control(request):
       '404': {description: Unknown job}
       '400': {description: Unknown op}
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jid = request.match_info.get("id")
@@ -5522,7 +5546,7 @@ async def handle_chat_job_delete(request):
     responses:
       '200': {description: Deleted}
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jid = request.match_info.get("id")
@@ -5541,7 +5565,7 @@ async def handle_scratch_get(request):
     responses:
       '200': {description: Scratchpad entries, oldest first}
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     bid = request.match_info.get("bid")
@@ -5571,7 +5595,7 @@ async def handle_openai_chat(request):
       '502':
         description: All servers failed
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     async with request.app["semaphore"]:
@@ -5610,7 +5634,7 @@ async def handle_ollama_generate(request):
       '502':
         description: All servers failed
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     async with request.app["semaphore"]:
@@ -5961,7 +5985,7 @@ def _chat_delete(cid):
 
 async def handle_chats_get(request):
     """List saved chats (id, title, createdAt) — no message bodies, for the sidebar."""
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     return web.json_response({"chats": _chats_list()})
@@ -5969,7 +5993,7 @@ async def handle_chats_get(request):
 
 async def handle_chat_get(request):
     """One chat's full content by id."""
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     chat = _chat_get(request.match_info["cid"])
@@ -5980,7 +6004,7 @@ async def handle_chat_get(request):
 
 async def handle_chat_post(request):
     """Upsert one chat by id."""
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     try:
@@ -5995,7 +6019,7 @@ async def handle_chat_post(request):
 
 async def handle_chat_delete(request):
     """Delete one chat by id."""
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     _chat_delete(request.match_info["cid"])
@@ -6239,7 +6263,7 @@ async def handle_web_fetch(request):
       '502':
         description: The fetch failed
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     try:
@@ -6331,7 +6355,7 @@ async def handle_txt2img(request):
       '503':
         description: No available image-gen hosts
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     session = request.app["session"]
@@ -6999,7 +7023,7 @@ async def handle_comfyui_proxy(request):
       '503':
         description: No available ComfyUI hosts
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
 
@@ -9324,7 +9348,7 @@ async def handle_videos_post(request):
       '503':
         description: No video-capable hosts
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     try:
@@ -9550,7 +9574,7 @@ async def handle_videos_get(request):
       '404':
         description: Unknown job id
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jid = request.match_info.get("id")
@@ -9598,7 +9622,7 @@ async def handle_videos_content(request):
       '404':
         description: Job missing or not complete
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jid = request.match_info.get("id")
@@ -9696,7 +9720,7 @@ async def handle_tts_speech(request):
       '503':
         description: No available hosts
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
 
@@ -9865,7 +9889,7 @@ async def handle_audio_voices(request):
       '503':
         description: No available hosts
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
 
@@ -10604,7 +10628,7 @@ async def handle_image_edit(request):
       '503':
         description: No available hosts
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     try:
@@ -11204,7 +11228,7 @@ async def handle_music_post(request):
       '503':
         description: No music-capable hosts
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     try:
@@ -11277,7 +11301,7 @@ async def handle_music_get(request):
       '404':
         description: Unknown job id
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jid = request.match_info.get("id")
@@ -11313,7 +11337,7 @@ async def handle_music_content(request):
       '404':
         description: Unknown job, or not finished
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     jid = request.match_info.get("id")
@@ -11343,7 +11367,7 @@ async def handle_music_models(request):
       '200':
         description: Per-host music capability
     """
-    resp = _check_local(request)
+    resp = await _check_local(request)
     if resp:
         return resp
     session = request.app["session"]
@@ -11495,7 +11519,7 @@ def banner():
  ll       DD  dD   yY     VvvV   aA  Aa   ll
  llama~  DDDDd"   yY       VV   aA    Aa  llama~
  || ||               v{VERSION}               || ||
- '' ''               dibatag               '' ''
+ '' ''               dibatag              '' ''
 """)
 
 def main():
