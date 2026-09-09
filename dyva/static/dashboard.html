@@ -1526,14 +1526,17 @@ function _modelReleaseDate(name){
   }
   return (_relDateMemo[name]=dt);
 }
+// Fill unspecified date units with 01: "2026"->"2026-01-01", "2026-02"->"2026-02-01".
+// The one rule — threshold and model date both expand this way, then compare directly.
+function _expandDate(d){var p=String(d).split('-');while(p.length<3)p.push('01');return p.join('-');}
 function _splitDatePred(pattern){
   var s=String(pattern),pred=null;
   // Year alone is valid (">2026"); month/day optional. A trailing "-" (mid-typing
   // the month) is eaten so it doesn't leak into the name.
   var m=s.match(/([<>]=?)\s*(\d{4}(?:-\d{2}(?:-\d{2})?)?)-?/);
   if(m){
-    var op=m[1],th=m[2];
-    pred=function(dt){dt=String(dt).slice(0,th.length);return op==='<'?dt<th:op==='<='?dt<=th:op==='>='?dt>=th:dt>th};
+    var op=m[1],th=_expandDate(m[2]);
+    pred=function(dt){dt=_expandDate(dt);return op==='<'?dt<th:op==='<='?dt<=th:op==='>='?dt>=th:dt>th};
     s=s.slice(0,m.index)+s.slice(m.index+m[0].length);
   }
   // strip a leftover year-shaped date fragment so it isn't matched as a literal

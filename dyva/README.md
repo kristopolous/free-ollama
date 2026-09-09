@@ -238,13 +238,19 @@ Server-Room filter, and the map's compare boxes):
   can't include what hasn't been measured. On the map, `;live`/`;dead`,
   `;cloud`/`;nocloud`, `;<service>` and `;<provider>` meta tokens combine with
   these on either side.
-- **Release-date predicates** — `>`, `<`, `>=`, `<=` plus a `YYYY-MM` (or
-  `YYYY-MM-DD`): `qwen>2026-02` is qwen models released after Feb 2026, and it
-  composes with size — `qwen>2026-02>5gb`. The date is matched fuzzily against a
-  bundled leaderboard of the major models (`dyva/model-release-dates.json`,
-  harvested by `graflex.sh get-dates`). Unlike size, a date filter **excludes**
-  models it can't date — a temporal filter can only include what it can place in
-  time, and most undated models are just older ones not on the leaderboard.
+- **Release-date predicates** — `>`, `<`, `>=`, `<=` plus a date at any
+  granularity: a bare year (`qwen>2026`), a month (`qwen>2026-02`), or a day
+  (`>2026-02-15`). A 4-digit number after a `<`/`>` is unambiguously a year — a
+  size needs a unit, so there's nothing to collide with — and spaces around the
+  operator are fine (`qwen > 2026`). It composes with size: `qwen>2026>5gb`. The
+  rule is simple: any unspecified unit defaults to `01` (`2026` → `2026-01-01`,
+  `2026-02` → `2026-02-01`), then the operator compares directly — so `>2026` is
+  "2026 and newer" and `<2026` is "before 2026". Dates are matched fuzzily against a
+  bundled leaderboard of
+  the major models (`dyva/model-release-dates.json`, harvested by `graflex.sh
+  get-dates`). Unlike size, a date filter **excludes** models it can't date — a
+  temporal filter can only include what it can place in time, and most undated
+  models are just older ones not on the leaderboard.
 
 ### Context window
 

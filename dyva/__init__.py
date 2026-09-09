@@ -2170,6 +2170,19 @@ _rel_date_memo = {}
 _DATE_RE = re.compile(r"([<>]=?)\s*(\d{4}(?:-\d{2}(?:-\d{2})?)?)-?")
 
 
+def _expand_date(d):
+    """Fill unspecified date units with 01: '2026'->'2026-01-01', '2026-02'->
+    '2026-02-01'. The one rule — both the threshold and the model's own date are
+    expanded this way, then the operator compares the full strings directly (ISO
+    dates sort lexically)."""
+    if not d:
+        return d
+    parts = str(d).split("-")
+    while len(parts) < 3:
+        parts.append("01")
+    return "-".join(parts)
+
+
 def _norm_model(s):
     return re.sub(r"[^a-z0-9]", "", str(s).split("/")[-1].split("\\")[-1].lower())
 
@@ -2210,16 +2223,16 @@ def _model_release_date(name):
 
 
 def _split_date_filter(sub):
-    """Pull a release-date predicate like '>2026-02' / '<=2025-09-01' out of a model
-    query. Returns (name_without_it, (comparator, 'YYYY-MM[-DD]') | None). ISO dates
-    sort correctly as strings, so the comparator runs on the date strings directly
-    (the model's date is truncated to the threshold's granularity)."""
+    """Pull a release-date predicate like '>2026' / '<=2025-09' out of a model query.
+    Returns (name_without_it, (comparator, 'YYYY-MM-DD') | None). Unspecified units
+    default to 01 (_expand_date: '2026'->'2026-01-01'), then the operator compares the
+    full strings directly — so '>2026' is after 2026-01-01, '<2026' is before it."""
     import operator
     s = sub or ""
     m = _DATE_RE.search(s)
     if not m:
         return sub, None
-    op, date = m.group(1), m.group(2)
+    op, date = m.group(1), _expand_date(m.group(2))
     name = (s[:m.start()] + s[m.end():]).strip()
     cmp = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}[op]
     return name, (cmp, date)
@@ -2380,7 +2393,7 @@ def find_servers(sub, caps=None):
             dcmp, dthresh = date_pred
             ms2 = [m for m in ms2
                    if _model_release_date(m) is not None
-                   and dcmp(_model_release_date(m)[:len(dthresh)], dthresh)]
+                   and dcmp(_expand_date(_model_release_date(m)), dthresh)]
         if ms2:
             out.append((prio, host, ms2))
     return out
@@ -4134,7 +4147,7 @@ async def handle_geo_compare(request):
                             return False
                     if dpred:
                         dt = _model_release_date(m)
-                        if dt is None or not dpred[0](dt[:len(dpred[1])], dpred[1]):
+                        if dt is None or not dpred[0](_expand_date(dt), dpred[1]):
                             return False
                     return True
                 if not any(_tok_ok(m) for m in models):
