@@ -916,13 +916,13 @@ body.dragging-image .hist-item{cursor:grabbing}
 <h2>Hosts</h2>
 <div class="card-inner">
 <div class="host-tabs">
-<button type="button" class="htab active" data-pane="last" title="Recent">🎉 Recent<span class="htab-count" id="cnt-last"></span></button>
+<button type="button" class="htab active" data-pane="workers" title="Workers">🛠️ Workers<span class="htab-count" id="cnt-workers">0</span></button>
+<button type="button" class="htab" data-pane="last" title="Recent">🎉 Recent<span class="htab-count" id="cnt-last"></span></button>
 <button type="button" class="htab" data-pane="good" title="Good">👍 Good<span class="htab-count" id="cnt-good"></span></button>
 <button type="button" class="htab" data-pane="maybe" title="Maybe">🤷 Maybe<span class="htab-count" id="cnt-maybe"></span></button>
 <button type="button" class="htab" data-pane="bad" title="Bad">💀 Bad<span class="htab-count" id="cnt-bad"></span></button>
-<button type="button" class="htab" data-pane="workers" title="Workers">🛠️ Workers<span class="htab-count" id="cnt-workers">0</span></button>
 </div>
-<div id="pane-last">
+<div id="pane-last" style="display:none">
 <div id="lastList"></div>
 </div>
 <div id="pane-good" style="display:none">
@@ -937,7 +937,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="badList"></div>
 <div id="badMore"></div>
 </div>
-<div id="pane-workers" style="display:none">
+<div id="pane-workers">
 <div id="workersList"></div>
 </div>
 </div>
@@ -1586,7 +1586,9 @@ document.querySelectorAll('.htab[data-pane]').forEach(function(t){
   })
 });
 var savedPane=localStorage.getItem('dyva_hostpane');
-if(savedPane&&savedPane!=='last'){var pb=document.querySelector('.htab[data-pane="'+savedPane+'"]');if(pb)pb.click()}
+// Workers is the default view (first tab); only override if the user has
+// deliberately stuck a different pane.
+if(savedPane&&savedPane!=='workers'){var pb=document.querySelector('.htab[data-pane="'+savedPane+'"]');if(pb)pb.click()}
 
 document.querySelectorAll('[data-mpane]').forEach(function(t){
   t.addEventListener('click',function(){
@@ -2649,6 +2651,13 @@ function upgradeVideoLinks(root){
     var v=document.createElement('video');
     v.controls=true;v.preload='metadata';v.src=a.getAttribute('href');
     v.style.width='100%';v.style.borderRadius='var(--r-md)';v.style.background='#000';
+    // Some hosts emit an animated WEBP/GIF instead of an mp4; <video> can't play
+    // those, so on decode error swap in an <img>, which animates them.
+    v.addEventListener('error',function(){
+      var img=document.createElement('img');img.src=v.src;
+      img.style.width='100%';img.style.borderRadius='var(--r-md)';img.style.background='#000';
+      if(v.parentNode)v.parentNode.replaceChild(img,v);
+    });
     wrap.appendChild(cap);wrap.appendChild(v);
     if(a.parentNode)a.parentNode.replaceChild(wrap,a);
   });
@@ -2806,7 +2815,12 @@ function renderMessages(){
   chatLog.innerHTML='';
   currentChat.messages.forEach(function(m,i){
     if(m&&m._meta&&m._meta.hidden)return;
-    if(m&&m._meta&&m._meta.note!==undefined){addNote(m._meta.note,m.content);return}
+    if(m&&m._meta&&m._meta.note!==undefined){
+      // Legacy: token-gate bounces used to persist as a note. The gate is an
+      // internal trick, so skip rendering any such note still saved in old chats.
+      if(/token required/.test(m.content||'')&&/🔒/.test(m.content||''))return;
+      addNote(m._meta.note,m.content);return;
+    }
     addMsg(m.role,m.content,i);
   });
   updateTokEst();
@@ -3493,14 +3507,20 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       var tc=toolCalls[i]||{},fn=tc.function||{};
       var args={};
       try{args=typeof fn.arguments==='string'?JSON.parse(fn.arguments||'{}'):(fn.arguments||{})}catch(e){}
-      // read_docs gate: a gated tool won't run without the right token; a wrong
-      // one bounces back the docs AND the token so the retry succeeds.
-      if(GATED_TOOLS[fn.name]&&String(args.token||'')!==TOOL_TOKENS[fn.name]){
+      // Soft read-docs gate: a gated tool normally needs its token, but if the
+      // model already guessed a VALID call (every real required arg present) let
+      // it run — don't tax a correct invocation with a forced docs round-trip.
+      // Only bounce (docs + token) when the guess is INVALID, which is exactly
+      // when it needs the docs anyway.
+      if(GATED_TOOLS[fn.name]&&String(args.token||'')!==TOOL_TOKENS[fn.name]&&!_argsValidFor(fn.name,args)){
         var _gt=TOOL_DEFS[fn.name]||{};
-        var _dl=['You sent the wrong token, so '+fn.name+' did NOT run. Read the docs below, then call '+fn.name+' again including "token".','',(_gt.name||fn.name)+': '+(_gt.description||'')];
+        var _dl=['To run '+fn.name+' read the docs below, then call '+fn.name+' again including "token".','',(_gt.name||fn.name)+': '+(_gt.description||'')];
         _docParamLines(_gt.parameters).forEach(function(l){_dl.push(l)});
         _dl.push('- token (required) [string]: pass the exact value below.','','token: '+TOOL_TOKENS[fn.name]);
-        results.push({text:_dl.join('\n'),md:'`🔒 '+fn.name+': token required`'});
+        // No `md`: the token gate is an internal trick to force the model to read
+        // the docs — only the model sees this (the hidden tool message carries the
+        // docs+token so its retry succeeds); don't surface it as a user-facing note.
+        results.push({text:_dl.join('\n')});
         continue;
       }
       if(fn.name==='generate_image'){
@@ -3534,20 +3554,20 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                             keep:'[Generated image saved as '+inames.join(', ')+'.]',
                             md:fl.map(function(f,k){return '!['+(inames[k]||'generated image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
                                +_resultMetaMd(inames[0],j.model,j.service,j.host)});
-            }else results.push({text:'Error: image service returned no images',
+            }else results.push({text:'The image render finished without an image. Call generate_image again, or pick a different model with search_models type "image".',
                                 md:'`\u26a0 generate_image: the host returned no images`'});
           }else{
             var em='HTTP '+r2.status;
             try{var je=await r2.json();em=je.error||em}catch(e){}
             if(r2.status===503){
               // no host / no model matching \u2014 informational, not an error
-              results.push({text:'No image host available: '+em,note:'generate_image',md:em});
-            }else results.push({text:'Error generating image: '+em,
+              results.push({text:'No host could render that image right now ('+em+'). Try again, or pick a different model with search_models type "image".',note:'generate_image',md:em});
+            }else results.push({text:'generate_image could not finish ('+em+'). Try again, or pick a different model with search_models type "image".',
                           md:'`\u26a0 generate_image: '+String(em).replace(/`/g,"'")+'`'});
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Error generating image: '+ex.message,
+          results.push({text:'generate_image could not finish ('+ex.message+'). Try again, or pick a different model with search_models type "image".',
                         md:'`\u26a0 generate_image: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
       }else if(fn.name==='fetch_url'){
@@ -3558,7 +3578,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                                              body:JSON.stringify({url:wurl}),signal:ac.signal});
           if(!rw.ok){
             var wm='HTTP '+rw.status;try{var jw=await rw.json();wm=jw.error||wm}catch(e){}
-            results.push({text:'Error fetching '+wurl+': '+wm,
+            results.push({text:'Could not fetch '+wurl+' ('+wm+'). Check the URL and call fetch_url again, or try a different page.',
                           md:'`\u26a0 fetch_url: '+String(wm).replace(/`/g,"'")+'`'});
           }else{
             var jw2=await rw.json();
@@ -3590,7 +3610,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Error fetching '+wurl+': '+ex.message,
+          results.push({text:'Could not fetch '+wurl+' ('+ex.message+'). Check the URL and call fetch_url again, or try a different page.',
                         md:'`\u26a0 fetch_url: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
       }else if(fn.name==='search_models'){
@@ -3599,13 +3619,13 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         var ep={image:'sdapi/v1/sd-models',edit:'v1/images/edit-models',
                 video:'v1/videos/models',speech:'v1/audio/voices',text:'v1/models'}[mtype];
         setStatus('reading '+(mtype||'?')+' models\u2026');
-        if(!ep){results.push({text:'Error: unknown model type "'+mtype+'"'});}
+        if(!ep){results.push({text:'"'+mtype+'" is not a model type. Call search_models with "type" set to one of: image, edit, video, speech, text.'});}
         else{
           try{
             var rm=await fetch(ep,{cache:'no-store',signal:ac.signal});
             if(!rm.ok){
               var em='HTTP '+rm.status;try{var jm=await rm.json();em=jm.error||em}catch(e){}
-              results.push({text:'Error reading '+mtype+' models: '+em});
+              results.push({text:'Could not read the '+mtype+' model list ('+em+'). Call search_models again in a moment.'});
             }else{
               var jm2=await rm.json(),rows=[];
               if(mtype==='speech'){
@@ -3615,8 +3635,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
               }
               if(sub)rows=globSearch(sub,rows,function(r){return String(r.id||'')});
               if(!rows.length){
-                results.push({text:'No '+mtype+' models'+(sub?' matching "'+sub+'"':'')
-                                   +' are available across the discovered hosts right now.'});
+                results.push({text:'There are no '+mtype+' models'+(sub?' matching "'+sub+'"':'')
+                                   +' on the discovered hosts right now. Call search_models again with a broader filter or a different type.'});
               }else{
                 var LIM=50;
                 var pages=Math.ceil(rows.length/LIM);
@@ -3639,7 +3659,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
             }
           }catch(ex){
             if(ac.signal.aborted)return;
-            results.push({text:'Error reading '+mtype+' models: '+ex.message});
+            results.push({text:'Could not read the '+mtype+' model list ('+ex.message+'). Call search_models again in a moment.'});
           }
         }
       }else if(fn.name==='list_assets'){
@@ -3649,7 +3669,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         setStatus('waiting for you\u2026');
         var q=String(args.question||'').trim();
         var opts=_argArray(args.options).map(String).filter(Boolean);
-        if(!q){results.push({text:'Error: no question was given'});}
+        if(!q){results.push({text:'To ask the user a question, call ask_question again with "question" set to a one-sentence question and "options" set to an array of 2-4 short choices.'});}
         else{
           var picked=await askUser(q,opts,ac.signal);
           if(ac.signal.aborted)return;
@@ -3675,8 +3695,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           if(vwant){
             var va=assetFind(vchat,vwant);
             if(!va||va.kind!=='image'){
-              results.push({text:'Error: no image named "'+vwant+'" to start the video from. '
-                                 +'Call list_assets to see the real names.',
+              results.push({text:'To animate from a picture, pass one of this conversation\'s images as "image": '
+                                 +(assetsOf(liveChat(chatId)||currentChat).filter(function(a){return a.kind==='image'}).map(function(a){return a.name}).join(', ')||'(none yet — generate or attach an image first)')
+                                 +'. Then call generate_video again.',
                             md:'`\u26a0 generate_video: no image named '+vwant.replace(/`/g,"'")+'`'});
               continue;
             }
@@ -3684,7 +3705,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
               vb.image=await _fileToB64(await assetBlob(vchat,va));
               vb.image_name=va.name;
             }catch(ex2){
-              results.push({text:'Error reading the start image: '+ex2.message});
+              results.push({text:'Could not read the start image ('+ex2.message+'). Call list_assets to confirm the name, then call generate_video again with a valid "image".'});
               continue;
             }
           }
@@ -3692,7 +3713,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                                           body:JSON.stringify(vb),signal:ac.signal});
           if(!rv.ok){
             var vm1='HTTP '+rv.status;try{var jv=await rv.json();vm1=jv.error||vm1}catch(e){}
-            results.push({text:'Error starting video: '+vm1,
+            results.push({text:'generate_video did not start ('+vm1+'). Try again, or pick a different model with search_models type "video".',
                           md:'`\u26a0 generate_video: '+String(vm1).replace(/`/g,"'")+'`'});
           }else{
             var vjob=await rv.json();
@@ -3722,17 +3743,28 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                                +_resultMetaMd(vname,done.model,done.service,done.host)});
               loadVidGallery();
             }else if(done){
-              results.push({text:'Error generating video: '+(done.error||'failed'),
+              results.push({text:'The video render did not finish ('+(done.error||'failed')+'). Try generate_video again \u2014 a smaller "size" renders faster and more reliably.',
                             md:'`\u26a0 generate_video: '+String(done.error||'failed').replace(/`/g,"'")+'`'});
             }else{
-              // still going: hand back the link rather than pretending it failed
-              results.push({text:'The video is still rendering. It will appear in the Video gallery when done.',
-                            md:'`\u23f3 generate_video: still rendering \u2014 check the Video tab`'});
+              // Render outlasted our poll window, but the server job keeps going
+              // (generations survive backgrounding). Embed the content link NOW
+              // and save the asset, so the clip plays inline HERE once it
+              // finishes \u2014 don't just point at the Video tab and drop it from the
+              // conversation (that's the bug: videos over ~10min vanished from chat).
+              var vurl2='v1/videos/'+encodeURIComponent(vjob.id)+'/content';
+              urls.push(vurl2);
+              var vname2=assetAdd(liveChat(chatId)||currentChat,
+                                  {name:args.name||'video',kind:'video',url:vurl2,
+                                   desc:vb.prompt,src:'generated'});
+              results.push({text:'The video is still rendering in the background; it will play here when it finishes (also in the Video tab).',
+                            keep:'[Video '+vname2+' is still rendering; it will appear here when done.]',
+                            md:'['+vb.prompt.slice(0,80).replace(/[\[\]]/g,'')+']('+vurl2+')'});
+              loadVidGallery();
             }
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Error generating video: '+ex.message,
+          results.push({text:'generate_video could not finish ('+ex.message+'). Try again, or pick a different model with search_models type "video".',
                         md:'`\u26a0 generate_video: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
       }else if(fn.name==='edit_image'){
@@ -3755,8 +3787,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           // from text alone.
           var src=picks.length?null:lastEditableImage();
           if(missing.length){
-            results.push({text:'Error: this conversation has no image named '+missing.join(', ')
-                               +'. Call list_assets to see the real names, then try again.',
+            results.push({text:'To edit those pictures, use image names that exist here: '
+                               +(assetsOf(echat).filter(function(a){return a.kind==='image'}).map(function(a){return a.name}).join(', ')||'(none yet — generate or attach an image first)')
+                               +'. Then call edit_image again with valid "images" (not found: '+missing.join(', ')+').',
                           md:'`\u26a0 edit_image: no image named '+missing.join(', ').replace(/`/g,"'")+'`'});
           }else{
             var blobs=[];
@@ -3799,18 +3832,18 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                               md:ef.map(function(f,k){return '!['+(enames[k]||'edited image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
                                  +_resultMetaMd(enames[0],j4.model,j4.service,j4.host)});
                 loadImgHistory();
-              }else results.push({text:'Error: edit returned no image',
+              }else results.push({text:'edit_image finished without an image. Call it again, or try a different edit model with search_models type "edit".',
                                  md:'`\u26a0 edit_image: the host returned no image`'});
             }else{
               var em4='HTTP '+r4.status;
               try{var je4=await r4.json();em4=je4.error||em4}catch(e){}
-              results.push({text:'Error editing image: '+em4,
+              results.push({text:'edit_image could not finish ('+em4+'). Try again, or pick a different model with search_models type "edit".',
                             md:'`\u26a0 edit_image: '+String(em4).replace(/`/g,"'")+'`'});
             }
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Error editing image: '+ex.message,
+          results.push({text:'edit_image could not finish ('+ex.message+'). Try again, or pick a different model with search_models type "edit".',
                         md:'`\u26a0 edit_image: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
       }else if(fn.name==='generate_speech'){
@@ -3829,7 +3862,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
             sb._trimmed=true;
           }
           if(args.voice)sb.voice=String(args.voice).trim();
-          if(!sb.input){results.push({text:'Error: no text to speak'})}
+          if(!sb.input){results.push({text:'To speak aloud, call generate_speech again with "text" set to the words to say (at most 2 sentences) and "name" a short filename like "line.mp3".'})}
           else{
             var trimmed=sb._trimmed;delete sb._trimmed;
             var r3=await fetch('v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sb),signal:ac.signal});
@@ -3858,28 +3891,28 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                               keep:'[Audio clip saved as '+aname+'.]',
                               md:'['+sb.input.slice(0,90).replace(/[\[\]]/g,'')+']('+curl+')'
                                  +_resultMetaMd(aname,r3.headers.get('X-Dyva-Node')||'',r3.headers.get('X-Dyva-Service')||'',r3.headers.get('X-Dyva-Host')||'')});
-              }else results.push({text:'Error: speech produced no clip'});
+              }else results.push({text:'generate_speech finished without audio. Call it again, or try a different voice with search_models type "speech".'});
             }else{
               var sm='HTTP '+r3.status;
               try{var js=await r3.json();sm=js.error||sm}catch(e){}
-              results.push({text:'Error generating speech: '+sm,
+              results.push({text:'generate_speech could not finish ('+sm+'). Try again, or pick a different voice with search_models type "speech".',
                             md:'`\u26a0 generate_speech: '+String(sm).replace(/`/g,"'")+'`'});
             }
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Error generating speech: '+ex.message});
+          results.push({text:'generate_speech could not finish ('+ex.message+'). Try again, or pick a different voice with search_models type "speech".'});
         }
       }else if(fn.name==='calc'){
         var _cx=String(args.expression||'').trim();
         var _cr;
-        try{_cr=_calcEval(_cx)}catch(e){_cr='Error: '+((e&&e.message)||e)}
+        try{_cr=_calcEval(_cx)}catch(e){_cr='That did not evaluate: '+((e&&e.message)||e)}
         results.push({text:(_cx?_cx+' = ':'')+_cr,
                       md:'`= '+String(_cr).slice(0,160).replace(/`/g,"'")+'`'});
       }else if(fn.name==='help'){
         var _t=TOOL_DEFS[args.tool];
         if(!_t){
-          results.push({text:'No such tool "'+String(args.tool)+'". Available: '+Object.keys(TOOL_DEFS).join(', '),md:'`⚠ help`'});
+          results.push({text:'"'+String(args.tool)+'" is not a tool. Call help with "tool" set to one of: '+Object.keys(TOOL_DEFS).join(', '),md:'`⚠ help`'});
         }else{
           var _lines=[_t.name+': '+_t.description];
           _docParamLines(_t.parameters).forEach(function(l){_lines.push(l)});
@@ -3895,7 +3928,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           // Surface what actually arrived so a malformed call is visible, not
           // swallowed into a generic error (the point is to surface things).
           var _gotA=JSON.stringify(args.agents);
-          results.push({text:'Error: spawn_agents needs a non-empty "agents" ARRAY, each item an object with a "task" (not a JSON string). Received agents='+(_gotA||'undefined').slice(0,400),
+          results.push({text:'To run sub-agents, call spawn_agents again with "agents" as an array of objects, each with a "task" string (a full self-contained instruction); "name" and "model" are optional per agent. Received agents='+(_gotA||'undefined').slice(0,400),
                         md:'`⚠ spawn_agents: no usable agents — got '+(typeof args.agents)+' '+(_gotA||'').slice(0,100)+'`'});
         }else{
           if(aglist.length>80)aglist=aglist.slice(0,80);   // sanity ceiling — past this it's a runaway, not intent
@@ -3965,7 +3998,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         setStatus(dverb+' \u201c'+String(args.name||args.title||'file')+'\u201d\u2026');
         var dr=applyDocOp(chatId,fn.name,args);
         results.push({text:dr.text,md:dr.md});
-      }else results.push({text:'Error: unknown tool '+fn.name});
+      }else results.push({text:'There is no tool named "'+fn.name+'". Use one of the tools available in this chat.'});
     }
     msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
     results.forEach(function(res){msgs.push({role:'tool',content:res.text,_meta:{hidden:true}})});
@@ -4527,7 +4560,7 @@ async function _editSourceBlob(src){
 // which family the job lands on — the server resolves them per host. Frames
 // and steps are fixed at sane values; a model guessing 3 frames or 150 steps
 // helps nobody.
-var VIDEO_FRAMES=100,VIDEO_STEPS=20,VIDEO_TOOL_WAIT=600000;   // give it ten minutes
+var VIDEO_FRAMES=100,VIDEO_STEPS=20,VIDEO_TOOL_WAIT=5400000;   // give it ninety minutes
 var ASK_TOOL={type:'function',function:{name:'ask_question',description:'Ask the user one multiple-choice question when their request is genuinely underspecified and different answers would lead to materially different work \u2014 "write me a story" (what kind?), "make me a logo" (for what?). Do NOT use it for things you can reasonably decide yourself, and ask at most one question before getting on with the task.',parameters:{type:'object',properties:{question:{type:'string',description:'The question, in one short sentence'},options:{type:'array',items:{type:'string'},description:'Two to four short, mutually exclusive choices. The user can also type their own answer, so do not add an "other" option.'}},required:['question','options']}}};
 // The model asks, the turn stops, the user clicks, the turn resumes with the
 // answer as the tool result. Nothing else in the tool loop blocks on a human,
@@ -4690,6 +4723,21 @@ var TOOL_DEFS={};_ALL_TOOL_DEFS.forEach(function(t){if(t&&t.function)TOOL_DEFS[t
 // can't be memorised or hallucinated. Keep to tools where detail/cost matters.
 var GATED_TOOLS={generate_image:1,edit_image:1,generate_video:1,generate_speech:1,spawn_agents:1};
 var TOOL_TOKENS={};Object.keys(GATED_TOOLS).forEach(function(n){TOOL_TOKENS[n]='tok_'+Math.random().toString(36).slice(2,9)});
+// A gated call is "valid" (the model figured the tool out on its own) when every
+// REAL required arg is present — read from the untouched TOOL_DEFS, since the
+// terse schema only advertises `token`. The soft gate lets a valid guess run and
+// only bounces the docs for an invalid one. token is the gate's synthetic param,
+// never a real requirement.
+function _argsValidFor(name,args){
+  var def=TOOL_DEFS[name],p=def&&def.parameters;if(!p)return true;
+  var req=p.required||[];args=args||{};
+  for(var i=0;i<req.length;i++){
+    var k=req[i];if(k==='token')continue;
+    var v=args[k];
+    if(v===undefined||v===null||(typeof v==='string'&&v.trim()===''))return false;
+  }
+  return true;
+}
 var READ_DOCS_TOOL={type:'function',function:{name:'help',description:'Get the FULL usage docs (description + every parameter, and the required token for gated tools) for another tool. Other tools’ descriptions are deliberately terse — call help with a tool’s name before using it.',parameters:{type:'object',properties:{tool:{type:'string',enum:Object.keys(TOOL_DEFS),description:'Which tool to get help for'}},required:['tool']}}};
 // Render a tool's parameters as doc lines, expanding nested object / array-item
 // schemas (e.g. spawn_agents' per-agent name/task/model) — the blanked terse
@@ -5026,7 +5074,7 @@ function rebuildDocVersions(chat){
 }
 function applyDocOp(chatId,name,args){
   var ctx=docCtx(chatId);
-  if(!ctx)return {text:'Error: conversation not found'};
+  if(!ctx)return {text:'No active conversation for the file tools \u2014 open a chat, then try again.'};
   var docs=ctx.docs,doc,out;
   var fname=String(args.name||args.title||'').trim();   // title = inline <file> fallback
   if(name==='write_file'){
@@ -5046,23 +5094,23 @@ function applyDocOp(chatId,name,args){
     }
   }else if(name==='read_file'){
     doc=(fname&&findDoc(docs,fname))||(docs.length===1?docs[0]:null);
-    if(!doc)return {text:'Error: file not found'};
+    if(!doc)return {text:'No file to read'+(fname?' named "'+fname+'"':'')+'. Call write_file to create one, or list_assets to see existing files, then read_file again.'};
     if(args.search){
       var sr=searchDoc(doc,String(args.search||''),!!args.regex,args.context);
-      return {text:sr.error?('Error: '+sr.error):sr.text};   // read-only
+      return {text:sr.error?('Could not search the file: '+sr.error):sr.text};   // read-only
     }
     return {text:readDoc(doc,args.start_line,args.line_count).text};   // read-only
   }else if(name==='edit_file'){
     doc=(fname&&findDoc(docs,fname))||(docs.length===1?docs[0]:null);
-    if(!doc)return {text:'Error: file not found'};
+    if(!doc)return {text:'No file to edit'+(fname?' named "'+fname+'"':'')+'. Call write_file to create it first, then edit_file.'};
     var rr=replaceInDoc(doc,args.old_text,args.new_text,!!args.all);
-    if(rr.error)return {text:'Error: '+rr.error};
+    if(rr.error)return {text:'Could not edit the file: '+rr.error+' Check the exact text to replace, then call edit_file again.'};
     _docCommitVersion(doc);
     out={text:'Replaced '+rr.count+' occurrence'+(rr.count===1?'':'s')+' in "'+doc.title+'"'
               +(rr.how==='whitespace'?' (matched ignoring indentation)':'')
               +'. It is now '+_docLines(doc.content).length+' lines.',
          docId:doc.id,md:'Edited **'+doc.title+'**'};
-  }else return {text:'Error: unknown file tool '+name};
+  }else return {text:'There is no file tool named "'+name+'".'};
   ctx.commit();
   if(ctx.inView){refreshDocUI();if(out.docId)openDoc(out.docId);}
   return out;
@@ -6019,6 +6067,11 @@ function loadVidGallery(){
       if(j.content_url){
         var v=document.createElement('video');
         v.controls=true;v.preload='metadata';v.src=j.content_url.replace(/^\//,'');
+        // animated WEBP/GIF output can't play in <video> — fall back to <img>
+        v.addEventListener('error',function(){
+          var img=document.createElement('img');img.src=v.src;img.style.width='100%';
+          if(v.parentNode)v.parentNode.replaceChild(img,v);
+        });
         item.appendChild(v);
       }else{
         // in-flight and failed jobs stay listed: "where did my video go" is a
