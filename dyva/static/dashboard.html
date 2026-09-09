@@ -2094,7 +2094,7 @@ function loadDashboard(){
     var mv=res[0]||{},dv=res[1]||{};
     _good=new Set(dv.good||[]);_bad=new Set(dv.bad||[]);
     _modelSizes=mv.sizes||{};
-    _RELEASE_DATES=mv.dates&&mv.dates.dates||{};
+    _RELEASE_DATES=mv.dates||{};   // server sends the flat {normkey: 'YYYY-MM-DD'} map
     _RELEASE_KEYS=Object.keys(_RELEASE_DATES).sort(function(a,b){return b.length-a.length});
     _relDateMemo={};
     renderModels(mv.servers||[]);
