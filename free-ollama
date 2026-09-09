@@ -66,7 +66,6 @@ process_stack() {
     local out=' "\(.server) \(.models 
             | map(select(contains("'$model'"))) 
             | join(" ")) "' 
-    echo "$out"
     [[ -z "$model" ]] && return
     [[ "$model" =~ cloud ]] && nocloud= || nocloud='and (.models | all(contains(":cloud") | not))'
 
