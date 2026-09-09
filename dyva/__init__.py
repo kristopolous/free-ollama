@@ -3021,6 +3021,61 @@ def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+async def _send_chat(session, host, full, payload, endpoint, do_stream):
+    """Send one chat request to a single host IN ITS OWN DIALECT, and return the
+    open response. This is the primitive every chat send should go through — the
+    race, and every probe/test — so dialect handling lives in exactly one place.
+
+    Speak the host's recorded dialect first; if that endpoint 404/405/501s the
+    label was wrong ("Unexpected endpoint or method"), so try the other dialect
+    once before giving up — ~38% of the pool speaks OpenAI, not Ollama. The
+    endpoint is derived from the dialect ACTUALLY being attempted, never the
+    recorded label: a fallback /v1 try must not post an OpenAI-shaped body to
+    /api/chat (Ollama 400s "Value looks like object…"). The payload is stripped
+    of dyva-internal hints, pinned to `full`/`do_stream`, and shaped per dialect
+    (openai_payload for OpenAI; tool-call args coerced back to objects for Ollama).
+
+    Returns (resp, oai, ep): `resp` is the open aiohttp response for the dialect
+    that answered — its status may still be non-200; the CALLER judges that and
+    must release/close it. `resp` is None only when BOTH dialects said the
+    endpoint doesn't exist. `oai` is the dialect used, `ep` the endpoint.
+    Connection/timeout errors propagate to the caller."""
+    oai = speaks_openai(host)
+    resp, ep = None, endpoint
+    for attempt_oai in (oai, not oai):
+        ep = (("/v1/completions" if endpoint == "/api/generate"
+               else "/v1/chat/completions") if attempt_oai else endpoint)
+        p = {k: v for k, v in payload.items() if k not in _DYVA_INTERNAL}
+        p["model"], p["stream"] = full, do_stream
+        if attempt_oai:
+            p = openai_payload(p)
+        else:
+            # Ollama defaults every request to a 4096-token window and SILENTLY
+            # truncates anything past it — the head just vanishes, no error. So
+            # always send an auto-sized options.num_ctx when the caller didn't pin
+            # one; the premise is that a long chat or a big tool payload must not
+            # quietly fail. (num_ctx is Ollama-native — the OpenAI dialect has no
+            # such field, so only this branch.)
+            p = _with_num_ctx(p)
+            if p.get("messages"):
+                p = dict(p, messages=_coerced_messages(p["messages"]))
+        _curlify("POST", f"{host}{ep}", p)
+        _log_sent(f"{host}{ep}", p)
+        resp = await asyncio.wait_for(
+            session.post(f"{host}{ep}", json=p), timeout=TIMEOUT)
+        if resp.status not in (404, 405, 501):
+            return resp, attempt_oai, ep
+        peek = ""
+        try:
+            peek = (await resp.text())[:200]
+        except Exception:
+            pass
+        await resp.release()
+        resp = None
+        log.debug(f"{host}: {ep} -> {peek[:80]}; trying the other dialect")
+    return None, oai, ep
+
+
 async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None, hedge_delay=0):
     errors = []
     errors_lock = asyncio.Lock()
@@ -3069,43 +3124,8 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         # wrong, the other dialect is tried once before writing the host off —
         # "Unexpected endpoint or method" is a labelling problem, not a broken
         # host, and 38% of the pool speaks OpenAI rather than Ollama.
-        oai = speaks_openai(host)
-        resp = None
         try:
-            for attempt_oai in (oai, not oai):
-                # The endpoint must match the dialect we speak THIS attempt, not
-                # the host's recorded label. Deriving it from chat_endpoint(host)
-                # meant the fallback "other dialect" try sent an OpenAI-shaped
-                # body (string tool args) to /api/chat, which Ollama 400s with
-                # "Value looks like object, but can't find closing '}' symbol".
-                ep = (("/v1/completions" if endpoint == "/api/generate"
-                       else "/v1/chat/completions") if attempt_oai else endpoint)
-                # dyva-internal routing hints must never reach an upstream host.
-                p = {k: v for k, v in payload.items() if k not in _DYVA_INTERNAL}
-                p["model"], p["stream"] = full, do_stream
-                if attempt_oai:
-                    p = openai_payload(p)
-                elif p.get("messages"):
-                    # ollama-native wants tool_call arguments as objects; the
-                    # agent re-race / dialect conversion / replayed history can
-                    # carry them as strings. Fix non-destructively (the OpenAI
-                    # retry of this same attempt still needs the string form).
-                    p = dict(p, messages=_coerced_messages(p["messages"]))
-                _curlify("POST", f"{host}{ep}", p)
-                _log_sent(f"{host}{ep}", p)
-                resp = await asyncio.wait_for(
-                    session.post(f"{host}{ep}", json=p), timeout=TIMEOUT)
-                if resp.status not in (404, 405, 501):
-                    oai = attempt_oai
-                    break
-                peek = ""
-                try:
-                    peek = (await resp.text())[:200]
-                except Exception:
-                    pass
-                await resp.release()
-                resp = None
-                log.debug(f"{host}: {ep} -> {peek[:80]}; trying the other dialect")
+            resp, oai, ep = await _send_chat(session, host, full, payload, endpoint, do_stream)
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             dur = time.time() - start
             # str(e) carries the real reason for connection/client errors
@@ -3348,176 +3368,6 @@ def _effective_num_ctx(payload):
     return opts["num_ctx"] if "num_ctx" in opts else _auto_num_ctx(payload)
 
 
-async def _try_one(session, host, model, full_model, opayload, remote=None):
-    wid = asyncio.current_task().get_name()
-    await broadcast_activity(host, model, "trying",
-        f"trying: {host} for {model}", wid=wid)
-    tag = f"{host} {full_model}"
-    start = time.time()
-    payload = _with_num_ctx(dict(opayload, model=full_model, stream=False))
-    # See _try_host: a 400 that carried tools is Ollama refusing tool calling on
-    # a model that can't do it \u2014 retry the same host once without tools.
-    tried_no_tools = False
-    while True:
-        _curlify("POST", f"{host}/api/chat", payload)
-        try:
-            resp = await asyncio.wait_for(
-                session.post(f"{host}/api/chat", json=payload),
-                timeout=TIMEOUT,
-            )
-        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-            dur = time.time() - start
-            await broadcast_activity(host, model, "failed",
-                f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-            return None, None
-
-        if resp.status != 200:
-            dur = time.time() - start
-            err_msg = None
-            try:
-                raw = await resp.read()
-                err_msg = raw.decode('utf-8', errors='replace')[:500]
-                log_upstream(resp.status, host, "/api/chat", err_msg, remote=remote)
-            except Exception:
-                pass
-            await resp.release()
-            if resp.status == 400 and payload.get("tools") and not tried_no_tools:
-                payload = dict(payload); payload.pop("tools", None)
-                tried_no_tools = True
-                continue
-            log.debug(f"  \u2717 {tag}  (status {resp.status})")
-            add_bad(host, model)
-            await broadcast_activity(host, model, "failed",
-                f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
-            return None, err_msg
-        break
-
-    try:
-        data = await resp.json()
-    except asyncio.TimeoutError:
-        await resp.release()
-        return None, None
-    except json.JSONDecodeError:
-        await resp.release()
-        dur = time.time() - start
-        add_bad(host, model)
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-        return None, None
-    await resp.release()
-
-    if "error" in data:
-        dur = time.time() - start
-        log.debug(f"  \u2717 {tag}  (error: {data['error']})")
-        add_bad(host, model)
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - error: {data['error']}", duration=dur, wid=wid)
-        return None, data["error"]
-
-    dur = time.time() - start
-    log.debug(f"  \u2713 {tag}")
-    set_last(model, host, full_model)
-    add_good(host, model)
-    await broadcast_activity(host, model, "connected",
-        f"success: {host} for {model}", duration=dur, wid=wid)
-    return data, None
-
-
-async def _try_host(session, host, full_model, model, payload, do_stream, endpoint="/api/chat", remote=None):
-    wid = asyncio.current_task().get_name()
-    await broadcast_activity(host, model, "trying",
-        f"trying: {host} for {model}", wid=wid)
-    tag = f"{host} {full_model}"
-    start = time.time()
-    p = dict(payload, model=full_model, stream=do_stream)
-    if endpoint.endswith("/api/chat"):   # num_ctx is Ollama-native; /v1 has no such field
-        p = _with_num_ctx(p)
-    # Ollama rejects the whole request with 400 when the model can't do tool
-    # calling ("... does not support tools"). Nothing in /api/tags tells us that
-    # ahead of time, so on a 400 that carried tools we drop them and try the
-    # same host once more \u2014 a non-tool model can still answer as a plain chat.
-    tried_no_tools = False
-    while True:
-        _curlify("POST", f"{host}{endpoint}", p)
-        try:
-            resp = await asyncio.wait_for(
-                session.post(f"{host}{endpoint}", json=p),
-                timeout=TIMEOUT,
-            )
-        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-            dur = time.time() - start
-            await broadcast_activity(host, model, "failed",
-                f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-            return None, None
-
-        if resp.status != 200:
-            dur = time.time() - start
-            err_msg = None
-            try:
-                raw = await resp.read()
-                err_msg = raw.decode('utf-8', errors='replace')[:500]
-                log_upstream(resp.status, host, endpoint, err_msg, remote=remote)
-            except Exception:
-                pass
-            await resp.release()
-            if resp.status == 400 and p.get("tools") and not tried_no_tools:
-                p = dict(p); p.pop("tools", None)
-                tried_no_tools = True
-                continue                      # same host, plain chat this time
-            log.debug(f"  \u2717 {tag}  (status {resp.status})")
-            add_bad(host, model)
-            await broadcast_activity(host, model, "failed",
-                f"failure: {host} for {model} - status {resp.status}", duration=dur, wid=wid)
-            return None, err_msg
-        break
-
-    try:
-        it = resp.content
-        first_line = await it.readline()
-    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-        dur = time.time() - start
-        await resp.release()
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - {type(e).__name__}", duration=dur, wid=wid)
-        return None, None
-
-    if not first_line or not first_line.strip():
-        dur = time.time() - start
-        log.debug(f"  \u2717 {tag}  (empty response)")
-        await resp.release()
-        add_bad(host, model)
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - empty response", duration=dur, wid=wid)
-        return None, None
-    try:
-        first = json.loads(first_line)
-    except json.JSONDecodeError:
-        dur = time.time() - start
-        log.debug(f"  \u2717 {tag}  (bad response)")
-        await resp.release()
-        add_bad(host, model)
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - bad response", duration=dur, wid=wid)
-        return None, None
-
-    if "error" in first:
-        dur = time.time() - start
-        log.debug(f"  \u2717 {tag}  (error: {first['error']})")
-        await resp.release()
-        add_bad(host, model)
-        await broadcast_activity(host, model, "failed",
-            f"failure: {host} for {model} - error: {first['error']}", duration=dur, wid=wid)
-        return None, first["error"]
-
-    dur = time.time() - start
-    log.debug(f"  \u2713 {tag}")
-    set_last(model, host, full_model)
-    add_good(host, model)
-    await broadcast_activity(host, model, "connected",
-        f"success: {host} for {model}", duration=dur, wid=wid)
-    return (resp, first_line, first), None
-
-
 async def _forward_stream(request, response, resp, first_line, host, full, openai_format,
                           upstream_openai=False, wid=None, num_ctx=None):
     content_type = "text/event-stream" if openai_format else "application/x-ndjson"
@@ -3752,26 +3602,24 @@ async def _run_info_test(session, model_in, tools=None):
         }
         if tools:
             payload["tools"] = tools
-        # Probe the host in its OWN dialect. An LM Studio / vLLM / openai-style
-        # host has no /api/chat and answers "Unexpected endpoint or method.
-        # (POST /api/chat)" — so forcing Ollama's endpoint made the test cull a
-        # perfectly good host. chat_endpoint() routes those to /v1/chat/completions
-        # exactly as a real request would.
-        ep = chat_endpoint(host)
-        oai = speaks_openai(host)
-        _curlify("POST", f"{host}{ep}", payload)
         start = time.time()
         await broadcast_activity(host, model_in, "trying",
             f"quick test: {host} for {model_in}", wid=wid)
         try:
-            resp = await asyncio.wait_for(
-                session.post(f"{host}{ep}", json=payload),
-                timeout=TIMEOUT,
-            )
+            # Same send primitive as the real request path: the host's own
+            # dialect with a fallback to the other. A probe that forced Ollama's
+            # /api/chat used to cull every LM Studio / vLLM / OpenAI-style host.
+            resp, oai, _ep = await _send_chat(session, host, full, payload, "/api/chat", False)
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             add_bad(host, model_in)
             await broadcast_activity(host, model_in, "failed",
                 f"quick test: {host} for {model_in} - {type(e).__name__}",
+                duration=time.time() - start, wid=wid)
+            continue
+        if resp is None:
+            add_bad(host, model_in)
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - no chat endpoint (tried both dialects)",
                 duration=time.time() - start, wid=wid)
             continue
         if resp.status != 200:
