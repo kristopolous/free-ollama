@@ -1090,6 +1090,17 @@ def _usage_of(obj):
     return p, c
 
 
+def _is_truncated(obj, num_ctx):
+    """True when the host's reported prompt reached the num_ctx window we sent —
+    Ollama then drops the head, so any answer was built on a CUT prompt. This is
+    our sizing falling short, never the host's fault: callers treat it as a
+    failure to re-send with a bigger window, and must NOT mark the host bad."""
+    if not num_ctx:
+        return False
+    p, _ = _usage_of(obj)
+    return p is not None and p >= num_ctx - NUM_CTX_REPLY
+
+
 def mark_worker_tokens(wid, prompt, completion, num_ctx):
     """Record a request's token accounting on its worker: prompt (upstream, what
     the host actually ingested), completion (downstream), the num_ctx window we
@@ -1117,10 +1128,19 @@ async def account_tokens(wid, host, model, obj, num_ctx):
         return
     mark_worker_tokens(wid, p, c, num_ctx)
     trunc = p is not None and num_ctx and p >= num_ctx - NUM_CTX_REPLY
-    msg = (f"tokens: {host} {model} — up {p if p is not None else '?'}"
-           f"/ctx {num_ctx or '?'}, down {c if c is not None else '?'}"
-           + (" — PROMPT FILLED THE WINDOW (head likely truncated)" if trunc else ""))
-    await broadcast_activity(host, model, "tokens", msg, wid=wid)
+    if trunc:
+        # Our window was too small; Ollama cut the prompt's head. The host is NOT
+        # at fault — no bad mark (this is just an activity line, reputation is
+        # untouched). The non-streaming path re-sends with a bigger window; a
+        # stream can't retract text already sent, so surface it loudly as a
+        # failure rather than pass a cut-prompt answer off as a clean success.
+        await broadcast_activity(host, model, "failed",
+            f"context truncated: prompt {p} filled the {num_ctx}-token window — "
+            "answer built on a cut prompt (host not penalised)", wid=wid)
+    else:
+        await broadcast_activity(host, model, "tokens",
+            f"tokens: {host} {model} — up {p if p is not None else '?'}"
+            f"/ctx {num_ctx or '?'}, down {c if c is not None else '?'}", wid=wid)
     await _broadcast_workers()
 
 
@@ -3285,7 +3305,9 @@ NUM_CTX_PAD = 1.05             # small headroom for tokenizer disagreement
 NUM_CTX_REPLY = 1024           # tokens reserved for the model's own reply
 NUM_CTX_STEP = 2048            # snap to this bucket
 NUM_CTX_MIN = 4096             # never below Ollama's own default
-NUM_CTX_MAX = 32768            # ceiling, so a runaway input can't ask for the moon
+NUM_CTX_MAX = 32768            # ceiling for the FIRST try, so a runaway input can't ask for the moon
+NUM_CTX_HARD_MAX = 131072      # absolute ceiling when escalating after a truncation
+NUM_CTX_RETRIES = 2            # how many times to re-send with a doubled window
 
 # The upstream models are Llama/Qwen/etc., whose tokenizers we don't ship, so an
 # exact count is impossible here. tiktoken's cl100k is a close *proxy* (within
@@ -3732,12 +3754,35 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                         content_type="text/event-stream",
                     )
             else:
-                result, errors, stopped = await _race_servers(session, model, _servers, dict(opayload, stream=False), do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
-
-                if result:
+                # Truncation-aware loop: if the host reports a prompt that filled
+                # the num_ctx window we sent, Ollama dropped the head and the answer
+                # is built on a cut prompt — a failure we caused by under-sizing, so
+                # re-send with a DOUBLED window (never marking the host bad; it
+                # answered). Give up into a 413 only when even the hard ceiling
+                # truncates — then the conversation is genuinely too large.
+                nctx_pin = None
+                for _attempt in range(NUM_CTX_RETRIES + 1):
+                    send_payload = dict(opayload, stream=False)
+                    if nctx_pin:
+                        send_payload["options"] = dict(send_payload.get("options") or {},
+                                                       num_ctx=nctx_pin)
+                    result, errors, stopped = await _race_servers(session, model, _servers, send_payload, do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
+                    if not result:
+                        break
                     _, host, full, data = result
+                    sent_ctx = _effective_num_ctx(send_payload)
+                    if _is_truncated(data, sent_ctx):
+                        if _attempt < NUM_CTX_RETRIES and sent_ctx < NUM_CTX_HARD_MAX:
+                            nctx_pin = min(sent_ctx * 2, NUM_CTX_HARD_MAX)
+                            await broadcast_activity(host, model, "trying",
+                                f"context truncated at num_ctx {sent_ctx} — retrying with {nctx_pin}",
+                                wid=job_wid)
+                            continue
+                        return web.json_response(err_obj(
+                            f"context too large: the conversation fills even a {sent_ctx}-token "
+                            "window — trim the history or start a new chat"), status=413)
                     mark_worker_found(job_wid, host, full)
-                    await account_tokens(job_wid, host, full, data, _effective_num_ctx(opayload))
+                    await account_tokens(job_wid, host, full, data, sent_ctx)
                     resp = chat_fmt(data, model, openai_format)
                     resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
                     resp.headers["X-Dyva-Model"] = full
