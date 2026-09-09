@@ -252,10 +252,12 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .map-lists>div{flex:1 1 240px;min-width:0}
 .map-lists h3{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint);margin:0 0 .3em;text-align:right}
 .map-bar{display:flex;align-items:center;gap:6px;font-size:.8rem;padding:2px 0}
-.map-bar .mb-k{width:6.5em;color:var(--text-2);flex:0 0 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
-.map-bar .mb-track{flex:1 1 auto;height:10px;min-width:40px;background:var(--card);border:1px solid var(--border);border-radius:4px;overflow:hidden}
-.map-bar .mb-fill{height:100%;background:var(--accent);display:block}
-.map-bar .mb-n{flex:0 0 auto;color:var(--text-dim);font-variant-numeric:tabular-nums;font-size:.72rem}
+.map-bar .mb-k{width:4em;color:var(--text-2);flex:0 0 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
+.map-bar .mb-track{flex:1 1 auto;height:10px;min-width:40px;background:var(--card);border:1px solid var(--border);border-radius:4px;overflow:hidden;display:flex}
+.map-bar .mb-fill{height:100%;background:var(--accent);flex:0 0 auto}
+.map-bar .mb-fill.mb-a{background:var(--map-blue)}
+.map-bar .mb-fill.mb-b{background:var(--map-pink)}
+.map-bar .mb-n{flex:0 0 4em;width:4em;text-align:right;color:var(--text-dim);font-variant-numeric:tabular-nums;font-size:.72rem;white-space:nowrap}
 @media(max-width:640px){.map-lists{flex:1 1 100%}}
 .hd-badges{display:flex;gap:6px;flex-wrap:wrap;margin:.6em 0}
 .hd-badge{font-size:.72rem;padding:2px 9px;border-radius:20px;background:var(--card);border:1px solid var(--border);color:var(--text-2);white-space:nowrap}
@@ -281,7 +283,7 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .more{font-size:var(--fs-sm);color:var(--text-faint);margin-top:var(--sp-2)}
 .worker-card{display:flex;align-items:stretch;gap:var(--sp-2);justify-content:space-between;padding:var(--sp-2) var(--sp-3);border:1px solid var(--border);border-radius:var(--r-lg);margin-bottom:var(--sp-2)}
 .worker-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}
-.worker-card .worker-title{display:flex;align-items:baseline;gap:var(--sp-3);min-width:0}
+.worker-card .worker-title{display:flex;align-items:baseline;gap:var(--sp-3);min-width:0;flex-wrap:wrap;row-gap:1px}
 .worker-card .worker-model{font-family:var(--font-mono);font-size:var(--fs-md);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
 .worker-sub{display:flex;align-items:baseline;gap:var(--sp-2);margin-top:1px;min-width:0}
 .worker-kind{flex:0 0 auto;font-size:var(--fs-3xs);letter-spacing:.03em;color:var(--text-dim);text-transform:uppercase}
@@ -299,8 +301,8 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .worker-card.worker-done .worker-model{color:var(--text-2)}
 .worker-host{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .worker-rmodel{color:var(--text-2)}
-.worker-card .worker-tokens{font-size:var(--fs-2xs);color:var(--text-dim);font-variant-numeric:tabular-nums;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.worker-card .worker-tokens.trunc{color:var(--err-hover)}
+.wk-tok{color:var(--text-dim);white-space:nowrap;flex:0 0 auto;font-variant-numeric:tabular-nums}
+.wk-tok.trunc{color:var(--err-hover)}
 /* Two spans, each with a thin coloured rule under the words: finding a host
    (blue) then running the job on it (green). Just a line — no fill. */
 .wk-timeline{margin-left:auto;flex:0 0 auto;display:flex;gap:12px;font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
@@ -1804,8 +1806,10 @@ function _checkGlyph(w,findSecs){
   if(w.done||findSecs!=null)return '✓';
   return _CHECK_EMOJI[Math.floor(Date.now()/1350)%_CHECK_EMOJI.length];
 }
-// One card's two segments, both reading "<time> - <what>" for consistency: the
-// find side is "<time> - <emoji> <hosts>", the run side "<time> - ran".
+// Token counts shown in k, one decimal, k = 1024: 1024 -> "1.0k", 3171 -> "3.1k".
+function _kfmt(n){return (n==null)?'?':(n/1024).toFixed(1)+'k';}
+// One card's two segments: find is "<time> <emoji> <hosts>", run is just "<time>"
+// once it finished OK (no "ran"); a live or failed run keeps its state word.
 function paintTimeline(tl,w,total,checkedStr){
   var find=tl.querySelector('.wk-find'),run=tl.querySelector('.wk-run');
   if(total==null)total=w.age||0;
@@ -1815,21 +1819,21 @@ function paintTimeline(tl,w,total,checkedStr){
   var findSecs=w.find;
   if(findSecs==null){
     if(findSecs===null&&w.done){
-      find.textContent=timerText(total)+' - no host';
+      find.textContent=timerText(total)+' no host';
       find.classList.add('nofind');
     }else{
-      find.textContent=timerText(total)+' - '+_checkGlyph(w,null)+' '+checked;
+      find.textContent=timerText(total)+' '+_checkGlyph(w,null)+' '+checked;
       find.classList.remove('nofind');
     }
     run.textContent='';run.style.display='none';
     return;
   }
   find.classList.remove('nofind');
-  find.textContent=timerText(findSecs)+' - '+_checkGlyph(w,findSecs)+' '+checked;
+  find.textContent=timerText(findSecs)+' '+_checkGlyph(w,findSecs)+' '+checked;
   run.style.display='';
   var runSecs=Math.max(0,total-findSecs);
-  var label=w.done?(w.ok===false?'stopped':'ran'):'running';
-  run.textContent=timerText(runSecs)+' - '+label;
+  var label=w.done?(w.ok===false?'stopped':''):'running';   // 'ran' dropped
+  run.textContent=timerText(runSecs)+(label?' '+label:'');
 }
 var _lastWorkers=[];
 var _workersSig=null;
@@ -1924,18 +1928,6 @@ function renderWorkers(workers){
       sub.appendChild(hs);
     }
     body.appendChild(sub);
-    // Row 3 (when known): token accounting — prompt tokens the host actually
-    // ingested (upstream) over the num_ctx window we sent, and completion tokens
-    // (downstream). Red + a warning when the prompt filled the window, i.e. the
-    // head was almost certainly truncated — the thing to watch for context bugs.
-    if(w.ptoks!=null||w.ctoks!=null){
-      var tk=document.createElement('div');tk.className='worker-tokens'+(w.truncated?' trunc':'');
-      var up=(w.ptoks!=null?w.ptoks:'?'),ctx=(w.num_ctx!=null?w.num_ctx:'?'),down=(w.ctoks!=null?w.ctoks:'?');
-      tk.textContent='↑'+up+' / ctx '+ctx+'   ↓'+down+(w.truncated?'   ⚠ truncated':'');
-      tk.title='prompt tokens (upstream) / context window sent  ·  completion tokens (downstream)'
-        +(w.truncated?' — the prompt filled the window, so Ollama dropped the head':'');
-      body.appendChild(tk);
-    }
     // Two spans, two clocks: finding a host (blue) and running the job on it
     // (green). Data attributes drive the local ticker; the server hands back
     // `find` (seconds to secure a host) and `age` (total).
@@ -1947,6 +1939,16 @@ function renderWorkers(workers){
     tl.setAttribute('data-started',String(started));
     tl.setAttribute('data-find',w.find===undefined?'?':(w.find===null?'':String(w.find)));
     tl.setAttribute('data-checked',String(w.checked));
+    // Token accounting sits to the LEFT of the time: (up)(down) (context), all in
+    // k (1024). Red + ⚠ when the prompt filled the window (truncation). Shown only
+    // once the host reported counts.
+    if(w.ptoks!=null||w.ctoks!=null||w.num_ctx!=null){
+      var tk=document.createElement('span');tk.className='wk-tok'+(w.truncated?' trunc':'');
+      tk.textContent='↑'+_kfmt(w.ptoks)+' ↓'+_kfmt(w.ctoks)+' ('+_kfmt(w.num_ctx)+')'+(w.truncated?' ⚠':'');
+      tk.title='↑ prompt (upstream) · ↓ completion (downstream) · (context window) — in 1024-token k'
+        +(w.truncated?' — prompt filled the window, head truncated':'');
+      tl.appendChild(tk);
+    }
     // Wall-clock time the request began (24hr). Static — set once, never ticks;
     // plain dim text with no accent underline, unlike the timeline segments.
     var ts=document.createElement('span');ts.className='wk-time';ts.textContent=fmtClock(started);
@@ -6476,7 +6478,7 @@ function openMap(){
     _mapWired=true;
     var cb=document.getElementById('mapCompareBtn'),clr=document.getElementById('mapClearBtn');
     if(cb)cb.onclick=runMapCompare;
-    if(clr)clr.onclick=function(){_mapCmp=null;clr.style.display='none';drawMap()};
+    if(clr)clr.onclick=function(){_mapCmp=null;clr.style.display='none';drawMap();renderMapLists()};
     // ';' meta-command autocomplete on the two compare boxes.
     var META_TOKENS=[';live',';dead',';cloud',';nocloud',
       ';ollama',';comfyui',';llama.cpp',';vllm',';a1111',';lmstudio',';gradio',
@@ -6536,23 +6538,49 @@ function runMapCompare(){
   var a=((document.getElementById('mapGlobA')||{}).value||'').trim();
   var b=((document.getElementById('mapGlobB')||{}).value||'').trim();
   var clr=document.getElementById('mapClearBtn');
-  if(!a&&!b){_mapCmp=null;if(clr)clr.style.display='none';drawMap();return}
+  if(!a&&!b){_mapCmp=null;if(clr)clr.style.display='none';drawMap();renderMapLists();return}
   fetch('geo-compare?a='+encodeURIComponent(a)+'&b='+encodeURIComponent(b),{cache:'no-store'})
-    .then(function(r){return r.json()}).then(function(c){_mapCmp=c;if(clr)clr.style.display='';drawMap()})
+    .then(function(r){return r.json()}).then(function(c){_mapCmp=c;if(clr)clr.style.display='';drawMap();renderMapLists()})
     .catch(function(){});
 }
 function _lerpHex(a,b,t){var h='#';for(var i=0;i<3;i++){var av=parseInt(a.substr(1+i*2,2),16),bv=parseInt(b.substr(1+i*2,2),16),v=Math.round(av+(bv-av)*t);h+=('0'+v.toString(16)).slice(-2)}return h}
 function renderMapLists(d){
   var el=document.getElementById('mapLists');if(!el)return;
+  d=d||_mapData||{};
   function bars(title,obj){
     var es=Object.keys(obj||{}).map(function(k){return [k,obj[k]]}).sort(function(a,b){return b[1]-a[1]}).slice(0,12);
-    var h='<h3>'+title+'</h3>';
+    var h='<h3>'+escHtml(title)+'</h3>';
     if(!es.length)return '<div>'+h+'<div class="map-bar" style="color:var(--text-dim)">(no data — reload hosts)</div></div>';
     var max=es[0][1]||1;
     es.forEach(function(e){h+='<div class="map-bar"><span class="mb-k">'+escHtml(e[0])+'</span><span class="mb-track"><span class="mb-fill" style="width:'+Math.max(2,Math.round(e[1]/max*100))+'%"></span></span><span class="mb-n">'+e[1]+'</span></div>'});
     return '<div>'+h+'</div>';
   }
-  el.innerHTML=bars('Top countries',d.countries)+bars('Providers',d.providers);
+  // When two terms are compared, each region's bar SPLITS into the two — blue (A)
+  // vs pink (B) — by their RAW magnitude within that region: given the two
+  // populations in the country, what's the split (a/(a+b) vs b/(a+b)). This is a
+  // DIFFERENT question from the map, which normalizes each side by its own global
+  // total to show over/under-representation. Rows ordered by activity (a+b), top 12.
+  function splitBars(cmpC,la,lb){
+    var rows=[];
+    for(var c2 in cmpC){var r=cmpC[c2],tot=(r.a||0)+(r.b||0);if(tot)rows.push([c2,r.a||0,r.b||0,tot])}
+    rows.sort(function(x,y){return y[3]-x[3]});
+    rows=rows.slice(0,12);
+    var h='<h3><span class="mhb-blue">'+escHtml(la)+'</span> vs <span class="mhb-pink">'+escHtml(lb)+'</span> by region</h3>';
+    if(!rows.length)return '<div>'+h+'<div class="map-bar" style="color:var(--text-dim)">(no matches)</div></div>';
+    rows.forEach(function(r){
+      var pa=r[3]?Math.round(r[1]/r[3]*100):50,pb=100-pa;
+      h+='<div class="map-bar"><span class="mb-k">'+escHtml(r[0])+'</span>'
+        +'<span class="mb-track"><span class="mb-fill mb-a" style="width:'+pa+'%"></span>'
+        +'<span class="mb-fill mb-b" style="width:'+pb+'%"></span></span>'
+        +'<span class="mb-n" title="'+escHtml(la)+' '+r[1]+' · '+escHtml(lb)+' '+r[2]+'">'+r[1]+'·'+r[2]+'</span></div>';
+    });
+    return '<div>'+h+'</div>';
+  }
+  if(_mapCmp&&_mapCmp.countries&&_mapCmp.a&&_mapCmp.b){
+    el.innerHTML=splitBars(_mapCmp.countries,_mapCmp.a,_mapCmp.b);
+  }else{
+    el.innerHTML=bars('Top countries',d.countries)+bars('Providers',d.providers);
+  }
 }
 function _heatFill(t){var a=[35,55,75],b=[122,162,247],h='#';for(var i=0;i<3;i++){var vv=Math.round(a[i]+(b[i]-a[i])*t);h+=('0'+vv.toString(16)).slice(-2)}return h}
 function _pathD(f,X,Y){return f.g.map(function(r){return r.map(function(p,i){return (i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1)}).join('')+'Z'}).join('')}

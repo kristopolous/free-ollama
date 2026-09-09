@@ -8069,6 +8069,7 @@ async def _run_chat_job(session, jid):
                         w["skip"] = _do_skip
 
                     pending = []          # unflushed NDJSON lines
+                    done_obj = [None]     # final done chunk, for token accounting
 
                     async def _flush(force=False):
                         if pending and (force or sum(len(x) for x in pending) >= _JOB_FLUSH_CHARS):
@@ -8094,6 +8095,8 @@ async def _run_chat_job(session, jid):
                         tcs = (obj.get("message") or {}).get("tool_calls")
                         if tcs:
                             round_tcs.extend(tcs)
+                        if obj.get("done"):
+                            done_obj[0] = obj
                         return json.dumps(obj, ensure_ascii=False), bool(obj.get("done"))
 
                     async def _pump():
@@ -8139,6 +8142,12 @@ async def _run_chat_job(session, jid):
                     if skipped:
                         continue         # re-race remaining hosts for this model
                     status = "ok"
+                    # Token accounting for the dashboard's own chat path (this job
+                    # runner streams to a buffer, so it never hit the _forward_stream
+                    # accounting) — so the worker card shows up/down/ctx here too.
+                    if done_obj[0]:
+                        await account_tokens(job_wid, host, full, done_obj[0],
+                                             _effective_num_ctx(opayload))
                     break
                 if status == "ok":
                     break
