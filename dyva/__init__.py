@@ -2157,13 +2157,17 @@ def _split_size_filter(sub):
 
 
 # Model release dates (bundled from artificialanalysis.ai — see build_release_dates
-# / the --refresh-dates CLI). The query grammar gains a date predicate: >YYYY-MM /
-# <YYYY-MM (and >=/<=), e.g. "qwen>2026-02", composable with size: "qwen>2026-02>5gb".
+# / the --refresh-dates CLI). The query grammar gains a date predicate: >YYYY,
+# >YYYY-MM or >YYYY-MM-DD (and </>=/<=), e.g. "qwen>2026" or "qwen>2026-02",
+# composable with size: "qwen>2026-02>5gb".
 REL_DATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model-release-dates.json")
 _rel_dates = None
 _rel_keys = None
 _rel_date_memo = {}
-_DATE_RE = re.compile(r"([<>]=?)\s*(\d{4}-\d{2}(?:-\d{2})?)")
+# Year alone is a valid threshold (">2026"); month and day are optional. Bare 4
+# digits after a </> can't be a size (those need a unit), so no ambiguity. A
+# trailing "-" (mid-typing the month) is consumed so it doesn't leak into the name.
+_DATE_RE = re.compile(r"([<>]=?)\s*(\d{4}(?:-\d{2}(?:-\d{2})?)?)-?")
 
 
 def _norm_model(s):
@@ -4277,10 +4281,12 @@ async def handle_dashboard_models(request):
         if ck:
             entry["checked"] = ck
         out.append(entry)
-    # ship the survey's per-model sizes so the client filter understands ">10gb"
+    # ship the survey's per-model sizes so the client filter understands ">10gb",
+    # and the release-date lookup so it understands ">2026-02" (fuzzy-matched
+    # client-side, same as the server does for routing).
     sizes = {name: rec["size"] for name, rec in load_survey().items()
              if isinstance(rec, dict) and rec.get("size")}
-    body = json.dumps({"servers": out, "sizes": sizes})
+    body = json.dumps({"servers": out, "sizes": sizes, "dates": _load_release_dates()})
     # This payload is large but changes slowly; serve it with an ETag so the
     # browser revalidates and gets a tiny 304 instead of re-downloading it.
     etag = '"' + hashlib.md5(body.encode("utf-8")).hexdigest() + '"'

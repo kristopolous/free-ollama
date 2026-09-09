@@ -893,7 +893,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
-<input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, or size e.g. &gt;10gb" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?)&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;Combine a name and a size in any order: 'qwen &gt;10gb' or '&gt;10gb qwen'. A half-typed size (just '&gt;' or '&gt;10') is ignored until it has a unit. A model whose size the survey doesn't know is hidden by a size filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, size &gt;10gb, or date &gt;2026-02" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?)&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;• release date — an operator and YYYY-MM: &gt;2026-02, &lt;2025-01 (the major models; undated ones are hidden by a date filter)&#10;Combine any of them: 'qwen &gt;2026-02 &gt;5gb'. Half-typed size/date fragments are ignored until complete. A model whose size/date isn't known is hidden by that filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
 <button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
 </div>
 <div id="mpane-text">
@@ -1241,6 +1241,7 @@ __SD_MODELS__
 <p>Toggle <b>Country</b>/<b>City</b> to see where hosts are. The two boxes below the map compare what each region runs — regions shade <span class="mhb-blue">blue</span> toward the left box, <span class="mhb-pink">pink</span> toward the right.</p>
 <p><b>Model globs</b> — type part of a model name; <code>*</code> and <code>?</code> wildcards work: <code>qwen</code>, <code>flux*2</code>, <code>llama3?70b</code>.</p>
 <p><b>Size</b> — <code>&gt;</code> / <code>&lt;</code> (optionally <code>=</code>) and a size shade regions by model heft: <code>&gt;10gb</code>, <code>&lt;=4gb</code>. Pair it with a name (<code>qwen &gt;10gb</code>) or use it alone. Only models with a recorded size count toward a size token.</p>
+<p><b>Release date</b> — <code>&gt;</code> / <code>&lt;</code> and a year, month, or day (<code>2026</code>, <code>2026-02</code>, <code>2026-02-15</code>): <code>qwen&gt;2026</code> maps where recent Qwen runs, <code>&gt;2026-06</code> alone maps fleet freshness. Compose with size (<code>qwen&gt;2026&gt;5gb</code>). Undated models don't count toward a date token.</p>
 <p><b>Meta words</b> — prefixed with <code>;</code>:</p>
 <ul>
 <li><code>;live</code> / <code>;dead</code> — host currently reachable, or not</li>
@@ -1512,12 +1513,48 @@ function _sizeOf(name){
   if(_modelSizes[name]!=null)return _modelSizes[name];
   return _modelSizes[String(name).split(/\s+/).pop()];   // "host model" -> model
 }
+// Release dates from the leaderboard (shipped with dashboard-models). Lets the
+// filter understand ">2026-02" — fuzzy-matched like the server's _model_release_date.
+var _RELEASE_DATES={},_RELEASE_KEYS=[],_relDateMemo={};
+function _normModel(s){return String(s).split('/').pop().split('\\').pop().toLowerCase().replace(/[^a-z0-9]/g,'');}
+function _modelReleaseDate(name){
+  if(name in _relDateMemo)return _relDateMemo[name];
+  var n=_normModel(name),dt=null;
+  if(n){
+    if(_RELEASE_DATES[n])dt=_RELEASE_DATES[n];
+    else for(var i=0;i<_RELEASE_KEYS.length;i++){var k=_RELEASE_KEYS[i];if(n.indexOf(k)>=0||k.indexOf(n)>=0){dt=_RELEASE_DATES[k];break}}
+  }
+  return (_relDateMemo[name]=dt);
+}
+function _splitDatePred(pattern){
+  var s=String(pattern),pred=null;
+  // Year alone is valid (">2026"); month/day optional. A trailing "-" (mid-typing
+  // the month) is eaten so it doesn't leak into the name.
+  var m=s.match(/([<>]=?)\s*(\d{4}(?:-\d{2}(?:-\d{2})?)?)-?/);
+  if(m){
+    var op=m[1],th=m[2];
+    pred=function(dt){dt=String(dt).slice(0,th.length);return op==='<'?dt<th:op==='<='?dt<=th:op==='>='?dt>=th:dt>th};
+    s=s.slice(0,m.index)+s.slice(m.index+m[0].length);
+  }
+  // strip a leftover year-shaped date fragment so it isn't matched as a literal
+  // name. 4 digits required — a shorter mid-type ("<", ">20") is left for the size
+  // stripper below, so this never eats a size token's digits (">10gb").
+  s=s.replace(/[<>]=?\s*\d{4}-?\d{0,2}/g,'');
+  return {name:s.trim(),pred:pred};
+}
 function matchModel(name,pattern){
   if(!pattern)return true;
+  // date predicate (">2026-02") FIRST, so its digits aren't eaten by the size
+  // stripper. Strict, like size: a model we can't date can't satisfy "after X".
+  var dp=_splitDatePred(pattern);
+  if(dp.pred){
+    var dt=_modelReleaseDate(name);
+    if(!dt||!dp.pred(dt))return false;
+  }
   // a size predicate (">10gb") is a filter modifier, not part of the name: only
   // models with a KNOWN size that satisfies it pass (unknown size is excluded —
   // a positive "show me >10gb" can't include what we can't measure).
-  var sp=_splitSizePred(pattern);
+  var sp=_splitSizePred(dp.name);
   if(sp.pred){
     var sz=_sizeOf(name);
     if(sz==null||!sp.pred(sz))return false;
@@ -2054,6 +2091,9 @@ function loadDashboard(){
     var mv=res[0]||{},dv=res[1]||{};
     _good=new Set(dv.good||[]);_bad=new Set(dv.bad||[]);
     _modelSizes=mv.sizes||{};
+    _RELEASE_DATES=mv.dates&&mv.dates.dates||{};
+    _RELEASE_KEYS=Object.keys(_RELEASE_DATES).sort(function(a,b){return b.length-a.length});
+    _relDateMemo={};
     renderModels(mv.servers||[]);
     renderHostLists(dv);
     hideSnack();
