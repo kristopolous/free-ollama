@@ -2304,15 +2304,17 @@ def find_servers(sub, caps=None):
     return out
 
 
-_FALLBACK_RE = re.compile(r"\s+\?\s+")
+_FALLBACK_RE = re.compile(r"\s*,\s*")
 
 
 def _split_fallback(q):
-    """Split a model query into an ordered fallback chain on a whitespace-flanked
-    '?': 'qwen >10gb ? gemma' -> ['qwen >10gb', 'gemma']. The '?' MUST be flanked
-    by whitespace, so it never collides with the single-char glob wildcard —
-    'llama3?70b' stays one pattern. '/' is NOT a fallback separator here; it's the
-    capability/model pairing (edit/wan). No ' ? ' -> a one-element chain."""
+    """Split a model query into an ordered fallback chain on ',', spaces optional:
+    'qwen3.8,gemma4' and 'qwen >10gb, gemma' both split. ',' is the separator —
+    absent from every model name in the corpus (unlike '%', which is URL
+    percent-encoding), shell-safe (bare comma isn't special; only brace-expansion
+    '{a,b}' is), and reads naturally as an ordered list. '/' stays the
+    capability/model pairing (edit/wan); glob wildcards '*' and '?' keep their
+    meaning inside each segment. No ',' -> a one-element chain."""
     parts = [p.strip() for p in _FALLBACK_RE.split(q or "") if p.strip()]
     return parts or [(q or "").strip()]
 

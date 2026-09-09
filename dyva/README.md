@@ -223,12 +223,12 @@ Server-Room filter, and the map's compare boxes):
 - **Partials and globs** — `qwen` matches every qwen variant on every host;
   `*` and `?` wildcards work (`qwen*27b`, `flux*2`, `llama3?70b`); matching is
   case-insensitive and glob-normalised.
-- **Fallback chains** — a **whitespace-flanked `?`** separates ordered
-  alternatives: `gemma3 ? qwen` tries `gemma3`, then `qwen`. The `?` must have
-  spaces around it so it never clashes with the single-char glob wildcard —
-  `llama3?70b ? mistral` is the glob `llama3?70b`, falling back to `mistral`.
-  (`/` is *not* a fallback separator; it's the capability/model pairing, e.g.
-  `edit/wan`.)
+- **Fallback chains** — a comma separates ordered alternatives (spaces
+  optional): `gemma3, qwen` (or `gemma3,qwen`) tries `gemma3`, then `qwen`. The
+  comma is just a sentinel — it's shell-safe and absent from every model name in
+  the survey (unlike `%`, which is URL percent-encoding, or `/`, which is the
+  capability/model pairing, e.g. `edit/wan`). Globs still work inside each
+  alternative: `llama3?70b, mistral`.
 - **Size predicates** — `>`, `<`, `>=`, `<=` plus a size filter by a model's
   recorded disk heft: `>10gb`, `qwen <=4gb`, `<700mb`. The size token can stand
   alone or ride alongside a name, and sizes are decimal (`gb` = 1e9 bytes). It
@@ -238,6 +238,24 @@ Server-Room filter, and the map's compare boxes):
   can't include what hasn't been measured. On the map, `;live`/`;dead`,
   `;cloud`/`;nocloud`, `;<service>` and `;<provider>` meta tokens combine with
   these on either side.
+
+### Context window
+
+Ollama defaults every request to a 4096-token window (`num_ctx`) and **silently
+truncates** anything past it — the head of a long chat just vanishes, no error.
+So dyva auto-sizes `num_ctx` for each native `/api/chat` request from the prompt
+(a tiktoken estimate, padded generously since it's only a proxy for the model's
+real tokenizer, plus reply headroom), and only caps at a sanity ceiling of 2²⁰
+(1,048,576) — we don't set the real limit, the host does. An explicit
+`options.num_ctx` you send is always honored as-is.
+
+If a response comes back with the prompt having filled the window anyway (the
+estimate undershot), that answer was built on a cut prompt, so dyva treats it as
+a **failure, not a result**: it re-sends with a doubled window (up to the
+ceiling), and only if even that truncates does it return **413 "context too
+large — trim the history."** A truncation never marks the host bad — it answered;
+our sizing was short. Each turn's token accounting (prompt ↑ / completion ↓ /
+window) shows on the worker card in the dashboard's Activity view.
 
 ## API Reference
 
