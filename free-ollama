@@ -63,9 +63,10 @@ cache() {
 }
 
 process_stack() {
-    local out=' "\(.tps | floor) \(.server) \(.models 
+    local out=' "\(.server) \(.models 
             | map(select(contains("'$model'"))) 
             | join(" ")) "' 
+    echo "$out"
     [[ -z "$model" ]] && return
     [[ "$model" =~ cloud ]] && nocloud= || nocloud='and (.models | all(contains(":cloud") | not))'
 
@@ -86,7 +87,6 @@ process_stack() {
                  '"$nocloud"'
              )
          ) 
-         | sort_by(.tps) 
          | .['$(IFS=,; echo "${index[*]}")'] 
          | '"$out" "$_db"
     } | {
