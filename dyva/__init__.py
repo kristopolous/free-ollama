@@ -1090,15 +1090,22 @@ def _usage_of(obj):
     return p, c
 
 
+def _prompt_truncated(prompt, num_ctx):
+    """True ONLY when the prompt actually filled the window (prompt_eval_count
+    reached num_ctx) — Ollama then dropped the head, so the answer was built on a
+    cut prompt. A prompt that is merely large relative to the window is NOT
+    truncation: it fit, the reply just had less room. (We size num_ctx to hold the
+    prompt PLUS a reply reserve, so a correctly-sized request never trips this —
+    the old `>= num_ctx - reply` test mis-fired on prompts that fit fine.)"""
+    return bool(prompt is not None and num_ctx and prompt >= num_ctx)
+
+
 def _is_truncated(obj, num_ctx):
-    """True when the host's reported prompt reached the num_ctx window we sent —
-    Ollama then drops the head, so any answer was built on a CUT prompt. This is
-    our sizing falling short, never the host's fault: callers treat it as a
-    failure to re-send with a bigger window, and must NOT mark the host bad."""
-    if not num_ctx:
-        return False
+    """_prompt_truncated against a finished response's reported prompt count.
+    Truncation is our sizing falling short, never the host's fault — callers
+    re-send with a bigger window and must NOT mark the host bad."""
     p, _ = _usage_of(obj)
-    return p is not None and p >= num_ctx - NUM_CTX_REPLY
+    return _prompt_truncated(p, num_ctx)
 
 
 def mark_worker_tokens(wid, prompt, completion, num_ctx):
@@ -1115,8 +1122,7 @@ def mark_worker_tokens(wid, prompt, completion, num_ctx):
         w["ctoks"] = completion
     if num_ctx:
         w["num_ctx"] = num_ctx
-    if prompt is not None and num_ctx:
-        w["truncated"] = prompt >= num_ctx - NUM_CTX_REPLY
+    w["truncated"] = _prompt_truncated(prompt, num_ctx)
 
 
 async def account_tokens(wid, host, model, obj, num_ctx):
@@ -1127,8 +1133,7 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     if p is None and c is None:
         return
     mark_worker_tokens(wid, p, c, num_ctx)
-    trunc = p is not None and num_ctx and p >= num_ctx - NUM_CTX_REPLY
-    if trunc:
+    if _prompt_truncated(p, num_ctx):
         # Our window was too small; Ollama cut the prompt's head. The host is NOT
         # at fault — no bad mark (this is just an activity line, reputation is
         # untouched). The non-streaming path re-sends with a bigger window; a
@@ -3315,8 +3320,10 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
 # estimate from the text we're sending, pad it, add room to answer, and snap to
 # a 2048 bucket — the bucketing also keeps the value stable so Ollama isn't
 # forced to reload the model for a window that wobbles a few tokens each turn.
-NUM_CTX_PAD = 1.05             # small headroom for tokenizer disagreement
-NUM_CTX_REPLY = 1024           # tokens reserved for the model's own reply
+NUM_CTX_PAD = 1.5              # GENEROUS headroom: our tiktoken count is only a proxy
+                               # for the real tokenizer and undershoots (esp. code /
+                               # CJK / tool JSON) — better to over-ask than truncate
+NUM_CTX_REPLY = 4096           # ample room reserved for the model's own reply
 NUM_CTX_STEP = 2048            # snap to this bucket
 NUM_CTX_MIN = 4096             # never below Ollama's own default
 # We don't set the real context ceiling — the host does. Cap only at 2**18 so a
