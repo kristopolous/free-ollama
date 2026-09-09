@@ -37,8 +37,22 @@ case "$SERVICE" in
 
     jq -s 'add' ~/.cache/free-ollama/*-notworking.json > ~/.cache/free-ollama/notworking-consolidated.json
 
-    ./dyva.py --refresh 
+    ./dyva.py --refresh
     exit
+    ;;
+
+  get-dates)
+    # graflex harvests the wild internet — including Artificial Analysis's model
+    # release dates. Scrape (unauthenticated), then hand the extracted Next.js
+    # payload to the build tool, which writes dyva/model-release-dates.json. The
+    # page's payload shape shifts — EXPECT to tweak the grep/sed below (and
+    # build_release_dates.py) when it breaks; it has changed several times already.
+    HERE="$(dirname "$0")"
+    curl -s 'https://artificialanalysis.ai/leaderboards/models' \
+      | grep -Po '(?<=self.__next_f.push\(\[1,).*?(?=\]\))' \
+      | grep oding | sed 's/^..../"/g' | tail -1 | jq -r 'fromjson' \
+      | python3 "$HERE/build_release_dates.py" - "$HERE/../dyva/model-release-dates.json"
+    exit $?
     ;;
 
 

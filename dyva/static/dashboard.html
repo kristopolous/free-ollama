@@ -889,8 +889,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <h2>Models</h2>
 <div class="card-inner">
 <div class="host-tabs">
-<button type="button" class="htab active" data-mpane="text" title="Text models">📖 Text<span class="htab-count" id="cnt-mtext"></span></button>
-<button type="button" class="htab" data-mpane="image" title="Image models">🖼️ Image<span class="htab-count" id="cnt-mimage"></span></button>
+<button type="button" class="htab active" data-mpane="text" title="Text models">📖<span class="htab-count" id="cnt-mtext"></span></button>
+<button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, or size e.g. &gt;10gb" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?)&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;Combine a name and a size in any order: 'qwen &gt;10gb' or '&gt;10gb qwen'. A half-typed size (just '&gt;' or '&gt;10') is ignored until it has a unit. A model whose size the survey doesn't know is hidden by a size filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
@@ -916,11 +916,11 @@ body.dragging-image .hist-item{cursor:grabbing}
 <h2>Hosts</h2>
 <div class="card-inner">
 <div class="host-tabs">
-<button type="button" class="htab active" data-pane="workers" title="Workers">🛠️ Workers<span class="htab-count" id="cnt-workers">0</span></button>
-<button type="button" class="htab" data-pane="last" title="Recent">🎉 Recent<span class="htab-count" id="cnt-last"></span></button>
-<button type="button" class="htab" data-pane="good" title="Good">👍 Good<span class="htab-count" id="cnt-good"></span></button>
-<button type="button" class="htab" data-pane="maybe" title="Maybe">🤷 Maybe<span class="htab-count" id="cnt-maybe"></span></button>
-<button type="button" class="htab" data-pane="bad" title="Bad">💀 Bad<span class="htab-count" id="cnt-bad"></span></button>
+<button type="button" class="htab active" data-pane="workers" title="Workers">🛠️<span class="htab-count" id="cnt-workers">0</span></button>
+<button type="button" class="htab" data-pane="last" title="Recent">🎉<span class="htab-count" id="cnt-last"></span></button>
+<button type="button" class="htab" data-pane="good" title="Good">👍<span class="htab-count" id="cnt-good"></span></button>
+<button type="button" class="htab" data-pane="maybe" title="Maybe">🤷<span class="htab-count" id="cnt-maybe"></span></button>
+<button type="button" class="htab" data-pane="bad" title="Bad">💀<span class="htab-count" id="cnt-bad"></span></button>
 </div>
 <div id="pane-last" style="display:none">
 <div id="lastList"></div>
@@ -3546,11 +3546,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                                          host:j.host||'',model:j.model||'',
                                          service:j.service||''}));
               });
-              var realUrls=urls.map(function(u){return new URL(u,document.baseURI).href});
               results.push({text:'Image generated and saved as '+inames.join(', ')
-                                 +'. Refer to it by that name in later tool calls. '
-                                 +'Full URL'+(realUrls.length>1?'s':'')+' (use in HTML/markdown '
-                                 +'outside the chat): '+realUrls.join(', '),
+                                 +'. Refer to it by that name in later tool calls; to show it in a '
+                                 +'document, embed the NAME — markdown ![name](name) or HTML '
+                                 +'<img src="name"> — and dyva fills in the real image. The image '
+                                 +'is already saved; nothing more is needed to display it.',
                             keep:'[Generated image saved as '+inames.join(', ')+'.]',
                             md:fl.map(function(f,k){return '!['+(inames[k]||'generated image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
                                +_resultMetaMd(inames[0],j.model,j.service,j.host)});
@@ -3823,11 +3823,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
                                               host:j4.host||'',model:j4.model||'',service:j4.service||'',
                                               src:'edited from '+blobs.map(function(b){return b.name}).join(' + ')}));
                 });
-                var eReal=ef.map(function(f){return new URL('sdapi/v1/images/'+f,document.baseURI).href});
                 results.push({text:'Image edited and saved as '+enames.join(', ')
-                                   +'. Refer to it by that name in later tool calls. '
-                                   +'Full URL'+(eReal.length>1?'s':'')+' (use in HTML/markdown '
-                                   +'outside the chat): '+eReal.join(', '),
+                                   +'. Refer to it by that name in later tool calls; to show it in a '
+                                   +'document, embed the NAME — markdown ![name](name) or HTML '
+                                   +'<img src="name"> — and dyva fills in the real image. The image '
+                                   +'is already saved; nothing more is needed to display it.',
                               keep:'[Edited image saved as '+enames.join(', ')+'.]',
                               md:ef.map(function(f,k){return '!['+(enames[k]||'edited image')+'](sdapi/v1/images/'+f+')'}).join('\n\n')
                                  +_resultMetaMd(enames[0],j4.model,j4.service,j4.host)});
@@ -4425,8 +4425,9 @@ function assetListText(chat){
   if(list.length){
     var rows=list.map(function(a){
       var o={name:a.name,kind:a.kind,source:a.src||'unknown'};
-      // absolute URL so it can be embedded in HTML/markdown outside the chat
-      if(a.url)try{o.url=new URL(a.url,document.baseURI).href}catch(e){o.url=a.url}
+      // RELATIVE url (dyva is behind a reverse proxy — an absolute URL from
+      // document.baseURI would be wrong). Embed by NAME in docs; dyva resolves it.
+      if(a.url)o.url=a.url;
       if(a.host)o.host=a.host;
       if(a.model)o.model=a.model;
       if(a.desc)o.description=a.desc;
@@ -5201,6 +5202,20 @@ function _resolveAssetLinks(text){
     });
 }
 function renderChatText(text){return renderParsed(splitDocBlocks(_resolveAssetLinks(text)))}
+// HTML analogue of _resolveAssetLinks: rewrite src=/href= that point at an asset
+// NAME to that asset's url. The url is RELATIVE (sdapi/v1/images/…) on purpose —
+// dyva runs behind a reverse proxy, so an absolute URL built from document.baseURI
+// would be wrong. So <img src="cat.jpg"> in an HTML doc renders.
+function _resolveAssetAttrs(html){
+  var chat=currentChat;
+  if(!chat||!assetsOf(chat).length)return html;
+  return String(html||'').replace(/\b(src|href)=(["'])([^"']+)\2/gi,function(m,attr,q,target){
+    if(/^(https?:|data:|\/|sdapi\/|v1\/|#|mailto:)/i.test(target))return m;
+    var a=assetFind(chat,decodeURIComponent(target));
+    if(!a||!a.url)return m;
+    return attr+'='+q+a.url+q;
+  });
+}
 // mirror the parsed documents into the conversation's document list as they
 // stream; `final` commits them once the turn is done
 function syncStreamDocs(gen,docs,final){
@@ -5357,7 +5372,7 @@ function renderDocPanel(streaming){
     // origin: no reach into this document, its storage, or its cookies
     fr.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-popups');
     fr.setAttribute('referrerpolicy','no-referrer');
-    fr.srcdoc=content;
+    fr.srcdoc=_resolveAssetAttrs(content);
     body.innerHTML='';
     body.appendChild(fr);
     return;
@@ -5366,7 +5381,7 @@ function renderDocPanel(streaming){
     var wrap=document.createElement('div');
     wrap.className='doc-preview';
     var clean='';
-    try{clean=window.DOMPurify.sanitize(content,{USE_PROFILES:{svg:true,svgFilters:true}})}catch(e){clean=''}
+    try{clean=window.DOMPurify.sanitize(_resolveAssetAttrs(content),{USE_PROFILES:{svg:true,svgFilters:true}})}catch(e){clean=''}
     wrap.innerHTML=clean;
     body.innerHTML='';
     body.appendChild(wrap);
@@ -5382,7 +5397,9 @@ function renderDocPanel(streaming){
     if(doc.language)code.className='language-'+doc.language;
     code.textContent=content;
   }else{
-    body.innerHTML=mdRender(content);
+    // Resolve asset-name image/links to real URLs, same as chat text — a doc that
+    // embeds ![pic](garden.png) must point at the asset's URL or it renders broken.
+    body.innerHTML=mdRender(_resolveAssetLinks(content));
   }
   // highlighting a half-written file every 60ms is wasted work — do it at rest
   if(!streaming)highlightBlocks(body);

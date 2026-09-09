@@ -72,7 +72,7 @@ curl http://THIS-HOST:PORT/api/chat -d '{"model":"gemma3","messages":[{"role":"u
 
 # OpenAI-style
 curl http://THIS-HOST:PORT/v1/chat/completions -d '{"model":"qwen3","messages":[...]}'</code></pre>
-<p>Model names are <b>routing patterns</b>: partials and globs work (<code>qwen*27b</code>, <code>abliterated</code>), as do comma fallbacks (<code>gemma3,qwen</code>) and size filters by disk heft (<code>&gt;10gb</code>, <code>qwen &lt;=4gb</code>). One name covers every matching variant on every host. Media (image / edit / video / TTS) rides the OpenAI-ish endpoints under <code>/v1/…</code> and <code>/sdapi/…</code> — see the <a href="docs/" target="_blank">Swagger docs</a>.</p>
+<p>Model names are <b>routing patterns</b>: partials and globs work (<code>qwen*27b</code>, <code>abliterated</code>), as do comma fallbacks (<code>gemma3,qwen</code>), size filters by disk heft (<code>&gt;10gb</code>, <code>qwen &lt;=4gb</code>) and release-date filters (<code>qwen&gt;2026-02</code>, even <code>qwen&gt;2026-02&gt;5gb</code>). One name covers every matching variant on every host. Media (image / edit / video / TTS) rides the OpenAI-ish endpoints under <code>/v1/…</code> and <code>/sdapi/…</code> — see the <a href="docs/" target="_blank">Swagger docs</a>.</p>
 
 <h3>Adding a source (settings)</h3>
 <p>dyva's host list comes from one or more <b>sources</b>: the public discovery cache, or a private federation you point it at. Manage them in the dashboard <b>Settings</b> tab (paste a source URL), or from the CLI:</p>

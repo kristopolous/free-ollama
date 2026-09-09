@@ -107,7 +107,7 @@ CHATS_DB = os.path.join(CACHE_DIR, "chats.db")
 # a job is router-level delivery state, and this table is keyed by `kind`
 # (text/video/…) so every generation kind can share it.
 JOBS_DB = os.path.join(CACHE_DIR, "jobs.db")
-IMG_HISTORY_MAX = 100
+IMG_HISTORY_MAX = 1000
 CAP_REFRESH_TTL = 3600
 _last_cache = None
 _knowns_cache = None
@@ -2156,6 +2156,71 @@ def _split_size_filter(sub):
     return name, (cmp, thresh)
 
 
+# Model release dates (bundled from artificialanalysis.ai — see build_release_dates
+# / the --refresh-dates CLI). The query grammar gains a date predicate: >YYYY-MM /
+# <YYYY-MM (and >=/<=), e.g. "qwen>2026-02", composable with size: "qwen>2026-02>5gb".
+REL_DATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model-release-dates.json")
+_rel_dates = None
+_rel_keys = None
+_rel_date_memo = {}
+_DATE_RE = re.compile(r"([<>]=?)\s*(\d{4}-\d{2}(?:-\d{2})?)")
+
+
+def _norm_model(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).split("/")[-1].split("\\")[-1].lower())
+
+
+def _load_release_dates():
+    global _rel_dates, _rel_keys
+    if _rel_dates is None:
+        try:
+            with open(REL_DATES_FILE, encoding="utf-8") as f:
+                _rel_dates = (json.load(f).get("dates")) or {}
+        except Exception:
+            _rel_dates = {}
+        _rel_keys = sorted(_rel_dates, key=len, reverse=True)   # longest (most specific) first
+    return _rel_dates
+
+
+def _model_release_date(name):
+    """Release date ('YYYY-MM-DD') for a model name, matched fuzzily against the
+    bundled leaderboard data, or None. Normalizes the basename (drops path, case,
+    punctuation) and finds the longest leaderboard key that is a substring either
+    way, so quant/format suffixes and path prefixes don't block. Best-effort — the
+    major models, not all of them."""
+    if name in _rel_date_memo:
+        return _rel_date_memo[name]
+    lut = _load_release_dates()
+    n = _norm_model(name)
+    dt = None
+    if n:
+        if n in lut:
+            dt = lut[n]
+        else:
+            for k in _rel_keys:
+                if k in n or n in k:
+                    dt = lut[k]
+                    break
+    _rel_date_memo[name] = dt
+    return dt
+
+
+def _split_date_filter(sub):
+    """Pull a release-date predicate like '>2026-02' / '<=2025-09-01' out of a model
+    query. Returns (name_without_it, (comparator, 'YYYY-MM[-DD]') | None). ISO dates
+    sort correctly as strings, so the comparator runs on the date strings directly
+    (the model's date is truncated to the threshold's granularity)."""
+    import operator
+    s = sub or ""
+    m = _DATE_RE.search(s)
+    if not m:
+        return sub, None
+    op, date = m.group(1), m.group(2)
+    name = (s[:m.start()] + s[m.end():]).strip()
+    cmp = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}[op]
+    return name, (cmp, date)
+
+
 def _known_has(host, model, cap):
     caps_map = (load_knowns().get(host) or {}).get("models", {})
     return cap in (caps_map.get(model) or [])
@@ -2291,14 +2356,27 @@ def find_servers(sub, caps=None):
     # recorded size satisfies it — models with an UNKNOWN size are kept (the
     # filter only drops ones known to fail, so a backend that reports no size
     # isn't silently excluded).
+    # A release-date (">2026-02") predicate works the same way — strip it too.
+    # Unlike size, a date filter EXCLUDES unknown-date models: a temporal "after
+    # 2026-02" can't include a model we can't date (and most undated ones are just
+    # older models that didn't match the leaderboard). Date before size so
+    # 'qwen>2026-02>5gb' splits cleanly.
+    sub, date_pred = _split_date_filter(sub)
     sub, size_pred = _split_size_filter(sub)
     result = _find_servers_raw(sub, caps)
-    if not size_pred:
+    if not size_pred and not date_pred:
         return result
-    cmp, thresh = size_pred
     out = []
     for prio, host, ms in result:
-        ms2 = [m for m in ms if (_model_size(m) is None) or cmp(_model_size(m), thresh)]
+        ms2 = ms
+        if size_pred:
+            cmp, thresh = size_pred
+            ms2 = [m for m in ms2 if (_model_size(m) is None) or cmp(_model_size(m), thresh)]
+        if date_pred:
+            dcmp, dthresh = date_pred
+            ms2 = [m for m in ms2
+                   if _model_release_date(m) is not None
+                   and dcmp(_model_release_date(m)[:len(dthresh)], dthresh)]
         if ms2:
             out.append((prio, host, ms2))
     return out
@@ -4035,18 +4113,27 @@ async def handle_geo_compare(request):
                 elif meta != svc and meta != prov:   # a service or a provider
                     return False
                 continue
-            # A token may carry a size predicate (">10gb"), same as the model
-            # filter elsewhere. Split it out; a size token needs a model whose
-            # RECORDED size satisfies it (unknown sizes can't satisfy a positive
-            # "show me >10gb", matching the dashboard's own filter). A token can
-            # be name+size, size-only, or name-only.
-            tname, spred = _split_size_filter(t)
-            if spred:
-                cmp, thresh = spred
-                if not any(
-                        (not tname or model_query_match(m, tname))
-                        and _model_size(m) is not None and cmp(_model_size(m), thresh)
-                        for m in models):
+            # A token can carry a release-date and/or size predicate alongside a
+            # name ("qwen", "qwen>10gb", "qwen>2026-02>5gb") — the same grammar as
+            # the routing filter. Split them off; the token matches iff SOME model
+            # satisfies every part. Date and size need a KNOWN value (a positive
+            # "after 2026-02" / ">10gb" can't include what we can't date/measure).
+            tname, dpred = _split_date_filter(t)
+            tname, spred = _split_size_filter(tname)
+            if dpred or spred:
+                def _tok_ok(m, tname=tname, spred=spred, dpred=dpred):
+                    if tname and not model_query_match(m, tname):
+                        return False
+                    if spred:
+                        sz = _model_size(m)
+                        if sz is None or not spred[0](sz, spred[1]):
+                            return False
+                    if dpred:
+                        dt = _model_release_date(m)
+                        if dt is None or not dpred[0](dt[:len(dpred[1])], dpred[1]):
+                            return False
+                    return True
+                if not any(_tok_ok(m) for m in models):
                     return False
             elif not any(model_query_match(m, t) for m in models):
                 return False

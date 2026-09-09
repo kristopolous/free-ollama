@@ -238,6 +238,13 @@ Server-Room filter, and the map's compare boxes):
   can't include what hasn't been measured. On the map, `;live`/`;dead`,
   `;cloud`/`;nocloud`, `;<service>` and `;<provider>` meta tokens combine with
   these on either side.
+- **Release-date predicates** — `>`, `<`, `>=`, `<=` plus a `YYYY-MM` (or
+  `YYYY-MM-DD`): `qwen>2026-02` is qwen models released after Feb 2026, and it
+  composes with size — `qwen>2026-02>5gb`. The date is matched fuzzily against a
+  bundled leaderboard of the major models (`dyva/model-release-dates.json`,
+  harvested by `graflex.sh get-dates`). Unlike size, a date filter **excludes**
+  models it can't date — a temporal filter can only include what it can place in
+  time, and most undated models are just older ones not on the leaderboard.
 
 ### Context window
 
