@@ -1208,6 +1208,22 @@ _FAKE_EXACT = {
     "claude-3-opus:latest",
     "gpt-4:latest",
     "gpt-4o:latest",
+    # 1.93GB, digest b64e060895eb: a renamed small model — no open weights exist for
+    # OpenAI's gpt-4o-mini (confirmed against survey.json size/digest, 2026-09).
+    "gpt-4o-mini:latest",
+    # Pure Claude product names with NO open-base lineage — weightless spoof
+    # listings or tiny renames (confirmed against survey.json, 2026-09). NOTE the
+    # exception, and why this stays an EXACT list not a "claude-*" pattern: names
+    # that carry a real base model (qwen3.5-…-claude-4.6-opus-distilled, gemma3-12b
+    # claude distills, llama3.1-claude-…) are LEGITIMATE distillations and must be
+    # kept — a base-model name in the string means it's a real model, not a fake.
+    "claude-sonnet-4.6:latest",
+    "claude-sonnet-4.6",
+    "claude-opus-4.8:latest",
+    "claude-opus-4-8:latest",
+    "claude-opus-5",
+    "claude-haiku-4.5:latest",
+    "claude-favorite-5.0:latest",
 }
 
 
@@ -1914,9 +1930,18 @@ def set_last(model, host, full):
 
 
 def match_model(model_name, pattern):
+    # A trailing "$" (borrowed from regex) anchors the END of the name: "qwen3.8:27b$"
+    # matches that name exactly and NOT "...:27b-abliterated" or other quant/finetune
+    # variants that a bare "qwen3.8:27b" would also sweep in. It is the only such
+    # anchor — no other regex metacharacters are honored.
+    pattern = pattern or ""
+    anchor_end = pattern.endswith("$")
+    if anchor_end:
+        pattern = pattern[:-1]
+    ml, pl = model_name.lower(), pattern.lower()
     if any(c in pattern for c in "*?["):
-        return fnmatch.fnmatch(model_name.lower(), f"*{pattern.lower()}*")
-    return pattern.lower() in model_name.lower()
+        return fnmatch.fnmatch(ml, f"*{pl}" if anchor_end else f"*{pl}*")
+    return ml.endswith(pl) if anchor_end else (pl in ml)
 
 
 def canon_pattern(pattern):
@@ -5262,7 +5287,7 @@ async def handle_api_pull(request):
     return web.json_response({"status": "success"})
 
 
-FAILED_PAYLOAD_LOG = "/tmp/dyva/failed-payloads.txt"
+FAILED_PAYLOAD_LOG = "/tmp/graflex/failed-payloads.txt"
 
 
 async def _check_local(request):
@@ -6897,13 +6922,19 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
     negative_prompt = body.get("negative_prompt", "")
     width = body.get("width", 512)
     height = body.get("height", 512)
-    steps = body.get("steps", 20)
-    cfg = body.get("cfg_scale", 7)
+    # Per-checkpoint sampling recipe: a flat 20-steps/CFG-7 is right for plain
+    # SD/SDXL but ~5x too many steps for distilled few-step models (Flux schnell,
+    # turbo, lightning, lcm, hyper) and the wrong CFG for Flux. The caller's explicit
+    # values always win; otherwise the recipe fills them in, else the 20/7 default.
+    rec = _ckpt_recipe(ckpt or model_filter or "")
+    steps = int(body["steps"]) if body.get("steps") is not None else int(rec.get("steps", 20))
+    cfg = float(body["cfg_scale"]) if body.get("cfg_scale") is not None else float(rec.get("cfg", 7))
     seed = body.get("seed", -1)
     if seed == -1:
         import random
         seed = random.randint(0, 2**31 - 1)
-    sampler = body.get("sampler_name", "euler")
+    sampler = body.get("sampler_name") or rec.get("sampler") or "euler"
+    scheduler = rec.get("scheduler") or "normal"
     out_node = comfy_image_out_for(host)
 
     # A specific model was asked for and it is not a checkpoint here. It may be
@@ -6943,7 +6974,7 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
         "5": {"class_type": "KSampler", "inputs": {
             "model": ["1", 0], "positive": ["3", 0], "negative": ["4", 0],
             "latent_image": ["2", 0], "seed": seed, "steps": steps,
-            "cfg": cfg, "sampler_name": sampler, "scheduler": "normal", "denoise": 1,
+            "cfg": cfg, "sampler_name": sampler, "scheduler": scheduler, "denoise": 1,
         }},
         "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
         "7": ({"class_type": "PreviewImage", "inputs": {"images": ["6", 0]}}
@@ -8580,6 +8611,54 @@ def load_video_families():
     return out
 
 
+_ckpt_recipes_cache = None
+_NSTEP_RE = re.compile(r"(\d+)[-_. ]?steps?(?:[-_. ]|$)", re.I)
+
+
+def load_checkpoint_recipes():
+    """Docs-sourced sampling recipes (family -> steps/cfg/sampler/scheduler) for
+    plain checkpoints, from node-classifier.json's 'checkpoint' list, first match
+    wins. A flat 20-steps/CFG-7 is right for ordinary SD/SDXL but wrong for the
+    distilled few-step families (Flux schnell, turbo, lightning, lcm, hyper) and for
+    Flux's CFG — this table carries what each family actually wants."""
+    global _ckpt_recipes_cache
+    if _ckpt_recipes_cache is not None:
+        return _ckpt_recipes_cache
+    out = []
+    try:
+        with open(NODE_CLASSIFIER_FILE, encoding="utf-8") as f:
+            for r in (json.load(f).get("checkpoint") or []):
+                try:
+                    r = dict(r)
+                    r["_re"] = re.compile(r["model"])
+                    out.append(r)
+                except Exception as e:
+                    log.warning(f"checkpoint recipe: bad entry {r!r}: {e}")
+    except Exception as e:
+        log.warning(f"node-classifier: failed to load checkpoint recipes: {e}")
+    _ckpt_recipes_cache = out
+    return out
+
+
+def _ckpt_recipe(name):
+    """Recommended sampling knobs for a checkpoint filename, as a dict (possibly
+    empty) with any of steps/cfg/sampler/scheduler. A step count baked into the name
+    ('sdxl_lightning_4step', 'Hyper-SDXL-8steps') is authoritative and overrides the
+    family default; distilled/flux families come from the recipe table; anything else
+    returns {} so the caller keeps its own defaults."""
+    name = name or ""
+    rec = {}
+    for r in load_checkpoint_recipes():
+        if r["_re"].search(name):
+            rec = {k: v for k, v in r.items()
+                   if k in ("steps", "cfg", "sampler", "scheduler")}
+            break
+    m = _NSTEP_RE.search(re.sub(r"\.(safetensors|sft|ckpt)$", "", name, flags=re.I))
+    if m and 1 <= int(m.group(1)) <= 100:
+        rec = dict(rec, steps=int(m.group(1)))
+    return rec
+
+
 # Nine buckets instead of a resolution box. Every family has a native pixel
 # budget it was trained near, so scale that by size and split it by aspect,
 # rather than offering a grid of numbers that is wrong for two families out of
@@ -10154,13 +10233,15 @@ def model_query_match(name, query):
     if match_model(name, query):
         return True
     # ... then again with separators removed, so flux.2 / flux-2 / flux 2 all
-    # find flux2-dev.
-    n, q = _sep_insensitive(name), _sep_insensitive(query)
+    # find flux2-dev. Carry the "$" end-anchor through (see match_model).
+    anchor_end = query.strip().endswith("$")
+    q_src = query.strip()[:-1] if anchor_end else query
+    n, q = _sep_insensitive(name), _sep_insensitive(q_src)
     if not q:
         return True
     if any(c in q for c in "*?["):
-        return fnmatch.fnmatch(n, f"*{q}*")
-    return q in n
+        return fnmatch.fnmatch(n, f"*{q}" if anchor_end else f"*{q}*")
+    return n.endswith(q) if anchor_end else (q in n)
 
 
 def _hints(v):

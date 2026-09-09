@@ -223,6 +223,11 @@ Server-Room filter, and the map's compare boxes):
 - **Partials and globs** — `qwen` matches every qwen variant on every host;
   `*` and `?` wildcards work (`qwen*27b`, `flux*2`, `llama3?70b`); matching is
   case-insensitive and glob-normalised.
+- **End-anchor `$`** — a query is a containment match by default (`qwen3.8:27b`
+  also matches `qwen3.8:27b-q4_K_M`). A trailing `$`, borrowed from regex, anchors
+  the end so `qwen3.8:27b$` matches *that* name exactly and skips the quant and
+  finetune variants (e.g. `-abliterated`) a bare pattern would draft in. It's the
+  only regex metacharacter honoured.
 - **Fallback chains** — a comma separates ordered alternatives (spaces
   optional): `gemma3, qwen` (or `gemma3,qwen`) tries `gemma3`, then `qwen`. The
   comma is just a sentinel — it's shell-safe and absent from every model name in

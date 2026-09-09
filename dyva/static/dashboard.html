@@ -203,8 +203,29 @@ body.chat{height:100vh;height:100dvh}
 .model-item:last-child{border:none}
 .model-name{font-family:var(--font-mono);font-size:var(--fs-sm);max-width:85%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-count{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap}
+/* Model coverage bar: working/failing/untested, muted pastels (not a christmas tree) */
+.model-bar{flex-shrink:0;align-self:center;display:inline-flex;height:8px;overflow:hidden;margin-left:var(--sp-3);background:#2a2a2a}
+.model-bar i{display:block;height:100%}
+.mb-g{background:#83b58a}
+.mb-r{background:#c78d8d}
+.mb-u{background:#6d6d6d}
 .modellist .model-item{cursor:pointer;transition:background .1s;overflow-wrap:anywhere}
 .modellist .model-item:hover{background:var(--accent-bg)}
+/* Faceted grouping of the model list (family / size / kind), toggled by .group-row */
+.group-row{display:flex;align-items:center;gap:var(--sp-2);margin-bottom:var(--sp-2);flex-wrap:wrap}
+.group-lbl{color:var(--text-dim);font-size:var(--fs-sm)}
+.gbtn{background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:.1em .55em;font-size:var(--fs-sm);cursor:pointer}
+.gbtn:hover{color:var(--text)}
+.gbtn.active{background:var(--accent-bg);color:var(--text);border-color:var(--accent)}
+.model-group{display:flex;align-items:center;gap:.45em;cursor:pointer;user-select:none;margin:var(--sp-3) 0 var(--sp-1);padding:.4em .55em;border-radius:5px;background:var(--accent-bg);color:var(--text);font-size:var(--fs-md);font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+.model-group:hover{filter:brightness(1.18)}
+.model-group-wrap:first-child .model-group{margin-top:0}
+.mg-caret{display:inline-block;transition:transform .12s;color:var(--text-dim);font-size:.8em}
+.model-group-wrap.collapsed .mg-caret{transform:rotate(-90deg)}
+.mg-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mg-count{color:var(--text-dim);font-weight:600;font-size:var(--fs-sm);text-transform:none}
+.model-group-wrap.collapsed .model-group-body{display:none}
+.modellist.filtering .model-group-body{display:block}   /* a search reveals matches even in collapsed groups */
 .host-name{font-family:var(--font-mono);font-size:var(--fs-sm);flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:none}
 a.host-name:hover{color:var(--accent);text-decoration:underline}
 #hostDetailTitle{font-family:var(--font-mono);font-size:.92rem;overflow-wrap:anywhere}
@@ -893,8 +914,14 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
-<input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, size &gt;10gb, or date &gt;2026-02" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?)&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;• release date — an operator and YYYY-MM: &gt;2026-02, &lt;2025-01 (the major models; undated ones are hidden by a date filter)&#10;Combine any of them: 'qwen &gt;2026-02 &gt;5gb'. Half-typed size/date fragments are ignored until complete. A model whose size/date isn't known is hidden by that filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, size &gt;10gb, or date &gt;2026-02" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?); a trailing $ anchors the end, so qwen3.8:27b$ excludes -abliterated / quant variants&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;• release date — an operator and YYYY-MM: &gt;2026-02, &lt;2025-01 (the major models; undated ones are hidden by a date filter)&#10;Combine any of them: 'qwen &gt;2026-02 &gt;5gb'. Half-typed size/date fragments are ignored until complete. A model whose size/date isn't known is hidden by that filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
 <button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
+</div>
+<div class="group-row" id="modelGroupCtl">
+<button type="button" class="gbtn active" data-facet="count" title="Most-available first (flat)">#</button>
+<button type="button" class="gbtn" data-facet="family" title="By model family">family</button>
+<button type="button" class="gbtn" data-facet="size" title="By parameter size (read from the name, in billions)">size</button>
+<button type="button" class="gbtn" data-facet="kind" title="By kind / provenance (instruct, code, abliterated, embedding …)">kind</button>
 </div>
 <div id="mpane-text">
 <div id="modelList" class="modellist"></div>
@@ -1567,16 +1594,22 @@ function matchModel(name,pattern){
   pattern=sp.name;
   if(!pattern)return true;
   var p=String(pattern).toLowerCase(),n=String(name||'').toLowerCase();
+  // A trailing "$" (borrowed from regex) anchors the END: "qwen3.8:27b$" matches that
+  // name exactly and NOT "...:27b-abliterated" / quant / finetune variants. Only "$".
+  var anchorEnd=p.charAt(p.length-1)==='$';
+  if(anchorEnd)p=p.slice(0,-1);
   if(/[*?[]/.test(p)){
-    var re=_globCache[p];
+    var key=(anchorEnd?'$|':'')+p;   // anchored vs not must not share a cache slot
+    var re=_globCache[key];
     if(re===undefined){
-      try{re=_globToRe('*'+p+'*')}catch(e){re=null}
-      _globCache[p]=re;
+      try{re=_globToRe('*'+p+(anchorEnd?'':'*'))}catch(e){re=null}
+      _globCache[key]=re;
     }
     if(re)return re.test(n);
-    return n.indexOf(p.replace(/[*?[]/g,''))>=0;   // unusable glob: degrade
+    var bare=p.replace(/[*?[]/g,'');
+    return anchorEnd?n.endsWith(bare):n.indexOf(bare)>=0;   // unusable glob: degrade
   }
-  return n.indexOf(p)>=0;
+  return anchorEnd?n.endsWith(p):n.indexOf(p)>=0;
 }
 function globSearch(query,list,key){
   if(!query)return (list||[]).slice();
@@ -1611,6 +1644,14 @@ function filterModels(){
   }
   refreshUseBtn();
   document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=matchModel(el.getAttribute('data-name'),q)?'':'none'});
+  // while a query is active, force groups open so matches inside a collapsed group
+  // aren't hidden; hide a whole group whose models are all filtered out.
+  document.querySelectorAll('.modellist').forEach(function(list){list.classList.toggle('filtering',!!q);});
+  document.querySelectorAll('.model-group-wrap').forEach(function(wrap){
+    var vis=0,items=wrap.querySelectorAll('.model-item');
+    for(var i=0;i<items.length;i++)if(items[i].style.display!=='none'){vis++;break;}
+    wrap.style.display=vis?'':'none';
+  });
   updateModelPaneCounts(q);
   // the same query re-renders the Hosts card panes from the full arrays, so it
   // searches the whole list and the "... and N more" count matches the results
@@ -1646,15 +1687,126 @@ var _currentModel=null;
 var modelHosts={},hostChecked={},imageModels={};
 var _good=new Set(),_bad=new Set();
 function checkedAgo(iso){if(!iso)return'';var t=Date.parse(iso);if(isNaN(t))return'';var days=Math.floor((Date.now()-t)/86400000);if(days<=0)return'today';if(days===1)return'1 day';return days+' days'}
-function modelStatus(mid){var hs=modelHosts[mid]||[],g=0,b=0;hs.forEach(function(h){if(_good.has(h+' '+mid))g++;else if(_bad.has(h+' '+mid))b++});return g+'/'+b+'/'+(hs.length-g-b)}
-function makeModelRow(mid){var d=document.createElement('div');d.className='model-item';d.setAttribute('data-name',mid);d.title=mid;var n=document.createElement('span');n.className='model-name';n.textContent=mid;var c=document.createElement('span');c.className='model-count';c.textContent=modelStatus(mid);d.appendChild(n);d.appendChild(c);return d}
+// A model's host coverage as a partitioned bar rather than "g/b/u" text: working
+// (green) / failing (red) / untested (grey), pastel so a long list doesn't read like
+// a christmas tree. Host counts are power-law (1 .. ~900), so the bar's LENGTH is a
+// power-ROOT of the total host count (not linear pixels) and capped — big models
+// don't run off the edge, small ones still show. Segments split that length by their
+// share. Exact numbers live in the hover title. Tune MBAR_* to taste.
+var MBAR_MAX=100, MBAR_POW=0.5, MBAR_K=3.4, MBAR_MIN=6;
+function modelBarWidth(total){
+  if(total<=0)return 0;
+  return Math.min(MBAR_MAX, Math.max(MBAR_MIN, Math.round(Math.pow(total,MBAR_POW)*MBAR_K)));
+}
+function makeModelBar(mid){
+  var hs=modelHosts[mid]||[],g=0,b=0;
+  hs.forEach(function(h){if(_good.has(h+' '+mid))g++;else if(_bad.has(h+' '+mid))b++});
+  var total=hs.length,u=total-g-b,W=modelBarWidth(total);
+  var bar=document.createElement('span');bar.className='model-bar';
+  bar.title=g+' working · '+b+' failing · '+u+' untested';
+  if(W<=0||total<=0)return bar;
+  var segs=[['mb-g',g],['mb-r',b],['mb-u',u]];
+  // proportional widths, min 2px for any nonzero part so a lone failing host is
+  // still a visible sliver; drift from rounding is absorbed by the widest segment
+  // so the parts sum to exactly W.
+  var w=segs.map(function(s){return s[1]>0?Math.max(2,Math.round(s[1]/total*W)):0;});
+  var sum=w[0]+w[1]+w[2],mi=w.indexOf(Math.max(w[0],w[1],w[2]));
+  w[mi]+=W-sum;if(w[mi]<0)w[mi]=0;
+  segs.forEach(function(s,i){if(w[i]>0){var el=document.createElement('i');el.className=s[0];el.style.width=w[i]+'px';bar.appendChild(el);}});
+  return bar;
+}
+function makeModelRow(mid){var d=document.createElement('div');d.className='model-item';d.setAttribute('data-name',mid);d.title=mid;var n=document.createElement('span');n.className='model-name';n.textContent=mid;d.appendChild(n);d.appendChild(makeModelBar(mid));return d}
+
+// --- Faceted grouping of the model list ------------------------------------
+// The flat list is cardinality-sorted (most-available first), which is useful but
+// not universal — family, parameter size, and kind/provenance are other useful
+// CUTS of the same set. The group control picks one; each is a pure re-render over
+// modelHosts. Facets are derived from the model NAME (best-effort, tunable).
+var _modelFacet='count',_lastModelServers=null,_collapsedGroups={};
+try{_modelFacet=localStorage.getItem('dyva_modelfacet')||'count';}catch(e){}
+try{(JSON.parse(localStorage.getItem('dyva_collapsed'))||[]).forEach(function(k){_collapsedGroups[k]=1;});}catch(e){}
+function toggleGroup(wrap,key){
+  var c=wrap.classList.toggle('collapsed');
+  if(c)_collapsedGroups[key]=1;else delete _collapsedGroups[key];
+  try{localStorage.setItem('dyva_collapsed',JSON.stringify(Object.keys(_collapsedGroups)));}catch(e){}
+}
+function _familyOf(mid){                       // leading alpha run of the basename
+  var b=String(mid).split('/').pop().toLowerCase(),m=b.match(/^[a-z]+/);
+  return m?m[0].charAt(0).toUpperCase()+m[0].slice(1):'Other';
+}
+var _SIZE_EDGES=[2,11,30,70];                  // billions of params (tunable)
+function _paramB(mid){                          // largest "…Nb" token in the name
+  var re=/(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/gi,m,best=null,s=String(mid);
+  while((m=re.exec(s))){var v=parseFloat(m[1]);if(best==null||v>best)best=v;}
+  return best;
+}
+function _sizeBucketOf(mid){
+  var p=_paramB(mid);if(p==null)return 'Unknown size';
+  var e=_SIZE_EDGES,lo=0;
+  for(var i=0;i<e.length;i++){if(p<e[i])return lo+'-'+e[i]+'B';lo=e[i];}
+  return e[e.length-1]+'B+';
+}
+var _KINDS=[
+  ['Embedding',/embed|bge|gte|nomic|minilm|mxbai|e5[-_]/],
+  ['Vision',/vision|llava|moondream|(?:^|[-_:/])vl(?:[-_:.]|$)/],
+  ['Code',/cod(?:e|er|ing)|starcoder|codestral/],
+  ['Abliterated / uncensored',/abliterat|uncensor|dolphin/],
+  ['Distilled',/distill/],
+  ['Instruct / chat',/instruct|-it(?:[-_:.]|$)|chat/]
+];
+function _kindOf(mid){var s=String(mid).toLowerCase();
+  for(var i=0;i<_KINDS.length;i++)if(_KINDS[i][1].test(s))return _KINDS[i][0];
+  return 'Base / other';}
+function _facetGroups(ids,facet){
+  if(facet==='count'||!facet)return null;      // flat, no headers
+  var fn=facet==='family'?_familyOf:facet==='size'?_sizeBucketOf:_kindOf,map={};
+  ids.forEach(function(id){var g=fn(id);(map[g]=map[g]||[]).push(id);});
+  var labels=Object.keys(map);
+  if(facet==='size'){                          // fixed ascending, Unknown last
+    var ord=function(l){if(l==='Unknown size')return 1e9;var mm=l.match(/^(\d+)/);return mm?+mm[1]:5e8;};
+    labels.sort(function(a,b){return ord(a)-ord(b);});
+  }else{                                        // biggest group first (host coverage)
+    var cov=function(l){var t=0;map[l].forEach(function(id){t+=(modelHosts[id]||[]).length;});return t;};
+    labels.sort(function(a,b){return cov(b)-cov(a)||(a<b?-1:1);});
+  }
+  return labels.map(function(l){return {label:l,ids:map[l]};});
+}
+function _appendModelPane(container,ids,facet){
+  container.innerHTML='';
+  var frag=document.createDocumentFragment(),groups=_facetGroups(ids,facet);
+  if(!groups){ids.forEach(function(id){frag.appendChild(makeModelRow(id));});container.appendChild(frag);return;}
+  groups.forEach(function(g){
+    var key=facet+'\n'+g.label;
+    var wrap=document.createElement('div');wrap.className='model-group-wrap';
+    if(_collapsedGroups[key])wrap.classList.add('collapsed');
+    var h=document.createElement('div');h.className='model-group';h.setAttribute('role','button');h.tabIndex=0;h.title='collapse / expand';
+    var car=document.createElement('span');car.className='mg-caret';car.textContent='▾';
+    var lbl=document.createElement('span');lbl.className='mg-label';lbl.textContent=g.label;
+    var cnt=document.createElement('span');cnt.className='mg-count';cnt.textContent=g.ids.length;
+    h.appendChild(car);h.appendChild(lbl);h.appendChild(cnt);
+    var body=document.createElement('div');body.className='model-group-body';
+    g.ids.forEach(function(id){body.appendChild(makeModelRow(id));});
+    h.addEventListener('click',function(){toggleGroup(wrap,key);});
+    h.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleGroup(wrap,key);}});
+    wrap.appendChild(h);wrap.appendChild(body);
+    frag.appendChild(wrap);
+  });
+  container.appendChild(frag);
+}
+// Image/diffusion models get pulled onto non-ComfyUI hosts too (flux on Ollama /
+// LM Studio: x/flux2-klein, black-forest-labs/FLUX.1-dev), so the text/image split
+// can't be host-service alone — it must recognise the model NAME, or "flux" shows
+// up under text. Names only; unambiguous diffusion/media families.
+var _IMG_NAME_RE=/(flux|black[-_]?forest|stable[-_]?diffusion|(?:^|[-_/])sdxl|(?:^|[-_/])sd[-_.]?[0-9]|dreamshaper|juggernaut|pony|playground[-_]?v|kolors|hidream|qwen[-_]?image|hunyuan[-_]?(?:image|video|dit)|(?:^|[-_/])wan[-_.]?[0-9]|(?:^|[-_/])ltx|mochi|cogvideo|animatediff|z[-_]?image)/i;
+function _isImageModelName(m){return _IMG_NAME_RE.test(String(m));}
 function renderModels(servers){
+  _lastModelServers=servers;
   modelHosts={};hostChecked={};imageModels={};
   servers.forEach(function(s){
     var host=s.host||'';if(s.checked)hostChecked[host]=s.checked;
     var isImg=(s.service==='a1111'||s.service==='comfyui');
     (s.models||[]).forEach(function(m){
-      if(isImg){imageModels[m]=1;var t=m.indexOf(' [');if(t>=0)imageModels[m.slice(0,t)]=1}
+      if(isImg||_isImageModelName(m)){imageModels[m]=1;var t=m.indexOf(' [');if(t>=0)imageModels[m.slice(0,t)]=1}
       if(/[:-]cloud/.test(m)||!m.length)return;
       (modelHosts[m]=modelHosts[m]||[]).push(host);
     });
@@ -1662,13 +1814,23 @@ function renderModels(servers){
   var mid;for(mid in modelHosts)modelHosts[mid].sort();
   var ids=Object.keys(modelHosts);
   ids.sort(function(a,b){return modelHosts[b].length-modelHosts[a].length||(a<b?-1:a>b?1:0)});
-  var fT=document.createDocumentFragment(),fI=document.createDocumentFragment();
-  ids.forEach(function(id){(imageModels[id]?fI:fT).appendChild(makeModelRow(id))});
-  var lt=document.getElementById('modelList');lt.innerHTML='';lt.appendChild(fT);
-  var li=document.getElementById('modelListImage');li.innerHTML='';li.appendChild(fI);
+  var textIds=[],imageIds=[];
+  ids.forEach(function(id){(imageModels[id]?imageIds:textIds).push(id);});
+  _appendModelPane(document.getElementById('modelList'),textIds,_modelFacet);
+  _appendModelPane(document.getElementById('modelListImage'),imageIds,_modelFacet);
   filterModels();
   updateModelPaneCounts(document.getElementById('modelFilter').value.trim());
 }
+(function(){var ctl=document.getElementById('modelGroupCtl');if(!ctl)return;
+  ctl.querySelectorAll('.gbtn').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-facet')===_modelFacet);});
+  ctl.addEventListener('click',function(e){
+    var b=e.target.closest('.gbtn');if(!b)return;
+    _modelFacet=b.getAttribute('data-facet')||'count';
+    try{localStorage.setItem('dyva_modelfacet',_modelFacet);}catch(err){}
+    ctl.querySelectorAll('.gbtn').forEach(function(x){x.classList.toggle('active',x===b);});
+    if(_lastModelServers)renderModels(_lastModelServers);
+  });
+})();
 // A host is an address; listing one without letting you open it is a waste of
 // a link. rel=noreferrer because these are strangers' boxes.
 function hostLink(host){

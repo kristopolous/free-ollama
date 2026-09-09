@@ -516,5 +516,14 @@
     "(?i)loader$|saver$|batch|concat|combine|merge|split|trim",
     "(?i)stt|speech.?to.?text|transcri|asr",
     "(?i)upscal|denois|separat"
+  ],
+  "checkpoint": [
+    {"name": "flux-schnell", "model": "(?i)schnell", "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple", "note": "FLUX.1 schnell is timestep-distilled: 4 steps, CFG 1 (guidance is baked in). https://comfyui-wiki.com/en/tutorial/advanced/image/flux"},
+    {"name": "flux", "model": "(?i)flux", "steps": 20, "cfg": 1.0, "sampler": "euler", "scheduler": "simple", "note": "FLUX.1 dev / general flux checkpoints: ~20-28 steps, CFG 1 on a bare KSampler (dev is guidance-distilled; real guidance rides a FluxGuidance node this basic graph lacks). Euler+Simple; avoid Euler-Ancestral on distilled models."},
+    {"name": "turbo", "model": "(?i)turbo", "steps": 4, "cfg": 1.0, "note": "SD/SDXL Turbo and SD3.5-Large-Turbo are adversarial-distilled for 1-4 steps at CFG 1; negative prompts have no effect."},
+    {"name": "lightning", "model": "(?i)lightning|lightening", "steps": 8, "cfg": 1.5, "note": "SDXL Lightning ships 2/4/8-step variants; a step count in the filename (e.g. _4step) overrides this. Low CFG."},
+    {"name": "hyper", "model": "(?i)hyper[-_. ]?sd", "steps": 8, "cfg": 1.0, "note": "ByteDance Hyper-SD; 1/2/4/8-step variants - filename step count overrides. CFG-preserved variants take 5-8."},
+    {"name": "lcm", "model": "(?i)(^|[-_. ])lcm([-_. ]|$)", "steps": 6, "cfg": 1.5, "sampler": "lcm", "scheduler": "sgm_uniform", "note": "Latent Consistency: 4-8 steps, low CFG, needs the LCM sampler + sgm_uniform scheduler."},
+    {"name": "sd3", "model": "(?i)sd3(\\.5|5)?|stable[-_. ]?diffusion[-_. ]?3", "steps": 28, "cfg": 4.5, "note": "SD3 / SD3.5 Large: ~28-40 steps, CFG ~4.5. (Turbo variant caught above.)"}
   ]
 }
