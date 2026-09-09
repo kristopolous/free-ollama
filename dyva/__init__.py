@@ -1133,19 +1133,15 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     if p is None and c is None:
         return
     mark_worker_tokens(wid, p, c, num_ctx)
+    # Token counts live on the WORKER CARD, not the activity feed — the feed is for
+    # request events (trying / failed / connected), and per-turn token metrics
+    # aren't that class of thing. The one exception is a truncation, which is a
+    # real failure worth a feed line (host NOT penalised — our window was too
+    # small; a stream can't retract text already sent, so surface it loudly).
     if _prompt_truncated(p, num_ctx):
-        # Our window was too small; Ollama cut the prompt's head. The host is NOT
-        # at fault — no bad mark (this is just an activity line, reputation is
-        # untouched). The non-streaming path re-sends with a bigger window; a
-        # stream can't retract text already sent, so surface it loudly as a
-        # failure rather than pass a cut-prompt answer off as a clean success.
         await broadcast_activity(host, model, "failed",
             f"context truncated: prompt {p} filled the {num_ctx}-token window — "
             "answer built on a cut prompt (host not penalised)", wid=wid)
-    else:
-        await broadcast_activity(host, model, "tokens",
-            f"tokens: {host} {model} — up {p if p is not None else '?'}"
-            f"/ctx {num_ctx or '?'}, down {c if c is not None else '?'}", wid=wid)
     await _broadcast_workers()
 
 
