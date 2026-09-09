@@ -840,6 +840,12 @@ def _worker_snapshot():
             "service": w.get("service"),
             "done": bool(done),
             "ok": w.get("ok"),
+            # token accounting: prompt (upstream) / completion (downstream), the
+            # num_ctx window sent, and whether the prompt filled it (truncation).
+            "ptoks": w.get("ptoks"),
+            "ctoks": w.get("ctoks"),
+            "num_ctx": w.get("num_ctx"),
+            "truncated": w.get("truncated"),
         })
     # live first, oldest at the top (as before); finished after, most recent
     # first, so a just-completed job settles directly under the running ones
@@ -1068,6 +1074,54 @@ async def broadcast_activity(host, model, status, message, duration=None, wid=No
                 dead.append(q)
         for q in dead:
             _activity_queues.remove(q)
+
+
+def _usage_of(obj):
+    """(prompt_tokens, completion_tokens) from a finished response, in either
+    dialect: Ollama's prompt_eval_count/eval_count or OpenAI's usage.* — the
+    upstream's OWN count of what it actually ingested and produced, which is the
+    ground truth for context-window debugging (unlike our tiktoken estimate)."""
+    if not isinstance(obj, dict):
+        return None, None
+    p, c = obj.get("prompt_eval_count"), obj.get("eval_count")
+    if p is None and c is None:
+        u = obj.get("usage") or {}
+        p, c = u.get("prompt_tokens"), u.get("completion_tokens")
+    return p, c
+
+
+def mark_worker_tokens(wid, prompt, completion, num_ctx):
+    """Record a request's token accounting on its worker: prompt (upstream, what
+    the host actually ingested), completion (downstream), the num_ctx window we
+    sent, and whether the prompt effectively filled that window — Ollama silently
+    drops the head past num_ctx, so a prompt reaching it means truncation."""
+    w = _workers.get(wid)
+    if not w:
+        return
+    if prompt is not None:
+        w["ptoks"] = prompt
+    if completion is not None:
+        w["ctoks"] = completion
+    if num_ctx:
+        w["num_ctx"] = num_ctx
+    if prompt is not None and num_ctx:
+        w["truncated"] = prompt >= num_ctx - NUM_CTX_REPLY
+
+
+async def account_tokens(wid, host, model, obj, num_ctx):
+    """Pull the upstream's token counts off a finished response, attach them to
+    the worker, and emit one activity line — so a context-window overrun is
+    visible instead of silent."""
+    p, c = _usage_of(obj)
+    if p is None and c is None:
+        return
+    mark_worker_tokens(wid, p, c, num_ctx)
+    trunc = p is not None and num_ctx and p >= num_ctx - NUM_CTX_REPLY
+    msg = (f"tokens: {host} {model} — up {p if p is not None else '?'}"
+           f"/ctx {num_ctx or '?'}, down {c if c is not None else '?'}"
+           + (" — PROMPT FILLED THE WINDOW (head likely truncated)" if trunc else ""))
+    await broadcast_activity(host, model, "tokens", msg, wid=wid)
+    await _broadcast_workers()
 
 
 async def _add_activity_listener(q):
@@ -3286,6 +3340,14 @@ def _with_num_ctx(payload):
     return dict(payload, options=opts)
 
 
+def _effective_num_ctx(payload):
+    """The num_ctx value a native /api/chat request effectively runs with — the
+    caller's pin if any, else our auto estimate. This is what token accounting
+    compares the real prompt against to spot truncation."""
+    opts = payload.get("options") or {}
+    return opts["num_ctx"] if "num_ctx" in opts else _auto_num_ctx(payload)
+
+
 async def _try_one(session, host, model, full_model, opayload, remote=None):
     wid = asyncio.current_task().get_name()
     await broadcast_activity(host, model, "trying",
@@ -3457,7 +3519,7 @@ async def _try_host(session, host, full_model, model, payload, do_stream, endpoi
 
 
 async def _forward_stream(request, response, resp, first_line, host, full, openai_format,
-                          upstream_openai=False):
+                          upstream_openai=False, wid=None, num_ctx=None):
     content_type = "text/event-stream" if openai_format else "application/x-ndjson"
     response.headers["Content-Type"] = content_type
     response.headers["Cache-Control"] = "no-cache"
@@ -3500,6 +3562,7 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
                     if obj.get("done"):
                         fr = obj.get("done_reason", "stop")
                         await response.write(sse_str(sse_chunk(full, {}, done=True, finish_reason=fr)).encode())
+                        await account_tokens(wid, host, full, obj, num_ctx)
                     else:
                         msg = dict(obj.get("message", {}))
                         tcs = msg.pop("tool_calls", None)
@@ -3511,7 +3574,7 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
                     await response.write(line + b"\n")
                     obj = json.loads(line)
                     if obj.get("done"):
-                        pass
+                        await account_tokens(wid, host, full, obj, num_ctx)
             except (BrokenPipeError, ConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
                 log.debug("Client disconnected during stream")
                 return
@@ -3597,12 +3660,12 @@ def _would_use(model_in, req_caps, exclude=None):
     last = get_last(model_in)
     if last and (ex is None or _norm_host(last[0]) != ex) and _known_capable(last[0], last[1], req_caps) and (
             "vision" not in req_caps or _known_has(last[0], last[1], "vision")):
-        return {"host": _norm_host(last[0]), "model": last[1]}
+        return {"host": _norm_host(last[0]), "model": last[1], "service": service_of(last[0])}
     for _prio, host, ms in find_servers(model_in, req_caps):
         if ex is not None and _norm_host(host) == ex:
             continue
         if ms:
-            return {"host": _norm_host(host), "model": ms[0]}
+            return {"host": _norm_host(host), "model": ms[0], "service": service_of(host)}
     return None
 
 
@@ -3743,7 +3806,7 @@ async def _run_info_test(session, model_in, tools=None):
         await broadcast_activity(host, model_in, "connected",
             f"quick test: {host} for {model_in} - passes. answer: {shown!r}",
             duration=dur, wid=wid)
-        return {"host": _norm_host(host), "model": full}
+        return {"host": _norm_host(host), "model": full, "service": service_of(host)}
     return None
 
 
@@ -3800,7 +3863,8 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     mark_worker_found(job_wid, host, full)
                     stream_resp = web.StreamResponse()
                     await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format,
-                                          upstream_openai=_oai)
+                                          upstream_openai=_oai, wid=job_wid,
+                                          num_ctx=_effective_num_ctx(opayload))
                     return stream_resp
                 msg = "worker manually stopped" if stopped else "all servers failed"
                 if errors:
@@ -3816,6 +3880,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                 if result:
                     _, host, full, data = result
                     mark_worker_found(job_wid, host, full)
+                    await account_tokens(job_wid, host, full, data, _effective_num_ctx(opayload))
                     resp = chat_fmt(data, model, openai_format)
                     resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
                     resp.headers["X-Dyva-Model"] = full

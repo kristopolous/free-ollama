@@ -299,6 +299,8 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .worker-card.worker-done .worker-model{color:var(--text-2)}
 .worker-host{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .worker-rmodel{color:var(--text-2)}
+.worker-card .worker-tokens{font-size:var(--fs-2xs);color:var(--text-dim);font-variant-numeric:tabular-nums;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-card .worker-tokens.trunc{color:var(--err-hover)}
 /* Two spans, each with a thin coloured rule under the words: finding a host
    (blue) then running the job on it (green). Just a line — no fill. */
 .wk-timeline{margin-left:auto;flex:0 0 auto;display:flex;gap:12px;font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
@@ -1922,6 +1924,18 @@ function renderWorkers(workers){
       sub.appendChild(hs);
     }
     body.appendChild(sub);
+    // Row 3 (when known): token accounting — prompt tokens the host actually
+    // ingested (upstream) over the num_ctx window we sent, and completion tokens
+    // (downstream). Red + a warning when the prompt filled the window, i.e. the
+    // head was almost certainly truncated — the thing to watch for context bugs.
+    if(w.ptoks!=null||w.ctoks!=null){
+      var tk=document.createElement('div');tk.className='worker-tokens'+(w.truncated?' trunc':'');
+      var up=(w.ptoks!=null?w.ptoks:'?'),ctx=(w.num_ctx!=null?w.num_ctx:'?'),down=(w.ctoks!=null?w.ctoks:'?');
+      tk.textContent='↑'+up+' / ctx '+ctx+'   ↓'+down+(w.truncated?'   ⚠ truncated':'');
+      tk.title='prompt tokens (upstream) / context window sent  ·  completion tokens (downstream)'
+        +(w.truncated?' — the prompt filled the window, so Ollama dropped the head':'');
+      body.appendChild(tk);
+    }
     // Two spans, two clocks: finding a host (blue) and running the job on it
     // (green). Data attributes drive the local ticker; the server hands back
     // `find` (seconds to secure a host) and `age` (total).
