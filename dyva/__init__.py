@@ -3752,13 +3752,20 @@ async def _run_info_test(session, model_in, tools=None):
         }
         if tools:
             payload["tools"] = tools
-        _curlify("POST", f"{host}/api/chat", payload)
+        # Probe the host in its OWN dialect. An LM Studio / vLLM / openai-style
+        # host has no /api/chat and answers "Unexpected endpoint or method.
+        # (POST /api/chat)" — so forcing Ollama's endpoint made the test cull a
+        # perfectly good host. chat_endpoint() routes those to /v1/chat/completions
+        # exactly as a real request would.
+        ep = chat_endpoint(host)
+        oai = speaks_openai(host)
+        _curlify("POST", f"{host}{ep}", payload)
         start = time.time()
         await broadcast_activity(host, model_in, "trying",
             f"quick test: {host} for {model_in}", wid=wid)
         try:
             resp = await asyncio.wait_for(
-                session.post(f"{host}/api/chat", json=payload),
+                session.post(f"{host}{ep}", json=payload),
                 timeout=TIMEOUT,
             )
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
@@ -3784,6 +3791,8 @@ async def _run_info_test(session, model_in, tools=None):
                 duration=time.time() - start, wid=wid)
             continue
         await resp.release()
+        if oai and "choices" in data:          # normalise the openai shape first
+            data = openai_to_ollama(data, full)
         content = (data.get("message") or {}).get("content") or ""
         dur = time.time() - start
         shown = content.strip()[:160]
