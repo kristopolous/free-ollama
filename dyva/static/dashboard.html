@@ -2815,12 +2815,12 @@ function renderMessages(){
   chatLog.innerHTML='';
   currentChat.messages.forEach(function(m,i){
     if(m&&m._meta&&m._meta.hidden)return;
-    if(m&&m._meta&&m._meta.note!==undefined){
-      // Legacy: token-gate bounces used to persist as a note. The gate is an
-      // internal trick, so skip rendering any such note still saved in old chats.
-      if(/token required/.test(m.content||'')&&/🔒/.test(m.content||''))return;
-      addNote(m._meta.note,m.content);return;
-    }
+    // Legacy token-gate bounces linger in old chats — sometimes as a note,
+    // sometimes as a plain assistant message. The gate is an internal trick, so
+    // skip rendering one whatever shape it took (checked BEFORE the note/assistant
+    // split, or an assistant-shaped one slips through).
+    if(m&&/token required/.test(m.content||'')&&/🔒/.test(m.content||''))return;
+    if(m&&m._meta&&m._meta.note!==undefined){addNote(m._meta.note,m.content);return}
     addMsg(m.role,m.content,i);
   });
   updateTokEst();
