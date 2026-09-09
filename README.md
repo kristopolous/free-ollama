@@ -47,7 +47,8 @@ You can go to the port in your web browser and view the current settings or cran
 Here's the web interface so you can see the status while you're running it. [I might be running it right now](https://9ol.es/11434/)
 
 Actual documentation? Alright, whatever. [Here you go](dyva).
-<img alt="iface" src="https://github.com/user-attachments/assets/4f11c8b9-8920-4b65-8ef6-b2b6f3152653" />
+
+<img alt="sshot" src="https://github.com/user-attachments/assets/ca8f99a0-1026-4b02-a054-8256f6b3c66c" />
 
 Now where's that $50 million seed round...
 
