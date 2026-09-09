@@ -2303,10 +2303,24 @@ def find_servers(sub, caps=None):
     return out
 
 
+_FALLBACK_RE = re.compile(r"\s+\?\s+")
+
+
+def _split_fallback(q):
+    """Split a model query into an ordered fallback chain on a whitespace-flanked
+    '?': 'qwen >10gb ? gemma' -> ['qwen >10gb', 'gemma']. The '?' MUST be flanked
+    by whitespace, so it never collides with the single-char glob wildcard —
+    'llama3?70b' stays one pattern. '/' is NOT a fallback separator here; it's the
+    capability/model pairing (edit/wan). No ' ? ' -> a one-element chain."""
+    parts = [p.strip() for p in _FALLBACK_RE.split(q or "") if p.strip()]
+    return parts or [(q or "").strip()]
+
+
 def _find_servers_raw(sub, caps=None):
-    if '/' in sub:
+    chain = _split_fallback(sub)
+    if len(chain) > 1:
         res = []
-        for model in sub.split('/'):
+        for model in chain:
             res += find_servers(model, caps)
         return res
 
@@ -3305,9 +3319,13 @@ NUM_CTX_PAD = 1.05             # small headroom for tokenizer disagreement
 NUM_CTX_REPLY = 1024           # tokens reserved for the model's own reply
 NUM_CTX_STEP = 2048            # snap to this bucket
 NUM_CTX_MIN = 4096             # never below Ollama's own default
-NUM_CTX_MAX = 32768            # ceiling for the FIRST try, so a runaway input can't ask for the moon
-NUM_CTX_HARD_MAX = 131072      # absolute ceiling when escalating after a truncation
-NUM_CTX_RETRIES = 2            # how many times to re-send with a doubled window
+# We don't set the real context ceiling — the host does. Cap only at 2**18 so a
+# runaway input can't request something truly absurd; a host that can't serve a
+# window that big will say so (reject / OOM), and that's fine — better than us
+# silently clamping. The old 32768 cap quietly broke agentic tooling, whose tool
+# schemas + accumulated history routinely blow past it.
+NUM_CTX_MAX = 2 ** 20          # 1048576 — a sanity bound, not a real limit (Qwen3 et al. reach 256k native, ~1M with YaRN)
+NUM_CTX_RETRIES = 2            # re-sends with a doubled window after a truncation
 
 # The upstream models are Llama/Qwen/etc., whose tokenizers we don't ship, so an
 # exact count is impossible here. tiktoken's cl100k is a close *proxy* (within
@@ -3690,10 +3708,7 @@ async def _run_info_test(session, model_in, tools=None):
 
 
 async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_format):
-    if '/' in model_in:
-        model_list = model_in.split('/')
-    else:
-        model_list = [model_in]
+    model_list = _split_fallback(model_in)
 
     # Do this before needs_caps(): flattening lifts inline images out to the
     # `images` list, which is the signal needs_caps() uses to require vision.
@@ -3772,8 +3787,8 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     _, host, full, data = result
                     sent_ctx = _effective_num_ctx(send_payload)
                     if _is_truncated(data, sent_ctx):
-                        if _attempt < NUM_CTX_RETRIES and sent_ctx < NUM_CTX_HARD_MAX:
-                            nctx_pin = min(sent_ctx * 2, NUM_CTX_HARD_MAX)
+                        if _attempt < NUM_CTX_RETRIES and sent_ctx < NUM_CTX_MAX:
+                            nctx_pin = min(sent_ctx * 2, NUM_CTX_MAX)
                             await broadcast_activity(host, model, "trying",
                                 f"context truncated at num_ctx {sent_ctx} — retrying with {nctx_pin}",
                                 wid=job_wid)
@@ -7911,7 +7926,7 @@ async def _run_chat_job(session, jid):
         req_caps = sorted(set(req_caps) | {"tools"})
 
     await _job_set(jid, status=JOB_PROCESSING, phase="dispatching", error=None)
-    model_list = model_in.split("/") if "/" in model_in else [model_in]
+    model_list = _split_fallback(model_in)
     servers = find_servers(model_in, req_caps)
     if not servers:
         await _job_set(jid, status=JOB_FAILED, phase=None,

@@ -223,7 +223,12 @@ Server-Room filter, and the map's compare boxes):
 - **Partials and globs** — `qwen` matches every qwen variant on every host;
   `*` and `?` wildcards work (`qwen*27b`, `flux*2`, `llama3?70b`); matching is
   case-insensitive and glob-normalised.
-- **Fallback chains** — `gemma?4/qwen3` tries `gemma?4` first, then `qwen3`.
+- **Fallback chains** — a **whitespace-flanked `?`** separates ordered
+  alternatives: `gemma3 ? qwen` tries `gemma3`, then `qwen`. The `?` must have
+  spaces around it so it never clashes with the single-char glob wildcard —
+  `llama3?70b ? mistral` is the glob `llama3?70b`, falling back to `mistral`.
+  (`/` is *not* a fallback separator; it's the capability/model pairing, e.g.
+  `edit/wan`.)
 - **Size predicates** — `>`, `<`, `>=`, `<=` plus a size filter by a model's
   recorded disk heft: `>10gb`, `qwen <=4gb`, `<700mb`. The size token can stand
   alone or ride alongside a name, and sizes are decimal (`gb` = 1e9 bytes). It
