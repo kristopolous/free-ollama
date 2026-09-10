@@ -4883,7 +4883,7 @@ async function _editSourceBlob(src){
 // and steps are fixed at sane values; a model guessing 3 frames or 150 steps
 // helps nobody.
 var VIDEO_FRAMES=100,VIDEO_STEPS=20,VIDEO_TOOL_WAIT=5400000;   // give it ninety minutes
-var ASK_TOOL={type:'function',function:{name:'ask_question',description:'Ask the user one multiple-choice question when their request is genuinely underspecified and different answers would lead to materially different work \u2014 "write me a story" (what kind?), "make me a logo" (for what?).',parameters:{type:'object',properties:{question:{type:'string',description:'The question'},options:{type:'array',items:{type:'string'},description:'Two to four short, mutually exclusive choices. The user can also type their own answer, so do not add an "other" option.'}},required:['question','options']}}};
+var ASK_TOOL={type:'function',function:{name:'ask_question',description:'Ask the user a multiple-choice question',parameters:{type:'object',properties:{question:{type:'string',description:'The question'},options:{type:'array',items:{type:'string'},description:'A few mutually exclusive choices. The user may type their own answer as well.'}},required:['question','options']}}};
 // The model asks, the turn stops, the user clicks, the turn resumes with the
 // answer as the tool result. Nothing else in the tool loop blocks on a human,
 // so this owns its own promise and has to settle on abort as well as on click.
