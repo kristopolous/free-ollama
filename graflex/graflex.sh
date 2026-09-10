@@ -15,7 +15,7 @@ case "$SERVICE" in
   all)
 
     while [ 0 ]; do
-      for i in ollama-shodan ollama comfyui a1111 llama.cpp vllm lmstudio gradio; do
+      for i in ollama comfyui a1111 ollama-shodan llama.cpp vllm lmstudio gradio; do
         $CMD $i ${EXTRA_ARGS[@]}
         [[ $? ]] && exit 0
         sleep 7200
