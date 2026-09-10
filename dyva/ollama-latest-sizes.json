@@ -1,6 +1,6 @@
 {
   "_count": 226,
-  "_generated": "2026-09-09T15:52:14",
+  "_generated": "2026-09-09T16:04:29",
   "_source": "local ollama.com wget mirror",
   "models": {
     "alfred": {

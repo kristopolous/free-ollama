@@ -217,7 +217,7 @@ body.chat{height:100vh;height:100dvh}
 .gbtn{background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:.1em .55em;font-size:var(--fs-sm);cursor:pointer}
 .gbtn:hover{color:var(--text)}
 .gbtn.active{background:var(--accent-bg);color:var(--text);border-color:var(--accent)}
-.model-group{display:flex;align-items:center;gap:.45em;cursor:pointer;user-select:none;margin:var(--sp-3) 0 var(--sp-1);padding:.4em .55em;border-radius:5px;background:var(--accent-bg);color:var(--text);font-size:var(--fs-md);font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+.model-group{display:flex;align-items:center;gap:.45em;cursor:pointer;user-select:none;margin:var(--sp-3) 0 var(--sp-1);padding:.4em .55em;border-radius:5px;background:#33343a;color:var(--text);font-size:var(--fs-md);font-weight:700;text-transform:uppercase;letter-spacing:.03em}
 .model-group:hover{filter:brightness(1.18)}
 .model-group-wrap:first-child .model-group{margin-top:0}
 .mg-caret{display:inline-block;transition:transform .12s;color:var(--text-dim);font-size:.8em}
@@ -225,7 +225,6 @@ body.chat{height:100vh;height:100dvh}
 .mg-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mg-count{color:var(--text-dim);font-weight:600;font-size:var(--fs-sm);text-transform:none}
 .model-group-wrap.collapsed .model-group-body{display:none}
-.modellist.filtering .model-group-body{display:block}   /* a search reveals matches even in collapsed groups */
 .host-name{font-family:var(--font-mono);font-size:var(--fs-sm);flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:none}
 a.host-name:hover{color:var(--accent);text-decoration:underline}
 #hostDetailTitle{font-family:var(--font-mono);font-size:.92rem;overflow-wrap:anywhere}
@@ -1644,12 +1643,14 @@ function filterModels(){
   }
   refreshUseBtn();
   document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=matchModel(el.getAttribute('data-name'),q)?'':'none'});
-  // while a query is active, force groups open so matches inside a collapsed group
-  // aren't hidden; hide a whole group whose models are all filtered out.
-  document.querySelectorAll('.modellist').forEach(function(list){list.classList.toggle('filtering',!!q);});
+  // Per group: the header count reflects how many models MATCH the query (not the
+  // group total), and a group with no matches is hidden. Collapse is respected — a
+  // collapsed group stays collapsed during a search; its header still shows the
+  // match count so you can choose to open it.
   document.querySelectorAll('.model-group-wrap').forEach(function(wrap){
-    var vis=0,items=wrap.querySelectorAll('.model-item');
-    for(var i=0;i<items.length;i++)if(items[i].style.display!=='none'){vis++;break;}
+    var items=wrap.querySelectorAll('.model-item'),vis=0;
+    for(var i=0;i<items.length;i++)if(items[i].style.display!=='none')vis++;
+    var c=wrap.querySelector('.mg-count');if(c)c.textContent=vis;
     wrap.style.display=vis?'':'none';
   });
   updateModelPaneCounts(q);
@@ -1735,10 +1736,24 @@ function _familyOf(mid){                       // leading alpha run of the basen
   return m?m[0].charAt(0).toUpperCase()+m[0].slice(1):'Other';
 }
 var _SIZE_EDGES=[2,11,30,70];                  // billions of params (tunable)
-function _paramB(mid){                          // largest "…Nb" token in the name
+// Authoritative parameter counts (billions) from ollama.com, keyed by "model:tag"
+// (+ bare "model" -> latest); shipped with dashboard-models. The list GROUPS by
+// parameter size; the ">Ngb" search stays on disk size (a more complete set).
+var _OLLAMA_PARAMS={};
+function _ollamaParamB(mid){
+  var s=String(mid);
+  if(_OLLAMA_PARAMS[s]!=null)return _OLLAMA_PARAMS[s];
+  if(s.indexOf(':')<0&&_OLLAMA_PARAMS[s+':latest']!=null)return _OLLAMA_PARAMS[s+':latest'];
+  return null;
+}
+function _nameParamB(mid){                       // largest "…Nb" token in the name
   var re=/(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/gi,m,best=null,s=String(mid);
   while((m=re.exec(s))){var v=parseFloat(m[1]);if(best==null||v>best)best=v;}
   return best;
+}
+function _paramB(mid){                            // ollama.com first (accurate, and
+  var p=_ollamaParamB(mid);                       // right for MoE), else the name
+  return p!=null?p:_nameParamB(mid);
 }
 function _sizeBucketOf(mid){
   var p=_paramB(mid);if(p==null)return 'Unknown size';
@@ -2257,6 +2272,7 @@ function loadDashboard(){
     _good=new Set(dv.good||[]);_bad=new Set(dv.bad||[]);
     _modelSizes=mv.sizes||{};
     _RELEASE_DATES=mv.dates||{};   // server sends the flat {normkey: 'YYYY-MM-DD'} map
+    _OLLAMA_PARAMS=mv.params||{};  // {'model:tag': params_b} for the size (parameter) facet
     _RELEASE_KEYS=Object.keys(_RELEASE_DATES).sort(function(a,b){return b.length-a.length});
     _relDateMemo={};
     renderModels(mv.servers||[]);
@@ -3259,8 +3275,7 @@ var SLASH_COMMANDS=[
   {cmd:'retitle',  arg:'',         desc:'regenerate the chat title'},
   {cmd:'download', arg:'',         desc:'download this chat as JSON'},
   {cmd:'delete',   arg:'',         desc:'delete the current chat'},
-  {cmd:'list',     arg:'',         desc:'system prompt, tools, host and files for this chat'},
-  {cmd:'help',     arg:'',         desc:'list these commands'}
+  {cmd:'list',     arg:'',         desc:'system prompt, tools, host and files for this chat'}
 ];
 // Everything a note links to opens in a new tab — a host, and equally a file
 // from the asset list, since neither is worth losing the chat over. In-page
@@ -3398,11 +3413,6 @@ function chatSummaryMd(){
   });
   return out.join('\n');
 }
-function slashHelpText(){
-  return SLASH_COMMANDS.map(function(c){
-    return '* `/'+c.cmd+(c.arg?' '+c.arg:'')+'` '+c.desc;
-  }).join('\n');
-}
 // ---- completion popup ----
 // Shown while the composer holds nothing but a partial command word, so it gets
 // out of the way as soon as an argument is being typed.
@@ -3538,10 +3548,8 @@ function handleSlashCommand(text){
     return false;   // fall through: probe the hosts and cull the bogus ones
   }else if(cmd==='list'||cmd==='listassets'||cmd==='assets'){
     info(chatSummaryMd());
-  }else if(cmd==='help'){
-    info(slashHelpText());
   }else{
-    info('Unknown command. Type `/` to see what there is, or `/help` for the list.','err');
+    info('Unknown command. Type `/` to see what there is.','err');
   }
   return true;
 }
@@ -3712,19 +3720,20 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       var tc=toolCalls[i]||{},fn=tc.function||{};
       var args={};
       try{args=typeof fn.arguments==='string'?JSON.parse(fn.arguments||'{}'):(fn.arguments||{})}catch(e){}
-      // Soft read-docs gate: a gated tool normally needs its token, but if the
-      // model already guessed a VALID call (every real required arg present) let
-      // it run — don't tax a correct invocation with a forced docs round-trip.
-      // Only bounce (docs + token) when the guess is INVALID, which is exactly
-      // when it needs the docs anyway.
-      if(GATED_TOOLS[fn.name]&&String(args.token||'')!==TOOL_TOKENS[fn.name]&&!_argsValidFor(fn.name,args)){
+      // Soft docs gate (every tool): don't nag the model to read docs up front —
+      // let it just try. Only when a call is INVALID (a required arg missing) do we
+      // hand back the tool's full docs so its retry can succeed. A VALID guess runs
+      // untaxed. Gated tools additionally carry a token here (and a gated call that
+      // already has the right token runs straight through).
+      var _gated=GATED_TOOLS[fn.name];
+      var _hasTok=_gated&&String(args.token||'')===TOOL_TOKENS[fn.name];
+      if(!_hasTok&&!_argsValidFor(fn.name,args)){
         var _gt=TOOL_DEFS[fn.name]||{};
-        var _dl=['To run '+fn.name+' read the docs below, then call '+fn.name+' again including "token".','',(_gt.name||fn.name)+': '+(_gt.description||'')];
+        var _dl=['To run '+fn.name+', use the docs below, then call '+fn.name+' again'+(_gated?' including "token"':'')+'.','',(_gt.name||fn.name)+': '+(_gt.description||'')];
         _docParamLines(_gt.parameters).forEach(function(l){_dl.push(l)});
-        _dl.push('- token (required) [string]: pass the exact value below.','','token: '+TOOL_TOKENS[fn.name]);
-        // No `md`: the token gate is an internal trick to force the model to read
-        // the docs — only the model sees this (the hidden tool message carries the
-        // docs+token so its retry succeeds); don't surface it as a user-facing note.
+        if(_gated)_dl.push('- token (required) [string]: pass the exact value below.','','token: '+TOOL_TOKENS[fn.name]);
+        // No `md`: this is an internal retry aid (the docs, plus a token for gated
+        // tools) — only the model sees it; don't surface it as a user-facing note.
         results.push({text:_dl.join('\n')});
         continue;
       }
@@ -4944,7 +4953,7 @@ function _argsValidFor(name,args){
   }
   return true;
 }
-var READ_DOCS_TOOL={type:'function',function:{name:'help',description:'Get the FULL usage docs (description + every parameter, and the required token for gated tools) for another tool. Other tools’ descriptions are deliberately terse — call help with a tool’s name before using it.',parameters:{type:'object',properties:{tool:{type:'string',enum:Object.keys(TOOL_DEFS),description:'Which tool to get help for'}},required:['tool']}}};
+var READ_DOCS_TOOL={type:'function',function:{name:'help',description:'Get the FULL usage docs (description + every parameter, and the required token for gated tools) for another tool. Other tools’ descriptions are deliberately terse.',parameters:{type:'object',properties:{tool:{type:'string',enum:Object.keys(TOOL_DEFS),description:'Which tool to get help for'}},required:['tool']}}};
 // Render a tool's parameters as doc lines, expanding nested object / array-item
 // schemas (e.g. spawn_agents' per-agent name/task/model) — the blanked terse
 // schema omits params, so help / the gate are the only place the model can learn
@@ -4965,8 +4974,7 @@ function _terseDesc(name,full){
   var m=s.match(/^[\s\S]*?[.!?](?:\s|$)/);   // first sentence
   var lead=(m?m[0]:s).trim();
   if(lead.length>180)lead=lead.slice(0,180).replace(/\s+\S*$/,'')+'…';
-  if(GATED_TOOLS[name])return lead+' — you MUST call help "'+name+'" first for its usage and required token.';
-  return lead+' — call help "'+name+'" for full usage.';
+  return lead;
 }
 function _terseTool(tool){
   if(!tool||!tool.function||tool.function.name==='help')return tool;

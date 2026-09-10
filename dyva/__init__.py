@@ -2186,6 +2186,35 @@ def _split_size_filter(sub):
 # >YYYY-MM or >YYYY-MM-DD (and </>=/<=), e.g. "qwen>2026" or "qwen>2026-02",
 # composable with size: "qwen>2026-02>5gb".
 REL_DATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model-release-dates.json")
+OLLAMA_SIZES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ollama-latest-sizes.json")
+_ollama_params = None
+
+
+def _load_ollama_params():
+    """Canonical parameter counts (billions), flattened from ollama-latest-sizes.json:
+    {'model:tag': params_b} plus {'model': latest params_b}. The model list GROUPS by
+    parameter size, so it needs this authoritative count (a name often lacks one, e.g.
+    gemma3:latest); the '>Ngb' search predicate stays on DISK size, a more complete
+    data set (every probed model has bytes; not every model has a published param
+    count)."""
+    global _ollama_params
+    if _ollama_params is None:
+        flat = {}
+        try:
+            with open(OLLAMA_SIZES_FILE, encoding="utf-8") as f:
+                data = json.load(f).get("models") or {}
+            for model, e in data.items():
+                for tag, info in (e.get("tags") or {}).items():
+                    pb = info.get("params_b")
+                    if pb is not None:
+                        flat[f"{model}:{tag}"] = pb
+                lb = (e.get("latest") or {}).get("params_b")
+                if lb is not None:
+                    flat[model] = lb
+        except Exception:
+            pass
+        _ollama_params = flat
+    return _ollama_params
 _rel_dates = None
 _rel_keys = None
 _rel_date_memo = {}
@@ -4324,7 +4353,8 @@ async def handle_dashboard_models(request):
     # client-side, same as the server does for routing).
     sizes = {name: rec["size"] for name, rec in load_survey().items()
              if isinstance(rec, dict) and rec.get("size")}
-    body = json.dumps({"servers": out, "sizes": sizes, "dates": _load_release_dates()})
+    body = json.dumps({"servers": out, "sizes": sizes, "dates": _load_release_dates(),
+                       "params": _load_ollama_params()})
     # This payload is large but changes slowly; serve it with an ETag so the
     # browser revalidates and gets a tiny 304 instead of re-downloading it.
     etag = '"' + hashlib.md5(body.encode("utf-8")).hexdigest() + '"'

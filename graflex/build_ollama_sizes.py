@@ -18,6 +18,8 @@ import os, re, sys, json, datetime
 ANCHOR = re.compile(r'href="/library/([^":/]+):([^"/]+)"')
 SIZE = re.compile(r'([0-9]+(?:\.[0-9]+)?)\s*([GMK])B', re.I)
 DIGEST = re.compile(r'\b([0-9a-f]{12,64})\b')
+# the blue "latest" alias pill (border-blue-500 … >latest</span>)
+BLUE_LATEST = re.compile(r'border-blue-500[^>]*>\s*latest\s*</span>', re.I)
 # each model/tag PAGE carries a details strip: arch • parameters • quantization
 _FIELD = lambda label: re.compile(label + r'</span>\s*<span[^>]*>\s*([^<]+?)\s*</span>', re.I)
 PARAM_RE, ARCH_RE, QUANT_RE = _FIELD("parameters"), _FIELD("arch"), _FIELD("quantization")
@@ -82,7 +84,16 @@ def parse_tags(path, model):
         out[tag] = {"size_str": f"{sm.group(1)}{sm.group(2).upper()}B",
                     "bytes": _bytes(sm.group(1), sm.group(2)),
                     "digest": dm.group(1) if dm else None}
-    return out
+    # 'latest' is an ALIAS: ollama.com marks it as a blue pill badge on whichever
+    # concrete tag it points to (e.g. the 35b row), NOT always its own tag row. Find
+    # the badged tag so `latest` resolves even when there's no `:latest` row at all.
+    alias = None
+    bm = BLUE_LATEST.search(h)
+    if bm:
+        prev = [a for a in ordered if a.start() < bm.start()]
+        if prev:
+            alias = prev[-1].group(2)
+    return out, alias
 
 
 def main(argv):
@@ -101,13 +112,17 @@ def main(argv):
         tags_path = os.path.join(lib, model, "tags")
         if not os.path.isfile(tags_path):
             continue
-        tags = parse_tags(tags_path, model)
+        tags, alias = parse_tags(tags_path, model)
         if not tags:
             continue
         # disk size/digest came from the tags page; parameter size/arch/quant live
         # on each tag's own page — merge them so every tag carries BOTH metrics.
-        for tag, info in tags.items():
+        for tag, info in list(tags.items()):
             info.update(parse_model_page(os.path.join(lib, f"{model}:{tag}")))
+        # resolve the 'latest' alias badge -> the badged concrete tag's data, so
+        # badge-only models (no `:latest` row) still get a latest size/params.
+        if "latest" not in tags and alias and alias in tags:
+            tags["latest"] = dict(tags[alias])
         entry = {"tags": tags}
         if "latest" in tags:
             entry["latest"] = tags["latest"]
