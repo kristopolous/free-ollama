@@ -443,7 +443,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.note.working .body{border-left-color:var(--border-strong);font-style:italic}
 .msg.note.err .body{border-left-color:var(--err);color:var(--err)}
 .msg.assistant .body pre{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:.6em;overflow-x:auto;white-space:pre;margin:.6em 0}
-.msg.assistant .body code{font-family:var(--font-mono);font-size:var(--fs-sm);background:var(--bg-inset);padding:.05em .3em;border-radius:var(--r-sm)}
+.msg.assistant .body code{font-family:var(--font-mono);font-size:var(--fs-sm);background:var(--bg-inset);padding:.3em .6em;border-radius:var(--r-sm)}
 .msg.assistant .body pre code{background:none;padding:0}
 .msg.assistant .body a{color:var(--accent)}
 .msg.assistant .body blockquote{border-left:3px solid var(--border-strong);margin:.6em 0;padding:.2em .7em;color:var(--text-3)}
@@ -2624,6 +2624,91 @@ function fileIsText(f){
 // THE outgoing payload's messages — the single source of truth for what gets sent
 // to the model. Used by both sendChat (the wire) and chatPayload (/download), so a
 // downloaded chat is the exact, replayable request body, not a re-derivation.
+// Streamed tool_calls arrive as FRAGMENTS, not whole calls: an OpenAI-compat host
+// emits one call across several deltas — the first carries its index/id + name and
+// the start of its arguments, each later delta repeats the same index (with a 0 or
+// empty id) and appends more argument text. Blindly pushing every fragment yields
+// duplicated, half-parsed calls, so merge by index, falling back to the rule "a
+// 0/empty id with no name is the SAME call as the previous one". Native Ollama sends
+// complete calls (name + object arguments, no index) which fall through as fresh
+// pushes, untouched. The temporary __idx key is stripped before the calls are sent.
+function mergeToolCallFragment(list,t){
+  t=t||{};var fn=t.function||{};
+  var hasIdx=(t.index!==undefined&&t.index!==null);
+  var cur=null;
+  if(hasIdx){
+    for(var q=0;q<list.length;q++){if(list[q].__idx===t.index){cur=list[q];break}}
+  }else if((!t.id||t.id===0)&&!fn.name&&typeof fn.arguments==='string'&&list.length){
+    cur=list[list.length-1];   // bare continuation fragment -> the previous call
+  }
+  if(!cur){
+    cur={function:{name:fn.name||'',arguments:(fn.arguments!=null?fn.arguments:'')}};
+    if(hasIdx)cur.__idx=t.index;
+    if(t.id&&t.id!==0)cur.id=t.id;
+    list.push(cur);return;
+  }
+  if(fn.name)cur.function.name=fn.name;
+  if(t.id&&t.id!==0&&!cur.id)cur.id=t.id;
+  if(fn.arguments!=null){
+    var a=(typeof fn.arguments==='string')?fn.arguments:JSON.stringify(fn.arguments);
+    var base=(typeof cur.function.arguments==='string')?cur.function.arguments
+            :(cur.function.arguments==null?'':JSON.stringify(cur.function.arguments));
+    cur.function.arguments=base+a;
+  }
+}
+// The stored transcript is a DISPLAY form: a tool-call turn and each of its
+// results are all persisted as role:'assistant' (the result as an _meta.note).
+// Sent verbatim that is an ILLEGAL sequence — stacked assistant messages with no
+// role:'tool' between them — and strict OpenAI-compat hosts reject the whole
+// request ("Cannot have 2 or more assistant messages at the end of the list"),
+// which surfaces as a chat that "just stops". This rebuilds the legal protocol:
+// every assistant tool-call gets an id, and each following result-note becomes a
+// real role:'tool' message carrying the matching tool_call_id + name. Unmatched
+// calls are balanced with a stub result so no tool_call id is left dangling, and
+// any stray consecutive same-role messages are merged as a final safety net.
+function _normalizeToolSequence(msgs){
+  var out=[],i=0,turn=0;
+  while(i<msgs.length){
+    var m=msgs[i];
+    if(m.role==='assistant'&&m.tool_calls&&m.tool_calls.length){
+      var calls=m.tool_calls.map(function(tc,j){
+        var fn=(tc&&tc.function)||{};
+        return {id:(tc.id||('call_'+turn+'_'+j)),type:'function',
+                function:{name:fn.name,arguments:fn.arguments}};
+      });
+      out.push({role:'assistant',content:m.content||'',tool_calls:calls});
+      i++;turn++;
+      var k=0;
+      // consume the immediately-following result-notes (in order) as this turn's
+      // tool outputs — one per call
+      while(i<msgs.length&&k<calls.length&&msgs[i]._note
+            &&!(msgs[i].tool_calls&&msgs[i].tool_calls.length)){
+        out.push({role:'tool',tool_call_id:calls[k].id,
+                  name:calls[k].function.name,content:msgs[i].content||''});
+        i++;k++;
+      }
+      for(;k<calls.length;k++)
+        out.push({role:'tool',tool_call_id:calls[k].id,
+                  name:calls[k].function.name,content:'[tool result not retained]'});
+    }else if(m._note){
+      i++;   // a system note with no preceding tool call — never part of the wire
+    }else{
+      var o={};for(var kk in m){if(kk!=='_note')o[kk]=m[kk];}
+      out.push(o);i++;
+    }
+  }
+  var merged=[];
+  out.forEach(function(m){
+    var p=merged[merged.length-1];
+    if(p&&p.role==='assistant'&&m.role==='assistant'&&!p.tool_calls){
+      p.content=(p.content?p.content+'\n\n':'')+(m.content||'');
+      if(m.tool_calls)p.tool_calls=m.tool_calls;
+    }else if(p&&p.role==='user'&&m.role==='user'){
+      p.content=(p.content?p.content+'\n\n':'')+(m.content||'');
+    }else merged.push(m);
+  });
+  return merged;
+}
 function buildSendMessages(chat){
   function _stripMediaMd(txt){
     return String(txt||'')
@@ -2634,11 +2719,17 @@ function buildSendMessages(chat){
   }
   var msgs=(chat.messages||[]).map(function(m){
       var content=(m.role==='assistant')?_stripMediaMd(m.content):m.content;
-      if(m.role==='assistant'&&!content&&!m.tool_calls&&!(m.files&&m.files.length))
+      var tc=m.tool_calls||(m._meta&&m._meta.toolcalls);
+      // keep a tool-call turn even when its visible content is empty (the calls
+      // live in _meta.toolcalls, not m.tool_calls) — dropping it would orphan the
+      // result notes that follow.
+      if(m.role==='assistant'&&!content&&!(tc&&tc.length)&&!(m.files&&m.files.length))
         return null;
       var o={role:m.role,content:content};
-      var tc=m.tool_calls||(m._meta&&m._meta.toolcalls);
       if(tc&&tc.length)o.tool_calls=tc;
+      // a persisted tool RESULT is an assistant note (role:'assistant', _meta.note);
+      // flag it so _normalizeToolSequence turns it back into a role:'tool' message.
+      if(m.role==='assistant'&&m._meta&&m._meta.note!==undefined)o._note=true;
       if(m.files&&m.files.length){
         var imgs=[],extra='';
         var seeing=(m.vision!==false);
@@ -3772,6 +3863,14 @@ async function sendChat(){
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs}))}catch(e){}
   runStream(chatId,chatCreated,chatTitle,model,msgs,bubble);
 }
+// How many tool-call rounds one turn may run before dyva forcibly finalizes. This
+// was 3, which strangled real agentic work: paging through a single file that needs
+// three reads exhausts the entire budget before ONE edit runs, so the turn ends on
+// the model's "…let me make the changes" narration with nothing applied — the classic
+// "it just stops". A known-good model (openrouter/free) needed 6+ rounds just to
+// recolor one file. Give the loop real room; the soft docs-gate, the hedge, and the
+// per-round cost still bound it in practice.
+var TOOL_LOOP_MAX=24;
 async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,existingJob){
   chatId=String(chatId);
   depth=depth||0;
@@ -3798,13 +3897,16 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
   var full='',think='',tps=null,acc='',toolCalls=[],host='',fmodel=model,gotToken=false,service='';
   async function complete(){
     clearInflight();
-    if(useTools&&toolCalls.length&&depth<3){
+    if(useTools&&toolCalls.length&&depth<TOOL_LOOP_MAX){
       await runToolRound();
       return;
     }
     finishStream(gen.bubble,live(),host,fmodel,tps,chatId,chatCreated,chatTitle,model,think,full,gen.service);
   }
   async function runToolRound(){
+    // drop the merge-only position key so it never rides out on the wire (a strict
+    // host rejects an unknown field on a tool_call)
+    toolCalls.forEach(function(tc){if(tc&&tc.__idx!==undefined)delete tc.__idx});
     setStatus('calling tool\u2026');
     if(live()){
       gen.bubble.bodyEl.classList.remove('streaming');
@@ -4428,8 +4530,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
             if(live())scheduleRender(gen);
           }
           if(d.message&&d.message.tool_calls){
-            d.message.tool_calls.forEach(function(t){toolCalls.push(t)});
-            setStatus('tool: '+(((d.message.tool_calls[0]||{}).function||{}).name||'')+'\u2026');
+            d.message.tool_calls.forEach(function(t){mergeToolCallFragment(toolCalls,t)});
+            setStatus('tool: '+(((toolCalls[toolCalls.length-1]||{}).function||{}).name||'')+'\u2026');
           }
           if(d.done){
             if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;

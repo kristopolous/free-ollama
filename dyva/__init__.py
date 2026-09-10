@@ -3127,10 +3127,22 @@ def openai_stream_to_ollama(line, model):
     fin = ch.get("finish_reason")
     msg = {"role": delta.get("role") or "assistant", "content": delta.get("content") or ""}
     if delta.get("tool_calls"):
-        msg["tool_calls"] = [
-            {"function": {"name": (t.get("function") or {}).get("name"),
-                          "arguments": _maybe_json((t.get("function") or {}).get("arguments"))}}
-            for t in delta["tool_calls"]]
+        tcs = []
+        for t in delta["tool_calls"]:
+            fn = (t.get("function") or {})
+            e = {"function": {"name": fn.get("name"),
+                              "arguments": _maybe_json(fn.get("arguments"))}}
+            # Preserve the streaming position. OpenAI emits ONE call across several
+            # deltas: the first carries index + id + name + the start of arguments,
+            # each later delta repeats the same index (with a 0/empty id) and appends
+            # more argument text. Dropping index/id here would leave the client unable
+            # to tell a continuation from a new call, so it would stack broken partials.
+            if t.get("index") is not None:
+                e["index"] = t["index"]
+            if t.get("id"):
+                e["id"] = t["id"]
+            tcs.append(e)
+        msg["tool_calls"] = tcs
     out = {"model": obj.get("model") or model, "created_at": _now_iso(), "message": msg,
            "done": bool(fin)}
     if fin:
