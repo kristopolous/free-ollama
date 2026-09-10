@@ -1545,11 +1545,27 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
         async with sem:
             result, method = await _doorknock(session, entry, service,
                                               check_timeout, existing_working)
+            # Honeypot gate, INSIDE the check: a host that probes OK but whose whole
+            # freshly-listed catalog is the phantom frozen set gets one benign
+            # /wp-login.php GET (tiny subset). 200 => record as honeypot, not working.
+            honeypot = (isinstance(result, dict) and "error" not in result
+                        and _host_models(result) and _host_models(result) <= HONEYPOT_MODELS
+                        and await _is_honeypot(session, entry["host"], check_timeout))
 
         key = _entry_host(entry)
         ok = False
         async with wlock:
-            if isinstance(result, dict) and "error" not in result:
+            if honeypot:
+                nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}",
+                      "reason": "honeypot", "result": "honeypot",
+                      "checked": datetime.now(timezone.utc).isoformat()}
+                notworking = _load_json(notworking_file, silent=True)
+                if not isinstance(notworking, dict):
+                    notworking = {}
+                notworking[entry["host"]] = nr
+                _save_json_atomic(notworking_file, notworking)
+                log.warning(f"~ {entry['host']}: honeypot (phantom catalog + /wp-login.php 200)")
+            elif isinstance(result, dict) and "error" not in result:
                 result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
                 # Identity stays the claimed host (stable survey key); how it was
                 # actually reached lives in `method` (absent = the default way).
@@ -1610,10 +1626,10 @@ def check(service, name=None, check_timeout=60, check_new=False, check_all=False
 
 
 def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session=None):
-    """Check an explicit list of host entries (the 'check-new' table, bounded to
-    a single worker-count round during fetch-check). Hosts already recorded in
-    working/notworking, and already-snapshotted hosts when resuming -i, are
-    skipped so only never-tested hosts are probed."""
+    """Check an explicit list of host entries — the fresh hosts from one fetch-check
+    page (all of them; `workers` is the probe concurrency, not a cap). Hosts already
+    recorded in working/notworking, and already-snapshotted hosts when resuming -i,
+    are skipped so only never-tested hosts are probed."""
     if not hosts:
         return
     if name is None:
@@ -1656,6 +1672,45 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
         return
 
     asyncio.run(_check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working))
+
+
+# woahllama's phantom-responder frozen catalog (day50.dev/woahllama): the fakes serve
+# ONLY a subset of this short list, "sizes constant to the byte." We gate on that
+# signature so an ordinary host is never touched — a real server has models beyond
+# this set — then confirm with ONE benign GET /wp-login.php (a standard page a real
+# Ollama 404s). We deliberately do NOT probe /.git/config or /.env: dangling-secret
+# scanning is itself invasive. A 200 on /wp-login.php = honeypot.
+HONEYPOT_MODELS = {
+    # woahllama's canonical frozen catalog (the five named in the writeup)
+    "llama2:latest", "llama3:latest", "openchat:7b", "codellama:13b", "qwen2.5:1.5b",
+    # live extras observed on confirmed honeypots (2026-09-10) — the catalog has
+    # drifted; the HF-style "org/Repo" names are themselves a tell (real Ollama tags
+    # are never org/repo). Extend as the catalog is re-mapped.
+    "deepseek-r1:latest", "deepseek-ai/DeepSeek-R1", "mistralai/Mistral-Large-Instruct-2411",
+}
+
+
+def _host_models(entry):
+    out = set()
+    for m in (entry.get("models") or []):
+        n = m if isinstance(m, str) else (m.get("name") if isinstance(m, dict) else None)
+        if n:
+            out.add(n)
+    return out
+
+
+async def _is_honeypot(session, host, timeout):
+    """One benign GET /wp-login.php — a standard page a real Ollama 404s. 200 =
+    honeypot. Called from the check phase ONLY for a host whose whole freshly-listed
+    catalog is the phantom frozen set, so it's a tiny subset and never touches an
+    ordinary host. We deliberately do NOT probe /.git/config or /.env (invasive)."""
+    try:
+        async with session.get(f"http://{host}/wp-login.php",
+                               timeout=aiohttp.ClientTimeout(total=min(timeout, 10)),
+                               allow_redirects=False) as r:
+            return r.status == 200
+    except Exception:
+        return False
 
 
 async def _check_working(service, name=None, check_timeout=60, workers=10, session=None):
@@ -2328,9 +2383,14 @@ def main():
                 log.info("--- fetch-check (interleaved) ---")
 
                 def batch_cb(fresh_hosts, _svc=_svc, _nm=_nm):
-                    batch = fresh_hosts[:args.workers]
-                    log.info(f"  check batch: {len(batch)} new host(s) (interleaved)")
-                    check_batch(batch, _svc, _nm, args.check_timeout, args.workers, args.session)
+                    # Check ALL new hosts from this page — not just the first
+                    # `workers`. `workers` is the probe CONCURRENCY (applied inside
+                    # check_batch), not a per-page cap; slicing to it silently left
+                    # every new host beyond the 65th unchecked, piling up a backlog
+                    # you then had to chase with a manual check-new. fetch-check must
+                    # check everything it fetches.
+                    log.info(f"  check batch: {len(fresh_hosts)} new host(s) (interleaved)")
+                    check_batch(fresh_hosts, _svc, _nm, args.check_timeout, args.workers, args.session)
 
                 fetch(dry=args.dry, curlify=args.curlify, service=_svc, query=args.query,
                       name=_nm, servers=args.servers, ports=args.ports, countries=args.countries,
