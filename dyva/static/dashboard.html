@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Slackey&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
@@ -126,7 +127,7 @@
   --scrim-strong:rgba(0,0,0,.88);
 
   --font-ui:-apple-system,BlinkMacSystemFont,sans-serif;
-  --font-mono:ui-monospace,monospace;
+  --font-mono:"Cousine",ui-monospace,monospace;
   --font-display:"Slackey",sans-serif;
 
   --line-tight:1.25;
@@ -209,6 +210,13 @@ body.chat{height:100vh;height:100dvh}
 .mb-g{background:#83b58a}
 .mb-r{background:#c78d8d}
 .mb-u{background:#6d6d6d}
+/* External-use panel shown in an empty chat */
+.chat-empty{font-size:var(--fs-sm);line-height:1.5}
+.chat-empty h3{margin:0 0 .4em;font-size:var(--fs-md)}
+.chat-empty p{margin:.5em 0}
+.chat-empty ol{margin:.4em 0;padding-left:1.4em}
+.chat-empty li{margin:.25em 0}
+.chat-empty code{word-break:break-all}
 .modellist .model-item{cursor:pointer;transition:background .1s;overflow-wrap:anywhere}
 .modellist .model-item:hover{background:var(--accent-bg)}
 /* Faceted grouping of the model list (family / size / kind), toggled by .group-row */
@@ -397,7 +405,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.note .note-text p{margin:.15em 0}
 .msg.note .note-text ul{margin:.25em 0;padding-left:1.2em}
 .msg.note .note-text li{margin:.1em 0}
-.msg.note .note-text code{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-2)}
+.msg.note .note-text code{font-family:var(--font-mono);font-size:var(--fs-sm);padding:0.05rem 0.15rem;background:#080808;color:inherit}
 .msg.note .note-text strong{color:var(--text);font-weight:500}
 .msg.note .note-text blockquote{border-left:2px solid var(--border-strong);margin:.3em 0;padding:0 .6em;color:var(--text-3)}
 .msg.note .note-text h4{margin:1.25rem 0 .3em;font-size:inherit;font-weight:500;letter-spacing:.05em;text-transform:uppercase;color:#fff}
@@ -1477,7 +1485,16 @@ function useFilterModel(preferTyped){
   if(!el)return;
   el.value=q;
   try{el.dispatchEvent(new Event('input',{bubbles:true}))}catch(e){}   // refresh the server count
-  location.hash='chat';
+  // Land on a BLANK window: reuse the current chat if it's empty (just point it at
+  // the chosen model), otherwise start a fresh one. Either way the empty-state shows
+  // the External-use panel for this model.
+  if(currentChat&&(currentChat.messages||[]).length){
+    newChat();                                   // newChat picks up el.value as the model
+  }else{
+    if(currentChat)currentChat.model=q;
+    renderMessages();
+    location.hash='chat';
+  }
 }
 document.getElementById('modelUse').addEventListener('click',function(){useFilterModel(false)});
 document.getElementById('modelFilter').addEventListener('keydown',function(e){
@@ -1975,7 +1992,7 @@ function timerText(secs){
   if(!isFinite(secs)||secs<0)secs=0;
   if(secs<10)return secs.toFixed(1)+'s';
   if(secs<60)return Math.floor(secs)+'s';
-  return agoLong(secs);
+  return Math.floor(secs/60)+'m'+Math.floor(secs%60)+'s';   // "2m5s", no space
 }
 // wids with a stop in flight. Kept outside renderWorkers because every
 // snapshot rebuilds the cards from scratch, which would otherwise throw the
@@ -2052,7 +2069,10 @@ function paintTimeline(tl,w,total,checkedStr){
   run.style.display='';
   var runSecs=Math.max(0,total-findSecs);
   var label=w.done?(w.ok===false?'stopped':''):'running';   // 'ran' dropped
-  run.textContent=timerText(runSecs)+(label?' '+label:'');
+  // tps after the duration: completion tokens / run seconds — "1.9s 30tps running"
+  var tps='';
+  if(w.ctoks&&runSecs>0){var _v=w.ctoks/runSecs;_v=_v<5?Math.round(_v*10)/10:Math.round(_v);if(_v>0)tps=' '+_v+'tps';}
+  run.textContent=timerText(runSecs)+tps+(label?' '+label:'');
 }
 var _lastWorkers=[];
 var _workersSig=null;
@@ -2158,6 +2178,7 @@ function renderWorkers(workers){
     tl.setAttribute('data-started',String(started));
     tl.setAttribute('data-find',w.find===undefined?'?':(w.find===null?'':String(w.find)));
     tl.setAttribute('data-checked',String(w.checked));
+    tl.setAttribute('data-ctoks',w.ctoks!=null?String(w.ctoks):'');   // so the live ticker can show tps
     // Token accounting sits to the LEFT of the time: (up)(down) (context), all in
     // k (1024). Red + ⚠ when the prompt filled the window (truncation). Shown only
     // once the host reported counts.
@@ -2201,7 +2222,8 @@ setInterval(function(){
     var t0=parseInt(tl.getAttribute('data-started'),10);if(!t0)return;
     var fv=tl.getAttribute('data-find');
     var fval=(fv==='?')?undefined:(fv===''?null:parseFloat(fv));
-    paintTimeline(tl,{find:fval,done:false,ok:null},
+    var cv=tl.getAttribute('data-ctoks');
+    paintTimeline(tl,{find:fval,done:false,ok:null,ctoks:cv?parseFloat(cv):undefined},
                   (Date.now()-t0)/1000, tl.getAttribute('data-checked')||'');
   });
 },100);
@@ -3032,8 +3054,38 @@ function addNote(label,md,kind){
   _extLinks(t);_thumbFallbacks(t);b.appendChild(t);d.appendChild(b);
   chatLog.appendChild(d);highlightBlocks(t);
 }
+// Base URL the client is ACTUALLY viewing — proxy-correct (derived from the page
+// the user loaded, not fabricated), so the external-use instructions copy cleanly.
+function _externalBase(){
+  try{return new URL('.',document.baseURI).href.replace(/\/+$/,'');}catch(e){return location.origin;}
+}
+// The blank-window welcome: how to use the chosen model from outside, then chat.
+function _externalUseHtml(){
+  var model=(currentChat&&currentChat.model)||document.getElementById('chatModel').value.trim()||'*';
+  var m=escHtml(model),base=_externalBase(),v=escHtml(base+'/v1'),b=escHtml(base);
+  return '<div class="chat-empty">'
+    +'<h1>Welcome to Dyva Chat</h1>'
+    +'<p>You can chat below like normal! Tap the wrench to enable a variety of tools.</p>'
+    +'<h3>If you want to use this model in another app</h3>'
+    +'<p>I understand! I will get over it!<br/>Here are a few options:</p>'
+    +'<ol>'
+    +'<li>Set your OpenAI-compatible base URL to <code>'+v+'</code> and the model to <code>'+m+'</code></li>'
+    +'<li><code>OPENAI_BASE_URL='+v+' your-app</code></li>'
+    +'<li>In your provider list pick <b>Ollama</b> and enter <code>'+m+'</code></li>'
+    +'</ol>'
+    +'<p>If the app makes you choose from a model list, upload an override in <a href="#settings">settings</a>.</p>'
+    +'<p>Or run <code>ollama run '+m+'</code> or drive it with '
+      +'<a href="https://github.com/day50-dev/llcat" target="_blank" rel="noopener">llcat</a>: '
+      +'<code>uvx llcat -u \''+b+'\' -m \''+m+'\' \'hello world\'</code></p>'
+    +'</div>';
+}
 function renderMessages(){
   chatLog.innerHTML='';
+  if(!currentChat.messages.length){
+    var ew=document.createElement('div');ew.className='msg note';
+    ew.innerHTML='<div class="body"><div class="note-text">'+_externalUseHtml()+'</div></div>';
+    chatLog.appendChild(ew);
+  }
   currentChat.messages.forEach(function(m,i){
     if(m&&m._meta&&m._meta.hidden)return;
     // Legacy token-gate bounces linger in old chats — sometimes as a note,
@@ -3273,6 +3325,7 @@ var SLASH_COMMANDS=[
   {cmd:'next',     arg:'',         desc:'drop this model’s sticky host and move to the next one'},
   {cmd:'test',     arg:'',         desc:'probe the hosts with the quick test and cull the bogus ones'},
   {cmd:'retitle',  arg:'',         desc:'regenerate the chat title'},
+  {cmd:'compact',  arg:'',         desc:'summarize the chat so far to free up context'},
   {cmd:'download', arg:'',         desc:'download this chat as JSON'},
   {cmd:'delete',   arg:'',         desc:'delete the current chat'},
   {cmd:'list',     arg:'',         desc:'system prompt, tools, host and files for this chat'}
@@ -3471,7 +3524,61 @@ function pickSlash(c){
   hideSlashPop(false);
   input.focus();
 }
-// Slash commands for the chat composer: /retitle /download /delete /help.
+// Cheap pre-send compaction (mechanical, no model call) — the first-line trim done
+// before every inference, ahead of the /compact summarizer. A read_file result
+// carries a snapshot of the file's lines, so reading/editing the same document
+// repeatedly stacks OLD versions of it in the context. Keep only the most-recent
+// read of each file and stub the earlier ones; the current content lives in the side
+// panel and the model can re-read. Add further cheap tricks here as they come up.
+function _cheapCompact(msgs){
+  var HEAD=/^"([^"]+)"\s+[—(]/;   // readDoc/searchDoc headers: "title" — …  or  "title" (…
+  var lastByDoc={};
+  for(var i=0;i<msgs.length;i++){
+    var m=msgs[i];if(!m||m.role!=='tool')continue;
+    var mm=HEAD.exec(m.content||'');if(mm)lastByDoc[mm[1]]=i;
+  }
+  return msgs.map(function(m,i){
+    if(m&&m.role==='tool'){
+      var mm=HEAD.exec(m.content||'');
+      if(mm&&lastByDoc[mm[1]]!==i)
+        return {role:'tool',content:'[earlier read of "'+mm[1]+'" omitted to save context — superseded by a newer read]'};
+    }
+    return m;
+  });
+}
+// /compact — summarize the conversation and replace the history with [summary] +
+// the last couple of turns, so a long chat keeps fitting a small pool model's
+// context window (the truncation problem). One-shot api/chat call, like regenTitle.
+async function compactChat(chat){
+  chat=chat||currentChat;
+  var all=(chat&&chat.messages)||[];
+  var KEEP=2;                                   // keep the last turn(s) verbatim
+  var head=all.slice(0,Math.max(0,all.length-KEEP));
+  var tail=all.slice(Math.max(0,all.length-KEEP));
+  if(head.length<2)return {ok:false,error:'too short to compact'};
+  // skip __dyva_info__ turns (their tag would hijack the summary request)
+  var transcript=head
+    .filter(function(m){return m.content&&String(m.content).indexOf(DYVA_INFO_TAG)<0;})
+    .map(function(m){return (m.role||'?')+': '+String(m.content)})
+    .join('\n\n').slice(0,12000);
+  if(!transcript)return {ok:false,error:'nothing to summarize'};
+  var model=chat.model||document.getElementById('chatModel').value.trim()||'*';
+  try{
+    var r=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:model,stream:false,messages:[
+        {role:'system',content:'You compact a conversation so it can continue within a smaller context window. Summarize everything below into a brief the assistant can pick up from: key facts, decisions, the user’s goals and preferences, unresolved threads, and any names/files/identifiers to remember. Be concise and factual; output only the summary.'},
+        {role:'user',content:transcript}]})});
+    if(!r.ok){var em='HTTP '+r.status;try{var je=await r.json();em=(je.error&&(je.error.message||je.error))||em}catch(e){}return {ok:false,error:em};}
+    var j=await r.json();
+    var summary=(j&&j.message&&typeof j.message.content==='string')?j.message.content.trim():'';
+    if(!summary)return {ok:false,error:'the host returned an empty summary'};
+    var before=all.length;
+    chat.messages=[{role:'assistant',content:'📋 Summary of the conversation so far:\n\n'+summary,_meta:{compacted:true}}].concat(tail);
+    saveChat(chat);touchIndex(chat);
+    return {ok:true,before:before,kept:tail.length};
+  }catch(e){return {ok:false,error:(e&&e.message)||'request failed'};}
+}
+// Slash commands for the chat composer: /retitle /compact /download /delete /help.
 // Returns true if the text was consumed as a command (so the caller shouldn't
 // send it as a normal chat message).
 function handleSlashCommand(text){
@@ -3503,6 +3610,12 @@ function handleSlashCommand(text){
     regenTitle(currentChat,null).then(function(res){
       if(res&&res.ok)note.set('Renamed to **'+escHtml(res.title)+'**');
       else note.set('Couldn’t retitle: '+escHtml((res&&res.error)||'unknown error'),'err');
+    });
+  }else if(cmd==='compact'){
+    var cnote=info('Compacting the conversation…','working');
+    compactChat(currentChat).then(function(res){
+      if(res&&res.ok)renderMessages();   // re-render to the compacted state (summary + last turns)
+      else cnote.set('Couldn’t compact: '+escHtml((res&&res.error)||'unknown error'),'err');
     });
   }else if(cmd==='download'){
     if(currentChat&&currentChat.title!==undefined){
@@ -3652,6 +3765,7 @@ async function sendChat(){
       }
       return o;
     }).filter(Boolean);
+    msgs=_cheapCompact(msgs);   // cheap mechanical trim before inference (see below)
     var sysMsg=currentChat.system||'';
     if(docsOn)sysMsg=sysMsg?(sysMsg+'\n\n'+DOC_SYSTEM):DOC_SYSTEM;
     // The files in this conversation, by name, as a plain fact the model can

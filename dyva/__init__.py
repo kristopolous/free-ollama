@@ -121,6 +121,14 @@ WORKER_COUNT = 10
 # pool is raced alongside it; first to produce wins, the loser is dropped.
 # Caps the wait on a dead-but-connected favourite. 0 disables (race at once).
 HEDGE_DELAY = 30
+# A tool-loop CONTINUATION (the incoming messages end with a tool result) is already
+# mid-conversation on a host that just answered it — racing the pool again each round
+# is wasted work and risks switching hosts mid-loop (losing the upstream's warm
+# prompt-prefix cache). So give that sticky host a huge head-start: it keeps the whole
+# round to itself, and the pool is only raced if it actually FAILS (a fast failure
+# still fans out immediately via _race_hosts' `tried < 2` short-circuit, so a dead
+# host doesn't block). Not a hard pin — failover is preserved, just not speculative.
+CONTINUATION_HEDGE = 3600
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
@@ -3262,7 +3270,27 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
     return None, oai, ep
 
 
+def _is_tool_continuation(messages):
+    """True if this request is continuing a tool loop — its last real message is a
+    tool result (role 'tool'/'function', both dialects). Such a round is already
+    mid-conversation on the host that just answered, so it shouldn't speculatively
+    re-race the pool."""
+    for m in reversed(messages or []):
+        if not isinstance(m, dict):
+            continue
+        r = m.get("role")
+        if r in ("tool", "function"):
+            return True
+        if r in ("user", "assistant", "system"):
+            return False
+    return False
+
+
 async def _race_servers(session, model, servers, payload, do_stream, endpoint="/api/chat", remote=None, caps=None, job_wid=None, hedge_delay=0):
+    # Mid-tool-loop continuations pin to the warm host: give it the whole round
+    # before racing the pool (failover still fires instantly on a real failure).
+    if hedge_delay and _is_tool_continuation((payload or {}).get("messages")):
+        hedge_delay = CONTINUATION_HEDGE
     errors = []
     errors_lock = asyncio.Lock()
 
@@ -11516,7 +11544,11 @@ def make_app():
 
     async def on_startup(app):
         app["session"] = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False),
+            # keepalive_timeout default is ~15s; bump it so the pooled upstream
+            # socket to a sticky host survives the gap between tool rounds (model
+            # think + client-side tool execution) and gets reused instead of
+            # reconnecting each round.
+            connector=aiohttp.TCPConnector(ssl=False, keepalive_timeout=120),
             timeout=aiohttp.ClientTimeout(total=None),
         )
         app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)

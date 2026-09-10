@@ -1821,6 +1821,24 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
                 notworking[entry["host"]] = nw
             log.info(f"~ {host} dead: {payload}")
 
+    # CIRCUIT BREAKER: a re-survey that "kills" more than half the pool in one pass
+    # is almost always a LOCAL problem (network blip, too-tight --ct, the box itself),
+    # not mass host death — and _check_working overwrites working.json wholesale, so
+    # one such pass silently guts the pool (this is what took ollama 1662 -> 11). When
+    # the prune fraction is implausibly high, DON'T prune: refresh the model lists of
+    # the hosts that did answer, leave the rest in the pool untouched, and warn loudly.
+    PRUNE_ABORT_FRAC = 0.5
+    if working and removed > 20 and removed / len(working) > PRUNE_ABORT_FRAC:
+        by_host = {_entry_host(w): w for w in working}        # keep everyone
+        for rec in kept:                                      # but refresh responders
+            by_host[_entry_host(rec)] = rec
+        merged = sorted(by_host.values(), key=lambda h: (h.get("checked", ""), _entry_host(h)))
+        _save_json_atomic(working_file, merged)               # notworking NOT touched
+        log.warning(f"check-working: {removed}/{len(working)} ({removed/len(working):.0%}) failed this "
+                    f"pass — that's a bad pass (network / tight --ct / local), not mass host death. "
+                    f"REFUSING to prune; pool left intact ({len(merged)}), {len(kept)} models refreshed. "
+                    f"Re-run with a larger --ct or fix connectivity.")
+        return
     kept.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
     _save_json_atomic(working_file, kept)
     _save_json_atomic(notworking_file, notworking)
