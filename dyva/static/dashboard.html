@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mathjs@13/lib/browser/math.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <style>
 /* ============================================================
    design tokens
@@ -1482,6 +1483,14 @@ function useFilterModel(preferTyped){
   var typed=document.getElementById('modelFilter').value.trim();
   var q=preferTyped?(typed||_currentModel||''):(_currentModel||typed||'');
   if(!q)return;
+  // Route by KIND: a generative media model belongs in the matching media tab
+  // (model pre-filled), not the chat box. And if the IMAGE pane is the active model
+  // view, the model is certainly not text — route to media even when the classifier
+  // is unsure or flags a component, defaulting to the image tab.
+  var tab=_kindTab(_kindOfModel(q));
+  var a=document.querySelector('[data-mpane].active');
+  if(!tab&&a&&a.getAttribute('data-mpane')==='image')tab='image';
+  if(tab){_useMediaModel(q,tab);return;}
   var el=document.getElementById('chatModel');
   if(!el)return;
   el.value=q;
@@ -1790,9 +1799,43 @@ var _KINDS=[
 function _kindOf(mid){var s=String(mid).toLowerCase();
   for(var i=0;i<_KINDS.length;i++)if(_KINDS[i][1].test(s))return _KINDS[i][0];
   return 'Base / other';}
-function _facetGroups(ids,facet){
+// Per-model KIND from the hand-curated classifier (graflex/model-classifier.json),
+// shipped by /dashboard-models. Raw first-match category — the ground truth, not a
+// re-derivation. Drives the image pane's "kind" facet and routing "use" to the
+// right media tab.
+var _modelKind={};
+var _KIND_LABEL={image:'Image',image_edit:'Image + Edit',edit:'Edit',lora:'LoRA',
+  vision:'Text encoder / CLIP',video:'Video',music:'Music',audio:'Audio / TTS',
+  other:'Other (VAE, ControlNet…)'};
+function _stripModelDecor(mid){var s=String(mid||''),t=s.indexOf(' [');return t>=0?s.slice(0,t):s;}
+function _kindOfModel(mid){return _modelKind[_stripModelDecor(mid)]||_modelKind[mid]||null;}
+// The media tab a generative model belongs to; null for components (lora/vision/
+// other) and unclassified — those aren't things you generate WITH, so "use" leaves
+// them to the chat box.
+function _kindTab(cat){
+  if(cat==='image'||cat==='image_edit')return 'image';
+  if(cat==='edit')return 'edit';
+  if(cat==='video')return 'video';
+  if(cat==='music')return 'music';
+  if(cat==='audio')return 'speech';
+  return null;
+}
+function _useMediaModel(q,tab){
+  q=_stripModelDecor(q);
+  function _set(id){var el=document.getElementById(id);if(el){el.value=q;try{el.dispatchEvent(new Event('input',{bubbles:true}))}catch(e){}}}
+  if(tab==='edit'){_set('editModel');location.hash='media/image/edit';return;}
+  if(tab==='video'){location.hash='media/video';return;}
+  if(tab==='music'){location.hash='media/music';return;}
+  if(tab==='speech'){location.hash='media/speech';return;}
+  _set('sdModel');location.hash='media/image';   // image / image_edit
+}
+function _facetGroups(ids,facet,isImage){
   if(facet==='count'||!facet)return null;      // flat, no headers
-  var fn=facet==='family'?_familyOf:facet==='size'?_sizeBucketOf:_kindOf,map={};
+  var fn;
+  if(isImage&&facet==='kind')                  // image pane: group by the hand-curated classifier
+    fn=function(id){var k=_kindOfModel(id);return k?(_KIND_LABEL[k]||k):'Unclassified';};
+  else fn=facet==='family'?_familyOf:facet==='size'?_sizeBucketOf:_kindOf;
+  var map={};
   ids.forEach(function(id){var g=fn(id);(map[g]=map[g]||[]).push(id);});
   var labels=Object.keys(map);
   if(facet==='size'){                          // fixed ascending, Unknown last
@@ -1804,9 +1847,9 @@ function _facetGroups(ids,facet){
   }
   return labels.map(function(l){return {label:l,ids:map[l]};});
 }
-function _appendModelPane(container,ids,facet){
+function _appendModelPane(container,ids,facet,isImage){
   container.innerHTML='';
-  var frag=document.createDocumentFragment(),groups=_facetGroups(ids,facet);
+  var frag=document.createDocumentFragment(),groups=_facetGroups(ids,facet,isImage);
   if(!groups){ids.forEach(function(id){frag.appendChild(makeModelRow(id));});container.appendChild(frag);return;}
   groups.forEach(function(g){
     var key=facet+'\n'+g.label;
@@ -1849,8 +1892,8 @@ function renderModels(servers){
   ids.sort(function(a,b){return modelHosts[b].length-modelHosts[a].length||(a<b?-1:a>b?1:0)});
   var textIds=[],imageIds=[];
   ids.forEach(function(id){(imageModels[id]?imageIds:textIds).push(id);});
-  _appendModelPane(document.getElementById('modelList'),textIds,_modelFacet);
-  _appendModelPane(document.getElementById('modelListImage'),imageIds,_modelFacet);
+  _appendModelPane(document.getElementById('modelList'),textIds,_modelFacet,false);
+  _appendModelPane(document.getElementById('modelListImage'),imageIds,_modelFacet,true);
   filterModels();
   updateModelPaneCounts(document.getElementById('modelFilter').value.trim());
 }
@@ -2296,6 +2339,7 @@ function loadDashboard(){
     _modelSizes=mv.sizes||{};
     _RELEASE_DATES=mv.dates||{};   // server sends the flat {normkey: 'YYYY-MM-DD'} map
     _OLLAMA_PARAMS=mv.params||{};  // {'model:tag': params_b} for the size (parameter) facet
+    _modelKind=mv.kind||{};        // {model: 'image'|'image_edit'|'edit'|'lora'|'vision'|'video'|'music'|'audio'|'other'} — hand-curated classifier
     _RELEASE_KEYS=Object.keys(_RELEASE_DATES).sort(function(a,b){return b.length-a.length});
     _relDateMemo={};
     renderModels(mv.servers||[]);
@@ -3172,9 +3216,38 @@ function paintGen(gen){
   updateTokEst();
 }
 function highlightBlocks(scope){
+  renderMermaid(scope);              // draw ```mermaid blocks before hljs touches them
   if(!window.hljs)return;
   var blocks=(scope||document).querySelectorAll('pre code');
-  for(var i=0;i<blocks.length;i++){try{window.hljs.highlightElement(blocks[i])}catch(e){}}
+  for(var i=0;i<blocks.length;i++){
+    if(blocks[i].classList.contains('language-mermaid'))continue;   // already a diagram
+    try{window.hljs.highlightElement(blocks[i])}catch(e){}
+  }
+}
+var _mermaidReady=false;
+function _initMermaid(){
+  if(_mermaidReady||!window.mermaid)return _mermaidReady;
+  try{window.mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'dark'});_mermaidReady=true;}catch(e){}
+  return _mermaidReady;
+}
+// Render ```mermaid fenced blocks (chat + markdown docs) as diagrams. marked emits
+// them as <pre><code class="language-mermaid">…</code></pre> with the source HTML-
+// escaped; swap each for a <div class="mermaid"> holding the RAW (un-escaped) text
+// via textContent and let mermaid draw it. suppressErrors keeps a half-streamed or
+// malformed diagram from throwing — it just re-renders cleanly on the next pass.
+function renderMermaid(scope){
+  if(!window.mermaid||!_initMermaid())return;
+  var blocks=(scope||document).querySelectorAll('code.language-mermaid'),nodes=[];
+  for(var i=0;i<blocks.length;i++){
+    var code=blocks[i],pre=code.parentNode;
+    if(!pre||pre.tagName!=='PRE'||!pre.parentNode)continue;
+    var div=document.createElement('div');
+    div.className='mermaid';
+    div.textContent=code.textContent||'';
+    pre.parentNode.replaceChild(div,pre);
+    nodes.push(div);
+  }
+  if(nodes.length){try{window.mermaid.run({nodes:nodes,suppressErrors:true});}catch(e){}}
 }
 function scheduleRender(gen){
   _paintGen=gen;
@@ -4985,7 +5058,7 @@ async function _editSourceBlob(src){
 // and steps are fixed at sane values; a model guessing 3 frames or 150 steps
 // helps nobody.
 var VIDEO_FRAMES=100,VIDEO_STEPS=20,VIDEO_TOOL_WAIT=5400000;   // give it ninety minutes
-var ASK_TOOL={type:'function',function:{name:'ask_question',description:'Ask the user a multiple-choice question',parameters:{type:'object',properties:{question:{type:'string',description:'The question'},options:{type:'array',items:{type:'string'},description:'A few mutually exclusive choices. The user may type their own answer as well.'}},required:['question','options']}}};
+var ASK_TOOL={type:'function',function:{name:'ask_question',description:'Ask the user a multiple-choice question',parameters:{type:'object',properties:{question:{type:'string',description:'The question'},options:{type:'array',items:{type:'string'},description:'A few choices. The user may type their own answer'}},required:['question','options']}}};
 // The model asks, the turn stops, the user clicks, the turn resumes with the
 // answer as the tool result. Nothing else in the tool loop blocks on a human,
 // so this owns its own promise and has to settle on abort as well as on click.
@@ -5754,6 +5827,21 @@ function docPreviewOn(doc){
   if(doc.streaming)return false;          // watch it being written, then it renders
   return _docView[doc.id]!=='source';
 }
+// An HTML document rendered in the sandboxed iframe can't reach the dashboard's
+// mermaid, so give it its own: if the page uses mermaid (a .mermaid element or a
+// mermaid fence) and doesn't already load the library, inject the CDN script + an
+// auto-run init before the closing body tag. Theme 'default' (not 'dark') since the
+// doc controls its own background. The injected closing script tags are built by
+// string concatenation so no literal closing-script token appears in this file —
+// which would otherwise end the dashboard's own inline script right here.
+function _injectMermaid(html){
+  var s=String(html||'');
+  if(!/mermaid/i.test(s))return s;                        // no mermaid in the doc
+  if(/mermaid(?:\.min)?\.js|mermaid@|cdn[^"']*mermaid/i.test(s))return s;   // author loads it
+  var inject='\n<scr'+'ipt src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></scr'+'ipt>\n'
+    +'<scr'+'ipt>try{mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"default"});}catch(e){}</scr'+'ipt>\n';
+  return /<\/body>/i.test(s)?s.replace(/<\/body>/i,inject+'</body>'):(s+inject);
+}
 function renderDocPanel(streaming){
   if(currentChat&&!currentChat._vrb){rebuildDocVersions(currentChat);currentChat._vrb=1;}
   var docs=currentDocs();
@@ -5794,7 +5882,7 @@ function renderDocPanel(streaming){
     // origin: no reach into this document, its storage, or its cookies
     fr.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-popups');
     fr.setAttribute('referrerpolicy','no-referrer');
-    fr.srcdoc=_resolveAssetAttrs(content);
+    fr.srcdoc=_injectMermaid(_resolveAssetAttrs(content));
     body.innerHTML='';
     body.appendChild(fr);
     return;

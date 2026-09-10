@@ -4393,8 +4393,23 @@ async def handle_dashboard_models(request):
     # client-side, same as the server does for routing).
     sizes = {name: rec["size"] for name, rec in load_survey().items()
              if isinstance(rec, dict) and rec.get("size")}
+    # Per-model KIND straight from the hand-curated classifier (CLASSIFIER_FILE ==
+    # graflex/model-classifier.json). This is the RAW first-match category
+    # (image / image_edit / edit / lora / vision / video / music / audio / other),
+    # NOT model_classes() — which consolidates image_edit and drops support assets
+    # (lora/vae/encoder), the very fidelity the image pane's kind facet needs. Text
+    # models don't match any pattern, so this stays scoped to the media/comfy set.
+    kind, _seen = {}, set()
+    for s in servers:
+        for m in s.get("models") or []:
+            if not m or m in _seen:
+                continue
+            _seen.add(m)
+            c = classify_model(m)
+            if c:
+                kind[m] = c
     body = json.dumps({"servers": out, "sizes": sizes, "dates": _load_release_dates(),
-                       "params": _load_ollama_params()})
+                       "params": _load_ollama_params(), "kind": kind})
     # This payload is large but changes slowly; serve it with an ETag so the
     # browser revalidates and gets a tiny 304 instead of re-downloading it.
     etag = '"' + hashlib.md5(body.encode("utf-8")).hexdigest() + '"'

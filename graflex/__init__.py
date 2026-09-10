@@ -1940,12 +1940,13 @@ def _load_classifier():
 
 
 def _classify_model(model, compiled):
-    i = 0
-    for ctype, regs in compiled.items():
-        i += 1
+    """Return (category, depth). `category` is a CLEAN key with no leading spaces,
+    so it is safe as a JSON key; `depth` is the 1-based match position used ONLY to
+    indent the printed scan for the human eye — it must never reach the JSON."""
+    for depth, (ctype, regs) in enumerate(compiled.items(), 1):
         if any(r.search(model) for r in regs):
-            return ' ' * i + ctype
-    return "....."
+            return ctype, depth
+    return ".....", 0
 
 
 def _classify_gradio_hosts(name, entries):
@@ -1975,30 +1976,19 @@ def _classify_gradio_hosts(name, entries):
 
 
 def _consolidate_image_edit(classified):
-    """Redistribute the `image_edit` bucket into `image` and `edit`, then drop
-    it. Dual-purpose models (Flux.2) generate AND edit, so they belong in both;
-    a single `image_edit` bucket exists only during classification so the
-    classifier can stay a clean, exclusive first-match. Keys may carry the
-    _classify_model space prefix, so match by stripped name."""
-    ie = [k for k in classified if k.strip() == "image_edit"]
-    if not ie:
+    """Redistribute the `image_edit` bucket into `image` and `edit`, then drop it.
+    Dual-purpose models (Flux.2) generate AND edit, so they belong in both; the
+    exclusive first-match classifier files them under a single `image_edit` bucket
+    that is split here."""
+    if "image_edit" not in classified:
         return
-    def _bucket(nm):
-        # classified carries both a bare pre-populated key and the space-
-        # prefixed one _classify_model actually files models under; merge into
-        # the space-prefixed (populated) one so we don't split a bucket in two.
-        cands = [k for k in classified if k.strip() == nm]
-        if cands:
-            return max(cands, key=lambda k: len(k) - len(k.lstrip()))
-        classified[nm] = []
-        return nm
-    ik, ek = _bucket("image"), _bucket("edit")
-    for k in ie:
-        for m in classified.pop(k):
-            if m not in classified[ik]:
-                classified[ik].append(m)
-            if m not in classified[ek]:
-                classified[ek].append(m)
+    classified.setdefault("image", [])
+    classified.setdefault("edit", [])
+    for m in classified.pop("image_edit"):
+        if m not in classified["image"]:
+            classified["image"].append(m)
+        if m not in classified["edit"]:
+            classified["edit"].append(m)
 
 
 def classify(name=None):
@@ -2027,13 +2017,13 @@ def classify(name=None):
         e = dict(entry)
         classified = {ctype: [] for ctype in list(compiled) + ["....."]}
         for m in entry.get("models") or []:
-            ctype = _classify_model(m, compiled)
+            ctype, depth = _classify_model(m, compiled)
             classified.setdefault(ctype, []).append(m)
             counts[ctype] = counts.get(ctype, 0) + 1
             key = (ctype, m)
             if key not in printed:
                 printed.add(key)
-                print(f"{ctype:13s} {m}")
+                print(f"{' ' * depth}{ctype:13s} {m}")   # indent aids the human scan; the JSON key stays clean
         _consolidate_image_edit(classified)
         e["classified"] = classified
         out.append(e)
