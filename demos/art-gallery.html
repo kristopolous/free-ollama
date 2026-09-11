@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Art Gallery — 4 models, one prompt (dyva)</title>
+<style>
+  :root{--wall:#241c18;--wall2:#2f2620;--text:#efe7dc;--text2:#b9ab9a;--line:#4a3b30;--accent:#d9b26a;}
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,var(--wall2),var(--wall));
+       color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100vh}
+  header{padding:18px 22px;text-align:center}
+  h1{margin:0;font-size:20px;letter-spacing:.5px}
+  header .sub{color:var(--text2);font-size:12px;margin-top:3px}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;justify-content:center;padding:8px 20px 20px}
+  .controls label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)}
+  .controls input{background:#1c1712;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:8px 10px;font-size:13px}
+  #prompt{min-width:280px}#base{min-width:210px}
+  button{background:var(--accent);color:#2a1e08;border:0;border-radius:6px;padding:9px 18px;font-weight:700;cursor:pointer;font-size:13px}
+  button.stop{background:#3a2f26;color:var(--text)}
+  button:disabled{opacity:.5;cursor:default}
+  #status{text-align:center;color:var(--text2);font-size:12px;min-height:18px;padding-bottom:8px}
+  .gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:26px;max-width:1100px;margin:0 auto;padding:10px 22px 50px}
+  .piece{display:flex;flex-direction:column;align-items:center;gap:12px}
+  /* the frame */
+  .frame{width:100%;padding:16px;border-radius:4px;background:
+      linear-gradient(135deg,#caa257,#8a6a2f 40%,#e7cf94 60%,#7d5c27);
+      box-shadow:0 14px 30px rgba(0,0,0,.5), inset 0 0 0 2px rgba(0,0,0,.35);}
+  .mat{background:#f7f4ee;padding:14px;border-radius:2px;box-shadow:inset 0 0 0 1px #ddd, inset 0 2px 8px rgba(0,0,0,.12)}
+  .art{aspect-ratio:1/1;background:#fff;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+  .art svg{width:100%;height:100%;display:block}
+  .piece.busy .art::after{content:"painting…";position:absolute;color:#999;font-size:13px}
+  .piece.err .mat{background:#f3dede}
+  .piece.err .art{color:#a33;font-size:13px}
+  .raw{font:11px/1.4 ui-monospace,monospace;color:#a33;max-height:96px;overflow:auto;white-space:pre-wrap;width:100%}
+  /* the placard */
+  .placard{background:#efe7d6;color:#2a2119;border-radius:4px;padding:8px 10px;width:78%;text-align:center;box-shadow:0 3px 8px rgba(0,0,0,.4)}
+  .placard input{width:100%;background:transparent;border:0;border-bottom:1px dashed #a99;color:#2a2119;text-align:center;font:600 13px system-ui;padding:2px}
+  .placard input:focus{outline:0;border-bottom-color:#7a5}
+  .placard .by{font-size:10px;color:#6b5c46;margin-top:4px;min-height:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🖼️ Art Gallery</h1>
+  <div class="sub">One prompt, four models, painted at once — one-shot, no vision. Each placard is a dyva model query.</div>
+</header>
+
+<div class="controls">
+  <label>dyva URL<input id="base" placeholder="http://localhost:11435"></label>
+  <label>prompt<input id="prompt" value="a horse at a tea party" placeholder="a horse at a tea party"></label>
+  <button id="go">Commission all 4</button>
+  <button id="clear" class="stop" hidden>Clear canvas</button>
+  <button id="stop" class="stop" hidden>Stop</button>
+</div>
+<div id="status"></div>
+<div class="gallery" id="gallery"></div>
+
+<script>
+var DEFAULT_QUERIES = ['qwen3.8','gemma4','muse','laguna'];
+var baseEl = document.getElementById('base');
+var gallery = document.getElementById('gallery');
+var statusEl = document.getElementById('status');
+var goBtn = document.getElementById('go');
+var clearBtn = document.getElementById('clear');
+var stopBtn = document.getElementById('stop');
+var mode = 'commission';                    // flips to 'modify' once there's art
+var ac = null;
+
+baseEl.value = (location.protocol === 'file:' || !location.origin)
+  ? 'http://localhost:11435' : location.origin;
+
+function setStatus(t){ statusEl.textContent = t; }
+function apiBase(){ return (baseEl.value || '').trim().replace(/\/+$/,''); }
+function extractSvg(text){ var m = String(text||'').match(/<svg[\s\S]*?<\/svg>/i); return m ? m[0] : null; }
+
+var SYSTEM = 'You are an expert SVG illustrator. Reply with exactly ONE complete, '
+  + 'self-contained <svg> element (include a viewBox; no external images, scripts, or fonts) '
+  + 'and NOTHING else — no prose, no markdown fences.';
+
+// Build the four frames, each with its own model-query placard.
+var pieces = DEFAULT_QUERIES.map(function(q, i){
+  var el = document.createElement('div');
+  el.className = 'piece';
+  el.innerHTML =
+    '<div class="frame"><div class="mat"><div class="art"></div></div></div>' +
+    '<div class="placard"><input class="q" value="'+q+'" placeholder="model query"><div class="by"></div></div>';
+  gallery.appendChild(el);
+  return { el: el, art: el.querySelector('.art'), by: el.querySelector('.by'), q: el.querySelector('.q') };
+});
+
+// STREAM (not stream:false): otherwise dyva's race waits for the whole SVG to
+// generate inside its timeout and a big model times out. Streaming bounds only
+// first-token; the rest streams unbounded.
+async function ask(model, messages){
+  var r = await fetch(apiBase()+'/api/chat', {
+    method:'POST', headers:{'Content-Type':'application/json'}, signal: ac.signal,
+    body: JSON.stringify({ model: model, stream: true, messages: messages })
+  });
+  var used = r.headers.get('X-Dyva-Model') || model;
+  var host = r.headers.get('X-Dyva-Host') || '';
+  if(!r.ok){
+    var em = 'HTTP '+r.status;
+    try{ var je = await r.json(); em = (je.error && (je.error.message||je.error)) || em; }catch(e){}
+    throw new Error(em);
+  }
+  var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', content = '';
+  while(true){
+    var chunk = await reader.read();
+    if(chunk.done) break;
+    buf += dec.decode(chunk.value, {stream:true});
+    var nl;
+    while((nl = buf.indexOf('\n')) >= 0){
+      var line = buf.slice(0, nl).trim(); buf = buf.slice(nl+1);
+      if(!line) continue;
+      try{ var d = JSON.parse(line); if(d.message && d.message.content) content += d.message.content; }catch(e){}
+    }
+  }
+  return { content: content, used: used, host: host };
+}
+
+// Paint one frame independently, so each shows up the moment its model answers.
+// In 'modify' mode the frame's current SVG is fed back as the assistant turn and
+// the prompt becomes an edit instruction ("make the cow blue") — text-only, no vision.
+async function paint(p, prompt){
+  var model = p.q.value.trim();
+  p.by.textContent = '';
+  var oldraw = p.el.querySelector('.raw'); if(oldraw) oldraw.remove();
+  if(!model){ p.el.className='piece'; p.art.innerHTML=''; return; }
+
+  var messages;
+  if(mode === 'modify' && p.lastSvg){
+    messages = [
+      {role:'system', content: SYSTEM},
+      {role:'assistant', content: p.lastSvg},
+      {role:'user', content: 'Modify the SVG above: '+prompt+'. Keep what already works and change only '
+        + 'what is asked. Reply with ONE updated <svg> and nothing else.'}
+    ];
+  }else{
+    messages = [
+      {role:'system', content: SYSTEM},
+      {role:'user', content: 'Draw "'+prompt+'".'}
+    ];
+  }
+
+  p.el.className = 'piece busy';            // old art (if any) stays visible under the overlay
+  try{
+    var res = await ask(model, messages);
+    p.by.textContent = (res.used||model).split('/').pop() + (res.host ? ' · '+res.host : '');
+    var svg = extractSvg(res.content);
+    if(!svg){
+      p.el.className = 'piece err';
+      p.art.innerHTML = ''; p.art.textContent = 'no SVG';
+      var raw = document.createElement('div'); raw.className='raw';
+      raw.textContent = res.content.slice(0,500) || '(empty)';
+      p.art.parentNode.appendChild(raw);
+      return;
+    }
+    p.el.className = 'piece';
+    p.art.innerHTML = svg;
+    p.lastSvg = svg;
+  }catch(e){
+    if(e.name === 'AbortError'){ p.el.className='piece'; return; }
+    p.el.className = 'piece err';
+    p.art.innerHTML = ''; p.art.textContent = e.message;
+  }
+}
+
+async function run(){
+  var prompt = document.getElementById('prompt').value.trim();
+  if(!prompt){ setStatus('enter a '+(mode==='modify'?'change':'prompt')); return; }
+  ac = new AbortController();
+  goBtn.disabled = true; stopBtn.hidden = false; clearBtn.hidden = true;
+  var n = pieces.filter(function(p){return p.q.value.trim();}).length;
+  setStatus((mode==='modify'?'modifying ':'commissioning ') + n + ' models…');
+  try{
+    await Promise.all(pieces.map(function(p){ return paint(p, prompt); }));   // all at once
+    if(!ac.signal.aborted){
+      setStatus('done');
+      if(pieces.some(function(p){ return p.lastSvg; })){   // there's art — allow modify/clear
+        mode = 'modify';
+        goBtn.textContent = 'Modify art';
+        document.getElementById('prompt').placeholder = 'make the cow blue…';
+        clearBtn.hidden = false;
+      }
+    }
+  }finally{
+    goBtn.disabled = false; stopBtn.hidden = true; ac = null;
+  }
+}
+
+function clearCanvas(){
+  if(ac) ac.abort();
+  pieces.forEach(function(p){
+    p.el.className = 'piece'; p.art.innerHTML = ''; p.by.textContent = ''; p.lastSvg = null;
+    var rw = p.el.querySelector('.raw'); if(rw) rw.remove();
+  });
+  mode = 'commission';
+  goBtn.textContent = 'Commission all 4';
+  clearBtn.hidden = true;
+  setStatus('');
+}
+
+goBtn.addEventListener('click', run);
+clearBtn.addEventListener('click', clearCanvas);
+stopBtn.addEventListener('click', function(){ if(ac) ac.abort(); });
+document.getElementById('prompt').addEventListener('keydown', function(e){ if(e.key==='Enter') run(); });
+</script>
+</body>
+</html>

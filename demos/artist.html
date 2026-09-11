@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artist — iterative SVG drawing (dyva)</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--text:#e7e9ee;--text2:#9aa3b2;--accent:#6aa8ff;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:16px 20px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:18px}
+  header .sub{color:var(--text2);font-size:12px;margin-top:2px}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;padding:16px 20px;border-bottom:1px solid var(--line)}
+  .controls label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)}
+  .controls input{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:7px 9px;font-size:13px}
+  #prompt{min-width:240px}#model{min-width:200px}#base{min-width:220px}#rounds{width:70px}
+  button{background:var(--accent);color:#071224;border:0;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer;font-size:13px}
+  button.stop{background:#3a3f4b;color:var(--text)}
+  button:disabled{opacity:.5;cursor:default}
+  #status{padding:10px 20px;color:var(--text2);font-size:12px;min-height:18px}
+  #gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:0 20px 40px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+  .card .art{aspect-ratio:1/1;background:#fff;display:flex;align-items:center;justify-content:center;position:relative}
+  .card .art svg,.card .art img{width:100%;height:100%;display:block}
+  .card .cap{padding:8px 10px;font-size:11px;color:var(--text2);border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
+  .card .cap b{color:var(--text);font-weight:600}
+  .card.busy .art::after{content:"drawing…";position:absolute;color:#888;font-size:12px}
+  .card.err .art{background:#2a1418}
+  .card .raw{font:11px/1.4 ui-monospace,monospace;color:#c98;padding:8px 10px;max-height:120px;overflow:auto;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎨 Artist</h1>
+  <div class="sub">Give a vision model a prompt; it draws an SVG, sees its own render, and tries to improve it — 7 rounds, live. Built on the dyva router.</div>
+</header>
+
+<div class="controls">
+  <label>dyva URL<input id="base" placeholder="http://localhost:11435"></label>
+  <label>model query<input id="model" value="*/vision" placeholder="e.g. qwen*/vision"></label>
+  <label>prompt<input id="prompt" value="a snake" placeholder="draw a…"></label>
+  <label>rounds<input id="rounds" type="number" value="7" min="1" max="20"></label>
+  <button id="go">Draw</button>
+  <button id="stop" class="stop" hidden>Stop</button>
+</div>
+
+<div id="status"></div>
+<div id="gallery"></div>
+
+<script>
+var RASTER = 512;                         // px the SVG is rasterized to for the model
+var baseEl = document.getElementById('base');
+var gallery = document.getElementById('gallery');
+var statusEl = document.getElementById('status');
+var goBtn = document.getElementById('go');
+var stopBtn = document.getElementById('stop');
+var ac = null;
+
+// Default the dyva URL: same origin when this page is served (e.g. behind a proxy),
+// else a sensible localhost guess for opening the file standalone.
+baseEl.value = (location.protocol === 'file:' || !location.origin)
+  ? 'http://localhost:11435' : location.origin;
+
+function setStatus(t){ statusEl.textContent = t; }
+function apiBase(){ return (baseEl.value || '').trim().replace(/\/+$/,''); }
+
+// The model replies with prose that contains one <svg>…</svg> (sometimes fenced).
+// Pull the first complete svg element out; null if there isn't one.
+function extractSvg(text){
+  var m = String(text||'').match(/<svg[\s\S]*?<\/svg>/i);
+  return m ? m[0] : null;
+}
+
+// Rasterize an SVG string to a PNG data URL on a white ground (vision models read
+// a white canvas far better than transparency). Resolves to the dataURL.
+function rasterize(svg){
+  return new Promise(function(resolve, reject){
+    var blob = new Blob([svg], {type:'image/svg+xml;charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var img = new Image();
+    img.onload = function(){
+      try{
+        var c = document.createElement('canvas'); c.width = RASTER; c.height = RASTER;
+        var ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,RASTER,RASTER);
+        ctx.drawImage(img, 0, 0, RASTER, RASTER);
+        URL.revokeObjectURL(url);
+        resolve(c.toDataURL('image/png'));
+      }catch(e){ URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('SVG did not render')); };
+    img.src = url;
+  });
+}
+
+function addCard(n){
+  var card = document.createElement('div');
+  card.className = 'card busy';
+  card.innerHTML = '<div class="art"></div><div class="cap"><span>round <b>'+n+'</b></span><span class="host"></span></div>';
+  gallery.appendChild(card);
+  card.scrollIntoView({behavior:'smooth', block:'end'});
+  return card;
+}
+
+// One /api/chat round (non-streaming). `image` is an optional base64 PNG (no data:
+// prefix) sent in ollama's `images` field so dyva routes to a vision host.
+// STREAM the response: with stream:false dyva's race must wait for the ENTIRE
+// generation inside its timeout, and a big model drawing a full SVG blows past it.
+// Streaming only bounds first-token; the long SVG then streams unbounded.
+async function ask(model, messages){
+  var r = await fetch(apiBase()+'/api/chat', {
+    method:'POST', headers:{'Content-Type':'application/json'}, signal: ac.signal,
+    body: JSON.stringify({ model: model, messages: messages, stream: true })
+  });
+  var host = r.headers.get('X-Dyva-Host') || '';
+  var model_used = r.headers.get('X-Dyva-Model') || '';
+  if(!r.ok){
+    var em = 'HTTP '+r.status;
+    try{ var je = await r.json(); em = (je.error && (je.error.message||je.error)) || em; }catch(e){}
+    throw new Error(em);
+  }
+  var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', content = '';
+  while(true){
+    var chunk = await reader.read();
+    if(chunk.done) break;
+    buf += dec.decode(chunk.value, {stream:true});
+    var nl;
+    while((nl = buf.indexOf('\n')) >= 0){
+      var line = buf.slice(0, nl).trim(); buf = buf.slice(nl+1);
+      if(!line) continue;
+      try{ var d = JSON.parse(line); if(d.message && d.message.content) content += d.message.content; }catch(e){}
+    }
+  }
+  return { content: content, host: host, model: model_used };
+}
+
+var SYSTEM = 'You are an expert SVG illustrator. Reply with exactly ONE complete, '
+  + 'self-contained <svg> element (include a viewBox; no external images, scripts, or fonts) '
+  + 'and NOTHING else — no prose, no markdown fences.';
+
+async function run(){
+  var model = document.getElementById('model').value.trim();
+  var prompt = document.getElementById('prompt').value.trim();
+  var rounds = Math.max(1, Math.min(20, parseInt(document.getElementById('rounds').value,10) || 7));
+  if(!model || !prompt){ setStatus('enter a model query and a prompt'); return; }
+
+  ac = new AbortController();
+  gallery.innerHTML = '';
+  goBtn.disabled = true; stopBtn.hidden = false;
+
+  var prevSvg = null, prevPng = null;
+  try{
+    for(var i=1; i<=rounds; i++){
+      if(ac.signal.aborted) break;
+      setStatus('round '+i+' of '+rounds+' — asking '+model+'…');
+      var card = addCard(i);
+
+      var messages;
+      if(i === 1){
+        messages = [
+          {role:'system', content: SYSTEM},
+          {role:'user', content: 'Draw "'+prompt+'".'}
+        ];
+      }else{
+        messages = [
+          {role:'system', content: SYSTEM},
+          {role:'assistant', content: prevSvg},
+          {role:'user',
+           content: 'Above is your SVG of "'+prompt+'", and attached is how it actually renders. '
+                  + 'Improve it: fix anything broken or crude, add detail and polish, and make it '
+                  + 'clearly read as "'+prompt+'". Reply with ONE improved <svg> and nothing else.',
+           images: [prevPng]}
+        ];
+      }
+
+      var res = await ask(model, messages);
+      var svg = extractSvg(res.content);
+      card.querySelector('.host').textContent = (res.model||model).split('/').pop() + (res.host? ' · '+res.host : '');
+
+      if(!svg){
+        card.className = 'card err';
+        card.querySelector('.art').textContent = 'no SVG';
+        var raw = document.createElement('div'); raw.className = 'raw';
+        raw.textContent = res.content.slice(0, 600) || '(empty response)';
+        card.appendChild(raw);
+        setStatus('round '+i+': model returned no SVG — stopping');
+        break;
+      }
+
+      card.querySelector('.art').innerHTML = svg;     // live render
+      card.className = 'card';
+      prevSvg = svg;
+      try{ prevPng = (await rasterize(svg)).split(',')[1]; }   // strip data: prefix for ollama
+      catch(e){
+        setStatus('round '+i+': could not rasterize the SVG ('+e.message+') — stopping');
+        break;
+      }
+    }
+    if(!ac.signal.aborted) setStatus('done');
+  }catch(e){
+    if(e.name === 'AbortError') setStatus('stopped');
+    else setStatus('error: '+e.message);
+  }finally{
+    goBtn.disabled = false; stopBtn.hidden = true; ac = null;
+  }
+}
+
+goBtn.addEventListener('click', run);
+stopBtn.addEventListener('click', function(){ if(ac) ac.abort(); });
+document.getElementById('prompt').addEventListener('keydown', function(e){ if(e.key==='Enter') run(); });
+</script>
+</body>
+</html>
