@@ -9,8 +9,6 @@ EXTRA_ARGS=("$@")
 FID=
 SITE=fofa
 SERVERS=
-WORKERS=          # blank -> graflex.py default (10)
-CT=               # blank -> graflex.py default (60s per-host check timeout)
 source .env
 
 
@@ -75,10 +73,6 @@ case "$SERVICE" in
     # No port filter — ollama runs on many ports. ISO alpha-2 codes (UK -> GB);
     # each country is its own ≤250 slice past ZoomEye's cap.
     COUNTRIES="CN,US,FR,DE,IN,JP,AU,SG,IR,IT,GB,SA,ID,BR,SE,MX,ES,FI,CH"
-    # ZoomEye surfaces many dead ollama IPs; the 60s default check timeout makes a
-    # batch look hung. Short timeout + high concurrency churns through them fast.
-    CT=10
-    WORKERS=40
     ;;
 
   ollama)

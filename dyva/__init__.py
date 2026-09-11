@@ -4109,7 +4109,8 @@ async def _proxy_generate(request, session):
                 mark_worker_found(job_wid, host, full)
                 stream_resp = web.StreamResponse()
                 await _forward_stream(request, stream_resp, resp, first_line, host, full,
-                                      openai_format=False, upstream_openai=_oai)
+                                      openai_format=False, upstream_openai=_oai,
+                                      wid=job_wid, num_ctx=_effective_num_ctx(body))
                 return stream_resp
             msg = "worker manually stopped" if stopped else "all servers failed"
             if errors:
