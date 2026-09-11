@@ -56,7 +56,6 @@ case "$SERVICE" in
     exit $?
     ;;
 
-
   ollama-shodan)
     SERVICE=ollama
     SITE=shodan
@@ -72,7 +71,13 @@ case "$SERVICE" in
     SITE=zoomeye
     # No port filter — ollama runs on many ports. ISO alpha-2 codes (UK -> GB);
     # each country is its own ≤250 slice past ZoomEye's cap.
-    COUNTRIES="CN,US,FR,DE,IN,JP,AU,SG,IR,IT,GB,SA,ID,BR,SE,MX,ES,FI,CH"
+    COUNTRIES="RU,DE,US,CN,IN,GB,ES" #TR,RO,TH,SK,FR,JP,SG,IT,SA,ID,BR,VT"
+    ;;
+
+  lmstudio-zoomeye)
+    SERVICE=lmstudio
+    SITE=zoomeye
+    COUNTRIES="US,CN,RU,TR,KR,TH,RO,TW,DE,HK,JP,BR,VN,CA,FR,ES,IN,SG,CL,IT,NL,GB"
     ;;
 
   ollama)
@@ -179,7 +184,7 @@ ENDL
     ;;
 
   *)
-    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|comfyui|a1111|vllm|llama.cpp|lmstudio|gradio|combine]" >&2
+    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|comfyui|a1111|vllm|llama.cpp|lmstudio|lmstudio-zoomeye|gradio|combine]" >&2
     exit 1
     ;;
 esac

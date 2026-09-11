@@ -335,7 +335,7 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 /* Two spans, each with a thin coloured rule under the words: finding a host
    (blue) then running the job on it (green). Just a line — no fill. */
 .wk-timeline{margin-left:auto;flex:0 0 auto;display:flex;gap:12px;font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
-.wk-seg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim);padding-bottom:2px;border-bottom:2px solid transparent}
+.wk-seg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim);padding-bottom:0px;border-bottom:1px solid transparent}
 .wk-find{border-bottom-color:var(--accent)}
 .wk-run{border-bottom-color:#39d353;flex:1 1 auto}
 .wk-time{color:var(--text-faint);white-space:nowrap;flex:0 0 auto}
@@ -2115,7 +2115,7 @@ function paintTimeline(tl,w,total,checkedStr){
   var label=w.done?(w.ok===false?'stopped':''):'running';   // 'ran' dropped
   // tps after the duration: completion tokens / run seconds — "1.9s 30tps running"
   var tps='';
-  if(w.ctoks&&runSecs>0){var _v=w.ctoks/runSecs;_v=_v<5?Math.round(_v*10)/10:Math.round(_v);if(_v>0)tps=' '+_v+'tps';}
+  if(w.ctoks&&runSecs>0){var _v=w.ctoks/runSecs;_v=_v<5?Math.round(_v*10)/10:Math.round(_v);if(_v>0)tps=' '+_v+'t/s';}
   run.textContent=timerText(runSecs)+tps+(label?' '+label:'');
 }
 var _lastWorkers=[];
@@ -2204,7 +2204,7 @@ function renderWorkers(workers){
     var where=w.host?String(w.host).replace(/^https?:\/\//,''):'';
     var rm=w.rmodel?String(w.rmodel).replace(/\\/g,'/').split('/').pop():'';
     var svc=w.service||'';
-    var prov=[rm,svc,where].filter(Boolean).join(' \u00b7 ');
+    var prov=[where,rm].filter(Boolean).join(' ');
     if(prov){
       var hs=document.createElement('span');hs.className='worker-host';
       hs.textContent=prov;hs.title=prov;
@@ -2229,8 +2229,8 @@ function renderWorkers(workers){
     if(w.ptoks!=null||w.ctoks!=null||w.num_ctx!=null){
       var tk=document.createElement('span');tk.className='wk-tok'+(w.truncated?' trunc':'');
       tk.textContent='↑'+_kfmt(w.ptoks)+' ↓'+_kfmt(w.ctoks)+' ('+_kfmt(w.num_ctx)+')'+(w.truncated?' ⚠':'');
-      tk.title='↑ prompt (upstream) · ↓ completion (downstream) · (context window) — in 1024-token k'
-        +(w.truncated?' — prompt filled the window, head truncated':'');
+      tk.title='↑ prompt (upstream) ↓ completion (downstream) (context window) in 1024-token k'
+        +(w.truncated?' prompt filled the window, head truncated':'');
       tl.appendChild(tk);
     }
     // Wall-clock time the request began (24hr). Static — set once, never ticks;
@@ -3438,7 +3438,7 @@ function setAssistantLabel(el,host,fmodel,tps,service){
   if(fmodel)bits.push(fmodel);
   if(service)bits.push(service);
   if(host)bits.push(String(host).replace(/^https?:\/\//,''));
-  if(tps!==undefined&&tps!==null&&!isNaN(tps))bits.push(tps+' tps');
+  if(tps!==undefined&&tps!==null&&!isNaN(tps))bits.push(tps+' t/s');
   var meta=el.querySelector('.role-meta');
   if(!bits.length){if(meta)meta.remove();return}
   if(!meta){
@@ -5242,7 +5242,7 @@ function _argsValidFor(name,args){
   }
   return true;
 }
-var READ_DOCS_TOOL={type:'function',function:{name:'help',description:'Get the docs (description + every parameter) for another tool.',parameters:{type:'object',properties:{tool:{type:'string',enum:Object.keys(TOOL_DEFS),description:'Which tool to get help for'}},required:['tool']}}};
+var READ_DOCS_TOOL={type:'function',function:{name:'help',description:'Get the docs (description + every parameter) for another tool.',parameters:{type:'object',properties:{tool:{type:'string',description:'Which tool to get help for'}},required:['tool']}}};
 // Render a tool's parameters as doc lines, expanding nested object / array-item
 // schemas (e.g. spawn_agents' per-agent name/task/model) — the blanked terse
 // schema omits params, so help / the gate are the only place the model can learn

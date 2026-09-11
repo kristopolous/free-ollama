@@ -59,6 +59,11 @@ SHODAN_PAGES = 2
 # ZoomEye's JSON search API. The session cookie is a SECRET, read only from the
 # environment (ZOOMEYE_COOKIE in .env) — never hard-code it or commit it.
 ZOOMEYE_API = "https://www.zoomeye.ai/api/search"
+# ZoomEye serves only the first ~250 results (pageSize 50 -> 5 pages); page 6+ errors.
+ZOOMEYE_MAX_PAGES = 5
+# Always constrain to hosts SEEN in the last N days (after=today-N, before=future),
+# so the limited points budget is spent on fresh, likelier-alive hosts.
+ZOOMEYE_SEEN_DAYS = 21
 
 
 def _zoomeye_cookie():
@@ -124,6 +129,7 @@ SERVICE_CONFIG = {
     "lmstudio": {
         "port": 1234,
         "fofa_query": 'body="Unexpected endpoint or method. (GET /)"',
+        "zoomeye_query": '"Unexpected endpoint or method"',
         "check_path": "/v1/models",
     },
 }
@@ -1181,15 +1187,22 @@ def _parse_zoomeye(data, service):
         port = (m.get("portinfo") or {}).get("port")
         if not ip or not port:
             continue
-        key = f"{ip}:{port}"
-        if key in seen:
-            continue
-        seen.add(key)
-        entry = {"service": service, "host": key, "site": "zoomeye"}
+        # ZoomEye's `ip` is usually a string but can be a LIST (e.g. a Cloudflare-
+        # fronted host resolving to several edge IPs) — make one host per IP, not
+        # "['1.2.3.4', '5.6.7.8']:port".
+        ips = ip if isinstance(ip, list) else [ip]
         cc = (((m.get("geoinfo") or {}).get("country") or {}).get("code"))
-        if cc:
-            entry["country"] = cc
-        hosts.append(entry)
+        for one in ips:
+            if not one:
+                continue
+            key = f"{one}:{port}"
+            if key in seen:
+                continue
+            seen.add(key)
+            entry = {"service": service, "host": key, "site": "zoomeye"}
+            if cc:
+                entry["country"] = cc
+            hosts.append(entry)
     return hosts
 
 
@@ -1229,12 +1242,31 @@ def _fetch_zoomeye(dry, svc, base_query, page=1, run_ts=None, curlify=False, lab
         log.info(f"# url: GET {ZOOMEYE_API}?q={qb64}&page={page}&t=v4+v6+web")
         return None
 
+    # Surface the REAL error kind, not a bare status: ZoomEye puts the reason
+    # (expired/invalid cookie, insufficient points, rate limit) in the response
+    # body, and can even return HTTP 200 with an error `status`/`message` in JSON.
     try:
         resp = requests.get(ZOOMEYE_API, headers=headers, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()          # unparsable body -> ValueError -> stop
-    except Exception as e:
-        log.warning(f"zoomeye: stopping — {e}")
+    except requests.exceptions.RequestException as e:
+        log.warning(f"zoomeye: stopping — request failed ({type(e).__name__}): {e}")
+        return None
+    if resp.status_code != 200:
+        log.warning(f"zoomeye: stopping — HTTP {resp.status_code}: {(resp.text or '')[:300]}")
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        log.warning(f"zoomeye: stopping — unparsable body (HTTP {resp.status_code}): {(resp.text or '')[:200]}")
+        return None
+    st = data.get("status")
+    if st is not None and st != 200:
+        msg = data.get("message") or data.get("error") or data.get("msg") or ""
+        log.warning(f"zoomeye: stopping — API status {st}: {msg}")
+        if st == 402:
+            # Out of credits — every remaining query would fail the same way, so
+            # abort the whole run (not just this query) rather than burn requests.
+            log.error("zoomeye: out of credits — aborting run")
+            sys.exit(2)
         return None
 
     if run_ts:
@@ -1358,7 +1390,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             return []
         if servers or fids:
             log.warning("--servers/--fid are ignored with --site zoomeye")
-        from datetime import datetime
+        from datetime import datetime, timedelta
         run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
         _RUN_TS = run_ts
         if session:
@@ -1382,20 +1414,41 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             country_list = [None]
         if shuffle:
             random.shuffle(country_list)
-        queries = [(f'{base_query} && country="{c}"' if c else base_query) for c in country_list]
+        # Always restrict to hosts seen recently: after = today - ZOOMEYE_SEEN_DAYS,
+        # before = 30 days out (a lazy future buffer so timezone skew can't exclude
+        # "today" regardless of ZoomEye's clock).
+        _today = datetime.now().date()
+        _window = (f'after="{(_today - timedelta(days=ZOOMEYE_SEEN_DAYS)).isoformat()}"'
+                   f' && before="{(_today + timedelta(days=30)).isoformat()}"')
+        queries = []
+        for c in country_list:
+            parts = [base_query]
+            if c:
+                parts.append(f'country="{c}"')
+            parts.append(_window)
+            queries.append(" && ".join(parts))
 
         pool = _load_json(hosts_file)
         seen = {_entry_host(h) for h in pool}
         svc = service or name or "unknown"
         start = time.time()
-        for combined in queries:
+        for qi, combined in enumerate(queries):
             page = 1
-            while True:
+            got = 0
+            while page <= ZOOMEYE_MAX_PAGES:    # ZoomEye only serves pages 1-5; p6+ errors
                 label = f"{_tag(combined)}-p{page}"
+                # Resume (-i): a page whose raw JSON is already cached this session was
+                # fetched (and its hosts pooled + checked) on a prior run. Skip the
+                # re-fetch so we don't burn ZoomEye points re-pulling what we have.
+                if session and not dry and os.path.exists(_zoomeye_path(label, run_ts, svc)):
+                    log.info(f"[{qi+1}/{len(queries)}] {combined} p{page}: cached, skip")
+                    page += 1
+                    continue
                 data = _fetch_zoomeye(dry, svc, combined, page=page, run_ts=run_ts,
                                       curlify=curlify, label=label, pname=svc)
                 if curlify or dry or data is None:
                     break                       # dry / curlify / http error / unparsable -> stop
+                t_fetched = time.time()         # the check that follows counts toward --sleep pacing
                 page_hosts = _parse_zoomeye(data, svc)
                 if not page_hosts:
                     break                       # no more results (hit the cap) -> stop
@@ -1407,17 +1460,28 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                         seen.add(key)
                         fresh += 1
                         fresh_hosts.append(h)
+                got += len(page_hosts)
                 if not dry:
                     _save_json(hosts_file, pool)
                     total = data.get("total")
-                    log.info(f"[{svc}] {combined} p{page}: {len(page_hosts)} hosts (+{fresh} new)"
-                             + (f" of {total}" if total else "") + f" from {_last_result_file}")
-                    log.info(f"  total: {len(pool)}   lapsed: {_fmt_duration(time.time() - start)}")
+                    elapsed = time.time() - start
+                    eta = elapsed * (len(queries) - (qi + 1)) / (qi + 1)
+                    log.info(f"[{qi+1}/{len(queries)}] {combined} p{page}: "
+                             f"{len(page_hosts)} hosts (+{fresh} new), {got} this query"
+                             + (f" of {total} available" if total else ""))
+                    log.info(f"  pool: {len(pool)}   eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}")
                 if check_batch_fn and fresh_hosts:
                     check_batch_fn(fresh_hosts)
                 page += 1
+                if page > ZOOMEYE_MAX_PAGES:    # ZoomEye only serves pages 1-5; p6+ errors
+                    break
                 if not curlify:
-                    time.sleep(sleep)
+                    # The check phase above already spent wall-clock time; count it
+                    # toward the --sleep pacing and only sleep the remainder (>=0),
+                    # rather than fetch + full-check + full-sleep.
+                    remaining = sleep - (time.time() - t_fetched)
+                    if remaining > 0:
+                        time.sleep(remaining)
         hosts = pool
     else:
         if not FOFA_COOKIE:
@@ -1785,7 +1849,11 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                 nkey = entry["host"]
                 notworking[nkey] = nr
                 _save_json_atomic(notworking_file, notworking)
-                _save_check_failure(h, p, reason)   # so -i resume skips it too
+                # host:port for the -i resume skip-list — `h`/`p` were never defined
+                # in this scope, so this line used to NameError and get swallowed by
+                # gather(return_exceptions=True), taking the print below down with it.
+                _hp = entry["host"].split(":")
+                _save_check_failure(_hp[0], (_hp[1] if len(_hp) > 1 else ""), reason)
                 log.info(f"  {entry['host']}: {reason}")
         completed += 1
         if completed % STATS_EVERY == 0:

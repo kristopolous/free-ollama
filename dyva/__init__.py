@@ -3716,6 +3716,59 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
         await resp.release()
 
 
+async def _drain_stream(resp, first_line, upstream_openai, model):
+    """Consume a streaming upstream response into ONE complete Ollama-shaped object
+    (the same shape the old non-streaming path returned), so a client that asked for
+    stream:false still gets a single response — while we always stream from the host
+    (the race only has to bound first-token, not the whole generation). `first_line`
+    was already normalized to an Ollama JSON line by the race; later lines are raw."""
+    content, thinking, tool_calls, done_obj = "", "", [], None
+
+    def accept(obj):
+        nonlocal content, thinking, done_obj
+        m = obj.get("message") or {}
+        if m.get("content"):
+            content += m["content"]
+        if m.get("thinking"):
+            thinking += m["thinking"]
+        tcs = m.get("tool_calls")
+        if tcs:
+            tool_calls.extend(tcs)
+        if obj.get("done"):
+            done_obj = obj
+
+    if first_line:
+        try:
+            accept(json.loads(first_line))
+        except Exception:
+            pass
+    async for raw in resp.content:
+        if not raw or raw == b"\n":
+            continue
+        raw = raw.rstrip(b"\n\r")
+        if upstream_openai:
+            obj = openai_stream_to_ollama(raw, model)
+            if obj is None:
+                continue
+        else:
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+        accept(obj)
+
+    data = dict(done_obj or {})
+    data.setdefault("model", model)
+    data["done"] = True
+    msg = {"role": "assistant", "content": content}
+    if thinking:
+        msg["thinking"] = thinking
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    data["message"] = msg
+    return data
+
+
 def chat_fmt(data, model, openai_format):
     if openai_format:
         return web.json_response(to_openai(data, model))
@@ -4013,23 +4066,27 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                         content_type="text/event-stream",
                     )
             else:
-                # Truncation-aware loop: if the host reports a prompt that filled
-                # the num_ctx window we sent, Ollama dropped the head and the answer
-                # is built on a cut prompt — a failure we caused by under-sizing, so
-                # re-send with a DOUBLED window (never marking the host bad; it
-                # answered). Give up into a 413 only when even the hard ceiling
-                # truncates — then the conversation is genuinely too large.
+                # The CLIENT asked for stream:false, but we ALWAYS stream from the
+                # host (do_stream=True) and buffer it into one response here. A
+                # non-streamed upstream request makes the race wait for the ENTIRE
+                # generation inside its timeout, so a big/slow-but-healthy model times
+                # out; streaming only bounds first-token. Truncation-retry is kept —
+                # the drained `done` chunk still carries the token counts.
                 nctx_pin = None
                 for _attempt in range(NUM_CTX_RETRIES + 1):
-                    send_payload = dict(opayload, stream=False)
+                    send_payload = dict(opayload)
                     if nctx_pin:
                         send_payload["options"] = dict(send_payload.get("options") or {},
                                                        num_ctx=nctx_pin)
-                    result, errors, stopped = await _race_servers(session, model, _servers, send_payload, do_stream=False, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
+                    result, errors, stopped = await _race_servers(session, model, _servers, send_payload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
                     if not result:
                         break
-                    _, host, full, data = result
+                    _, host, full, resp, first_line, first, _oai = result
                     sent_ctx = _effective_num_ctx(send_payload)
+                    try:
+                        data = await _drain_stream(resp, first_line, _oai, full)
+                    finally:
+                        await resp.release()
                     if _is_truncated(data, sent_ctx):
                         if _attempt < NUM_CTX_RETRIES and sent_ctx < NUM_CTX_MAX:
                             nctx_pin = min(sent_ctx * 2, NUM_CTX_MAX)
@@ -4042,12 +4099,12 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                             "window — trim the history or start a new chat"), status=413)
                     mark_worker_found(job_wid, host, full)
                     await account_tokens(job_wid, host, full, data, sent_ctx)
-                    resp = chat_fmt(data, model, openai_format)
-                    resp.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
-                    resp.headers["X-Dyva-Model"] = full
-                    resp.headers["X-Dyva-Service"] = service_of(host)
-                    resp.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
-                    return resp
+                    out = chat_fmt(data, model, openai_format)
+                    out.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
+                    out.headers["X-Dyva-Model"] = full
+                    out.headers["X-Dyva-Service"] = service_of(host)
+                    out.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
+                    return out
 
         msg = "worker manually stopped" if stopped else "all servers failed"
         if errors:
@@ -11626,7 +11683,14 @@ def make_app():
             # socket to a sticky host survives the gap between tool rounds (model
             # think + client-side tool execution) and gets reused instead of
             # reconnecting each round.
-            connector=aiohttp.TCPConnector(ssl=False, keepalive_timeout=120),
+            # limit=0 (unlimited): dyva is a router that fans out to MANY distinct
+            # hosts, and with the default limit=100 the pool saturates — released
+            # connections linger (keepalive) to hosts that are never reused, hoard
+            # the 100 slots, and every further connection then WAITS for a free slot
+            # and times out (mass "TimeoutError" while the hosts are reachable by
+            # hand). App-level concurrency (the semaphore + hedged race) bounds the
+            # real fan-out, so the connector must not be the bottleneck.
+            connector=aiohttp.TCPConnector(ssl=False, keepalive_timeout=120, limit=0),
             timeout=aiohttp.ClientTimeout(total=None),
         )
         app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)
@@ -11722,6 +11786,13 @@ def make_app():
     app.router.add_post("/v1/music", handle_music_post)
     app.router.add_get("/v1/music/{id}", handle_music_get)
     app.router.add_get("/v1/music/{id}/content", handle_music_content)
+
+    # Self-contained demo pages (repo-root demos/) served from dyva's own origin so
+    # they can hit /api/chat without cross-origin blocks. Registered BEFORE the "/"
+    # catch-all so /demos/* resolves here. Absent in a packaged install -> skip.
+    demos_dir = os.path.join(os.path.dirname(__file__), os.pardir, "demos")
+    if os.path.isdir(demos_dir):
+        app.router.add_static("/demos", demos_dir, show_index=True)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)
