@@ -120,7 +120,12 @@ WORKER_COUNT = 10
 # Seconds the sticky (last-good) host gets to itself before the rest of the
 # pool is raced alongside it; first to produce wins, the loser is dropped.
 # Caps the wait on a dead-but-connected favourite. 0 disables (race at once).
-HEDGE_DELAY = 30
+HEDGE_DELAY = 15
+# Upper bound on a believable tokens/second reading. Even a tiny model on top-end
+# hardware stays well under this; a computed value above it is a measurement
+# artifact (a buffered response drained in near-zero wall-clock), not a real rate,
+# so it's dropped rather than stored.
+TPS_CEILING = 5000
 # A tool-loop CONTINUATION (the incoming messages end with a tool result) is already
 # mid-conversation on a host that just answered it — racing the pool again each round
 # is wasted work and risks switching hosts mid-loop (losing the upstream's warm
@@ -1141,15 +1146,29 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     if p is None and c is None:
         return
     mark_worker_tokens(wid, p, c, num_ctx)
-    # tokens/second — the SAME wall-clock measure the worker card shows: completion
-    # tokens / run-seconds (now minus when the host was found, i.e. after first
-    # token). Works for every dialect, unlike eval_duration which only Ollama
-    # reports. Stored as the most-recent (host, model) reading.
-    w = _workers.get(wid)
-    if w and c and w.get("found"):
-        _run = time.time() - w["found"]
-        if _run > 0:
-            record_perf(host, model, tps=c / _run)
+    # tokens/second, most-recent (host, model) reading. Prefer the upstream's OWN
+    # generation timing when it reports it: Ollama gives eval_count / eval_duration
+    # (nanoseconds), the true tok/s regardless of how fast WE drained the socket.
+    # Fall back to a wall-clock measure (completion tokens over now-minus-found, the
+    # window after first token) only when the upstream is silent about timing — and
+    # a wall-clock window can collapse when a host buffers the whole answer and
+    # bursts it (the generation already finished upstream before our first read), so
+    # reject any fallback value above what real inference hardware can do rather than
+    # storing the millions-of-tok/s garbage that produces.
+    tps = None
+    ec, ed = obj.get("eval_count"), obj.get("eval_duration")   # ed is ns, Ollama native
+    if ec and ed and ed > 0:
+        tps = ec / (ed / 1e9)
+    else:
+        w = _workers.get(wid)
+        if w and c and w.get("found"):
+            _run = time.time() - w["found"]
+            if _run > 0:
+                cand = c / _run
+                if cand <= TPS_CEILING:      # else it's a read-speed artifact, not a rate
+                    tps = cand
+    if tps is not None:
+        record_perf(host, model, tps=tps)
     # Token counts live on the WORKER CARD, not the activity feed — the feed is for
     # request events (trying / failed / connected), and per-turn token metrics
     # aren't that class of thing. The one exception is a truncation, which is a
@@ -2785,7 +2804,7 @@ SENT_LOG_PATH = "/tmp/graflex/dyva-sent.jsonl"
 SENT_LOG_ROTATE = 5000
 
 
-def _log_sent(url, body):
+def _log_sent(url, body, rid=None):
     try:
         os.makedirs(os.path.dirname(SENT_LOG_PATH), exist_ok=True)
         # roughly every 100th write, see if it's grown past the cap and reset it
@@ -2798,7 +2817,7 @@ def _log_sent(url, body):
             except OSError:
                 pass
         with open(SENT_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": _now_iso(), "url": url, "body": body},
+            f.write(json.dumps({"ts": _now_iso(), "rid": rid, "url": url, "body": body},
                                ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -3295,6 +3314,10 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
     must release/close it. `resp` is None only when BOTH dialects said the
     endpoint doesn't exist. `oai` is the dialect used, `ep` the endpoint.
     Connection/timeout errors propagate to the caller."""
+    # One request id per send so the lifecycle is greppable across the logs:
+    # "[rid] req …" (what we sent) then "[rid] resp …" / "[rid] err …" (what came
+    # back), correlated even when a request tries both dialects or races many hosts.
+    rid = uuid.uuid4().hex[:8]
     oai = speaks_openai(host)
     resp, ep = None, endpoint
     for attempt_oai in (oai, not oai):
@@ -3315,9 +3338,19 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
             if p.get("messages"):
                 p = dict(p, messages=_coerced_messages(p["messages"]))
         _curlify("POST", f"{host}{ep}", p)
-        _log_sent(f"{host}{ep}", p)
-        resp = await asyncio.wait_for(
-            session.post(f"{host}{ep}", json=p), timeout=TIMEOUT)
+        _log_sent(f"{host}{ep}", p, rid)
+        _nctx = (p.get("options") or {}).get("num_ctx")
+        log.info(f"[{rid}] req {host}{ep} model={full} stream={do_stream}"
+                 + (f" num_ctx={_nctx}" if _nctx else ""))
+        _t0 = time.time()
+        try:
+            resp = await asyncio.wait_for(
+                session.post(f"{host}{ep}", json=p), timeout=TIMEOUT)
+        except Exception as e:
+            log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
+                     f"after {time.time()-_t0:.1f}s")
+            raise
+        log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s")
         if resp.status not in (404, 405, 501):
             return resp, attempt_oai, ep
         peek = ""
@@ -4083,6 +4116,11 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                         break
                     _, host, full, resp, first_line, first, _oai = result
                     sent_ctx = _effective_num_ctx(send_payload)
+                    # Latch the find-time NOW — first token is already in hand
+                    # (the race returned on it). Draining below takes the whole
+                    # generation, so if we stamped `found` afterwards the tps
+                    # window would collapse to ~0s and read as millions of tok/s.
+                    mark_worker_found(job_wid, host, full)
                     try:
                         data = await _drain_stream(resp, first_line, _oai, full)
                     finally:
@@ -4097,7 +4135,6 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                         return web.json_response(err_obj(
                             f"context too large: the conversation fills even a {sent_ctx}-token "
                             "window — trim the history or start a new chat"), status=413)
-                    mark_worker_found(job_wid, host, full)
                     await account_tokens(job_wid, host, full, data, sent_ctx)
                     out = chat_fmt(data, model, openai_format)
                     out.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
@@ -8422,6 +8459,7 @@ async def _run_chat_job(session, jid):
 
                     pending = []          # unflushed NDJSON lines
                     done_obj = [None]     # final done chunk, for token accounting
+                    partial = [""]        # assistant text so far — carried on a user skip
 
                     async def _flush(force=False):
                         if pending and (force or sum(len(x) for x in pending) >= _JOB_FLUSH_CHARS):
@@ -8444,9 +8482,12 @@ async def _run_chat_job(session, jid):
                                 obj = json.loads(line_bytes)
                             except Exception:
                                 return None, False
-                        tcs = (obj.get("message") or {}).get("tool_calls")
+                        _m = obj.get("message") or {}
+                        tcs = _m.get("tool_calls")
                         if tcs:
                             round_tcs.extend(tcs)
+                        if _m.get("content"):
+                            partial[0] += _m["content"]   # for skip-continuation
                         if obj.get("done"):
                             done_obj[0] = obj
                         return json.dumps(obj, ensure_ascii=False), bool(obj.get("done"))
@@ -8481,6 +8522,21 @@ async def _run_chat_job(session, jid):
                             record_verdict(host, model, skip("skipped by user"))
                             errors.append(f"{host}: skipped by user")
                             servers = [s for s in servers if s[1] != host]
+                            # EXPERIMENTAL skip-continuation (inherently undefined —
+                            # first attempt, tweak later): carry the work this host
+                            # already streamed into the context so the NEXT host
+                            # CONTINUES rather than restarting — otherwise its fresh
+                            # answer appends to the job buffer that already holds this
+                            # partial and the bubble is garbled. Represented as an
+                            # assistant turn + a "continue" nudge: syntactically valid
+                            # on every dialect (ends on user). The model may continue
+                            # cleanly, restate, or veer — the user chose to skip.
+                            if partial[0].strip():
+                                opayload["messages"] = list(opayload.get("messages") or []) + [
+                                    {"role": "assistant", "content": partial[0]},
+                                    {"role": "user", "content": "Continue your previous answer from "
+                                     "exactly where it was cut off. Do not repeat what you already wrote."},
+                                ]
                             _set_worker_phase(job_wid, None)
                             ctl["skip"] = False
                             skipped = True
@@ -11792,6 +11848,14 @@ def make_app():
     # catch-all so /demos/* resolves here. Absent in a packaged install -> skip.
     demos_dir = os.path.join(os.path.dirname(__file__), os.pardir, "demos")
     if os.path.isdir(demos_dir):
+        # /demos and /demos/ render index.html (aiohttp's static handler won't pick
+        # an index file on its own); everything else in demos/ is served as-is.
+        _demos_index = os.path.join(demos_dir, "index.html")
+        if os.path.exists(_demos_index):
+            async def _serve_demos_index(request, _p=_demos_index):
+                return web.FileResponse(_p, headers={"Cache-Control": "no-cache"})
+            app.router.add_get("/demos", _serve_demos_index)
+            app.router.add_get("/demos/", _serve_demos_index)
         app.router.add_static("/demos", demos_dir, show_index=True)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")

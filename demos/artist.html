@@ -13,6 +13,7 @@
   header .sub{color:var(--text2);font-size:12px;margin-top:2px}
   .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;padding:16px 20px;border-bottom:1px solid var(--line)}
   .controls label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)}
+  .controls label.chk{flex-direction:row;align-items:center;gap:6px;font-size:12px;cursor:pointer}
   .controls input{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:7px 9px;font-size:13px}
   #prompt{min-width:240px}#model{min-width:200px}#base{min-width:220px}#rounds{width:70px}
   button{background:var(--accent);color:#071224;border:0;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer;font-size:13px}
@@ -21,11 +22,14 @@
   #status{padding:10px 20px;color:var(--text2);font-size:12px;min-height:18px}
   #gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:0 20px 40px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
-  .card .art{aspect-ratio:1/1;background:#fff;display:flex;align-items:center;justify-content:center;position:relative}
+  .card .art{aspect-ratio:1/1;background:#fff;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
   .card .art svg,.card .art img{width:100%;height:100%;display:block}
   .card .cap{padding:8px 10px;font-size:11px;color:var(--text2);border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
   .card .cap b{color:var(--text);font-weight:600}
   .card.busy .art::after{content:"drawing…";position:absolute;color:#888;font-size:12px}
+  .card.streaming .art::after{content:none}   /* raw text is the progress indicator */
+  .streamraw{position:absolute;inset:0;margin:0;padding:8px;overflow:auto;background:#fff;color:#5a6270;
+             font:10px/1.35 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;word-break:break-all;text-align:left}
   .card.err .art{background:#2a1418}
   .card .raw{font:11px/1.4 ui-monospace,monospace;color:#c98;padding:8px 10px;max-height:120px;overflow:auto;white-space:pre-wrap}
 </style>
@@ -33,7 +37,8 @@
 <body>
 <header>
   <h1>🎨 Artist</h1>
-  <div class="sub">Give a vision model a prompt; it draws an SVG, sees its own render, and tries to improve it — 7 rounds, live. Built on the dyva router.</div>
+  <div class="sub">A vision model draws an SVG, sees its own render, and improves it over N rounds — a dyva load test.
+    <b>grow context</b> off = repeated routing (flat context); on = context-window extension (num_ctx climbs each round).</div>
 </header>
 
 <div class="controls">
@@ -41,6 +46,8 @@
   <label>model query<input id="model" value="*/vision" placeholder="e.g. qwen*/vision"></label>
   <label>prompt<input id="prompt" value="a snake" placeholder="draw a…"></label>
   <label>rounds<input id="rounds" type="number" value="7" min="1" max="20"></label>
+  <label class="chk" title="ON: keep the whole conversation each round, so context (num_ctx) grows — a context-window-extension test. OFF: each round re-sends only the last SVG+image — a repeated-routing test.">
+    <input id="grow" type="checkbox"> grow context</label>
   <button id="go">Draw</button>
   <button id="stop" class="stop" hidden>Stop</button>
 </div>
@@ -59,8 +66,15 @@ var ac = null;
 
 // Default the dyva URL: same origin when this page is served (e.g. behind a proxy),
 // else a sensible localhost guess for opening the file standalone.
-baseEl.value = (location.protocol === 'file:' || !location.origin)
-  ? 'http://localhost:11435' : location.origin;
+// dyva serves this page at <base>/demos/<file>, so derive the base by STRIPPING the
+// "/demos/…" suffix off the right — never rebuild it from origin+port, which drops
+// any reverse-proxy path prefix (e.g. https://9ol.es/11434 -> wrongly https://9ol.es).
+baseEl.value = (function(){
+  var here = location.href.split(/[?#]/)[0];
+  var i = here.indexOf('/demos/');
+  if(location.protocol !== 'file:' && i >= 0) return here.slice(0, i);
+  return 'http://localhost:11435';   // opened standalone — no server origin to infer
+})();
 
 function setStatus(t){ statusEl.textContent = t; }
 function apiBase(){ return (baseEl.value || '').trim().replace(/\/+$/,''); }
@@ -75,11 +89,21 @@ function extractSvg(text){
 // Rasterize an SVG string to a PNG data URL on a white ground (vision models read
 // a white canvas far better than transparency). Resolves to the dataURL.
 function rasterize(svg){
+  // An SVG the DOM renders fine can still fail to load as an <img> (blob) if it
+  // lacks the xmlns — the #1 reason rasterization silently fails/hangs. Add it.
+  if(!/<svg[^>]*\bxmlns=/i.test(svg)) svg = svg.replace(/<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
   return new Promise(function(resolve, reject){
     var blob = new Blob([svg], {type:'image/svg+xml;charset=utf-8'});
     var url = URL.createObjectURL(blob);
     var img = new Image();
+    var settled = false;
+    // A malformed SVG can fire NEITHER load nor error, leaving this promise (and
+    // the whole round loop) hung forever. Guarantee it settles: guard against a
+    // double-settle and hard-time-out if the image never reports back.
+    function fail(msg){ if(settled) return; settled = true; clearTimeout(timer); URL.revokeObjectURL(url); reject(new Error(msg)); }
+    var timer = setTimeout(function(){ fail('rasterize timed out'); }, 10000);
     img.onload = function(){
+      if(settled) return; settled = true; clearTimeout(timer);
       try{
         var c = document.createElement('canvas'); c.width = RASTER; c.height = RASTER;
         var ctx = c.getContext('2d');
@@ -89,7 +113,7 @@ function rasterize(svg){
         resolve(c.toDataURL('image/png'));
       }catch(e){ URL.revokeObjectURL(url); reject(e); }
     };
-    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('SVG did not render')); };
+    img.onerror = function(){ fail('SVG did not render'); };
     img.src = url;
   });
 }
@@ -108,7 +132,10 @@ function addCard(n){
 // STREAM the response: with stream:false dyva's race must wait for the ENTIRE
 // generation inside its timeout, and a big model drawing a full SVG blows past it.
 // Streaming only bounds first-token; the long SVG then streams unbounded.
-async function ask(model, messages){
+// onEvent reports the phase so the UI can distinguish routing vs cold-start vs
+// thinking vs drawing: fires once when the response headers arrive (a host was
+// picked = routing done), then on every chunk with the accumulated thinking/content.
+async function ask(model, messages, onEvent){
   var r = await fetch(apiBase()+'/api/chat', {
     method:'POST', headers:{'Content-Type':'application/json'}, signal: ac.signal,
     body: JSON.stringify({ model: model, messages: messages, stream: true })
@@ -120,7 +147,8 @@ async function ask(model, messages){
     try{ var je = await r.json(); em = (je.error && (je.error.message||je.error)) || em; }catch(e){}
     throw new Error(em);
   }
-  var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', content = '';
+  if(onEvent) onEvent({host:host, model:model_used, thinking:'', content:''});  // routed/connected
+  var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', content = '', thinking = '';
   while(true){
     var chunk = await reader.read();
     if(chunk.done) break;
@@ -129,10 +157,15 @@ async function ask(model, messages){
     while((nl = buf.indexOf('\n')) >= 0){
       var line = buf.slice(0, nl).trim(); buf = buf.slice(nl+1);
       if(!line) continue;
-      try{ var d = JSON.parse(line); if(d.message && d.message.content) content += d.message.content; }catch(e){}
+      try{
+        var d = JSON.parse(line), m = d.message || {};
+        if(m.content)  content  += m.content;
+        if(m.thinking) thinking += m.thinking;   // reasoning tokens (ollama `thinking`)
+      }catch(e){}
     }
+    if(onEvent) onEvent({host:host, model:model_used, thinking:thinking, content:content});
   }
-  return { content: content, host: host, model: model_used };
+  return { content: content, thinking: thinking, host: host, model: model_used };
 }
 
 var SYSTEM = 'You are an expert SVG illustrator. Reply with exactly ONE complete, '
@@ -145,19 +178,36 @@ async function run(){
   var rounds = Math.max(1, Math.min(20, parseInt(document.getElementById('rounds').value,10) || 7));
   if(!model || !prompt){ setStatus('enter a model query and a prompt'); return; }
 
+  // grow ON  -> keep the whole conversation, so context (num_ctx) climbs each round
+  //             (context-window-extension / truncation test).
+  // grow OFF -> each round re-sends only the previous SVG + its raster
+  //             (repeated-routing test; context stays small).
+  var grow = document.getElementById('grow').checked;
+
   ac = new AbortController();
   gallery.innerHTML = '';
   goBtn.disabled = true; stopBtn.hidden = false;
 
+  var convo = [{role:'system', content: SYSTEM}];   // used only in grow mode
   var prevSvg = null, prevPng = null;
   try{
     for(var i=1; i<=rounds; i++){
       if(ac.signal.aborted) break;
-      setStatus('round '+i+' of '+rounds+' — asking '+model+'…');
+      setStatus('round '+i+' of '+rounds+' — asking '+model+'…'+(grow?' (context '+convo.length+' msgs)':''));
       var card = addCard(i);
 
+      var improve = (prevPng ? 'Here is how your last drawing of "'+prompt+'" actually renders (attached). '
+                             : 'Here is your last SVG of "'+prompt+'" (above). ')
+        + 'Improve it: fix anything broken or crude, add detail and polish, and make it clearly read '
+        + 'as "'+prompt+'". Reply with ONE improved <svg> and nothing else.';
+      var um = {role:'user', content: improve};
+      if(prevPng) um.images = [prevPng];   // omit when rasterize failed -> text-only improve
       var messages;
-      if(i === 1){
+      if(grow){
+        if(i === 1) convo.push({role:'user', content: 'Draw "'+prompt+'".'});
+        else        convo.push(um);
+        messages = convo;                 // the FULL, growing history
+      }else if(i === 1){
         messages = [
           {role:'system', content: SYSTEM},
           {role:'user', content: 'Draw "'+prompt+'".'}
@@ -166,15 +216,25 @@ async function run(){
         messages = [
           {role:'system', content: SYSTEM},
           {role:'assistant', content: prevSvg},
-          {role:'user',
-           content: 'Above is your SVG of "'+prompt+'", and attached is how it actually renders. '
-                  + 'Improve it: fix anything broken or crude, add detail and polish, and make it '
-                  + 'clearly read as "'+prompt+'". Reply with ONE improved <svg> and nothing else.',
-           images: [prevPng]}
+          um
         ];
       }
 
-      var res = await ask(model, messages);
+      // stream the raw SVG into the card so it's clear data is flowing, then swap
+      // to the rendered graphic when it's complete.
+      card.className = 'card streaming';
+      var _art = card.querySelector('.art');
+      var pre = document.createElement('pre'); pre.className = 'streamraw';
+      _art.innerHTML = ''; _art.appendChild(pre);
+      pre.textContent = '⟲ routing…';
+      var res = await ask(model, messages, function(ev){
+        var t;
+        if(ev.content)       t = ev.content;                              // drawing the SVG
+        else if(ev.thinking) t = '💭 thinking…\n\n' + ev.thinking;         // reasoning tokens
+        else t = ev.host ? ('◉ connected → '+ev.host+'\n\nwaiting for the first token — the model may be cold-loading…')
+                         : '⟲ routing…';                                  // still picking a host
+        pre.textContent = t.slice(-6000); pre.scrollTop = pre.scrollHeight;
+      });
       var svg = extractSvg(res.content);
       card.querySelector('.host').textContent = (res.model||model).split('/').pop() + (res.host? ' · '+res.host : '');
 
@@ -190,11 +250,12 @@ async function run(){
 
       card.querySelector('.art').innerHTML = svg;     // live render
       card.className = 'card';
+      if(grow) convo.push({role:'assistant', content: svg});   // extend the history
       prevSvg = svg;
       try{ prevPng = (await rasterize(svg)).split(',')[1]; }   // strip data: prefix for ollama
       catch(e){
-        setStatus('round '+i+': could not rasterize the SVG ('+e.message+') — stopping');
-        break;
+        prevPng = null;   // couldn't rasterize — DON'T stop; next round improves from the SVG source
+        setStatus('round '+i+': raster failed ('+e.message+') — continuing text-only');
       }
     }
     if(!ac.signal.aborted) setStatus('done');
