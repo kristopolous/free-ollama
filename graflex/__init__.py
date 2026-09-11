@@ -56,6 +56,17 @@ SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
 SHODAN_WEB = "https://www.shodan.io/search"
 SHODAN_PAGES = 2
 
+# ZoomEye's JSON search API. The session cookie is a SECRET, read only from the
+# environment (ZOOMEYE_COOKIE in .env) — never hard-code it or commit it.
+ZOOMEYE_API = "https://www.zoomeye.ai/api/search"
+
+
+def _zoomeye_cookie():
+    # Read at CALL time, not import: main() runs load_dotenv() after this module is
+    # imported, and the cookie may be a freshly-added .env line the shell hasn't
+    # exported yet — a module-level `os.getenv` would capture "" and never see it.
+    return os.getenv("ZOOMEYE_COOKIE", "")
+
 # run_ts of the most recent fetch session, so ctrl+c in main() can suggest
 # the exact -i value to resume with
 _RUN_TS = None
@@ -97,6 +108,7 @@ SERVICE_CONFIG = {
         "port": 11434,
         "fofa_query": ['app="ollama"', 'body="ollama is running"'],
         "shodan_query": '"ollama is running"',
+        "zoomeye_query": 'app="ollama"',
         "check_path": "/api/tags",
     },
     "llama.cpp": {
@@ -1145,6 +1157,97 @@ def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label=
     return _parse_shodan_html(out_path, svc)
 
 
+def _zoomeye_path(label, run_ts, svc="any"):
+    return os.path.join("/tmp/graflex", run_ts, "zoomeye", f"{svc}-{label}.json")
+
+
+def _zoomeye_token(cookie):
+    """The JWT the API also wants as a Cube-Authorization header lives inside the
+    cookie as `token=…`. Pull it out; '' if absent. String parsing, no regex."""
+    for part in (cookie or "").split(";"):
+        part = part.strip()
+        if part.startswith("token="):
+            return part[len("token="):].strip()
+    return ""
+
+
+def _parse_zoomeye(data, service):
+    """Extract unified ip:port host dicts from a ZoomEye /api/search JSON page —
+    the SAME shape fofa/shodan return: {service, host, site}. Empty list when the
+    page carries no matches (the natural end of pagination)."""
+    hosts, seen = [], set()
+    for m in (data.get("matches") or []):
+        ip = m.get("ip")
+        port = (m.get("portinfo") or {}).get("port")
+        if not ip or not port:
+            continue
+        key = f"{ip}:{port}"
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {"service": service, "host": key, "site": "zoomeye"}
+        cc = (((m.get("geoinfo") or {}).get("country") or {}).get("code"))
+        if cc:
+            entry["country"] = cc
+        hosts.append(entry)
+    return hosts
+
+
+def _fetch_zoomeye(dry, svc, base_query, page=1, run_ts=None, curlify=False, label="", pname="any"):
+    """One ZoomEye /api/search page as JSON, or None to STOP. The query is base64'd
+    (their `q` encoding); auth is the session cookie + the JWT echoed as
+    Cube-Authorization — both from ZOOMEYE_COOKIE, never hard-coded. No retry:
+    an HTTP error or unparsable body means we stop and die, by design."""
+    import requests
+    import curlify as curlify_mod
+    import base64
+    global _last_result_file
+
+    qb64 = base64.b64encode(base_query.encode()).decode()
+    # pageSize 50 matches the web UI (the API defaults to 10) — ~5 pages to the
+    # ~250 cap instead of ~25, so far fewer requests per country slice.
+    params = {"q": qb64, "page": page, "pageSize": 50, "t": "v4+v6+web"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://www.zoomeye.ai/searchResult?q={qb64}",
+    }
+    cookie = _zoomeye_cookie()
+    if cookie:
+        headers["Cookie"] = cookie
+        tok = _zoomeye_token(cookie)
+        if tok:
+            headers["Cube-Authorization"] = tok
+
+    if curlify:
+        req = requests.Request("GET", ZOOMEYE_API, headers=headers, params=params)
+        log.info(curlify_mod.to_curl(req.prepare()))
+        return None
+    if dry:
+        log.info(f"# query: {base_query} (page {page})")
+        log.info(f"# url: GET {ZOOMEYE_API}?q={qb64}&page={page}&t=v4+v6+web")
+        return None
+
+    try:
+        resp = requests.get(ZOOMEYE_API, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()          # unparsable body -> ValueError -> stop
+    except Exception as e:
+        log.warning(f"zoomeye: stopping — {e}")
+        return None
+
+    if run_ts:
+        out_path = _zoomeye_path(label, run_ts, pname)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8", errors="replace") as f:
+            json.dump(data, f)
+        _last_result_file = out_path
+    else:
+        _last_result_file = "zoomeye"
+    return data
+
+
 def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers=None, ports=None, countries=None, fids=None, sleep=SLEEP_DEFAULT, session=None, shuffle=False, site="fofa", check_batch_fn=None):
     global _RUN_TS
     hosts_file = _cache_file(name, "hosts")
@@ -1248,6 +1351,73 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 if not dry and not curlify and done_reqs < total_reqs:
                     time.sleep(sleep)
 
+        hosts = pool
+    elif site == "zoomeye":
+        if not _zoomeye_cookie():
+            log.error("ZOOMEYE_COOKIE must be set in .env for --site zoomeye. See README for how to copy it from your browser.")
+            return []
+        if servers or fids:
+            log.warning("--servers/--fid are ignored with --site zoomeye")
+        from datetime import datetime
+        run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
+        _RUN_TS = run_ts
+        if session:
+            log.info(f"resuming session {run_ts}")
+
+        base_query = query
+        if not base_query and service:
+            base_query = SERVICE_CONFIG[service].get("zoomeye_query")
+        if not base_query:
+            log.error(f"no zoomeye query for '{service or name}' — pass --query (zoomeye syntax, e.g. app=\"ollama\")")
+            return []
+
+        # ZoomEye caps a single query at ~250 retrievable results (payload `max`),
+        # so narrow by COUNTRY to slice past that: each country is its own ≤250
+        # pass, plus one broad (unnarrowed) pass. Deliberately NO port filter —
+        # ollama runs on many ports, so narrowing by port would miss most of them.
+        # Country codes are ISO alpha-2 (e.g. GB, not UK).
+        if isinstance(countries, str):
+            country_list = [None] + [c.strip() for c in countries.split(",") if c.strip()]
+        else:
+            country_list = [None]
+        if shuffle:
+            random.shuffle(country_list)
+        queries = [(f'{base_query} && country="{c}"' if c else base_query) for c in country_list]
+
+        pool = _load_json(hosts_file)
+        seen = {_entry_host(h) for h in pool}
+        svc = service or name or "unknown"
+        start = time.time()
+        for combined in queries:
+            page = 1
+            while True:
+                label = f"{_tag(combined)}-p{page}"
+                data = _fetch_zoomeye(dry, svc, combined, page=page, run_ts=run_ts,
+                                      curlify=curlify, label=label, pname=svc)
+                if curlify or dry or data is None:
+                    break                       # dry / curlify / http error / unparsable -> stop
+                page_hosts = _parse_zoomeye(data, svc)
+                if not page_hosts:
+                    break                       # no more results (hit the cap) -> stop
+                fresh, fresh_hosts = 0, []
+                for h in page_hosts:
+                    key = _entry_host(h)
+                    if key not in seen:
+                        pool.append(h)
+                        seen.add(key)
+                        fresh += 1
+                        fresh_hosts.append(h)
+                if not dry:
+                    _save_json(hosts_file, pool)
+                    total = data.get("total")
+                    log.info(f"[{svc}] {combined} p{page}: {len(page_hosts)} hosts (+{fresh} new)"
+                             + (f" of {total}" if total else "") + f" from {_last_result_file}")
+                    log.info(f"  total: {len(pool)}   lapsed: {_fmt_duration(time.time() - start)}")
+                if check_batch_fn and fresh_hosts:
+                    check_batch_fn(fresh_hosts)
+                page += 1
+                if not curlify:
+                    time.sleep(sleep)
         hosts = pool
     else:
         if not FOFA_COOKIE:
@@ -1543,8 +1713,20 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
         nonlocal completed
         start = time.time()
         async with sem:
-            result, method = await _doorknock(session, entry, service,
-                                              check_timeout, existing_working)
+            # A probe that times out or errors RAISES (notably the session-level
+            # ClientTimeout -> asyncio.TimeoutError). Catch it here and turn it into
+            # an error result, or gather(return_exceptions=True) swallows it silently:
+            # the host records as neither working nor notworking and the per-host
+            # failure line never prints ("N checked, 0 working, 0 notworking").
+            try:
+                result, method = await _doorknock(session, entry, service,
+                                                  check_timeout, existing_working)
+            except asyncio.TimeoutError:
+                result, method = {"error": "timeout"}, None
+            except (aiohttp.ClientError, OSError) as e:
+                result, method = {"error": (str(e) or type(e).__name__)[:200]}, None
+            except Exception as e:
+                result, method = {"error": f"{type(e).__name__}: {e}"[:200]}, None
             # Honeypot gate, INSIDE the check: a host that probes OK but whose whole
             # freshly-listed catalog is the phantom frozen set gets one benign
             # /wp-login.php GET (tiny subset). 200 => record as honeypot, not working.
@@ -2293,7 +2475,7 @@ def main():
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
     parser.add_argument("-r", "--random", dest="shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
-    parser.add_argument("-t", "--site", choices=["fofa", "shodan"], default="fofa", help="site to scrape (default: fofa)")
+    parser.add_argument("-t", "--site", choices=["fofa", "shodan", "zoomeye"], default="fofa", help="site to scrape (default: fofa)")
     parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG) + ["all"],
                         help="service to search for; 'all' runs the action across every service (each gets its own <service>-*.json cache), for automating the full pipeline")
     parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")

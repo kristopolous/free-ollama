@@ -1141,6 +1141,15 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     if p is None and c is None:
         return
     mark_worker_tokens(wid, p, c, num_ctx)
+    # tokens/second — the SAME wall-clock measure the worker card shows: completion
+    # tokens / run-seconds (now minus when the host was found, i.e. after first
+    # token). Works for every dialect, unlike eval_duration which only Ollama
+    # reports. Stored as the most-recent (host, model) reading.
+    w = _workers.get(wid)
+    if w and c and w.get("found"):
+        _run = time.time() - w["found"]
+        if _run > 0:
+            record_perf(host, model, tps=c / _run)
     # Token counts live on the WORKER CARD, not the activity feed — the feed is for
     # request events (trying / failed / connected), and per-turn token metrics
     # aren't that class of thing. The one exception is a truncation, which is a
@@ -1670,7 +1679,13 @@ def _get_db():
                      "fail_5xx INTEGER NOT NULL DEFAULT 0",
                      "fail_conn INTEGER NOT NULL DEFAULT 0",
                      "fail_other INTEGER NOT NULL DEFAULT 0",
-                     "last_fail TEXT"):
+                     "last_fail TEXT",
+                     # Latest measured performance for this (host, model): ttft =
+                     # time-to-first-token in seconds (send -> first streamed line),
+                     # tps = tokens/second on the last generation. MOST-RECENT only
+                     # (overwritten each run), not an average — NULL until measured.
+                     "ttft REAL",
+                     "tps REAL"):
             try:
                 _status_db.execute(f"ALTER TABLE host_status ADD COLUMN {_col}")
             except sqlite3.OperationalError:
@@ -1749,6 +1764,34 @@ def add_good(host, model):
         (host, model, _now_iso()))
     db.execute("DELETE FROM host_status WHERE host=? AND model=?", (host, UNREACHABLE_KEY))
     db.commit()
+
+
+def record_perf(host, model, ttft=None, tps=None):
+    """Store the MOST-RECENT time-to-first-token (seconds) and/or tokens-per-second
+    for a (host, model), overwriting any prior value — the latest reading, not an
+    average. Best-effort: a measurement hiccup must never break the request path.
+    Keyed like verdicts (canon_pattern) and upserts a 'good' row if none exists yet
+    (a real measurement means the host answered)."""
+    cols, vals = [], []
+    if ttft is not None:
+        cols.append("ttft"); vals.append(round(float(ttft), 3))
+    if tps is not None:
+        cols.append("tps"); vals.append(round(float(tps), 2))
+    if not cols:
+        return
+    model = canon_pattern(model)
+    ph = ",".join("?" for _ in cols)
+    setc = ",".join(f"{c}=excluded.{c}" for c in cols)
+    try:
+        db = _get_db()
+        db.execute(
+            f"INSERT INTO host_status(host,model,state,failure_streak,{','.join(cols)})"
+            f" VALUES(?,?, 'good', 0, {ph})"
+            f" ON CONFLICT(host,model) DO UPDATE SET {setc}",
+            [host, model] + vals)
+        db.commit()
+    except Exception as e:
+        log.debug(f"record_perf failed for {host}/{model}: {e}")
 
 
 # Failure-kind -> counter column. Whitelisted so the kind can be interpolated
@@ -3126,6 +3169,12 @@ def openai_stream_to_ollama(line, model):
     delta = dict(ch.get("delta") or ch.get("message") or {})
     fin = ch.get("finish_reason")
     msg = {"role": delta.get("role") or "assistant", "content": delta.get("content") or ""}
+    # Carry an OpenAI reasoning delta through as Ollama's `thinking` field, so the
+    # thinking streams live AND lands in the job buffer — otherwise it's dropped, and
+    # a tab that reloads mid-think replays a buffer with no thinking in it.
+    _reason = delta.get("reasoning_content") or delta.get("reasoning")
+    if _reason:
+        msg["thinking"] = _reason
     if delta.get("tool_calls"):
         tcs = []
         for t in delta["tool_calls"]:
@@ -3488,6 +3537,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             return skip("another host won")
 
         dur = time.time() - start
+        record_perf(host, full, ttft=dur)   # dur here IS time-to-first-token
         log.debug(f"  \u2713 {tag}")
         await broadcast_activity(host, model, "connected",
             f"success: {host} for {model}", duration=dur, wid=wid, rmodel=full)

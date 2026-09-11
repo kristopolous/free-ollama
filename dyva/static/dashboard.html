@@ -4763,6 +4763,13 @@ function tryResume(){
   });
 }
 document.addEventListener('visibilitychange',function(){if(!document.hidden)setTimeout(tryResume,300)});
+// `dyva_own` means "a live generation is in THIS tab's memory". A page unload
+// (refresh — easy to hit by accident on mobile) wipes that memory but sessionStorage
+// survives, so the stale flag would block tryResume from re-attaching the still-
+// running job and its in-progress thinking would vanish. Clear it on unload: the
+// job replays from offset 0 on reload and rebuilds the thinking + content. (The
+// still-live case is already guarded by `for(k in gens)` in tryResume.)
+window.addEventListener('pagehide',function(){try{sessionStorage.removeItem('dyva_own')}catch(e){}});
 document.getElementById('chatSend').addEventListener('click',function(e){
   e.preventDefault();
   if(genOf(currentChat.id))stopChat();

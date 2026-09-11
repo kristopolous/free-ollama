@@ -9,7 +9,10 @@ EXTRA_ARGS=("$@")
 FID=
 SITE=fofa
 SERVERS=
+WORKERS=          # blank -> graflex.py default (10)
+CT=               # blank -> graflex.py default (60s per-host check timeout)
 source .env
+
 
 case "$SERVICE" in
   all)
@@ -61,6 +64,21 @@ case "$SERVICE" in
     SITE=shodan
     PORTS="11434,9306,5172,5984,8500,50000"
     COUNTRIES="US,AU,JP,IN,CA,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
+    ;;
+
+  # Not in the daily `all` loop: ZOOMEYE_COOKIE is a browser SESSION token that
+  # expires, so run this by hand after refreshing the cookie (unlike the stable
+  # Shodan API key). ZoomEye caps a query at ~250 results, so it's a quick pass.
+  ollama-zoomeye)
+    SERVICE=ollama
+    SITE=zoomeye
+    # No port filter — ollama runs on many ports. ISO alpha-2 codes (UK -> GB);
+    # each country is its own ≤250 slice past ZoomEye's cap.
+    COUNTRIES="CN,US,FR,DE,IN,JP,AU,SG,IR,IT,GB,SA,ID,BR,SE,MX,ES,FI,CH"
+    # ZoomEye surfaces many dead ollama IPs; the 60s default check timeout makes a
+    # batch look hung. Short timeout + high concurrency churns through them fast.
+    CT=10
+    WORKERS=40
     ;;
 
   ollama)
@@ -167,7 +185,7 @@ ENDL
     ;;
 
   *)
-    echo "Usage: $0 [ollama|comfyui|a1111|vllm|llama.cpp|lmstudio|gradio|combine]" >&2
+    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|comfyui|a1111|vllm|llama.cpp|lmstudio|gradio|combine]" >&2
     exit 1
     ;;
 esac

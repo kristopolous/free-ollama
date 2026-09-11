@@ -25,6 +25,12 @@ FOFA_COOKIE="fofa_theme=dark; fofa_token=...; fofa_result_page_size=50; ..."
 # Copy the polito cookie from your browser (or from a curl -b invocation).
 # The \u0021 shell escape curl prints is handled automatically.
 SHODAN_KEY='polito="3edd633c..."'
+
+# Required for -t zoomeye — zoomeye.ai session cookie (the whole Cookie header,
+# copied from your browser / a curl -b invocation). It is a SESSION token that
+# EXPIRES, so refresh it when zoomeye starts failing. The JWT inside it (token=…)
+# is reused automatically for the Cube-Authorization header.
+ZOOMEYE_COOKIE='__jsluid_s=...; sessionid=...; token=...; ...'
 ```
 
 ## Usage
@@ -89,6 +95,10 @@ graflex -t shodan -s ollama -a fetch -n ollama-shodan
 # Shodan with a custom query (note: shodan syntax — country:"US", port:8080)
 graflex -t shodan -q '"ollama is running"' -n ollama-shodan \
   -c 'US,DE' -p '11434,8080'
+
+# ZoomEye site — scrapes zoomeye.ai's JSON API into the same ollama pool
+graflex -t zoomeye -s ollama -n ollama --dry     # print the queries + URL first
+graflex -t zoomeye -s ollama -n ollama -c 'CN,US,FR,DE,...'
 ```
 
 ## Shodan site
@@ -106,6 +116,29 @@ method scrapes FOFA. Differences from the FOFA flow:
 - Requires `SHODAN_KEY` in `.env` — your shodan session cookie (`polito="..."`).
 - Only some services have built-in shodan queries (`ollama`, `comfyui`);
   others require an explicit `--query` in shodan syntax.
+
+## ZoomEye site
+
+`-t zoomeye` hits zoomeye.ai's JSON search API (`/api/search`) rather than
+scraping HTML, and folds the results into the SAME pool as FOFA/Shodan (each
+host tagged `site: "zoomeye"`). Notes:
+
+- Query syntax is zoomeye's: `app="ollama"`, `country="CN"`, `port="11434"`,
+  joined by `&&`. The query is base64-encoded into the `q` param automatically.
+- Auth is `ZOOMEYE_COOKIE` (`.env`) — the whole browser Cookie header. The `token=`
+  JWT inside it is echoed as the `Cube-Authorization` header. It is a **session**
+  cookie that **expires**: refresh it when zoomeye starts failing.
+- ZoomEye returns a huge `total` but caps how deep you can page at ~250 results
+  per query (`max` in the payload). So the run **narrows by country** — one broad
+  pass plus one pass per `--countries` code — to slice past the cap; each slice
+  pages (50/page) until it empties. There is **no port filter** (ollama runs on
+  many ports, so filtering by port would miss most of them).
+- No retry: an HTTP error or unparsable body stops the run (by design).
+- Raw JSON payloads are saved under `/tmp/graflex/<session>/zoomeye/`.
+- `ollama` has a built-in zoomeye query (`app="ollama"`); other services need an
+  explicit `--query`. Country codes are ISO alpha-2 (`GB`, not `UK`).
+- Run it by hand (`graflex.sh ollama-zoomeye`); it's kept out of the daily `all`
+  loop because the cookie expires, unlike the stable Shodan key.
 
 ## Shell script
 
@@ -333,7 +366,7 @@ the live, volatile thing (what node classes exist) to submit time.
 | `--ct`, `--check-timeout` | Per-host check timeout in seconds (default: 60) |
 | `-z`, `--sleep` | Seconds to sleep between requests (default: 4) |
 | `-r`, `--random` | Shuffle the combination list (countries × ports × servers plus the FID follow-ups) so the fetch cycles in random order |
-| `-t`, `--site` | Site to scrape: `fofa` (default) or `shodan`; recorded as `site` on each host entry |
+| `-t`, `--site` | Site to scrape: `fofa` (default), `shodan`, or `zoomeye`; recorded as `site` on each host entry |
 
 ## Field notes: host exposure patterns
 
@@ -406,3 +439,5 @@ More strategies are expected; the contract exists to leave room for them.
 | `FOFA_COOKIE must be set in .env for the web method` | The web fetch method requires a browser cookie to authenticate with FOFA's web interface. | Log into [fofa.info](https://en.fofa.info), open DevTools > Network, copy the `Cookie` header from any request, and set it as `FOFA_COOKIE` in `.env`. |
 | `FOFA access denied — IP flagged as a web crawler` | FOFA has rate-limited or blocked your IP. The response contains `[-3000] IP access is abnormal`. | Wait a while, switch IPs (VPN/proxy), or try again later. This is a fatal error — graflex will not retry. |
 | `daily usage limit hit` | Free tier FOFA accounts are limited to 3000 queries/day. | Resume later with `--id <run_ts>` from the error message. |
+| `ZOOMEYE_COOKIE must be set in .env for --site zoomeye` | `-t zoomeye` needs your zoomeye.ai session cookie. | Log into [zoomeye.ai](https://www.zoomeye.ai), copy the whole `Cookie` header (DevTools > Network, or a `curl -b` invocation), and set it as `ZOOMEYE_COOKIE` in `.env`. It's a session token that expires — refresh it when zoomeye starts failing. |
+| `zoomeye: stopping — …` | An HTTP error or unparsable body from zoomeye.ai — often an expired cookie (401/403) or a page past the ~250 cap. | If the cookie expired, refresh `ZOOMEYE_COOKIE`. Otherwise it's the normal end of a query's results. |
