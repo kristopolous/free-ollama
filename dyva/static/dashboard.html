@@ -789,6 +789,10 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 .media-models .mm b{color:var(--text-dim);font-weight:400}
 #imgResult{margin-top:14px}
 #imgResult img{max-width:100%;border-radius:var(--r-lg);border:1px solid var(--border);margin-top:10px}
+#imgResult.grid{display:flex;flex-wrap:wrap;gap:10px}
+#imgResult.grid img,#imgResult.grid .img-slot{width:calc(50% - 5px);margin-top:0}
+.img-slot{min-height:120px;border:1px dashed var(--border);border-radius:var(--r-lg);margin-top:10px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:var(--fs-2xs)}
+.img-slot::after{content:'\2026'}
 #imgResult .status{color:var(--text-dim);font-size:var(--fs-md)}
 #imgResult .error{color:var(--err);font-size:var(--fs-md)}
 #media{max-width:none}
@@ -804,6 +808,9 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
 body.img-edit .edit-only{display:revert!important}
 body.img-edit .generate-only{display:none!important}
 .hint{color:var(--text-faint);font-weight:normal}
+.sampler-note{color:var(--text-muted);font-size:var(--fs-2xs);font-style:italic;margin-left:.4em}
+#samplerField.disabled{opacity:.45}
+#samplerField.disabled select{pointer-events:none}
 .inline-check{display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-3);font-size:var(--fs-md);color:var(--text-2);cursor:pointer}
 .inline-check input{width:auto;flex-shrink:0;margin:0 var(--sp-1) 0 0;accent-color:var(--accent);cursor:pointer}
 .inline-check small{color:var(--text-faint);font-family:var(--font-mono);font-size:var(--fs-2xs);margin-left:.3em}
@@ -1066,8 +1073,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 <div class="img-params">
 <div class="field generate-only">
-<label for="sdModel">SD Model</label>
-<input id="sdModel" type="text" list="sdModels" placeholder="type or select an SD model..." autocomplete="off">
+<label for="sdModel">Image model</label>
+<input id="sdModel" type="text" list="sdModels" placeholder="type or select an image model..." autocomplete="off">
 <datalist id="sdModels">
 __SD_MODELS__
 </datalist>
@@ -1077,8 +1084,8 @@ __SD_MODELS__
 <input id="editModel" type="text" list="editModels" placeholder="loading edit models&hellip;" autocomplete="off">
 <datalist id="editModels"></datalist>
 </div>
-<div class="field generate-only">
-<label for="imgSampler">Sampler</label>
+<div class="field generate-only" id="samplerField">
+<label for="imgSampler">Sampler <small id="samplerNote" class="sampler-note" hidden></small></label>
 <select id="imgSampler">
 <option>Euler</option>
 <option>Euler a</option>
@@ -1131,8 +1138,8 @@ __SD_MODELS__
 <span class="val" id="imgCfgVal">7</span>
 </div>
 <div class="slider-row generate-only">
-<label for="imgBatch">Batch size</label>
-<input id="imgBatch" type="range" min="1" max="4" value="1">
+<label for="imgBatch">Quantity <small class="sampler-note">fanned across hosts</small></label>
+<input id="imgBatch" type="range" min="1" max="8" value="1">
 <span class="val" id="imgBatchVal">1</span>
 </div>
 </details>
@@ -6190,11 +6197,50 @@ function loadEditModels(){
   }).catch(function(){_editModelsLoaded=false;
     document.getElementById('editModel').placeholder='type an edit model name\u2026'});
 }
+// The generate picker lists EVERY image model \u2014 A1111 checkpoints AND the
+// ComfyUI-served ones (z-image, krea, flux, sdxl...) \u2014 from /sdapi/v1/sd-models,
+// which already merges both. (The server-injected __SD_MODELS__ datalist was
+// a1111-only, which is why z-image/krea couldn't be picked.) Each row carries
+// whether its family uses a user-selectable sampler.
+var _imageModelsLoaded=false,_imgSamplerByModel={};
+function loadImageModels(){
+  if(_imageModelsLoaded)return;_imageModelsLoaded=true;
+  fetch('sdapi/v1/sd-models',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+    var dl=document.getElementById('sdModels'),rows=j.data||[];
+    dl.innerHTML='';_imgSamplerByModel={};
+    rows.forEach(function(o){
+      var opt=document.createElement('option');
+      opt.value=o.id;
+      opt.label=(o.family?o.family+' \u00b7 ':'')+o.count+' host'+(o.count===1?'':'s');
+      dl.appendChild(opt);
+      _imgSamplerByModel[o.id]=(o.sampler!==false);
+    });
+    document.getElementById('sdModel').placeholder=rows.length
+      ? rows.length+' image models \u2014 blank auto-picks'
+      : 'no image models found';
+    updateSamplerState();
+  }).catch(function(){_imageModelsLoaded=false;});
+}
+// A flow/DiT model (flux, krea, z-image, qwen-image, sd3...) has dyva choose the
+// sampler from its recipe, so the A1111 sampler dropdown does nothing \u2014 grey it
+// out. Classic SD keeps it. Only disable when we KNOW the selected model is a
+// no-sampler family; an unknown / free-typed name stays enabled (classic default).
+function updateSamplerState(){
+  var name=(document.getElementById('sdModel').value||'').trim();
+  var field=document.getElementById('samplerField'),note=document.getElementById('samplerNote'),sel=document.getElementById('imgSampler');
+  if(!field||!sel)return;
+  var takes=(name&&_imgSamplerByModel.hasOwnProperty(name))?_imgSamplerByModel[name]:true;
+  field.classList.toggle('disabled',!takes);
+  sel.disabled=!takes;
+  if(note){note.hidden=takes;if(!takes)note.textContent='\u2014 chosen automatically for this model';}
+}
+document.getElementById('sdModel').addEventListener('input',updateSamplerState);
+document.getElementById('sdModel').addEventListener('change',updateSamplerState);
 function setImgMode(m){
   _imgMode=m;
   try{localStorage.setItem('dyva_imgmode',m)}catch(e){}
   document.body.classList.toggle('img-edit',m==='edit');
-  if(m==='edit')loadEditModels();
+  if(m==='edit')loadEditModels();else loadImageModels();
   Array.prototype.forEach.call(document.querySelectorAll('#imgMode .mode-btn'),function(b){
     b.classList.toggle('active',b.dataset.mode===m);
   });
@@ -6333,7 +6379,12 @@ async function generateImage(){
   var result=document.getElementById('imgResult');
   var seed=parseInt(document.getElementById('imgSeed').value);
   if(isNaN(seed))seed=-1;
-  var body={
+  var qty=Math.max(1,parseInt(document.getElementById('imgBatch').value)||1);
+  // One independent request PER image, each batch_size:1 \u2014 dyva routes each to a
+  // (potentially different) host, so the quantity fans out across the pool rather
+  // than batching on one server. Distinct seeds so the images differ (a fixed seed
+  // is offset per image; -1 stays random each).
+  var base={
     model:document.getElementById('sdModel').value.trim()||undefined,
     prompt:document.getElementById('posPrompt').value.trim(),
     negative_prompt:document.getElementById('negPrompt').value.trim(),
@@ -6341,33 +6392,39 @@ async function generateImage(){
     height:parseInt(document.getElementById('imgHeight').value)||512,
     steps:parseInt(document.getElementById('imgSteps').value)||20,
     cfg_scale:parseFloat(document.getElementById('imgCfg').value)||7,
-    seed:seed,
-    batch_size:parseInt(document.getElementById('imgBatch').value)||1,
+    batch_size:1,
     sampler_name:document.getElementById('imgSampler').value,
   };
   btn.disabled=true;
   result.innerHTML='';
-  showSnack('finding a server\u2026');
+  result.classList.toggle('grid',qty>1);
+  var slots=[];
+  for(var i=0;i<qty;i++){var ph=document.createElement('div');ph.className='img-slot';result.appendChild(ph);slots.push(ph);}
+  showSnack(qty>1?('generating '+qty+' images across hosts\u2026'):'finding a server\u2026');
   var st=snackStatus;activeImgStatus=st;
-  try{
-    var resp=await fetch('sdapi/v1/txt2img',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!resp.ok){
-      var msg='HTTP '+resp.status;
-      try{var j=await resp.json();msg=j.error||msg}catch(e){}
-      _mediaError(result,msg);
-      return;
-    }
-    var d=await resp.json();
-    var imgs=d.images||[];
-    if(!imgs.length){result.innerHTML='<div class="error">No images returned</div>';return;}
-    result.innerHTML='';
-    imgs.forEach(function(b64){
-      var img=document.createElement('img');
-      img.src='data:image/png;base64,'+b64;
-      result.appendChild(img);
-    });
-    loadImgHistory();
-  }catch(ex){_mediaError(result,ex.message);}
+  var done=0,anyOk=false;
+  function runOne(idx){
+    var body=Object.assign({},base,{seed:(seed<0?-1:seed+idx)});
+    return fetch('sdapi/v1/txt2img',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(resp){
+        if(!resp.ok){return resp.json().catch(function(){return{}}).then(function(j){throw new Error(j.error||('HTTP '+resp.status))});}
+        return resp.json();
+      })
+      .then(function(d){
+        var imgs=(d&&d.images)||[];
+        if(!imgs.length)throw new Error('no image returned');
+        var img=document.createElement('img');
+        img.src='data:image/png;base64,'+imgs[0];
+        slots[idx].replaceWith(img);slots[idx]=img;anyOk=true;
+      })
+      .catch(function(ex){
+        var e=document.createElement('div');e.className='error';e.textContent=String((ex&&ex.message)||ex);
+        slots[idx].replaceWith(e);slots[idx]=e;
+      })
+      .then(function(){done++;if(activeImgStatus===st)st.textContent=(qty>1?('generated '+done+'/'+qty):'done');});
+  }
+  var tasks=[];for(var k=0;k<qty;k++)tasks.push(runOne(k));
+  try{await Promise.all(tasks);if(anyOk)loadImgHistory();}
   finally{btn.disabled=false;if(activeImgStatus===st)activeImgStatus=null;hideSnack();}
 }
 document.getElementById('imgGenerate').addEventListener('click',generateImage);
@@ -6391,7 +6448,7 @@ function showMediaPane(name){
     if(el)el.style.display=(k===name)?'':'none';
   });
   try{localStorage.setItem('dyva_mediapane',name)}catch(e){}
-  if(name==='image'&&!_imgHistoryLoaded){_imgHistoryLoaded=true;loadImgHistory()}
+  if(name==='image'){loadImageModels();if(!_imgHistoryLoaded){_imgHistoryLoaded=true;loadImgHistory()}}
   if(name==='speech'&&!_ttsVoicesLoaded)loadTtsVoices();
   if(name==='speech')loadTtsHistory();
   if(name==='music'&&!_musicLoaded)loadMusicModels();

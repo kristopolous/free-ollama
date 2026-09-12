@@ -1049,14 +1049,18 @@ def _host_busy(host):
 
 
 def _idle_first(hosts):
-    """Move hosts we are already using to the back, order otherwise intact.
+    """Order hosts least-loaded first, so concurrent requests spread instead of
+    piling onto the same favourite. Load = in-flight ATTEMPTS (`_inflight`, bumped
+    the instant an attempt starts — the earliest, most reliable signal, so N
+    near-simultaneous fan-out requests diverge) plus whether a worker is currently
+    found there (`is_active`).
 
-    Not a hard filter: a busy host is still better than no host, and with one
-    good ComfyUI on the network a filter would turn "wait your turn" into "no
-    hosts available". Python's sort is stable, so the reputation ordering
-    inside each group survives untouched.
+    Not a hard filter: a busy host is still better than no host, and with one good
+    ComfyUI on the network a filter would turn "wait your turn" into "no hosts
+    available". Python's sort is stable, so the reputation ordering inside each
+    load group survives untouched.
     """
-    return sorted(hosts, key=is_active)
+    return sorted(hosts, key=lambda h: (_inflight.get(h, 0) + (1 if is_active(h) else 0)))
 
 
 async def _unregister_worker(wid, ok=None):
@@ -6410,6 +6414,10 @@ async def handle_sd_models(request):
                 if _NOT_A_MODEL.search(name) or _NOT_IMAGE_MODEL.search(name):
                     continue
                 _add(m.rsplit("/", 1)[-1] if "/" in m else m, host)
+    for row in seen.values():
+        fam, takes_sampler = _image_family(row["id"])
+        row["family"] = fam
+        row["sampler"] = takes_sampler    # False => flow/DiT family, sampler dropdown is inert
     return web.json_response({
         "object": "list",
         "data": sorted(seen.values(), key=lambda x: -x["count"]),
@@ -7282,13 +7290,20 @@ async def handle_txt2img(request):
     def _img_bad(h):
         return h in _un or f"{h} {IMG_KEY}" in _bad
 
+    # ONE host per image (workers=1): each request occupies a single host and
+    # fails over to the next only if that one fails — the same shape as a text
+    # generation. Racing the whole pool and keeping the fastest (the old default)
+    # made every concurrent request converge on the one fastest host AND set a
+    # render going on every other host just to cancel it. With a single host per
+    # request, _idle_first (load-aware) spreads a burst of N requests across N
+    # hosts — the "quantity fans out across workers" behaviour.
     # Phase 1: good + untested hosts (skip known-bad and unreachable)
-    data = await _race([h for h in hosts if not _img_bad(h)], a1111_attempt)
+    data = await _race([h for h in hosts if not _img_bad(h)], a1111_attempt, workers=1)
     if data:
         return await _deliver(data)
 
     # Phase 2: exhausted — retry the previously bad / unreachable (recovery path)
-    data = await _race([h for h in hosts if _img_bad(h)], a1111_attempt)
+    data = await _race([h for h in hosts if _img_bad(h)], a1111_attempt, workers=1)
     if data:
         return await _deliver(data)
 
@@ -7302,7 +7317,7 @@ async def handle_txt2img(request):
         ]
     comfy_hosts = _idle_first(
         [s.get("server") for s in comfy_candidates if not _img_bad(s.get("server"))])
-    data = await _race(comfy_hosts, comfy_attempt, workers=3)
+    data = await _race(comfy_hosts, comfy_attempt, workers=1)   # one host per image; spread, don't spray
     if data:
         return await _deliver(data)
 
@@ -10304,7 +10319,7 @@ async def handle_videos_post(request):
 _NOT_IMAGE_MODEL = re.compile(
     r"(?i)(wan[0-9._]*|ltx|mochi|cogvideo|hunyuan.?video|animatediff|framepack|"
     r"seedvr|flashvsr|dynamicrafter|_i2v_|_t2v_|vace|"
-    r"svd(?=[._-])|ace.?step|acestep|musicgen|audiocraft|minimax.?music|"
+    r"svd(?=[._-])|(?:^|[._/-])ace(?:[._-]?step|[._-]?v?\d)|musicgen|audiocraft|minimax.?music|"
     r"minimax.?h3|f5.?tts|cosyvoice|vibevoice|_ref2va|_fl2va)")
 
 
@@ -10315,6 +10330,43 @@ _NOT_A_MODEL = re.compile(
     # Text encoders are named after the LLM they wrap, not after their job:
     # qwen3vl_32b_minimax_h3 is MiniMax's *encoder*, not a MiniMax model.
     r"|^(qwen[0-9._]*vl|qwen_[0-9._]+_vl|gemma|mistral|llava|byt5|pile-t5|flan)")
+
+
+# Image-generation families that do NOT use the A1111 sampler dropdown: the
+# flow-matching / DiT models (Flux and its Krea variant, z-image, Qwen-Image,
+# SD3/3.5, HiDream, Chroma, Sana, PixArt, AuraFlow, Lumina, Cosmos). dyva picks
+# their sampler/scheduler from the node-classifier recipe, so a user's sampler
+# choice is inert — the UI greys it out for them. Everything else (classic
+# SD1.5/SD2/SDXL/Pony/Illustrious/Playground and the like) uses the selected
+# sampler, so it stays enabled. Most-specific name match first; unknown =>
+# classic (sampler on).
+_IMAGE_FAMILIES = [
+    ("flux",       re.compile(r"(?i)(flux|(^|[-_. ])krea)")),
+    ("z-image",    re.compile(r"(?i)z[-_. ]?image")),
+    ("qwen-image", re.compile(r"(?i)qwen[-_. ]?image")),
+    ("sd3",        re.compile(r"(?i)sd[-_. ]?3(\.5|5)?([-_. ]|$)|stable[-_. ]?diffusion[-_. ]?3")),
+    ("hidream",    re.compile(r"(?i)hi[-_. ]?dream")),
+    ("chroma",     re.compile(r"(?i)chroma")),
+    ("sana",       re.compile(r"(?i)(^|[-_. ])sana([-_. ]|$)")),
+    ("pixart",     re.compile(r"(?i)pix[-_. ]?art")),
+    ("auraflow",   re.compile(r"(?i)aura[-_. ]?flow")),
+    ("lumina",     re.compile(r"(?i)lumina")),
+    ("cosmos",     re.compile(r"(?i)cosmos")),
+]
+_NONSAMPLER_FAMILIES = frozenset({
+    "flux", "z-image", "qwen-image", "sd3", "hidream", "chroma",
+    "sana", "pixart", "auraflow", "lumina", "cosmos"})
+
+
+def _image_family(name):
+    """(family, takes_sampler) for an image-gen model filename. The flow/DiT
+    families have dyva choose the sampler, so the A1111 sampler dropdown is inert
+    for them; classic SD checkpoints use it. Unknown family -> classic, sampler on."""
+    base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    for fam, rx in _IMAGE_FAMILIES:
+        if rx.search(base):
+            return fam, fam not in _NONSAMPLER_FAMILIES
+    return "", True
 
 
 async def handle_video_models(request):

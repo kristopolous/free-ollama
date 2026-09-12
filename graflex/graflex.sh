@@ -131,16 +131,16 @@ ENDL
     QUERY='title="ComfyUI"'
     PORTS="9200,8983,9200,5060,8089,5601,28017,8188,8080,80,443"
     SERVERS="nginx,cloudflare,Python/3.12 aiohttp/3.11.16,Python/3.12 aiohttp/3.14.1,Python/3.12 aiohttp/3.13.3,Python/3.10 aiohttp/3.12.15,Python/3.13 aiohttp/3.13.3"
-    COUNTRIES="US,AU,IN,JP,DE,IE,ID,IT,BH,IL,CA,BR,CN,KR,GB,FR,SG,CH,ZA,BR,HK,SE,ES"
+    COUNTRIES="US,AU,IN,JP,DE,IE,ID,IT,BH,IL,CA,BR,CN,KR,GB,FR,SG,CH,ZA,BR,HK,SE,ES,TH,MX,AE,MY,PL,CN,NZ,RU"
     FID="2zn7oqmRiwaUu3+PzyTjvw==,7aBY0X9WxdeghtrJGx1MEQ==,MJ7K0wma6lKOVne5ksgrSw==,yhjkkd4AnCsogP9Ms1QgVA=="
     ;;
 
   a1111)
     QUERY='icon_hash="2075038152" && body="Stable Diffusion"'
     PORTS="7860,7861,8080,80,443,10000"
-    #SERVERS="nginx,cloudflare,uvicorn"
+    SERVERS="nginx,nginx/1.22.1,uvicorn"
     COUNTRIES="TH,MX,MY,NZ,BH,SG,KR,GB,AE,US,AU,IN,JP,DE,CA,RU,IL,BR,CN,IE,FR,ES,ID,IT,CH,ZA,HK,PL"
-    #FID="4OeA79EXS7Z+DdzkAvrBag==,WPcuJSTXuzZQIeov/h9jgA==,NCPjfTODiuNabsua2LTY7Q==,SWCeWGsQp4gTPi4YvgrIdQ=="
+    FID="4OeA79EXS7Z+DdzkAvrBag==,WPcuJSTXuzZQIeov/h9jgA==,NCPjfTODiuNabsua2LTY7Q==,SWCeWGsQp4gTPi4YvgrIdQ=="
     ;;
 
   llama.cpp)
