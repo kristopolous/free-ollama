@@ -480,11 +480,15 @@ var pictionary = {
   },
   _newRound: function(st){
     st.round++;
-    var t = pick(PICT_THINGS), a = pick(PICT_ACTIVITIES);
+    // shuffle-and-pop decks (Fisher-Yates) so a game doesn't repeat a thing or an
+    // activity — picking a random index each round hit birthday collisions.
+    if(!st.thingDeck || !st.thingDeck.length) st.thingDeck = shuffle(PICT_THINGS);
+    if(!st.actDeck || !st.actDeck.length) st.actDeck = shuffle(PICT_ACTIVITIES);
+    var t = st.thingDeck.pop(), a = st.actDeck.pop();
     st.secret = { thing: t[0], activity: a[0], full: t[0] + ' ' + a[0], tkw: t[1], akw: a[1] };
     st.phase = 'draw'; st.png = ''; st.feedback = ''; st.hint = ''; st.coach = ''; st.focus = '';
     st.guesses = []; st.revealed = { thing: false, activity: false };
-    st.pendingGuess = ''; st.pendingValue = 0;   // a guess awaiting the drawer's yes/no
+    st.pendingGuess = ''; st.pendingValue = 0;   // a guess awaiting the judge's yes/no
     st.attempt = 0; st.turns = 0;   // attempt = wrong guesses this round; value = ATTEMPTS - attempt
     st.drawings.push({ marker: true, round: st.round, secret: st.secret.full });   // round divider in the reel
   },
@@ -508,8 +512,8 @@ var pictionary = {
   // the reel timeline is a mix of round markers, drawings, and the guesser's
   // guesses/hint-requests (pushed by _say) — so the back-and-forth shows in order.
   _say: function(st, text, cls){ st.drawings.push({ say: text, cls: cls }); },
-  // An OBVIOUS match (both keywords present) is accepted without bothering the drawer;
-  // anything short of that goes to the drawer to judge (see the 'judge' phase).
+  // An OBVIOUS match (both keywords present) is accepted without bothering the judge;
+  // anything short of that goes to the impartial judge (model 3, see the 'judge' phase).
   _obvious: function(n, s){ return n.indexOf(s.tkw) >= 0 && n.indexOf(s.akw) >= 0; },
   // Award the pending guess and end the round.
   _award: function(st){
@@ -675,8 +679,8 @@ var pictionary = {
       return pictionary._award(st);
     }
     st.phase = 'judge';                                  // otherwise the DRAWER decides (yes/no)
-    pictionary._say(st, '❔ "' + g + '" — asking the drawer', 'hint');
-    return {note: 'guessed "' + g + '" — asking the drawer if it counts'};
+    pictionary._say(st, '❔ "' + g + '" — asking the judge', 'hint');
+    return {note: 'guessed "' + g + '" — asking the judge if it counts'};
   }
 };
 

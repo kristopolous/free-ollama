@@ -1030,6 +1030,20 @@ def is_active(host):
                for w in _workers.values())
 
 
+# In-flight ATTEMPT count per host — incremented the moment a race worker starts an
+# attempt (before the first token), decremented when it resolves. is_active() only
+# sees a host once it's "found" (first token in hand), which misses the cold-start
+# window; during a same-model burst that means the siblings don't yet look busy and
+# all pile onto the sticky. _inflight closes that window.
+_inflight = collections.Counter()
+
+
+def _host_busy(host):
+    """Busy = we have a request mid-attempt on it (cold-starting) OR already streaming
+    from it (found). Used to decide whether to waste the hedge head-start on it."""
+    return bool(host) and (_inflight.get(host, 0) > 0 or is_active(host))
+
+
 def _idle_first(hosts):
     """Move hosts we are already using to the back, order otherwise intact.
 
@@ -2972,8 +2986,10 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             # this host without tearing the whole race down. A full "stop"
             # cancels the worker task and sets `done`; a "skip" cancels only the
             # attempt, leaving `done` clear so the loop pulls the next host.
+            _ih = host_of(item)
             att = asyncio.ensure_future(attempt(item, wid, done))
             _attempt_tasks.add(att)
+            _inflight[_ih] += 1     # count the attempt NOW (cold-start window), not at first token
             try:
                 outcome = await att
             except asyncio.CancelledError:
@@ -2988,6 +3004,9 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 continue            # skip: move on to the next candidate host
             finally:
                 _attempt_tasks.discard(att)
+                _inflight[_ih] -= 1
+                if _inflight[_ih] <= 0:
+                    del _inflight[_ih]
             if outcome is None:
                 outcome = skip()
             tally[outcome.verdict] += 1
@@ -3023,6 +3042,14 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         _workers[wwid]["skip"] = _skip
     n = min(workers or WORKER_COUNT, len(entries)) or 1
     hedging = hedge_delay and hedge_delay > 0 and n > 1
+    # If the sticky/first host is ALREADY busy (we have an in-flight request to it),
+    # don't give it the solo head-start: ollama & friends serialise, so our request
+    # would queue behind the other one, we'd wait out the whole hedge, and the pool
+    # would win anyway. A burst of same-model calls piles onto the one sticky host
+    # exactly this way — so race the pool immediately instead. (Tool continuations keep
+    # their long hedge: their warm host finished the prior round, so it isn't active.)
+    if hedging and hedge_delay < CONTINUATION_HEDGE and entries and _host_busy(host_of(entries[0])):
+        hedging = False
     initial = 1 if hedging else n
     tasks = [asyncio.create_task(worker()) for _ in range(initial)]
     _tasks_holder[:] = tasks
@@ -4263,19 +4290,19 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         # fallback to the other (a probe that forced /api/chat culled every OpenAI host).
         resp, oai, _ep = await _send_chat(session, host, full, payload, "/api/chat", False)
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-        add_bad(host, model_in)
+        add_bad(host, full)
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - {type(e).__name__}", duration=time.time() - start, wid=wid)
         return False, type(e).__name__
     if resp is None:
-        add_bad(host, model_in)
+        add_bad(host, full)
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - no chat endpoint (tried both dialects)",
             duration=time.time() - start, wid=wid)
         return False, "no chat endpoint"
     if resp.status != 200:
         await resp.release()
-        add_bad(host, model_in)
+        add_bad(host, full)
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - status {resp.status}", duration=time.time() - start, wid=wid)
         return False, f"status {resp.status}"
@@ -4283,7 +4310,7 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         data = await resp.json()
     except Exception:
         await resp.release()
-        add_bad(host, model_in)
+        add_bad(host, full)
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - bad response", duration=time.time() - start, wid=wid)
         return False, "bad response"
@@ -4294,19 +4321,19 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     dur = time.time() - start
     shown = content.strip()[:160]
     if "error" in data:
-        add_bad(host, model_in)
+        add_bad(host, full)
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - error: {data['error']}", duration=dur, wid=wid)
         return False, f"error: {str(data['error'])[:80]}"
     if not _quick_test_answer_ok(content):
-        force_bad(host, model_in)
+        force_bad(host, full)
         log.warning(f"quick test FAIL {host} ({full}): no real answer={shown!r}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - no real answer (parroted/empty): {shown!r}", duration=dur, wid=wid)
         return False, f"no real answer: {shown}"
-    set_last(model_in, host, full)
-    add_good(host, model_in)
-    mark_smoke_ok(host, model_in)           # remember it passed, so :test-all can skip it
+    set_last(full, host, full)
+    add_good(host, full)
+    mark_smoke_ok(host, full)           # remember it passed, so :test-all can skip it
     log.info(f"quick test PASS {host} ({full}): answer={shown!r}")
     await broadcast_activity(host, model_in, "connected",
         f"quick test: {host} for {model_in} - passes. answer: {shown!r}", duration=dur, wid=wid)
@@ -4331,7 +4358,7 @@ async def _run_info_test_all(session, model_in, tools=None, emit=None):
             continue
         nh = _norm_host(host)
         entry = {"host": nh, "model": ms[0], "service": service_of(host)}
-        prior = smoke_ok_at(host, model_in)
+        prior = smoke_ok_at(host, ms[0])   # keyed by the resolved model, same as _quick_probe marks
         if prior:
             entry["smoke_ok"] = prior
             skipped.append(entry)

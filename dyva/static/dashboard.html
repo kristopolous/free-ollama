@@ -208,9 +208,9 @@ body.chat{height:100vh;height:100dvh}
 /* Model coverage bar: working/failing/untested, muted pastels (not a christmas tree) */
 .model-bar{flex-shrink:0;align-self:center;display:inline-flex;height:8px;overflow:hidden;margin-left:var(--sp-3);background:#2a2a2a}
 .model-bar i{display:block;height:100%}
-.mb-g{background:#83b58a}
-.mb-r{background:#c78d8d}
-.mb-u{background:#6d6d6d}
+.mb-g{background:#43b56a}
+.mb-r{background:#a73d5d}
+.mb-u{background:#444444}
 /* External-use panel shown in an empty chat */
 .chat-empty{font-size:var(--fs-sm);line-height:1.5}
 .chat-empty h3{margin:0 0 .4em;font-size:var(--fs-md)}
@@ -1418,7 +1418,14 @@ function connectActivity(fresh){
 }
 var _actLines={};  // activity id -> its line element, for in-place updates
 var ACTIVITY_LINES=500;   // the server keeps 500; showing 50 threw most of it away
-function refreshListsNow(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d)}).catch(function(){})}
+function refreshListsNow(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d);refreshModelBars()}).catch(function(){})}
+// The model coverage bars read _good/_bad only when built, so after reputation
+// changes (e.g. a :test-all sweep) rebuild each visible bar in place — cheap, and
+// no list rebuild/scroll-jump like a full renderModels would cause.
+function refreshModelBars(){
+  var items=document.querySelectorAll('.model-item[data-name]');
+  for(var i=0;i<items.length;i++){var mid=items[i].getAttribute('data-name');var old=items[i].querySelector('.model-bar');if(old)old.replaceWith(makeModelBar(mid));}
+}
 // Debounced: the activity stream replays its whole backlog on connect, and each
 // connected/failed event would otherwise trigger its own /dashboard-data fetch
 // (~20-25 on load). Collapse any burst into a single trailing fetch.
