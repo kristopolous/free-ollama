@@ -181,7 +181,7 @@ and losing it merely costs the old behaviour.
 
 The sticky host is tried first, as always, but it no longer gets to block the
 request while it dies. `find_servers` sorts the last-good host to the front, and
-the race gives it a **head start** of `hedge_delay` seconds (default 30) before
+the race gives it a **head start** of `hedge_delay` seconds (default 15) before
 fanning out to the rest of the pool. Whoever produces first wins; the losing
 connection is cancelled and released by the same machinery that already handles
 a normal race.
@@ -194,6 +194,16 @@ healthy sticky host answers well within the delay and nothing else is contacted
 instead of hanging the request until it times out. It is implemented as an
 opt-in staggered start in the shared race engine (`hedge_delay`), so every
 capability could use it, but only chat and generate do today.
+
+Failover also applies **mid-stream**, not just before the first token. If an
+upstream drops the connection partway through a streaming answer — without ever
+sending its terminal `done` token — dyva doesn't close the client. It logs the
+host's truncation, penalises it, and seamlessly re-races the rest of the pool,
+carrying the work already streamed into the next host's context (as an assistant
+turn plus a "continue where you left off" nudge) and continuing on the **same open
+client connection**, so the reader sees one uninterrupted stream. It's capped
+(`MAX_STREAM_CONTINUES`) so a flaky pool can't loop forever; if the pool is spent
+the stream is closed cleanly with a terminal done.
 
 ## Use It Like Ollama
 
@@ -274,6 +284,15 @@ ceiling), and only if even that truncates does it return **413 "context too
 large — trim the history."** A truncation never marks the host bad — it answered;
 our sizing was short. Each turn's token accounting (prompt ↑ / completion ↓ /
 window) shows on the worker card in the dashboard's Activity view.
+
+The same protection covers **streaming** answers. A generation that hits the
+window mid-stream comes back with a `done` chunk whose `done_reason` is `length`
+— an incomplete answer that nonetheless carries a done token. dyva treats that as
+the truncation it is: it swallows the premature done (so the client's stream stays
+open), then continues the answer on the same connection with the window grown at
+least 2×, re-racing with the same warm host still eligible (it didn't fail — it
+just ran out of window) until a host finishes with `done_reason: stop`. This
+shares the mid-stream failover's continue cap.
 
 ## API Reference
 

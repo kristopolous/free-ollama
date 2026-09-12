@@ -126,6 +126,11 @@ HEDGE_DELAY = 15
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
 # so it's dropped rather than stored.
 TPS_CEILING = 5000
+# Hard cap on how many times one streaming answer may be continued across hosts
+# after a mid-stream truncation (a connection drop or a done_reason 'length'
+# window-cut). A generous ceiling that still guarantees the failover loop can't
+# spin forever on a stubbornly-truncating pool.
+MAX_STREAM_CONTINUES = 6
 # A tool-loop CONTINUATION (the incoming messages end with a tool result) is already
 # mid-conversation on a host that just answered it — racing the pool again each round
 # is wasted work and risks switching hosts mid-loop (losing the upstream's warm
@@ -3685,21 +3690,43 @@ def _effective_num_ctx(payload):
     return opts["num_ctx"] if "num_ctx" in opts else _auto_num_ctx(payload)
 
 
-async def _forward_stream(request, response, resp, first_line, host, full, openai_format,
-                          upstream_openai=False, wid=None, num_ctx=None):
-    content_type = "text/event-stream" if openai_format else "application/x-ndjson"
-    response.headers["Content-Type"] = content_type
-    response.headers["Cache-Control"] = "no-cache"
-    response.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
-    response.headers["X-Dyva-Model"] = full
-    response.headers["X-Dyva-Service"] = service_of(host)
-    response.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
-    try:
-        await response.prepare(request)
-    except (BrokenPipeError, ConnectionResetError, aiohttp.ClientConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
-        log.debug("Client disconnected before response headers sent")
-        await resp.release()
-        return
+class _ClientGone(Exception):
+    """The CLIENT connection broke mid-write — distinct from an UPSTREAM drop, so
+    the streaming path can abort instead of failing over to another host."""
+
+
+# The same error set surfaces whether we're writing to the client or reading the
+# upstream; what differs is WHERE we catch it (see _pump_stream).
+_STREAM_BREAK_ERRORS = (BrokenPipeError, ConnectionResetError,
+                        aiohttp.ClientConnectionResetError, aiohttp.ClientError,
+                        asyncio.TimeoutError, OSError)
+
+
+async def _pump_stream(response, resp, first_line, host, full, openai_format,
+                       upstream_openai, wid, num_ctx, partial):
+    """Forward ONE already-won upstream stream to the already-prepared client
+    `response`, translating dialect as needed and accumulating the assistant text
+    into partial[0] so a mid-stream failover can carry the work forward. Returns:
+      'done'      the upstream sent a real terminal done chunk (tokens accounted);
+      'length'    the upstream sent a done chunk with done_reason 'length' — Ollama
+                  cut the generation at the context window, so the answer is
+                  INCOMPLETE (a truncation with a done token); the done is swallowed,
+                  not forwarded, so the caller can continue on the same connection;
+      'truncated' the upstream closed/errored WITHOUT any done chunk (a mid-stream drop);
+      'client'    the CLIENT connection broke (abort — do NOT fail over).
+    Always releases `resp`. A client hang-up raises _ClientGone from the write
+    helper; an upstream drop surfaces from the read loop — that split is the whole
+    point, so we know whether to fail over."""
+    async def cw(b):
+        try:
+            await response.write(b)
+        except _STREAM_BREAK_ERRORS as e:
+            raise _ClientGone from e
+
+    def accum(obj):
+        m = (obj or {}).get("message") or {}
+        if isinstance(m.get("content"), str):
+            partial[0] += m["content"]
 
     try:
         if openai_format:
@@ -3709,9 +3736,15 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
             if tcs:
                 msg["tool_calls"] = _fmt_tool_calls(tcs)
                 msg["content"] = None
-            await response.write(sse_str(sse_chunk(full, msg)).encode())
+            else:
+                accum(first)
+            await cw(sse_str(sse_chunk(full, msg)).encode())
         else:
-            await response.write(first_line + b"\n")
+            await cw(first_line + b"\n")
+            try:
+                accum(json.loads(first_line))
+            except Exception:
+                pass
 
         async for line in resp.content:
             if not line or line == b"\n":
@@ -3724,29 +3757,171 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
                     continue
                 line = json.dumps(conv).encode()
             try:
+                obj = json.loads(line)
+            except Exception:
+                obj = None
+            if obj and obj.get("done"):
+                # account tokens either way — the usage on the done chunk is real
+                await account_tokens(wid, host, full, obj, num_ctx)
+                # done_reason 'length' = the window cut the generation short. It's a
+                # truncation, so SWALLOW the done (don't close the client's stream)
+                # and let the caller continue the answer on the same connection.
+                if obj.get("done_reason") == "length":
+                    return "length"
                 if openai_format:
-                    obj = json.loads(line)
-                    if obj.get("done"):
-                        fr = obj.get("done_reason", "stop")
-                        await response.write(sse_str(sse_chunk(full, {}, done=True, finish_reason=fr)).encode())
-                        await account_tokens(wid, host, full, obj, num_ctx)
-                    else:
-                        msg = dict(obj.get("message", {}))
-                        tcs = msg.pop("tool_calls", None)
-                        if tcs:
-                            msg["tool_calls"] = _fmt_tool_calls(tcs)
-                            msg["content"] = None
-                        await response.write(sse_str(sse_chunk(full, msg)).encode())
+                    await cw(sse_str(sse_chunk(full, {}, done=True,
+                             finish_reason=obj.get("done_reason", "stop"))).encode())
                 else:
-                    await response.write(line + b"\n")
-                    obj = json.loads(line)
-                    if obj.get("done"):
-                        await account_tokens(wid, host, full, obj, num_ctx)
-            except (BrokenPipeError, ConnectionResetError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
-                log.debug("Client disconnected during stream")
-                return
+                    await cw(line + b"\n")
+                return "done"
+            # a normal content chunk
+            if openai_format:
+                m = dict((obj or {}).get("message", {}))
+                tcs = m.pop("tool_calls", None)
+                if tcs:
+                    m["tool_calls"] = _fmt_tool_calls(tcs)
+                    m["content"] = None
+                else:
+                    accum(obj)
+                await cw(sse_str(sse_chunk(full, m)).encode())
+            else:
+                await cw(line + b"\n")
+                accum(obj)
+        return "truncated"
+    except _ClientGone:
+        log.debug("Client disconnected during stream")
+        return "client"
+    except _STREAM_BREAK_ERRORS:
+        # reached only from the upstream read (client writes raise _ClientGone) —
+        # the host dropped mid-stream, so this generation is truncated
+        return "truncated"
     finally:
+        with contextlib.suppress(Exception):
+            await resp.release()
+
+
+async def _forward_stream(request, response, resp, first_line, host, full, openai_format,
+                          upstream_openai=False, wid=None, num_ctx=None):
+    content_type = "text/event-stream" if openai_format else "application/x-ndjson"
+    response.headers["Content-Type"] = content_type
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
+    response.headers["X-Dyva-Model"] = full
+    response.headers["X-Dyva-Service"] = service_of(host)
+    response.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
+    try:
+        await response.prepare(request)
+    except _STREAM_BREAK_ERRORS:
+        log.debug("Client disconnected before response headers sent")
         await resp.release()
+        return
+    await _pump_stream(response, resp, first_line, host, full, openai_format,
+                       upstream_openai, wid, num_ctx, [""])
+
+
+async def _write_terminal_done(response, full, openai_format):
+    """Close the client's stream with a synthetic done token — used when we give up
+    after a mid-stream drop with no server left to finish, so a client that keys off
+    `done` terminates cleanly instead of hanging on a half-answer."""
+    if openai_format:
+        await response.write(sse_str(sse_chunk(full, {}, done=True, finish_reason="length")).encode())
+    else:
+        done = {"model": full, "created_at": _now_iso(),
+                "message": {"role": "assistant", "content": ""},
+                "done": True, "done_reason": "length"}
+        await response.write((json.dumps(done) + "\n").encode())
+
+
+def _continuation_payload(payload, partial_text):
+    """Payload to hand the NEXT host after a mid-stream drop: the conversation so
+    far, plus the partial answer as an assistant turn and a nudge to finish it, and
+    a num_ctx floor big enough for the grown prompt (an interrupted long answer only
+    makes the context longer, and Ollama silently truncates past its window). Same
+    experimental continuation shape as a manual skip — the model may resume cleanly,
+    restate, or veer; the connection is kept alive either way."""
+    msgs = list(payload.get("messages") or []) + [
+        {"role": "assistant", "content": partial_text},
+        {"role": "user", "content": "Continue your previous answer from exactly where it "
+         "was cut off. Do not repeat what you already wrote."},
+    ]
+    out = dict(payload, messages=msgs)
+    opts = dict(out.get("options") or {})
+    opts["num_ctx"] = max(_auto_num_ctx(out), opts.get("num_ctx") or 0)   # bump, never shrink
+    out["options"] = opts
+    return out
+
+
+async def _stream_chat_failover(request, session, model, servers, opayload,
+                                openai_format, req_caps, job_wid, result):
+    """Stream a chat answer, and if an upstream drops mid-stream WITHOUT a terminal
+    done token, seamlessly fail over to the next server — the SAME client connection
+    stays open — carrying the work so far as context (with the window bumped to fit),
+    until a host completes the answer or the pool is spent. `result` is the race
+    outcome that already won the first host; later hosts are re-raced from `servers`
+    with a continuation payload. Returns the prepared StreamResponse."""
+    _, host, full, resp, first_line, _first, oai = result
+    response = web.StreamResponse()
+    response.headers["Content-Type"] = "text/event-stream" if openai_format else "application/x-ndjson"
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
+    response.headers["X-Dyva-Model"] = full
+    response.headers["X-Dyva-Service"] = service_of(host)
+    response.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
+    try:
+        await response.prepare(request)
+    except _STREAM_BREAK_ERRORS:
+        log.debug("Client disconnected before response headers sent")
+        await resp.release()
+        return response
+
+    partial = [""]
+    payload = opayload
+    dead = set()          # hosts that dropped the CONNECTION — don't retry those
+    continues = 0
+    while True:
+        mark_worker_found(job_wid, host, full)
+        status = await _pump_stream(response, resp, first_line, host, full, openai_format,
+                                    oai, job_wid, _effective_num_ctx(payload), partial)
+        if status in ("done", "client"):
+            break
+        # Two kinds of mid-stream truncation, both continued on the SAME open client
+        # connection by carrying the work forward — capped so the loop can't spin:
+        #  'truncated' the connection dropped with no done token: the host is suspect,
+        #              so log a failure, penalise it, and DON'T retry it (move on).
+        #  'length'    the answer hit the context window (done_reason 'length'): the
+        #              host is FINE, it just needs a bigger window — keep it eligible.
+        if status == "truncated":
+            await broadcast_activity(host, full, "failed",
+                f"truncated without end token: {host} dropped mid-stream after "
+                f"{len(partial[0])} chars — failing over", wid=job_wid)
+            record_verdict(host, full, failed("truncated without end token"))
+            dead.add(host)
+        else:  # 'length'
+            await broadcast_activity(host, full, "trying",
+                f"answer hit the context window on {host} at {len(partial[0])} chars — "
+                f"continuing with a larger window", wid=job_wid)
+        continues += 1
+        remaining = [s for s in servers if s[1] not in dead]
+        if continues <= MAX_STREAM_CONTINUES and remaining and partial[0].strip():
+            prev_ctx = _effective_num_ctx(payload)
+            payload = _continuation_payload(payload, partial[0])
+            if status == "length":
+                # the window is what cut it off — grow it decisively (at least 2x),
+                # not just by the length of the partial we appended.
+                opts = dict(payload.get("options") or {})
+                opts["num_ctx"] = min(max(opts.get("num_ctx", 0), prev_ctx * 2), NUM_CTX_MAX)
+                payload["options"] = opts
+            result2, _errs, _stopped = await _race_servers(
+                session, model, remaining, payload, do_stream=True,
+                remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
+            if result2:
+                _, host, full, resp, first_line, _first, oai = result2
+                continue
+        # cap hit / pool spent / nothing to continue: end the client's stream cleanly.
+        with contextlib.suppress(Exception):
+            await _write_terminal_done(response, full, openai_format)
+        break
+    return response
 
 
 async def _drain_stream(resp, first_line, upstream_openai, model):
@@ -4083,13 +4258,9 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
             if do_stream:
                 result, errors, stopped = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
                 if result:
-                    _, host, full, resp, first_line, first, _oai = result
-                    mark_worker_found(job_wid, host, full)
-                    stream_resp = web.StreamResponse()
-                    await _forward_stream(request, stream_resp, resp, first_line, host, full, openai_format,
-                                          upstream_openai=_oai, wid=job_wid,
-                                          num_ctx=_effective_num_ctx(opayload))
-                    return stream_resp
+                    return await _stream_chat_failover(
+                        request, session, model, _servers, opayload,
+                        openai_format, req_caps, job_wid, result)
                 msg = "worker manually stopped" if stopped else "all servers failed"
                 if errors:
                     msg += ": " + "; ".join(dict.fromkeys(errors))

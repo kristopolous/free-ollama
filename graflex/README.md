@@ -280,11 +280,45 @@ recorded.
 | `check` | Skips hosts already in the working file (including empty-model ollama hosts) and hosts with `result: "error"` in the not-working file. Rechecks `unreachable` hosts. |
 | `check-new` | Skips all hosts with any previous record (working or not-working). Only checks hosts never tested before. |
 | `check-all` | Rechecks every host regardless of previous status. |
-| `check-working` | Re-surveys only the currently-working hosts: refreshes each host's model list (operators keep downloading new models) and prunes hosts that no longer respond, dropping them from the working file and recording them as not-working. |
+| `check-working` | Re-surveys only the currently-working hosts: refreshes each host's model list (operators keep downloading new models) and prunes hosts that no longer respond, dropping them from the working file and recording them as not-working. On a resumed run (`-i`), hosts already snapshotted this session are kept in the pool untouched, not re-probed — and not dropped. |
+| `reconstruct` | Rebuild `{name}-working.json` **offline** from a check session's cached probe snapshots (`-i <session>`), for recovering a pool that got truncated. See *Recovering a truncated working pool*. |
 | `classify` | Bucket every model of every host in `{name}-working.json` by type. See below. |
 
 Working: `~/.cache/free-ollama/{name}-working.json` (default: `image-gen-working.json`)
 Failed:  `~/.cache/free-ollama/{name}-notworking.json` (default: `image-gen-notworking.json`)
+
+## Recovering a truncated working pool
+
+`{name}-working.json` is a **derived, rebuildable** view — the hosts that passed
+the last check — not a primary record; the primary inventory is
+`{name}-hosts.json`. Two safeguards keep a bad pass from gutting it, and one
+action rebuilds it if something ever does:
+
+- **Write-boundary guard.** Every cache write goes through one atomic writer that,
+  before replacing a file, compares the new record count against what's on disk and
+  **refuses the write** when it would drop the pool by more than 40% (and the file
+  held ≥10 records). A failed run — thousands of hosts loaded, a handful answering —
+  therefore can't overwrite the full pool with its stub; the file is left intact and
+  the refusal logged loudly. Normal appends only grow the file, so it never trips.
+- **check-working circuit breaker.** A single re-survey that would prune more than
+  half the pool (and >20 hosts) is treated as a bad pass (network blip, too-tight
+  `--ct`, local trouble), not mass host death: it refuses to prune, refreshes the
+  hosts that answered, and keeps the rest.
+- **`reconstruct`.** If a pool is lost anyway, rebuild it offline from a session's
+  cached probe snapshots — the raw model-list response of every host that answered
+  is saved under `/tmp/graflex/<session>/check/`:
+
+  ```bash
+  graflex -n ollama -a reconstruct -i 20260908154105
+  ```
+
+  It re-parses model names the same way the live check does, drops empty catalogs
+  and obvious honeypots (whose whole catalog is the phantom frozen set), and
+  **merges** into the working file (newest `checked` wins, geo carried, never
+  clobbered). It's offline recovery, not a live vet — it restores a permissive
+  superset, so follow it with `enrich` (re-stamp geo), `check-working` (re-probe,
+  prune dead, live honeypot gate) and dyva `--cleanse` (strip fake model names) to
+  converge on the fully vetted pool.
 
 ## Classify
 
@@ -352,7 +386,7 @@ the live, volatile thing (what node classes exist) to submit time.
 | Flag | Description |
 |------|-------------|
 | `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`, `lmstudio`) |
-| `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `check-working`, `fetch-check`, or `classify` |
+| `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `check-working`, `reconstruct`, `fetch-check`, or `classify` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging requests) |
 | `-q`, `--query` | Custom FOFA query (requires `--name`) |

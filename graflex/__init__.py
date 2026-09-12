@@ -259,6 +259,19 @@ def _load_check_failed(run_ts):
         return set()
 
 
+# Lobotomy guard: a failed pass must never shrink a populated cache to a stub.
+# Below this many existing records we don't bother (new/tiny files change freely);
+# at or above it, a drop of more than this fraction is refused (see _save_json_atomic).
+LOBOTOMY_FLOOR = 10
+LOBOTOMY_MAX_DROP = 0.40
+
+
+def _record_count(x):
+    """Number of records in a cache payload — list length or dict size; anything
+    else counts as 0 so the guard treats it as 'no records to protect'."""
+    return len(x) if isinstance(x, (list, dict)) else 0
+
+
 def _save_json_atomic(path, data):
     """Write JSON so a concurrent writer can't corrupt the result.
 
@@ -273,6 +286,25 @@ def _save_json_atomic(path, data):
     """
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
+    # LOBOTOMY GUARD. A failed run — 7000 hosts loaded, 3 answer — must not write
+    # its handful of results over a full pool. Compare the incoming record count
+    # against what's already on disk; a drop of more than LOBOTOMY_MAX_DROP is
+    # almost always a bad pass, not a real change, so REFUSE and keep the file.
+    # (Normal operation only appends, so it never trips; and refusing self-heals —
+    # the next read sees the intact file and re-appends correctly.)
+    try:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                prev_n = _record_count(json.load(f))
+            new_n = _record_count(data)
+            if prev_n >= LOBOTOMY_FLOOR and new_n < prev_n * (1 - LOBOTOMY_MAX_DROP):
+                log.error(
+                    f"REFUSING to write {os.path.basename(path)}: {new_n} records would "
+                    f"replace {prev_n} on disk — a {1 - new_n / prev_n:.0%} drop looks like a "
+                    f"failed pass lobotomizing the file, not a real change. File left intact.")
+                return
+    except (ValueError, OSError):
+        pass   # existing file unreadable/corrupt — nothing intact to protect, proceed
     fd, tmp = tempfile.mkstemp(dir=d, prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1986,22 +2018,26 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
         log.warning(f"check-working: no working {service or '?'} hosts to rescan")
         return
 
+    # Resume: hosts already snapshotted THIS session aren't re-probed — but they
+    # are still working hosts, so they must be PRESERVED in the pool, not dropped.
+    # Writing back only the rescanned subset is exactly what nuked 4408 -> 11.
+    preserved = []
     if session:
-        kept = []
-        skipped = 0
+        to_scan = []
         for w in working:
             hp = w["host"].split(":")
             hh = hp[0]
             pp = int(hp[1]) if len(hp) > 1 else SERVICE_CONFIG[service]["port"]
             if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
-                skipped += 1
+                preserved.append(w)
                 continue
-            kept.append(w)
-        working = kept
-        if skipped:
-            log.info(f"check-working: skipping {skipped} hosts already snapshot in session {session}")
+            to_scan.append(w)
+        working = to_scan
+        if preserved:
+            log.info(f"check-working: keeping {len(preserved)} hosts already snapshot "
+                     f"in session {session} (not re-probed)")
     if not working:
-        log.info("check-working: all hosts already snapshot in this session")
+        log.info("check-working: no hosts left to rescan; pool left intact")
         return
 
     log.info(f"check-working: rescanning {len(working)} working hosts to refresh models / prune dead")
@@ -2079,8 +2115,9 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
     # the hosts that did answer, leave the rest in the pool untouched, and warn loudly.
     PRUNE_ABORT_FRAC = 0.5
     if working and removed > 20 and removed / len(working) > PRUNE_ABORT_FRAC:
-        by_host = {_entry_host(w): w for w in working}        # keep everyone
-        for rec in kept:                                      # but refresh responders
+        by_host = {_entry_host(w): w for w in preserved}      # never re-probed this pass
+        by_host.update({_entry_host(w): w for w in working})  # + the rescanned subset
+        for rec in kept:                                      # refresh the responders
             by_host[_entry_host(rec)] = rec
         merged = sorted(by_host.values(), key=lambda h: (h.get("checked", ""), _entry_host(h)))
         _save_json_atomic(working_file, merged)               # notworking NOT touched
@@ -2089,15 +2126,106 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
                     f"REFUSING to prune; pool left intact ({len(merged)}), {len(kept)} models refreshed. "
                     f"Re-run with a larger --ct or fix connectivity.")
         return
-    kept.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
-    _save_json_atomic(working_file, kept)
+    # The written pool is the rescanned survivors PLUS the preserved (not-re-probed)
+    # hosts — never just the subset we happened to scan this pass.
+    final = {_entry_host(w): w for w in preserved}
+    for rec in kept:
+        final[_entry_host(rec)] = rec
+    out = sorted(final.values(), key=lambda h: (h.get("checked", ""), _entry_host(h)))
+    _save_json_atomic(working_file, out)
     _save_json_atomic(notworking_file, notworking)
-    refreshed = len(kept)
-    log.info(f"check-working: {len(working)} rescanned, {refreshed} still working (models refreshed), {removed} pruned")
+    log.info(f"check-working: {len(working)} rescanned, {len(kept)} still working "
+             f"(models refreshed), {removed} pruned, {len(preserved)} preserved — "
+             f"pool now {len(out)}")
 
 
 def check_working(service, name=None, check_timeout=60, workers=10, session=None):
     asyncio.run(_check_working(service, name, check_timeout, workers, session))
+
+
+def reconstruct(name=None, session=None):
+    """Rebuild <name>-working.json from a check session's cached probe snapshots.
+
+    Recovery for a working pool that got truncated. Every host that ANSWERED
+    during a check session has its raw model-list response cached under
+    /tmp/graflex/<session>/check/*.json (the same snapshots a resumed `-i` run
+    skips), so the pool can be rebuilt OFFLINE — no re-probing the fleet.
+
+    Records are rebuilt with the same model parsing the live check uses
+    (_filter_models over the listed names); hosts that listed nothing usable are
+    dropped, and obvious honeypots — whose ENTIRE catalog is woahllama's phantom
+    frozen set — are dropped too. The result is MERGED into the existing working
+    file, never clobbered: newest `checked` wins, so fresh survivors and
+    geo-enriched records already on disk are preserved. This is offline recovery,
+    not a live vet — follow it with `check-working` (re-probe, prune dead, live
+    honeypot gate) and dyva `--cleanse` to reach the fully vetted pool."""
+    from datetime import datetime, timezone
+    if not session:
+        log.error("reconstruct: -i <session-id> is required — the run_ts whose "
+                  "/tmp/graflex/<session>/check snapshots to rebuild from")
+        return
+    snap_dir = os.path.join("/tmp/graflex", session, "check")
+    if not os.path.isdir(snap_dir):
+        log.error(f"reconstruct: no snapshot dir {snap_dir}")
+        return
+
+    working_file = _cache_file(name, "working")
+    existing = _load_json(working_file)
+    if not isinstance(existing, list):
+        existing = []
+    by_host = {_entry_host(e): e for e in existing}
+
+    files = [fn for fn in os.listdir(snap_dir) if fn.endswith(".json")]
+    rebuilt = added = refreshed = empty = honeypots = 0
+    for fn in files:
+        try:
+            with open(os.path.join(snap_dir, fn), encoding="utf-8") as fh:
+                snap = json.load(fh)
+        except (ValueError, OSError):
+            continue
+        host = snap.get("host")
+        payload = snap.get("payload")
+        if not host or not isinstance(payload, dict):
+            continue
+        # Same name extraction as the live check: ollama /api/tags (models[].name),
+        # falling back to the OpenAI /v1/models shape (data[].id) for the hosts that
+        # answered that way. _filter_models drops the :cloud passthroughs.
+        raw = payload.get("models")
+        if not isinstance(raw, list):
+            raw = payload.get("data") if isinstance(payload.get("data"), list) else []
+        names = [n for n in (_model_name(m) for m in raw) if n]
+        names = _filter_models(names)
+        if not names:
+            empty += 1
+            continue
+        if set(names) <= HONEYPOT_MODELS:   # whole catalog is the frozen set => honeypot
+            honeypots += 1
+            continue
+        rebuilt += 1
+        port = host.rsplit(":", 1)[-1] if ":" in host else ""
+        scheme = "https" if port == "443" else "http"
+        checked = datetime.fromtimestamp(snap.get("check_time", 0), timezone.utc).isoformat()
+        rec = {"service": "ollama", "url": f"{scheme}://{host}/",
+               "models": names, "checked": checked, "host": host}
+        prev = by_host.get(host)
+        if prev is None:
+            by_host[host] = rec
+            added += 1
+        elif checked > (prev.get("checked") or ""):
+            # newer than what's on disk — refresh, but carry geo across the rebuild
+            for gk in _GEO_CARRY:
+                if gk in prev and gk not in rec:
+                    rec[gk] = prev[gk]
+            by_host[host] = rec
+            refreshed += 1
+        # else: on-disk record is newer/equal — keep it (fresh survivor / enriched)
+
+    merged = sorted(by_host.values(), key=lambda h: (h.get("checked", ""), _entry_host(h)))
+    _save_json_atomic(working_file, merged)
+    log.info(f"reconstruct: {len(files)} snapshots — {rebuilt} rebuilt "
+             f"({empty} listed nothing usable, {honeypots} honeypots dropped); "
+             f"{added} new, {refreshed} refreshed; pool now {len(merged)} "
+             f"(was {len(existing)}) in {os.path.basename(working_file)}")
 
 
 async def _model_probe(service, name=None, check_timeout=60, workers=10, session=None):
@@ -2533,7 +2661,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "model-probe"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "model-probe", "reconstruct"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -2606,6 +2734,13 @@ def main():
                             session=args.session)
         except KeyboardInterrupt:
             log.warning("model-probe interrupted")
+        return
+
+    if args.action == "reconstruct":
+        log.info("--- reconstruct ---")
+        for svc in pipe_services:
+            reconstruct(name=(svc if all_services else (args.name or args.service)),
+                        session=args.session)
         return
 
     if args.action == "check-working":
