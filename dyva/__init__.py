@@ -3424,6 +3424,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
             # quietly fail. (num_ctx is Ollama-native — the OpenAI dialect has no
             # such field, so only this branch.)
             p = _with_num_ctx(p)
+            p = _with_num_predict(p)   # lift the host's output cap so it can fill the window
             if p.get("messages"):
                 p = dict(p, messages=_coerced_messages(p["messages"]))
         _curlify("POST", f"{host}{ep}", p)
@@ -3785,6 +3786,22 @@ def _with_num_ctx(payload):
     if "num_ctx" in opts:
         return payload
     opts["num_ctx"] = _auto_num_ctx(payload)
+    return dict(payload, options=opts)
+
+
+def _with_num_predict(payload):
+    """Ensure the model may actually USE the window we sized. Sizing num_ctx only
+    reserves ROOM for a long reply — it doesn't lift the output cap. Ollama defaults
+    num_predict per host/model, and some hosts cap it low (~4096), so a long answer
+    (e.g. rewriting a 16kb story) stops ~4k tokens in with the window still half
+    empty — a stop, not a truncation, so the num_ctx reissue never even fires.
+    Set num_predict=-1 (generate until natural stop or the context fills) unless the
+    caller pinned one. Ollama-native, so only the Ollama send branch calls this; the
+    num_ctx reissue still handles the case where the answer genuinely fills num_ctx."""
+    opts = dict(payload.get("options") or {})
+    if "num_predict" in opts:
+        return payload
+    opts["num_predict"] = -1
     return dict(payload, options=opts)
 
 
