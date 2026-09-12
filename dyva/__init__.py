@@ -126,6 +126,11 @@ HEDGE_DELAY = 15
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
 # so it's dropped rather than stored.
 TPS_CEILING = 5000
+# After the first token, a live stream keeps sending — so any gap longer than this
+# (seconds) is a stalled connection, not slow generation. A per-read watchdog, reset
+# each line, fires on that silence and we fail over. Deliberately AFTER first token
+# only: time-to-first-token (cold starts) stays bounded by the race/hedge, not this.
+STREAM_STALL = 60
 # Hard cap on how many times one streaming answer may be continued across hosts
 # after a mid-stream truncation (a connection drop or a done_reason 'length'
 # window-cut). A generous ceiling that still guarantees the failover loop can't
@@ -792,15 +797,16 @@ def _apply_source_mapping(row, mapping):
 TRIAL_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
 
-# The `__dyva_info__:test` probe: a cheap factual question bogus servers get
-# wrong (they often just parrot the prompt or echo roll tokens). A host only
-# passes if its answer mentions "Washington" or "George". Cycling this through
-# every candidate for a specific model is the expensive part the operator opts
-# into explicitly, so it never runs in normal routing.
+# The `__dyva_info__:test` probe: a TRIVIAL question bogus servers get wrong (they
+# parrot the prompt or echo roll tokens). Kept dead-simple on purpose — a harder
+# factual question ("first US President") culls real-but-dumb models that answer
+# wrong, which isn't the point; we only want to catch fakes/broken hosts. A host
+# passes if its answer mentions "blue". Cycling this through every candidate for a
+# model is the expensive part the operator opts into explicitly.
 QUICK_TEST_TAG = "__dyva_info__:test"
 QUICK_TEST_PROMPT = ("Do not be conversational. This is a test. "
-                     "What is the name of the first United States President?")
-QUICK_TEST_PASS_RE = re.compile(r"\b(Washington|George)\b", re.I)
+                     "What color is the sky on a bright sunny day with no clouds? Answer in one word.")
+QUICK_TEST_PASS_RE = re.compile(r"\bblue\b", re.I)
 
 _status_db = None
 _servers_cache = None
@@ -1709,7 +1715,11 @@ def _get_db():
                      # tps = tokens/second on the last generation. MOST-RECENT only
                      # (overwritten each run), not an average — NULL until measured.
                      "ttft REAL",
-                     "tps REAL"):
+                     "tps REAL",
+                     # ISO timestamp this (host, model) last PASSED the quick smoke
+                     # test, so `:test-all` can skip re-probing it — a host:port isn't
+                     # swapping a real model for a fake one under us. NULL = never passed.
+                     "smoke_ok TEXT"):
             try:
                 _status_db.execute(f"ALTER TABLE host_status ADD COLUMN {_col}")
             except sqlite3.OperationalError:
@@ -1816,6 +1826,34 @@ def record_perf(host, model, ttft=None, tps=None):
         db.commit()
     except Exception as e:
         log.debug(f"record_perf failed for {host}/{model}: {e}")
+
+
+def mark_smoke_ok(host, model):
+    """Stamp NOW (ISO) as when this (host, model) last passed the quick smoke test,
+    so `:test-all` can skip re-probing it. Keyed like verdicts (canon_pattern)."""
+    model = canon_pattern(model)
+    try:
+        db = _get_db()
+        db.execute(
+            "INSERT INTO host_status(host,model,state,failure_streak,smoke_ok)"
+            " VALUES(?,?, 'good', 0, ?)"
+            " ON CONFLICT(host,model) DO UPDATE SET smoke_ok=excluded.smoke_ok",
+            [host, model, _now_iso()])
+        db.commit()
+    except Exception as e:
+        log.debug(f"mark_smoke_ok failed for {host}/{model}: {e}")
+
+
+def smoke_ok_at(host, model):
+    """ISO timestamp of this (host, model)'s last smoke-test pass, or None."""
+    model = canon_pattern(model)
+    try:
+        row = _get_db().execute(
+            "SELECT smoke_ok FROM host_status WHERE host=? AND model=?",
+            [host, model]).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
 
 
 # Failure-kind -> counter column. Whitelisted so the kind can be interpolated
@@ -3330,6 +3368,19 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
                else "/v1/chat/completions") if attempt_oai else endpoint)
         p = {k: v for k, v in payload.items() if k not in _DYVA_INTERNAL}
         p["model"], p["stream"] = full, do_stream
+        # think:false has no universal off-switch, so STACK every known lever per
+        # dialect (the way llcat's -nt does) — each backend ignores the ones it
+        # doesn't recognise. The native `think` field is kept for Ollama but stripped
+        # for OpenAI by openai_payload below, so a strict OpenAI host won't 400 on it.
+        if payload.get("think") is False:
+            p = _apply_no_think(p)                 # Qwen3 /no_think prompt token (rides in the text, any dialect)
+            if attempt_oai:
+                p["reasoning_effort"] = "low"                          # OpenAI / LiteLLM
+                p["chat_template_kwargs"] = {"enable_thinking": False}   # vLLM / SGLang / llama.cpp
+                if "openrouter" in host:
+                    p["reasoning"] = {"effort": "none", "exclude": True, "enabled": False}   # OpenRouter
+            else:
+                p["think"] = False                 # Ollama native
         if attempt_oai:
             p = openai_payload(p)
         else:
@@ -3672,6 +3723,28 @@ def _auto_num_ctx(payload):
     return max(NUM_CTX_MIN, min(NUM_CTX_MAX, stepped))
 
 
+def _apply_no_think(p):
+    """Express a `think:false` request as the Qwen3 `/no_think` PROMPT directive.
+
+    The native `think` field is unreliable here: the OpenAI dialect path strips it
+    (it's Ollama-only), and a custom-GGUF thinking model imported without Ollama's
+    thinking capability ignores it and reasons inline anyway. `/no_think` rides in
+    the message text, so the chat template suppresses the reasoning block on every
+    dialect (ollama / vllm / llama.cpp / lmstudio). It's a Qwen3-family convention;
+    on a non-thinking model the trailing token is harmless. Appended to the last
+    user turn."""
+    msgs = p.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return p
+    msgs = [dict(m) for m in msgs]
+    for m in reversed(msgs):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            if "/no_think" not in m["content"]:
+                m["content"] = (m["content"].rstrip() + " /no_think").strip()
+            break
+    return dict(p, messages=msgs)
+
+
 def _with_num_ctx(payload):
     """Return payload with an auto-sized options.num_ctx, unless the caller
     already pinned one (an explicit request always wins)."""
@@ -3746,8 +3819,14 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
             except Exception:
                 pass
 
-        async for line in resp.content:
-            if not line or line == b"\n":
+        while True:
+            # WATCHDOG (after first token): reset every line; a silence longer than
+            # STREAM_STALL raises asyncio.TimeoutError into the handler below and is
+            # treated as a mid-stream truncation -> fail over to another host.
+            line = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+            if not line:
+                break
+            if line == b"\n":
                 continue
             line = line.rstrip(b"\n\r")
             if upstream_openai:
@@ -3950,20 +4029,28 @@ async def _drain_stream(resp, first_line, upstream_openai, model):
             accept(json.loads(first_line))
         except Exception:
             pass
-    async for raw in resp.content:
-        if not raw or raw == b"\n":
-            continue
-        raw = raw.rstrip(b"\n\r")
-        if upstream_openai:
-            obj = openai_stream_to_ollama(raw, model)
-            if obj is None:
+    try:
+        while True:
+            # WATCHDOG (after first token): a silence longer than STREAM_STALL means
+            # the connection stalled — stop draining and return what we have.
+            raw = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+            if not raw:
+                break
+            if raw == b"\n":
                 continue
-        else:
-            try:
-                obj = json.loads(raw)
-            except Exception:
-                continue
-        accept(obj)
+            raw = raw.rstrip(b"\n\r")
+            if upstream_openai:
+                obj = openai_stream_to_ollama(raw, model)
+                if obj is None:
+                    continue
+            else:
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+            accept(obj)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+        pass   # stalled/dropped mid-drain — return the partial rather than hanging
 
     data = dict(done_obj or {})
     data.setdefault("model", model)
@@ -4030,6 +4117,13 @@ def _info_wants_test(payload):
     actually *probe* the candidate hosts with the quick factual question and
     mark bad any that answer wrong, returning the first one that passes."""
     return _content_contains(payload, DYVA_INFO_TAG + ":test")
+
+
+def _info_wants_test_all(payload):
+    """`__dyva_info__:test-all` — probe EVERY non-bad candidate for the model (not
+    just until the first pass), culling the failures. Check this BEFORE _info_wants_test,
+    since ':test-all' also contains ':test'."""
+    return _content_contains(payload, DYVA_INFO_TAG + ":test-all")
 
 
 def _norm_host(h):
@@ -4110,9 +4204,19 @@ def _info_ndjson(model_in, info):
 
 
 def _quick_test_answer_ok(content):
-    """True if a candidate host's answer to the quick test names the first US
-    president (Washington or George)."""
-    return bool(content) and QUICK_TEST_PASS_RE.search(content) is not None
+    """The quick test only needs to tell a REAL model from a fake/broken host — NOT
+    to grade trivia. So pass if the answer says "blue" (the expected reply) OR is just
+    a short, crisp answer — a working-but-dumb model that replies "green" or "grey" is
+    still a real model and must pass. Only fakes fail: they parrot the whole prompt
+    back (long) or emit nothing. Chat artifacts like `</s>` / `<|…|>` are stripped
+    first, so "Green.</s>" reads as the single word "green"."""
+    if not content:
+        return False
+    if QUICK_TEST_PASS_RE.search(content):
+        return True
+    cleaned = re.sub(r"</?s>|<\|[^|]*\|>|[^\w\s]", " ", content, flags=re.I)
+    words = cleaned.split()
+    return 1 <= len(words) <= 3
 
 
 async def _run_info_test(session, model_in, tools=None):
@@ -4135,81 +4239,150 @@ async def _run_info_test(session, model_in, tools=None):
         req_caps = sorted(set(req_caps) | {"tools"})
     servers = find_servers(model_in, req_caps)
     for _prio, host, ms in servers:
-        if ms:
-            full = ms[0]
-        else:
+        if not ms:
             continue
-        wid = asyncio.current_task().get_name()
-        payload = {
-            "model": full,
-            "messages": [{"role": "user", "content": QUICK_TEST_PROMPT}],
-            "stream": False,
-        }
-        if tools:
-            payload["tools"] = tools
-        start = time.time()
-        await broadcast_activity(host, model_in, "trying",
-            f"quick test: {host} for {model_in}", wid=wid)
-        try:
-            # Same send primitive as the real request path: the host's own
-            # dialect with a fallback to the other. A probe that forced Ollama's
-            # /api/chat used to cull every LM Studio / vLLM / OpenAI-style host.
-            resp, oai, _ep = await _send_chat(session, host, full, payload, "/api/chat", False)
-        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
-            add_bad(host, model_in)
-            await broadcast_activity(host, model_in, "failed",
-                f"quick test: {host} for {model_in} - {type(e).__name__}",
-                duration=time.time() - start, wid=wid)
-            continue
-        if resp is None:
-            add_bad(host, model_in)
-            await broadcast_activity(host, model_in, "failed",
-                f"quick test: {host} for {model_in} - no chat endpoint (tried both dialects)",
-                duration=time.time() - start, wid=wid)
-            continue
-        if resp.status != 200:
-            await resp.release()
-            add_bad(host, model_in)
-            await broadcast_activity(host, model_in, "failed",
-                f"quick test: {host} for {model_in} - status {resp.status}",
-                duration=time.time() - start, wid=wid)
-            continue
-        try:
-            data = await resp.json()
-        except Exception:
-            await resp.release()
-            add_bad(host, model_in)
-            await broadcast_activity(host, model_in, "failed",
-                f"quick test: {host} for {model_in} - bad response",
-                duration=time.time() - start, wid=wid)
-            continue
-        await resp.release()
-        if oai and "choices" in data:          # normalise the openai shape first
-            data = openai_to_ollama(data, full)
-        content = (data.get("message") or {}).get("content") or ""
-        dur = time.time() - start
-        shown = content.strip()[:160]
-        if "error" in data:
-            add_bad(host, model_in)
-            await broadcast_activity(host, model_in, "failed",
-                f"quick test: {host} for {model_in} - error: {data['error']}",
-                duration=dur, wid=wid)
-            continue
-        if not _quick_test_answer_ok(content):
-            force_bad(host, model_in)
-            log.warning(f"quick test FAIL {host} ({full}): answer={shown!r}")
-            await broadcast_activity(host, model_in, "failed",
-                f"quick test: {host} for {model_in} - wrong answer: {shown!r}",
-                duration=dur, wid=wid)
-            continue
-        set_last(model_in, host, full)
-        add_good(host, model_in)
-        log.info(f"quick test PASS {host} ({full}): answer={shown!r}")
-        await broadcast_activity(host, model_in, "connected",
-            f"quick test: {host} for {model_in} - passes. answer: {shown!r}",
-            duration=dur, wid=wid)
-        return {"host": _norm_host(host), "model": full, "service": service_of(host)}
+        ok, _detail = await _quick_probe(session, host, ms[0], model_in, tools)
+        if ok:
+            return {"host": _norm_host(host), "model": ms[0], "service": service_of(host)}
     return None
+
+
+async def _quick_probe(session, host, full, model_in, tools=None):
+    """One quick factual probe against a single host: updates reputation (bad on any
+    failure or wrong answer, good on a pass) and emits an activity line. Returns
+    (passed, detail). The shared primitive behind `:test` (first pass wins) and
+    `:test-all` (probe every candidate)."""
+    wid = asyncio.current_task().get_name()
+    payload = {"model": full, "messages": [{"role": "user", "content": QUICK_TEST_PROMPT}], "stream": False}
+    if tools:
+        payload["tools"] = tools
+    start = time.time()
+    await broadcast_activity(host, model_in, "trying", f"quick test: {host} for {model_in}", wid=wid)
+    try:
+        # Same send primitive as the real request path: the host's own dialect with a
+        # fallback to the other (a probe that forced /api/chat culled every OpenAI host).
+        resp, oai, _ep = await _send_chat(session, host, full, payload, "/api/chat", False)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        add_bad(host, model_in)
+        await broadcast_activity(host, model_in, "failed",
+            f"quick test: {host} for {model_in} - {type(e).__name__}", duration=time.time() - start, wid=wid)
+        return False, type(e).__name__
+    if resp is None:
+        add_bad(host, model_in)
+        await broadcast_activity(host, model_in, "failed",
+            f"quick test: {host} for {model_in} - no chat endpoint (tried both dialects)",
+            duration=time.time() - start, wid=wid)
+        return False, "no chat endpoint"
+    if resp.status != 200:
+        await resp.release()
+        add_bad(host, model_in)
+        await broadcast_activity(host, model_in, "failed",
+            f"quick test: {host} for {model_in} - status {resp.status}", duration=time.time() - start, wid=wid)
+        return False, f"status {resp.status}"
+    try:
+        data = await resp.json()
+    except Exception:
+        await resp.release()
+        add_bad(host, model_in)
+        await broadcast_activity(host, model_in, "failed",
+            f"quick test: {host} for {model_in} - bad response", duration=time.time() - start, wid=wid)
+        return False, "bad response"
+    await resp.release()
+    if oai and "choices" in data:          # normalise the openai shape first
+        data = openai_to_ollama(data, full)
+    content = (data.get("message") or {}).get("content") or ""
+    dur = time.time() - start
+    shown = content.strip()[:160]
+    if "error" in data:
+        add_bad(host, model_in)
+        await broadcast_activity(host, model_in, "failed",
+            f"quick test: {host} for {model_in} - error: {data['error']}", duration=dur, wid=wid)
+        return False, f"error: {str(data['error'])[:80]}"
+    if not _quick_test_answer_ok(content):
+        force_bad(host, model_in)
+        log.warning(f"quick test FAIL {host} ({full}): no real answer={shown!r}")
+        await broadcast_activity(host, model_in, "failed",
+            f"quick test: {host} for {model_in} - no real answer (parroted/empty): {shown!r}", duration=dur, wid=wid)
+        return False, f"no real answer: {shown}"
+    set_last(model_in, host, full)
+    add_good(host, model_in)
+    mark_smoke_ok(host, model_in)           # remember it passed, so :test-all can skip it
+    log.info(f"quick test PASS {host} ({full}): answer={shown!r}")
+    await broadcast_activity(host, model_in, "connected",
+        f"quick test: {host} for {model_in} - passes. answer: {shown!r}", duration=dur, wid=wid)
+    return True, shown
+
+
+async def _run_info_test_all(session, model_in, tools=None, emit=None):
+    """`__dyva_info__:test-all` — probe EVERY non-bad candidate for the model (never
+    stops at the first pass), culling each failure as it goes. `emit` (async) is
+    called with a human line per host as it happens, so the issuing client can watch
+    the probe live. Returns a summary
+    {model, probed, pass_count, fail_count, skip_count, passed[], failed[], skipped_already_passed[]}."""
+    req_caps = needs_caps([])
+    if tools:
+        req_caps = sorted(set(req_caps) | {"tools"})
+    # find_servers already excludes bad hosts; on top of that we only PROBE the ones
+    # that have never passed (smoke_ok NULL) and SKIP the already-verified — a host:port
+    # isn't swapping a real model for a fake one under us.
+    passed, failed, skipped = [], [], []
+    for _prio, host, ms in find_servers(model_in, req_caps):
+        if not ms:
+            continue
+        nh = _norm_host(host)
+        entry = {"host": nh, "model": ms[0], "service": service_of(host)}
+        prior = smoke_ok_at(host, model_in)
+        if prior:
+            entry["smoke_ok"] = prior
+            skipped.append(entry)
+            if emit: await emit(f"· {nh} ({ms[0]}) — skip, already passed {prior}")
+            continue
+        if emit: await emit(f"→ testing {nh} ({ms[0]})…")
+        ok, detail = await _quick_probe(session, host, ms[0], model_in, tools)
+        if ok:
+            passed.append(entry)
+            if emit: await emit(f"✓ {nh} ({ms[0]}) — {detail!r}")
+        else:
+            entry["detail"] = detail
+            failed.append(entry)
+            if emit: await emit(f"✗ {nh} ({ms[0]}) — {detail}")
+    return {"model": model_in, "probed": len(passed) + len(failed),
+            "pass_count": len(passed), "fail_count": len(failed), "skip_count": len(skipped),
+            "passed": passed, "failed": failed, "skipped_already_passed": skipped}
+
+
+async def _stream_info_test_all(request, session, model_in, tools, openai_format):
+    """Run :test-all and stream each host's result to the client as it happens,
+    then a final done chunk carrying the full summary in `dyva_info`."""
+    resp = web.StreamResponse()
+    resp.headers["Content-Type"] = "text/event-stream" if openai_format else "application/x-ndjson"
+    resp.headers["Cache-Control"] = "no-cache"
+    try:
+        await resp.prepare(request)
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        return resp
+    async def emit(line):
+        try:
+            if openai_format:
+                await resp.write(sse_str(sse_chunk(model_in, {"role": "assistant", "content": line + "\n"})).encode())
+            else:
+                await resp.write((json.dumps({"model": model_in, "created_at": _now_iso(),
+                    "message": {"role": "assistant", "content": line + "\n"}, "done": False}) + "\n").encode())
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            pass
+    await emit(f"test-all {model_in}: probing non-bad, not-yet-verified hosts…")
+    summary = await _run_info_test_all(session, model_in, tools=tools, emit=emit)
+    tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad, "
+            f"{summary['skip_count']} skipped (already passed) of {summary['probed']} probed")
+    with contextlib.suppress(Exception):
+        if openai_format:
+            await resp.write(sse_str(sse_chunk(model_in, {"role": "assistant", "content": tail})).encode())
+            await resp.write(sse_str(sse_chunk(model_in, {}, done=True)).encode())
+        else:
+            await resp.write((json.dumps({"model": model_in, "created_at": _now_iso(),
+                "message": {"role": "assistant", "content": "\n" + tail}, "done": True,
+                "done_reason": "stop", "dyva_info": summary}) + "\n").encode())
+    return resp
 
 
 async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_format):
@@ -4225,6 +4398,11 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
         req_caps = sorted(set(req_caps) | {"tools"})
 
     if _has_info_tag(opayload):
+        if _info_wants_test_all(opayload):
+            if do_stream:
+                return await _stream_info_test_all(request, session, model_list[0], opayload.get("tools"), openai_format)
+            summary = await _run_info_test_all(session, model_list[0], tools=opayload.get("tools"))
+            return _info_response(model_list[0], summary, do_stream=False, openai_format=openai_format)
         if _info_wants_test(opayload):
             info = await _run_info_test(session, model_list[0], tools=opayload.get("tools"))
             if info is None:
@@ -4342,6 +4520,9 @@ async def _proxy_generate(request, session):
         req_caps = sorted(set(req_caps) | {"tools"})
 
     if _has_info_tag(body):
+        if _info_wants_test_all(body):
+            summary = await _run_info_test_all(session, model, tools=body.get("tools"))
+            return _info_response(model, summary, do_stream=do_stream)
         if _info_wants_test(body):
             info = await _run_info_test(session, model, tools=body.get("tools"))
             if info is None:
@@ -5847,7 +6028,9 @@ async def handle_chat_job_submit(request):
     if _has_info_tag(body):
         session = request.app["session"]
         model0 = model.split("/")[0] if "/" in model else model
-        if _info_wants_test(body):
+        if _info_wants_test_all(body):
+            info = await _run_info_test_all(session, model0, tools=body.get("tools"))
+        elif _info_wants_test(body):
             info = await _run_info_test(session, model0, tools=body.get("tools"))
             if info is None:
                 return web.json_response(err_obj(
@@ -8669,8 +8852,20 @@ async def _run_chat_job(session, jid):
                         if jl is not None:
                             pending.append(jl + "\n")
                         if not done:
-                            async for raw in resp.content:
-                                if not raw or raw == b"\n":
+                            while True:
+                                # WATCHDOG (after first token): a silence longer than
+                                # STREAM_STALL — or a mid-stream drop — is the host dying;
+                                # flag it and fail over to the next server. Reading with a
+                                # timeout (rather than `async for`) also lets Stop/Skip
+                                # fire during a silent stall instead of blocking forever.
+                                try:
+                                    raw = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+                                except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+                                    ctl["stall"] = True
+                                    raise asyncio.CancelledError()
+                                if not raw:
+                                    break
+                                if raw == b"\n":
                                     continue
                                 raw = raw.rstrip(b"\n\r")
                                 # respond to controls between chunks
@@ -8689,7 +8884,23 @@ async def _run_chat_job(session, jid):
                         await _pump()
                     except asyncio.CancelledError:
                         await _flush(force=True)
-                        if ctl["skip"]:
+                        if ctl.get("stall"):
+                            # the host stalled / dropped mid-stream — fail over like a
+                            # skip (carry the partial to the next host), but record it as
+                            # a real failure so reputation reflects it.
+                            record_verdict(host, model, timed_out(f"stream stalled — no tokens for {STREAM_STALL}s"))
+                            errors.append(f"{host}: stream stalled")
+                            servers = [s for s in servers if s[1] != host]
+                            if partial[0].strip():
+                                opayload["messages"] = list(opayload.get("messages") or []) + [
+                                    {"role": "assistant", "content": partial[0]},
+                                    {"role": "user", "content": "Continue your previous answer from "
+                                     "exactly where it was cut off. Do not repeat what you already wrote."},
+                                ]
+                            _set_worker_phase(job_wid, None)
+                            ctl["stall"] = False
+                            skipped = True
+                        elif ctl["skip"]:
                             record_verdict(host, model, skip("skipped by user"))
                             errors.append(f"{host}: skipped by user")
                             servers = [s for s in servers if s[1] != host]
@@ -12025,7 +12236,13 @@ def make_app():
         if os.path.exists(_demos_index):
             async def _serve_demos_index(request, _p=_demos_index):
                 return web.FileResponse(_p, headers={"Cache-Control": "no-cache"})
-            app.router.add_get("/demos", _serve_demos_index)
+            # /demos (no trailing slash) REDIRECTS to /demos/, so the index's relative
+            # links (artist.html, ../) resolve against /demos/ and not the site root.
+            # The Location is RELATIVE ("demos/") so it stays correct behind a
+            # reverse-proxy path prefix (…/11434/demos -> …/11434/demos/).
+            async def _demos_redirect(request):
+                raise web.HTTPFound("demos/")
+            app.router.add_get("/demos", _demos_redirect)
             app.router.add_get("/demos/", _serve_demos_index)
         app.router.add_static("/demos", demos_dir, show_index=True)
 

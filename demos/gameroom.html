@@ -1,0 +1,1114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Game Room — two models play (dyva)</title>
+<style>
+  :root{--bg:#12141a;--panel:#1b1f28;--line:#2d323e;--text:#e9ecf2;--text2:#9aa3b4;--accent:#7cc0ff;
+        --x:#3fd0c0;   /* player 1 / X — teal */
+        --o:#b794f6;   /* player 2 / O — violet */
+        --p3:#f6c177;  /* player 3 — amber */
+        --p4:#6fb3ff;  /* player 4 — blue */
+        --err:#ff6b6b; /* errors & wrong/miss — red is reserved for these */}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:18px 22px 6px}
+  h1{margin:0;font-size:22px}
+  header .sub{color:var(--text2);font-size:12px;margin-top:3px}
+  .top{display:flex;gap:10px;align-items:flex-end;padding:8px 22px 16px}
+  .top label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)}
+  input{background:#12151c;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:8px 10px;font-size:13px}
+  #base{min-width:240px}
+  .games{display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:20px;padding:0 22px 50px}
+  /* phones: stack one game per row (1x4), each its natural height */
+  @media (max-width:640px){ .games{grid-template-columns:1fr;grid-auto-rows:auto} }
+  .game{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+  .game h2{margin:0 0 10px;font-size:16px}
+  .thinktoggle{font-size:11px;font-weight:400;color:var(--text2);cursor:pointer;vertical-align:middle}
+  .thinktoggle input{vertical-align:middle;margin-right:2px}
+  .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+  .controls input{flex:1 1 100px;min-width:0}
+  .controls input.p1{border-left:3px solid var(--x)}
+  .controls input.p2{border-left:3px solid var(--o)}
+  .controls input.p3{border-left:3px solid var(--p3)}
+  .controls input.p4{border-left:3px solid var(--p4)}
+  /* whose turn it is: a dark tint of that player's color on their input */
+  .controls input.turn.p1{background:color-mix(in srgb, var(--x) 22%, #12151c)}
+  .controls input.turn.p2{background:color-mix(in srgb, var(--o) 22%, #12151c)}
+  .controls input.turn.p3{background:color-mix(in srgb, var(--p3) 22%, #12151c)}
+  .controls input.turn.p4{background:color-mix(in srgb, var(--p4) 22%, #12151c)}
+  .controls button{flex:0 0 auto}
+  button{background:var(--accent);color:#06233f;border:0;border-radius:6px;padding:8px 16px;font-weight:700;cursor:pointer;font-size:13px}
+  button.stop{background:#33384a;color:var(--text)}
+  button:disabled{opacity:.45;cursor:default}
+  /* fixed-height so the wrapping thinking tail can't grow the card (or the 2x2 row);
+     wrap + break so a long token can't push the box wide either */
+  .status{font-size:12px;color:var(--text2);height:52px;border-top:1px solid var(--line);padding-top:8px;margin-top:8px;line-height:1.4;white-space:normal;overflow-wrap:anywhere;overflow:hidden}
+  .board{margin-bottom:8px}
+  /* chess */
+  .chess{display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);width:100%;max-width:320px;aspect-ratio:1/1;border:1px solid #000;margin:0 auto}
+  .chess .c{display:flex;align-items:center;justify-content:center;font-size:min(6vw,26px);line-height:1;user-select:none}
+  .chess .c.l{background:#454e5c} .chess .c.d{background:#2b323d}   /* dark board — the page is always dark */
+  /* piece colors match the player colors: White = player 1 (teal), Black = player 2
+     (violet); dark outline keeps them legible on both square colors */
+  .chess .c .pc{color:var(--o);text-shadow:0 0 1px #000,0 0 2px #000}   /* Black = player 2 */
+  .chess .c .pc.w{color:var(--x);text-shadow:0 0 1px #000,0 0 2px #000} /* White = player 1 */
+  /* tic-tac-toe */
+  .ttt{display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);gap:4px;width:100%;max-width:220px;aspect-ratio:1/1;margin:0 auto}
+  .ttt .cell{display:flex;align-items:center;justify-content:center;background:#12151c;border:1px solid var(--line);border-radius:6px;font-size:min(9vw,34px);font-weight:800;color:var(--text2)}
+  .ttt .cell.X{color:var(--x)} .ttt .cell.O{color:var(--o)}
+  .tttscore{font-size:12px;color:var(--text2);text-align:center;margin-bottom:8px}
+  /* hangman */
+  .hang pre{margin:0;font:13px/1.15 ui-monospace,SFMono-Regular,monospace;color:var(--text2)}
+  .hang .word{font:700 24px/1.4 ui-monospace,monospace;letter-spacing:6px;margin:8px 0}
+  .hang .guessed{font-size:12px;color:var(--text2)}
+  .hang .guessed .miss{color:var(--err)}
+  /* pictionary */
+  .pict .answer{font-size:12px;color:var(--text2);margin-bottom:6px}
+  .pict .answer b{color:var(--accent)}
+  .pict .reel{max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+  .pict .shot .cap{font-size:11px;color:var(--text2);margin-bottom:4px}
+  .pict .shot .pic{background:#0f1218;border-radius:6px;min-height:110px;max-height:200px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+  .pict .shot .pic svg{width:100%;height:auto;max-height:200px;display:block}
+  .pict .shot .pic .wait{color:#888;font-size:12px;padding:20px}
+  .pict .shot.pending .pic{outline:1px dashed var(--line);outline-offset:-1px}
+  .pict .card{background:#12151c;border:1px solid var(--line);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:8px}
+  .pict .rdhd{font-size:11px;color:var(--text2)} .pict .rdhd b{color:var(--accent)}
+  /* the guesser's lines, interleaved between drawings */
+  .pict .say{font:12px/1.4 ui-monospace,SFMono-Regular,monospace;color:var(--text2);padding:1px 2px}
+  .pict .say.correct{color:var(--accent);font-weight:700}
+  .pict .say.close{color:var(--p3)}
+  .pict .say.wrong{color:var(--err)}
+  .pict .draw{background:#0f1218;border-radius:6px;min-height:160px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .pict .draw svg{width:100%;height:auto;max-height:320px;display:block}
+  .pict .draw .wait{color:#888;font-size:12px;padding:24px}
+  .pict .draw .think{width:100%;max-height:320px;overflow:auto;padding:10px;margin:0;font:11px/1.45 ui-monospace,SFMono-Regular,monospace;color:#555;white-space:pre-wrap;text-align:left}
+  .pict .draw .think b{color:#222;display:block;margin-bottom:6px}
+  .pict .hint{font-size:12px;color:var(--o);margin-top:6px}
+  /* move log */
+  .log{max-height:150px;overflow:auto;font:11px/1.5 ui-monospace,monospace;color:var(--text2);padding-top:6px}
+  .log .mv{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .log .mv b{color:var(--text)}
+  .log .mv.p1 b{color:var(--x)} .log .mv.p2 b{color:var(--o)} .log .mv.p3 b{color:var(--p3)} .log .mv.p4 b{color:var(--p4)}
+  .log .mv .host{color:var(--accent)}
+  .log .err{color:var(--err)}
+  /* password */
+  .pw .answer{font-size:12px;color:var(--text2);margin-bottom:6px}
+  .pw .answer b{color:var(--accent)}
+  .pw .feed{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;font:12px/1.45 ui-monospace,SFMono-Regular,monospace}
+  .pw .feed .wait{color:#888}
+  .pw .ev.p1 b{color:var(--x)} .pw .ev.p2 b{color:var(--o)} .pw .ev.p3 b{color:var(--p3)} .pw .ev.p4 b{color:var(--p4)}
+  .pw .ev.sc{color:var(--text);font-weight:600}
+  .pw .card{background:#12151c;border:1px solid var(--line);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:3px}
+  .pw .rdhd{font-size:11px;color:var(--text2);margin-bottom:2px}
+  .pw .rdhd b{color:var(--accent)}
+  .pw .turnline{font-size:12px;color:var(--text2);margin-top:6px}
+  /* wheel of fortune */
+  .wof .cat{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text2);margin-bottom:6px}
+  .wof .wboard{font:700 18px/1.6 ui-monospace,SFMono-Regular,monospace;letter-spacing:2px;color:var(--text);white-space:pre-wrap;word-break:break-word;background:#12151c;border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:8px;min-height:48px}
+  .wof .money{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-bottom:8px}
+  .wof .money .pm{color:var(--text2)}
+  .wof .money .pm.p1{color:var(--x)} .wof .money .pm.p2{color:var(--o)} .wof .money .pm.p3{color:var(--p3)} .wof .money .pm.p4{color:var(--p4)}
+  .wof .money .pm.cur{font-weight:800;text-decoration:underline}
+  .wof .feed{max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;font:12px/1.4 ui-monospace,SFMono-Regular,monospace}
+  .wof .ev.p1 b{color:var(--x)} .wof .ev.p2 b{color:var(--o)} .wof .ev.p3 b{color:var(--p3)} .wof .ev.p4 b{color:var(--p4)}
+  .wof .turnline{font-size:12px;color:var(--text2);margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎲 Game Room</h1>
+  <div class="sub">Models play each other turn by turn — chess, tic-tac-toe, pictionary, password, wheel of fortune, hangman. The board just moves; illegal moves are allowed. The point is that nobody stalls, no request drops, and routing keeps working. Each move shows the host that served it.</div>
+</header>
+
+<div class="top">
+  <label>dyva URL<input id="base" placeholder="http://localhost:11435"></label>
+</div>
+
+<div class="games" id="games"></div>
+
+<script>
+// dyva serves this at <base>/demos/<file>; derive the base by STRIPPING the
+// "/demos/…" suffix off the right (never rebuild from origin+port — that drops a
+// reverse-proxy path prefix like https://9ol.es/11434).
+var baseEl = document.getElementById('base');
+baseEl.value = (function(){
+  var here = location.href.split(/[?#]/)[0];
+  var i = here.indexOf('/demos/');
+  if(location.protocol !== 'file:' && i >= 0) return here.slice(0, i);
+  return 'http://localhost:11435';
+})();
+function apiBase(){ return (baseEl.value || '').trim().replace(/\/+$/, ''); }
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+
+// One streamed chat turn. stream:true (not false) so a big/slow model only has to
+// bound first-token, never the whole reply — same reason as the other demos.
+async function ask(model, messages, signal, onProgress, tools, think){
+  // onProgress reports the phase so the UI can distinguish routing vs cold-start vs
+  // thinking vs answering: {stage:'routing'|'connected'|'stream', host, model, thinking, content}.
+  if(onProgress) onProgress({stage:'routing', host:'', model:model, thinking:'', content:''});
+  var payload = { model: model, stream: true, messages: messages, options: { temperature: 0.7 } };
+  if(tools) payload.tools = tools;
+  if(think === false) payload.think = false;   // "thinking" unchecked — skip reasoning to speed play
+  var r = await fetch(apiBase() + '/api/chat', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, signal: signal,
+    body: JSON.stringify(payload)
+  });
+  var used = r.headers.get('X-Dyva-Model') || model;
+  var host = r.headers.get('X-Dyva-Host') || '';
+  if(!r.ok){
+    var em = 'HTTP ' + r.status;
+    try{ var je = await r.json(); em = (je.error && (je.error.message || je.error)) || em; }catch(e){}
+    throw new Error(em);
+  }
+  if(onProgress) onProgress({stage:'connected', host:host, model:used, thinking:'', content:''});
+  var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', content = '', thinking = '', tcalls = [];
+  while(true){
+    var chunk = await reader.read();
+    if(chunk.done) break;
+    buf += dec.decode(chunk.value, {stream:true});
+    var nl;
+    while((nl = buf.indexOf('\n')) >= 0){
+      var line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+      if(!line) continue;
+      try{ var d = JSON.parse(line); if(d.message){
+        if(d.message.thinking) thinking += d.message.thinking;
+        if(d.message.content) content += d.message.content;
+        if(d.message.tool_calls) d.message.tool_calls.forEach(function(tc){ tcalls.push(tc); });
+      } }catch(e){}
+    }
+    if(onProgress) onProgress({stage:'stream', host:host, model:used, thinking:thinking, content:content});
+  }
+  // dedupe streamed tool-call fragments by function name (our tools take no args, so
+  // the name is enough to identify a call) so we don't run the same one twice
+  var seen = {}, toolCalls = [];
+  tcalls.forEach(function(tc){ var nm = tc && tc.function && tc.function.name; if(nm && !seen[nm]){ seen[nm] = 1; toolCalls.push(tc); } });
+  return { content: content, used: used, host: host, thinking: thinking, tool_calls: toolCalls };
+}
+
+function pick(a){ return a[Math.floor(Math.random() * a.length)]; }
+// Fisher-Yates on a copy. A shuffled deck popped one-per-round draws WITHOUT
+// replacement, so a game never repeats a word (no birthday-problem collisions
+// from picking a random index each round).
+function shuffle(a){ a = a.slice(); for(var i = a.length - 1; i > 0; i--){ var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
+function esc(s){ return String(s).replace(/[&<>]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; }); }
+function extractSvg(t){ var m = String(t||'').match(/<svg[\s\S]*?<\/svg>/i); return m ? m[0] : null; }
+// Drawers routinely ignore "don't write the words" and label the answer right on
+// the picture — which the vision guesser then just READS. Enforce the rule ourselves
+// by stripping every text-bearing element before the drawing is shown or rasterized.
+function stripText(svg){
+  return String(svg)
+    .replace(/<text\b[\s\S]*?<\/text>/gi, '')
+    .replace(/<tspan\b[\s\S]*?<\/tspan>/gi, '')
+    .replace(/<title\b[\s\S]*?<\/title>/gi, '')
+    .replace(/<desc\b[\s\S]*?<\/desc>/gi, '')
+    .replace(/<text\b[^>]*\/>/gi, '');
+}
+
+// Rasterize an SVG string to a PNG data URL on a white ground (vision models read
+// a white canvas far better than transparency) — same approach as the artist demo.
+var RASTER = 512;
+function rasterize(svg){
+  if(!/<svg[^>]*\bxmlns=/i.test(svg)) svg = svg.replace(/<svg\b/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  return new Promise(function(resolve, reject){
+    var url = URL.createObjectURL(new Blob([svg], {type:'image/svg+xml;charset=utf-8'}));
+    var img = new Image(), settled = false;
+    function fail(m){ if(settled) return; settled = true; clearTimeout(timer); URL.revokeObjectURL(url); reject(new Error(m)); }
+    var timer = setTimeout(function(){ fail('rasterize timed out'); }, 10000);
+    img.onload = function(){
+      if(settled) return; settled = true; clearTimeout(timer);
+      try{
+        var c = document.createElement('canvas'); c.width = RASTER; c.height = RASTER;
+        var ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, RASTER, RASTER);
+        ctx.drawImage(img, 0, 0, RASTER, RASTER);
+        URL.revokeObjectURL(url); resolve(c.toDataURL('image/png'));
+      }catch(e){ URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = function(){ fail('SVG did not render'); };
+    img.src = url;
+  });
+}
+
+// ---- games ---------------------------------------------------------------
+// Each game exposes: newState(), render(st,el), turn(st) -> {player, messages},
+// apply(st, text, player) -> {note}, and sets st.over / st.result when finished.
+
+// all SOLID glyphs — the player colour (teal vs violet) differentiates the sides
+var GLYPH = {K:'♚',Q:'♛',R:'♜',B:'♝',N:'♞',P:'♟',k:'♚',q:'♛',r:'♜',b:'♝',n:'♞',p:'♟'};
+var CHESS_MAX_PLIES = 300;
+
+var chess = {
+  label: 'Chess', players: ['qwen3.8','gemma4'],
+  newState: function(){
+    return { b: [
+      ['r','n','b','q','k','b','n','r'],
+      ['p','p','p','p','p','p','p','p'],
+      ['','','','','','','',''],
+      ['','','','','','','',''],
+      ['','','','','','','',''],
+      ['','','','','','','',''],
+      ['P','P','P','P','P','P','P','P'],
+      ['R','N','B','Q','K','B','N','R'] ],   // b[0]=rank8 … b[7]=rank1
+      turn: 0, plies: 0, last: '', over: false, result: '' };
+  },
+  ascii: function(st){
+    var out = [];
+    for(var i=0;i<8;i++){ out.push((8-i) + ' ' + st.b[i].map(function(c){return c||'.';}).join(' ')); }
+    out.push('  a b c d e f g h');
+    return out.join('\n');
+  },
+  render: function(st, el){
+    el.className = 'board chess';
+    el.innerHTML = '';
+    for(var i=0;i<8;i++) for(var j=0;j<8;j++){
+      var c = document.createElement('div');
+      c.className = 'c ' + ((i+j)%2 ? 'd':'l');
+      var p = st.b[i][j];
+      if(p){ var g = document.createElement('span'); g.className = 'pc' + (p===p.toUpperCase()?' w':''); g.textContent = GLYPH[p]||''; c.appendChild(g); }
+      el.appendChild(c);
+    }
+  },
+  // Tool the models call to fetch the position — the board is NOT spoon-fed in the
+  // prompt, so a move requires actually calling this (exercises dyva's tool path).
+  tools: [{
+    type: 'function',
+    function: {
+      name: 'get_board_state',
+      description: 'Get the current chess position (ranks 8 down to 1; UPPERCASE = White, '
+        + 'lowercase = Black, "." = empty) and whose turn it is.',
+      parameters: { type: 'object', properties: {}, required: [] }
+    }
+  }],
+  runTool: function(name, args, st){
+    if(name === 'get_board_state') return chess.ascii(st) + '\nTo move: ' + (st.turn === 0 ? 'White' : 'Black');
+    return 'unknown tool: ' + name;
+  },
+  turn: function(st){
+    var side = st.turn === 0 ? 'White' : 'Black';
+    return { player: st.turn, messages: [
+      {role:'system', content:'You are a chess engine playing as ' + side + '. Call the '
+        + 'get_board_state tool to see the current position, then reply with ONLY your move in '
+        + 'coordinate notation — the from-square then the to-square, e.g. e2e4. No words, no punctuation.'},
+      {role:'user', content: 'Last move: ' + (st.last || '(none)')
+        + '. Call get_board_state, then give your move.'}
+    ]};
+  },
+  apply: function(st, text, player){
+    st.plies++;
+    var m = String(text||'').toLowerCase().match(/([a-h][1-8])\s*[-x>to ]*\s*([a-h][1-8])/g);
+    if(!m || !m.length){ st.last = '(no move)'; st.turn ^= 1; if(st.plies>=CHESS_MAX_PLIES){st.over=true;st.result='move limit — draw';} return {note:'unparseable: '+String(text||'').slice(0,24)}; }
+    var mv = m[m.length-1].match(/([a-h][1-8]).*?([a-h][1-8])/);
+    var from = chess.sq(mv[1]), to = chess.sq(mv[2]);
+    var piece = st.b[from[0]][from[1]];
+    var note = mv[1] + mv[2];
+    if(piece){                              // apply as given — legal or not
+      var captured = st.b[to[0]][to[1]];
+      st.b[to[0]][to[1]] = piece; st.b[from[0]][from[1]] = '';
+      if(captured === 'K' || captured === 'k'){ st.over = true; st.result = (player===0?'White':'Black') + ' wins (king captured)'; }
+    } else { note += ' (empty square, skipped)'; }
+    st.last = mv[1] + mv[2]; st.turn ^= 1;
+    if(!st.over && st.plies >= CHESS_MAX_PLIES){ st.over = true; st.result = 'move limit reached — draw'; }
+    return {note: note};
+  },
+  sq: function(s){ return [8 - parseInt(s[1],10), s.charCodeAt(0) - 97]; }   // -> [row,col]
+};
+
+var TTT_WIN = 4;   // best of 7 — first to 4 game-wins takes the series
+
+var ttt = {
+  label: 'Tic-Tac-Toe', players: ['qwen3.8','gemma4'],
+  newState: function(){ return { c: Array(9).fill(''), turn: 0, wins: [0,0], games: 0, over: false, result: '' }; },
+  _reset: function(st){ st.c = Array(9).fill(''); st.turn = st.games % 2; },   // next game; alternate who starts
+  render: function(st, el){
+    el.className = 'board tttwrap';
+    var cells = '';
+    for(var i=0;i<9;i++){ var m = st.c[i] || ''; cells += '<div class="cell ' + m + '">' + m + '</div>'; }
+    var score = st.over ? esc(st.result)
+      : ('game ' + (st.games + 1) + ' · X ' + st.wins[0] + ' – ' + st.wins[1] + ' O · first to ' + TTT_WIN);
+    el.innerHTML = '<div class="tttscore">' + score + '</div><div class="ttt">' + cells + '</div>';
+  },
+  grid: function(st){ return [0,3,6].map(function(r){ return [0,1,2].map(function(k){ return st.c[r+k] || (r+k+1); }).join(' '); }).join('\n'); },
+  turn: function(st){
+    var mark = st.turn === 0 ? 'X' : 'O';
+    return { player: st.turn, messages: [
+      {role:'system', content:'You are playing tic-tac-toe. Cells are numbered 1-9 (left to right, '
+        + 'top to bottom). Empty cells show their number, taken cells show X or O. Reply with ONLY '
+        + 'the number (1-9) of the empty cell you take.'},
+      {role:'user', content: ttt.grid(st) + '\n\nYou are ' + mark + '. Your move (1-9):'}
+    ]};
+  },
+  apply: function(st, text, player){
+    var mark = player === 0 ? 'X' : 'O';
+    var mm = String(text||'').match(/[1-9]/);
+    var idx = mm ? (parseInt(mm[0],10) - 1) : -1;
+    var note;
+    if(idx < 0 || st.c[idx]){                      // invalid/taken -> first empty, so play continues
+      var e = st.c.indexOf('');
+      note = (idx<0?'no number':'cell '+(idx+1)+' taken') + ' -> ' + (e>=0?e+1:'none');
+      idx = e;
+    } else { note = 'cell ' + (idx+1); }
+    if(idx >= 0) st.c[idx] = mark;
+    var w = ttt.winner(st.c);
+    if(w){
+      var wi = (w === 'X') ? 0 : 1;
+      st.wins[wi]++; st.games++;
+      var series = 'X ' + st.wins[0] + '–' + st.wins[1] + ' O';
+      if(st.wins[wi] >= TTT_WIN){ st.over = true; st.result = w + ' takes the series ' + series;
+        return {note: note + ' · ' + w + ' wins game ' + st.games + ' — series over'}; }
+      ttt._reset(st);
+      return {note: note + ' · ' + w + ' wins game ' + st.games + ' (' + series + ')'};
+    }
+    if(st.c.every(function(x){ return x; })){          // draw — doesn't count, replay
+      st.games++; ttt._reset(st);
+      return {note: note + ' · game ' + st.games + ' drawn (X ' + st.wins[0] + '–' + st.wins[1] + ' O)'};
+    }
+    st.turn ^= 1;
+    return {note: note};
+  },
+  winner: function(c){
+    var L = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    for(var i=0;i<L.length;i++){ var a=L[i]; if(c[a[0]] && c[a[0]]===c[a[1]] && c[a[1]]===c[a[2]]) return c[a[0]]; }
+    return null;
+  }
+};
+
+var HANG_PICS = [
+  ' +---+\n |   |\n     |\n     |\n     |\n=======',
+  ' +---+\n |   |\n O   |\n     |\n     |\n=======',
+  ' +---+\n |   |\n O   |\n |   |\n     |\n=======',
+  ' +---+\n |   |\n O   |\n/|   |\n     |\n=======',
+  ' +---+\n |   |\n O   |\n/|\\  |\n     |\n=======',
+  ' +---+\n |   |\n O   |\n/|\\  |\n/    |\n=======',
+  ' +---+\n |   |\n O   |\n/|\\  |\n/ \\  |\n=======',
+];
+var HANG_WORDS = ['router','stream','planet','coffee','guitar','python','forest','rocket','silver','castle',
+  'packet','dragon','anchor','breeze','candle','dolphin','ember','falcon','glacier','harvest','island','jungle',
+  'kettle','lantern','meadow','nebula','orchid','pebble','quartz','ripple','sunset','temple','umbrella','velvet',
+  'walnut','compass','thunder','marble','cactus','pyramid'];
+
+var hangman = {
+  label: 'Hangman', players: ['qwen3.8','gemma4'],
+  // The secret is ASSIGNED from the dictionary (asking a model for one just kept
+  // returning the same word). Both players ALTERNATE guessing letters at the same
+  // word — shared board, shared misses — working toward the solve together.
+  newState: function(){ return { phase: 'guess', word: pick(HANG_WORDS), guessed: [], misses: 0, turn: 0, over: false, result: '' }; },
+  masked: function(st){ return st.word ? st.word.split('').map(function(ch){ return st.guessed.indexOf(ch) >= 0 ? ch : '_'; }).join(' ') : '???'; },
+  render: function(st, el){
+    el.className = 'board hang';
+    var pic = HANG_PICS[Math.min(st.misses, HANG_PICS.length - 1)];
+    var guessed = st.guessed.map(function(g){ var hit = st.word.indexOf(g) >= 0; return '<span class="' + (hit?'':'miss') + '">' + g + '</span>'; }).join(' ');
+    el.innerHTML = '<pre>' + pic + '</pre>'
+      + '<div class="word">' + hangman.masked(st) + '</div>'
+      + '<div class="guessed">guessed: ' + (guessed || '—') + ' &nbsp; misses: ' + st.misses + '/6</div>';
+  },
+  turn: function(st){
+    return { player: st.turn, messages: [
+      {role:'system', content:'You are playing hangman with a partner, taking turns. Guess the hidden word one '
+        + 'letter at a time. Reply with ONLY a single new letter (a-z) you have not guessed yet.'},
+      {role:'user', content:'Word: ' + hangman.masked(st) + '\nAlready guessed: '
+        + (st.guessed.join(' ') || '(none)') + '\nYour letter:'}
+    ]};
+  },
+  apply: function(st, text, player){
+    var pool = String(text||'').toLowerCase().replace(/[^a-z]/g,'').split('').filter(function(c){ return st.guessed.indexOf(c) < 0; });
+    var letter = pool[0];
+    var note;
+    if(!letter){                                   // no new letter -> random unguessed, keep going
+      var rest = 'abcdefghijklmnopqrstuvwxyz'.split('').filter(function(c){ return st.guessed.indexOf(c) < 0; });
+      letter = rest[Math.floor(Math.random()*rest.length)];
+      note = 'no new letter -> "' + letter + '"';
+    } else { note = 'guess "' + letter + '"'; }
+    if(!letter){ st.over = true; st.result = 'no letters left'; return {note:'exhausted'}; }
+    st.guessed.push(letter);
+    var hit = st.word.indexOf(letter) >= 0;
+    if(!hit) st.misses++;
+    note += hit ? ' — hit' : ' — miss';
+    if(st.word.split('').every(function(ch){ return st.guessed.indexOf(ch) >= 0; })){ st.over = true; st.result = 'solved: ' + st.word; }
+    else if(st.misses >= 6){ st.over = true; st.result = 'word wins (' + st.word + ')'; }
+    else st.turn ^= 1;          // hand off to the other player
+    return {note: note};
+  }
+};
+
+// Pictionary. Deliberately NOT the clever kind — the secret is always a plain
+// "<thing> <activity>", which weak SVG skills can actually convey. Player 1 (the
+// drawer) gets the secret and draws it; player 2 (the guesser) sees the rendered
+// image through the vision system and either guesses or asks for a hint, until it
+// lands. The human always sees the solution on the board.
+var PICT_THINGS = [
+  ['a king','king'],['an alien','alien'],['a goldfish','goldfish'],['an octopus','octopus'],
+  ['a crocodile','crocodile'],['a robot','robot'],['a wizard','wizard'],['a pirate','pirate'],
+  ['a penguin','penguin'],['a dragon','dragon'],['a cowboy','cowboy'],['a ghost','ghost'],
+  ['a dinosaur','dinosaur'],['a mermaid','mermaid'],['a snowman','snowman'],['a knight','knight'],
+  ['a monkey','monkey'],['a vampire','vampire'],['a chef','chef'],['a clown','clown'],
+  ['a giraffe','giraffe'],['an astronaut','astronaut'],['a witch','witch'],['a frog','frog'],
+  ['a bear','bear'],['a ninja','ninja'],['a unicorn','unicorn'],['a shark','shark'],
+  ['a farmer','farmer'],['a scientist','scientist'],
+  ['a cat','cat'],['a rabbit','rabbit'],['a horse','horse'],['a goat','goat'],['a dog','dog'],['a pig','pig'],
+  ['a bat','bat'],['a bug','bug'],['a bee','bee'],['a bird','bird'],['a whale','whale'],['a chicken','chicken'],
+  ['a clam','clam'],['a centipede','centipede'],['a lizard','lizard'],['a squid','squid'],['a hippo','hippo'],
+  ['a turtle','turtle'],['a snail','snail'],['a lobster','lobster'],['a starfish','starfish'],['a zebra','zebra'],
+  ['a spider','spider'],['a sheep','sheep'],['a porcupine','porcupine'],['a pelican','pelican'],
+  ['a jellyfish','jellyfish'],['a mouse','mouse'],['a moose','moose'],['a llama','llama'],['an elephant','elephant'] ];
+var PICT_ACTIVITIES = [
+  ['drinking tea','tea'],['playing tennis','tennis'],['taking a nap','nap'],['singing at church','church'],
+  ['riding a bike','bike'],['eating pizza','pizza'],['dancing ballet','ballet'],['playing guitar','guitar'],
+  ['reading a book','book'],['flying a kite','kite'],['brushing teeth','teeth'],['surfing a wave','surf'],
+  ['baking a cake','cake'],['playing chess','chess'],['watering plants','plant'],['juggling balls','juggl'],
+  ['painting a picture','paint'],['climbing a ladder','ladder'],['doing karate','karate'],['fishing','fish'],
+  ['skateboarding','skate'],['blowing bubbles','bubble'],['playing drums','drum'],['walking a dog','dog'],
+  ['mowing the lawn','lawn'],['praying','pray'],['getting married','married'],['laughing','laugh'],
+  ['sleeping','sleep'],
+  ['taking a bath','bath'],['driving a car','car'],['on an airplane','airplane'],['on an escalator','escalator'],
+  ['on a computer','computer'],['in a hot air balloon','balloon'],['lifting weights','weights'],
+  ['at a bar','bar'],['camping','camping'],['walking on the moon','moon'],
+  ['robbing a bank','robbing'],['parachuting','parachuting'],['protesting','protesting'],
+  ['at a disco','disco'],['playing basketball','basketball'],['golfing','golfing'],
+  ['riding a rollercoaster','rollercoaster'],['applying makeup','makeup'] ];
+var PICT_ROUNDS = 10;      // a game is 10 rounds (a new secret each round)
+var PICT_ATTEMPTS = 5;    // up to 5 guesses; points start at 5 and drop 1 each — 3x5 = 15 max, collaborative
+
+var pictionary = {
+  label: 'Pictionary', players: ['qwen3.8','gemma4','llama'],   // P1 draws, P2 guesses, P3 judges
+  newState: function(){
+    var st = { round: 0, score: 0, drawings: [], over: false, result: '' };   // drawings persist across ALL rounds
+    pictionary._newRound(st);
+    return st;
+  },
+  _newRound: function(st){
+    st.round++;
+    var t = pick(PICT_THINGS), a = pick(PICT_ACTIVITIES);
+    st.secret = { thing: t[0], activity: a[0], full: t[0] + ' ' + a[0], tkw: t[1], akw: a[1] };
+    st.phase = 'draw'; st.png = ''; st.feedback = ''; st.hint = ''; st.coach = ''; st.focus = '';
+    st.guesses = []; st.revealed = { thing: false, activity: false };
+    st.pendingGuess = ''; st.pendingValue = 0;   // a guess awaiting the drawer's yes/no
+    st.attempt = 0; st.turns = 0;   // attempt = wrong guesses this round; value = ATTEMPTS - attempt
+    st.drawings.push({ marker: true, round: st.round, secret: st.secret.full });   // round divider in the reel
+  },
+  _value: function(st){ return PICT_ATTEMPTS - st.attempt; },
+  _endRound: function(st, note){
+    var max = PICT_ROUNDS * PICT_ATTEMPTS;
+    if(st.round >= PICT_ROUNDS){
+      st.over = true; st.result = 'final score ' + st.score + '/' + max;
+      return {note: note + ' — game over: ' + st.score + '/' + max};
+    }
+    pictionary._newRound(st);
+    return {note: note + ' — next round (' + st.round + '/' + PICT_ROUNDS + ')'};
+  },
+  idle: function(el){
+    // Before Play: DON'T reveal a random secret (picking one here is what made the
+    // puzzle appear to "change" every time an input was edited and Play re-rolled it).
+    el.className = 'board pict';
+    el.innerHTML = '<div class="answer">🔑 solution: <b>hidden until you press Play</b></div>'
+      + '<div class="reel"><div class="shot"><div class="pic"><span class="wait">press Play to start a round</span></div></div></div>';
+  },
+  // the reel timeline is a mix of round markers, drawings, and the guesser's
+  // guesses/hint-requests (pushed by _say) — so the back-and-forth shows in order.
+  _say: function(st, text, cls){ st.drawings.push({ say: text, cls: cls }); },
+  // An OBVIOUS match (both keywords present) is accepted without bothering the drawer;
+  // anything short of that goes to the drawer to judge (see the 'judge' phase).
+  _obvious: function(n, s){ return n.indexOf(s.tkw) >= 0 && n.indexOf(s.akw) >= 0; },
+  // Award the pending guess and end the round.
+  _award: function(st){
+    var pts = st.pendingValue;
+    st.score += pts;
+    pictionary._say(st, '✓ "' + st.pendingGuess + '" (+' + pts + ')', 'correct');
+    return pictionary._endRound(st, 'accepted "' + st.pendingGuess + '" (+' + pts + ')');
+  },
+  // Build the reel: one div.card per round, holding that round's drawings, the
+  // guesser's lines between them, and a pending slot while a new one is drawn.
+  _reel: function(st){
+    var cards = [], cur = null;
+    st.drawings.forEach(function(d){
+      if(d.marker){ cur = { round: d.round, secret: d.secret, shots: [] }; cards.push(cur); return; }
+      if(!cur){ cur = { round: d.round || 1, secret: '', shots: [] }; cards.push(cur); }
+      if(d.say){ cur.shots.push('<div class="say ' + (d.cls || '') + '">' + esc(d.say) + '</div>'); return; }
+      cur.shots.push('<div class="shot"><div class="cap">' + (d.host ? esc(d.host) : 'drawing') + '</div>'
+        + '<div class="pic">' + d.svg + '</div></div>');
+    });
+    if(!st.over && st.phase === 'draw'){
+      if(!cur){ cur = { round: st.round, secret: st.secret.full, shots: [] }; cards.push(cur); }
+      cur.shots.push('<div class="shot pending"><div class="cap">drawing…</div><div class="pic"><span class="wait">drawing…</span></div></div>');
+    }
+    var html = cards.map(function(c){
+      return '<div class="card"><div class="rdhd">round ' + c.round + ' · <b>' + esc(c.secret) + '</b></div>' + c.shots.join('') + '</div>';
+    }).join('');
+    return '<div class="reel">' + html + '</div>';
+  },
+  onProgress: function(panel, ev, player){
+    if(player !== 0) return;                    // only the DRAWER paints the pending slot
+    var pic = panel.board.querySelector('.reel .pending .pic');
+    if(!pic) return;                            // no round in progress (e.g. guessing)
+    // STABLE one-liner only — streaming the thinking here jittered the board; the
+    // live thinking runs on the status line below instead.
+    var msg = ev.stage === 'routing' ? 'routing to a host…'
+            : (!ev.thinking && !ev.content) ? 'connected' + (ev.host ? ' · ' + ev.host : '') + ' — warming up…'
+            : 'drawing on ' + (ev.host || '…') + '…';
+    pic.innerHTML = '<span class="wait">' + esc(msg) + '</span>';
+    var reel = panel.board.querySelector('.reel');   // only auto-scroll if already at the bottom
+    if(reel && reel.scrollHeight - reel.scrollTop - reel.clientHeight < 60) reel.scrollTop = reel.scrollHeight;
+  },
+  render: function(st, el){
+    el.className = 'board pict';
+    // sticky scroll: if the viewer has scrolled up, KEEP their position; only pin to
+    // the newest when they're already at the bottom — so you can browse mid-game.
+    var old = el.querySelector('.reel');
+    var atBottom = !old || (old.scrollHeight - old.scrollTop - old.clientHeight < 40);
+    var prevTop = old ? old.scrollTop : 0;
+    el.innerHTML = '<div class="answer">🔑 <b>' + esc(st.secret.full) + '</b> · round ' + st.round + '/' + PICT_ROUNDS
+        + ' · score ' + st.score + '/' + (PICT_ROUNDS * PICT_ATTEMPTS) + ' · this guess worth ' + pictionary._value(st) + '</div>'
+      + pictionary._reel(st)
+      + (st.hint ? '<div class="hint">↳ ' + esc(st.hint) + '</div>' : '');
+    var reel = el.querySelector('.reel'); if(reel) reel.scrollTop = atBottom ? reel.scrollHeight : prevTop;
+  },
+  turn: function(st){
+    if(st.phase === 'draw'){
+      return { player: 0, messages: [
+        {role:'system', content:'You are the DRAWER in a COLLABORATIVE game of Pictionary — you and the '
+          + 'guesser are on the SAME team and you WANT them to get it. The secret answer is: "' + st.secret.full
+          + '". The guesser does NOT know it, so do NOT write any of those words (or letters spelling them) '
+          + 'in the image. Draw the secret as ONE complete, self-contained <svg> element (viewBox; no external '
+          + 'images/scripts/fonts; no text labels). When you are told the guesser is close, keep what already '
+          + 'worked and redraw to EMPHASIZE the part they are missing (add the telling detail, make it bigger '
+          + 'or clearer). If the guesser is stuck, you MAY break the clue down: start your reply with a single '
+          + 'line "OBJECT ONLY" (draw just the thing) or "ACTIVITY ONLY" (draw just the activity), then the '
+          + '<svg> of only that component. Otherwise reply with ONLY the <svg> and nothing else.'},
+        {role:'user', content: st.feedback || 'Draw it.'}
+      ]};
+    }
+    if(st.phase === 'judge'){
+      // an IMPARTIAL third model rules — the drawer can't, since collaborative scoring
+      // gives it a reason to accept anything.
+      return { player: 2, messages: [
+        {role:'system', content:'You are an IMPARTIAL JUDGE in Pictionary. The secret answer is "' + st.secret.full
+          + '". A player guessed "' + st.pendingGuess + '". Accept it ONLY if it clearly means the same thing — a '
+          + 'paraphrase or a partial that names both the subject and the activity counts (e.g. "a mouse mowing" for '
+          + '"a mouse mowing the lawn"); reject it if it misses the subject or the activity, or is too vague.'},
+        {role:'user', content:'Is "' + st.pendingGuess + '" close enough to the secret? (yes/no)'}
+      ]};
+    }
+    // guesser: show the rendered drawing through the vision system
+    var parts = [];
+    if(st.coach) parts.push(st.coach);   // collaborative nudge from the drawing side
+    if(st.focus) parts.push('This drawing shows ONLY the ' + st.focus + ' — name just that part.');
+    if(st.guesses.length) parts.push('Your earlier guesses (all still wrong): '
+      + st.guesses.map(function(x){ return '"' + x + '"'; }).join(', ')
+      + ' — refine from the drawing, do not repeat them.');
+    if(st.revealed.thing) parts.push('(hint) the thing is: ' + st.secret.thing);
+    if(st.revealed.activity) parts.push('(hint) the activity is: ' + st.secret.activity);
+    parts.push('What is being drawn? Guess the full "<thing> <activity>", or ask for a hint.');
+    var um = {role:'user', content: parts.join('\n')};
+    if(st.png) um.images = [st.png];
+    return { player: 1, messages: [
+      {role:'system', content:'You are GUESSING in Pictionary. The answer is ALWAYS a SUBJECT doing an ACTIVITY — '
+        + 'a person, animal, or thing performing an action — e.g. "a dog surfing", "a robot dancing", '
+        + '"a ghost singing". Your guess must name BOTH the subject AND what it is doing. Study the drawing, '
+        + 'then reply with EXACTLY one line: either "GUESS: <subject> <activity>" (your best full guess), or — if '
+        + 'you are unsure — one of these hint requests verbatim: "i need more details", "just give me the thing", '
+        + '"just give me the activity", "can I get a different angle". When you cannot tell what it is, say '
+        + '"i need more details".'},
+      um
+    ]};
+  },
+  apply: async function(st, text, player, res){
+    st.turns++;
+    if(st.turns > 24){ return pictionary._endRound(st, 'stalled — it was ' + st.secret.full); }   // safety vs a hint loop
+    if(st.phase === 'judge'){                            // the DRAWER rules on the pending guess
+      var jt = String(text||'').toLowerCase();
+      var accept = /\byes\b|\baccept|\bcorrect\b|close enough|\bsure\b/.test(jt) && !/\bno\b|\breject/.test(jt);
+      if(accept){ return pictionary._award(st); }
+      st.attempt++;                                       // rejected — costs a point
+      if(st.attempt >= PICT_ATTEMPTS){
+        pictionary._say(st, '✗ "' + st.pendingGuess + '" — rejected', 'wrong');
+        return pictionary._endRound(st, 'out of guesses — it was ' + st.secret.full);
+      }
+      pictionary._say(st, '✗ "' + st.pendingGuess + '" — not close enough', 'wrong');
+      st.phase = 'draw'; st.coach = ''; st.hint = '';
+      st.feedback = 'The guesser guessed "' + st.pendingGuess + '", which you did not accept. Draw the secret more clearly.';
+      return {note: 'rejected "' + st.pendingGuess + '" — worth ' + pictionary._value(st) + ' now'};
+    }
+    if(player === 0){                                    // drawer produced an SVG
+      var fm = String(text||'').match(/\b(object|activity)\s+only\b/i);
+      st.focus = fm ? fm[1].toLowerCase() : '';          // drawer may isolate one component
+      var svg = extractSvg(text);
+      if(!svg){ st.feedback = 'Reply with ONE complete <svg> element and nothing else.'; return {note:'no svg — redraw'}; }
+      svg = stripText(svg);   // never let a written-in label reach the guesser
+      try{ st.png = (await rasterize(svg)).split(',')[1]; }   // strip data: prefix for ollama
+      catch(e){ st.feedback = 'That drawing did not render — draw a simpler, valid <svg>.'; return {note:'render failed — redraw'}; }
+      st.drawings.push({ svg: svg, host: (res && res.host) || '', round: st.round });   // kept across all rounds
+      st.phase = 'guess'; st.feedback = '';
+      return {note: 'drew (' + svg.length + ' chars)'};
+    }
+    // guesser: a hint request (does NOT cost an attempt) or a guess (does)
+    var low = String(text||'').toLowerCase();
+    if(low.indexOf('more detail') >= 0){                 // guesser is lost — drawer may break it down
+      st.phase = 'draw'; st.hint = 'guesser needs more detail';
+      st.feedback = 'The guesser needs more detail. You MAY break it down: start your reply with "OBJECT ONLY" or '
+        + '"ACTIVITY ONLY" on its own line, then the <svg> of just that component — or redraw the whole thing more clearly.';
+      pictionary._say(st, '❓ "i need more details"', 'hint');
+      return {note:'hint: needs more detail'};
+    }
+    if(low.indexOf('different angle') >= 0){
+      st.phase = 'draw'; st.hint = 'guesser asked for a different angle';
+      st.feedback = 'The guesser asked for a different angle — draw the same secret again, clearer and from a different view.';
+      pictionary._say(st, '❓ "can I get a different angle"', 'hint');
+      return {note:'hint: different angle'};
+    }
+    if(low.indexOf('give me the thing') >= 0 && !st.revealed.thing){
+      st.revealed.thing = true; st.hint = 'revealed the thing: ' + st.secret.thing;
+      pictionary._say(st, '❓ "just give me the thing"', 'hint'); return {note:'hint: the thing'};
+    }
+    if(low.indexOf('give me the activity') >= 0 && !st.revealed.activity){
+      st.revealed.activity = true; st.hint = 'revealed the activity: ' + st.secret.activity;
+      pictionary._say(st, '❓ "just give me the activity"', 'hint'); return {note:'hint: the activity'};
+    }
+    var g = text, gm = String(text||'').match(/guess\s*[:\-]\s*(.+)/i);
+    if(gm) g = gm[1];
+    g = g.replace(/["\n]/g, ' ').trim().slice(0, 60);
+    var n = g.toLowerCase();
+    st.guesses.push(g);
+    st.pendingGuess = g; st.pendingValue = pictionary._value(st);   // lock the value at guess time
+    if(pictionary._obvious(n, st.secret)){               // blatant match — accept, no need to ask
+      return pictionary._award(st);
+    }
+    st.phase = 'judge';                                  // otherwise the DRAWER decides (yes/no)
+    pictionary._say(st, '❔ "' + g + '" — asking the drawer', 'hint');
+    return {note: 'guessed "' + g + '" — asking the drawer if it counts'};
+  }
+};
+
+// Password: two teams of two (4 models). One team-mate gives a SINGLE one-word
+// clue, their partner guesses; wrong → the other team gets a turn. Clues accumulate
+// and both guessers hear them all. The password is assigned from the dictionary.
+// Player 1 = Team A giver, Player 2 = Team A guesser, Player 3 = Team B giver,
+// Player 4 = Team B guesser.
+var PASSWORD_WORDS =
+  ['ocean','river','mountain','forest','desert','island','valley','meadow','glacier','volcano','canyon','waterfall','thunder','lightning','rainbow','sunset','sunrise','breeze','storm','cloud','snowflake','winter','summer','autumn','blossom','flower','garden','jungle','prairie','swamp','beach','cliff','cavern','lagoon','harvest','comet','galaxy','meteor','planet','eclipse','dog','cat','horse','dragon','tiger','lion','elephant','dolphin','whale','shark','eagle','owl','falcon','penguin','rabbit','fox','wolf','bear','deer','frog','snake','spider','butterfly','beetle','octopus','crab','turtle','monkey','giraffe','zebra','kangaroo','panda','hedgehog','otter','squirrel','raccoon','camel','moose','walrus','peacock','seahorse','jellyfish','starfish','ladybug','dragonfly','firefly','caterpillar','hummingbird','flamingo','dinosaur','coffee','pizza','bread','cheese','apple','banana','orange','lemon','cherry','grape','mango','peach','honey','sugar','pepper','garlic','noodle','waffle','cookie','muffin','pancake','popcorn','chocolate','butter','pickle','pretzel','taco','sushi','pumpkin','carrot','mirror','candle','lantern','compass','anchor','hammer','ladder','pillow','blanket','umbrella','camera','guitar','piano','violin','trumpet','telescope','magnet','battery','rocket','engine','bicycle','wagon','kite','balloon','marble','puzzle','clock','kettle','teapot','bucket','basket','ribbon','button','needle','thread','scissors','pencil','crayon','easel','mask','crown','throne','shield','sword','arrow','helmet','armor','hammock','mailbox','whistle','castle','palace','bridge','tower','temple','church','lighthouse','windmill','barn','cabin','cottage','market','harbor','station','library','museum','stadium','factory','tunnel','pyramid','igloo','tent','fountain','dungeon','aquarium','carousel','treehouse','courtyard','chapel','king','queen','knight','pirate','wizard','witch','doctor','farmer','sailor','pilot','chef','clown','ninja','cowboy','astronaut','artist','jester','blacksmith','hunter','dancer','silver','gold','copper','iron','diamond','crystal','pearl','ruby','emerald','quartz','amber','granite','bronze','velvet','satin','feather','pebble','seashell','driftwood','coral','robot','snowman','scarecrow','campfire','bonfire','treasure','fossil','skeleton','mummy','unicorn','mermaid'];
+var PASSWORD_ROUNDS = 20;      // a game is 20 rounds (a new password each round)
+var PASSWORD_ATTEMPTS = 10;    // up to 10 guesses; points start at 10 and drop 1 each
+
+var password = {
+  label: 'Password', players: ['qwen3.8','gemma4','muse','laguna'],
+  _team: function(t){ return t === 0 ? 'Team A' : 'Team B'; },
+  _value: function(st){ return PASSWORD_ATTEMPTS - st.attempt; },   // this attempt's worth
+  newState: function(){
+    var st = { round: 0, scores: [0, 0], events: [], deck: shuffle(PASSWORD_WORDS), over: false, result: '' };
+    password._newRound(st);
+    return st;
+  },
+  _newRound: function(st){
+    st.round++;
+    if(!st.deck.length) st.deck = shuffle(PASSWORD_WORDS);   // exhausted (won't happen in 20)
+    st.secret = st.deck.pop();
+    st.attempt = 0;                        // 0-based; value = ATTEMPTS - attempt
+    st.team = (st.round - 1) % 2;           // teams alternate who opens each round
+    st.phase = 'give';
+    st.clues = []; st.guesses = [];
+    st.events.push({ kind: 'round', round: st.round, secret: st.secret });
+  },
+  idle: function(el){
+    el.className = 'board pw';
+    el.innerHTML = '<div class="answer">🔑 password: <b>hidden until you press Play</b></div>'
+      + '<div class="scores">20 rounds · Team A (P1 clue / P2 guess) vs Team B (P3 clue / P4 guess)</div>'
+      + '<div class="feed"><span class="wait">press Play to start</span></div>';
+  },
+  render: function(st, el){
+    el.className = 'board pw';
+    // one div.card per round, holding that round's clues / guesses / score
+    var cards = [], cur = null;
+    st.events.forEach(function(e){
+      if(e.kind === 'round'){ cur = { round: e.round, secret: e.secret, rows: [] }; cards.push(cur); return; }
+      if(!cur) return;
+      if(e.kind === 'score'){ cur.rows.push('<div class="ev sc">' + esc(e.text) + '</div>'); return; }
+      var icon = e.kind === 'clue' ? '▸ clue' : (e.ok ? '✓ guess' : '✗ guess');
+      cur.rows.push('<div class="ev p' + (e.player+1) + '"><b>' + password._team(e.team) + '</b> ' + icon + ' "' + esc(e.word) + '"</div>');
+    });
+    var feed = cards.map(function(c){
+      return '<div class="card"><div class="rdhd">round ' + c.round + ' · <b>' + esc(c.secret) + '</b></div>' + c.rows.join('') + '</div>';
+    }).join('');
+    el.innerHTML = '<div class="answer">🔑 <b>' + esc(st.secret) + '</b> · round ' + st.round + '/' + PASSWORD_ROUNDS
+        + ' · this guess worth ' + password._value(st) + '</div>'
+      + '<div class="scores">Team A: <b>' + st.scores[0] + '</b> &nbsp; Team B: <b>' + st.scores[1] + '</b></div>'
+      + '<div class="feed">' + feed + '</div>'
+      + '<div class="turnline">' + (st.over ? '— ' + esc(st.result) : password._team(st.team) + ' to ' + st.phase) + '</div>';
+    var f = el.querySelector('.feed'); if(f) f.scrollTop = f.scrollHeight;
+  },
+  turn: function(st){
+    var giver = st.team * 2, guesser = st.team * 2 + 1;
+    if(st.phase === 'give'){
+      return { player: giver, messages: [
+        {role:'system', content:'You are the CLUE-GIVER on a team in the word game Password. The secret '
+          + 'password is "' + st.secret + '". Give your partner a SINGLE one-word clue to lead them to say '
+          + 'the password. The clue must be ONE word, must NOT be the password (or any form of it), and must '
+          + 'not repeat a clue already used. Use the clues and wrong guesses so far to pick a clue that steers '
+          + 'them closer. Reply with ONLY that one word.'},
+        {role:'user', content:'Clues given this round: ' + (st.clues.join(', ') || '(none)')
+          + '.\nGuesses tried this round (all wrong): ' + (st.guesses.join(', ') || '(none)')
+          + '.\nYour new one-word clue:'}
+      ]};
+    }
+    return { player: guesser, messages: [
+      {role:'system', content:'You are GUESSING in the word game Password. From the one-word clues, say the '
+        + 'single secret word. Reply with ONLY your one-word guess.'},
+      {role:'user', content:'Clues so far: ' + (st.clues.join(', ') || '(none)')
+        + '.\nGuesses already tried this round (all wrong): ' + (st.guesses.join(', ') || '(none)') + '.\nYour guess:'}
+    ]};
+  },
+  apply: function(st, text, player){
+    var words = (String(text||'').toLowerCase().match(/[a-z]+/g) || []).filter(function(w){ return w.length > 1; });
+    if(st.phase === 'give'){
+      var clue = words.filter(function(w){ return w !== st.secret; })[0] || 'hint';
+      st.clues.push(clue);
+      st.events.push({team: st.team, player: player, kind: 'clue', word: clue});
+      st.phase = 'guess';
+      return {note: password._team(st.team) + ' clue "' + clue + '" (worth ' + password._value(st) + ')'};
+    }
+    var guess = words[0] || '(none)';
+    st.guesses.push(guess);
+    var correct = guess === st.secret
+      || (guess.length >= 4 && (guess.indexOf(st.secret) >= 0 || st.secret.indexOf(guess) >= 0));
+    st.events.push({team: st.team, player: player, kind: 'guess', word: guess, ok: correct});
+    if(correct){
+      var pts = password._value(st);
+      st.scores[st.team] += pts;
+      st.events.push({kind: 'score', text: password._team(st.team) + ' +' + pts + ' — got "' + st.secret + '"'});
+      return password._endRound(st, password._team(st.team) + ' guessed "' + guess + '" — +' + pts);
+    }
+    var misser = st.team;
+    st.attempt++;
+    if(st.attempt >= PASSWORD_ATTEMPTS){          // points hit 0 — nobody got it
+      st.events.push({kind: 'score', text: 'nobody got "' + st.secret + '" — 0 pts'});
+      return password._endRound(st, 'no points — it was "' + st.secret + '"');
+    }
+    st.team ^= 1; st.phase = 'give';              // other team, one fewer point
+    return {note: password._team(misser) + ' missed "' + guess + '" — now worth ' + password._value(st)
+            + ' for ' + password._team(st.team)};
+  },
+  _endRound: function(st, note){
+    if(st.round >= PASSWORD_ROUNDS){
+      st.over = true;
+      var a = st.scores[0], b = st.scores[1];
+      st.result = (a === b) ? ('tie ' + a + '–' + b)
+        : ((a > b ? 'Team A' : 'Team B') + ' wins ' + Math.max(a,b) + '–' + Math.min(a,b));
+      return {note: note + ' — final: A ' + a + ', B ' + b};
+    }
+    password._newRound(st);
+    return {note: note};
+  }
+};
+
+
+// Wheel of Fortune. 4 players; one puzzle per game. A 12-slot wheel; vowels cost $150.
+var WOF_PUZZLES = [{t:'BRAIN SURGEON',c:'Occupation'},{t:'PARIS AND NICKY HILTON',c:'Family'},
+  {t:'FUNKY GADGETS',c:'Things'},{t:'ALBANY NEW YORK',c:'On The Map'},{t:'KEEP YOUR NOSE CLEAN',c:'Phrase'},
+  {t:'A FRIENDLY REMINDER',c:'Thing'},{t:'TIDAL BASIN',c:'Landmark'},{t:'HOLIDAY ORNAMENTS',c:'Things'},
+  {t:'IT\'S A DIRTY SHAME',c:'Phrase'},{t:'JOE COCKER SPANIEL',c:'before & After'},
+  {t:'A BEAUTIFUL MIND',c:'Movie Title'},{t:'TIME FOR MIRACLES',c:'Phrase'},{t:'WHITE HOUSE LAWN',c:'Place'},
+  {t:'CALGARY FLAMES',c:'Proper Name'},{t:'GIANT TOY STORE',c:'Place'},{t:'COMING ON LIKE GANGBUSTERS',c:'Phrase'},
+  {t:'GOOD GRIEF CHARLIE BROWN',c:'Quotation'},{t:'INDOOR GARDEN',c:'Place'},{t:'LOG HOUSE',c:'Place'},
+  {t:'STAND MIXER',c:'in The Kitchen'},{t:'WATER SLIDE',c:'Thing'},{t:'TOTEM POLE',c:'Thing'},
+  {t:'DARING PARACHUTE JUMP',c:'Events'},{t:'THOMPSON SEEDLESS GRAPES',c:'Food & Drink'},
+  {t:'WARM AND SUNNY CLIMATE',c:'Thing'},{t:'KNIGHT BISHOP & PAWN',c:'Fun & Games'},
+  {t:'STATUE OF LIBERTY',c:'Landmark'},{t:'MIX AND MATCH',c:'Phrase'},{t:'ANCIENT TEMPLES',c:'Places'},
+  {t:'ADVERSE CONDITIONS',c:'Things'},{t:'SAILBOAT RACE',c:'Events'},{t:'FULL-BODIED FLAVOR',c:'Phrase'},
+  {t:'MILD WEATHER',c:'Thing'},{t:'HD DIGITAL CAMERA',c:'Thing'},{t:'PIVOTAL MOMENT',c:'Event'},
+  {t:'LARRY BIRD',c:'Proper Name'},{t:'DENSE TROPICAL JUNGLE',c:'Place'},{t:'CAMPAIGN MANAGER',c:'Person'},
+  {t:'SPEAKER OF THE HOUSE',c:'Person'},{t:'PENS AND PENCILS',c:'Around The House'},
+  {t:'TOURING THE WINDY CITY',c:'Event'},{t:'PENNSYLVANIA AVENUE',c:'On The Map'},{t:'SENIOR OFFICIAL',c:'Person'},
+  {t:'PADRE ISLAND',c:'On The Map'},{t:'C & O CANAL',c:'On The Map'},{t:'PLAYING STICKBALL',c:'Fun & Games'},
+  {t:'MINIMUM WAGE',c:'Thing'},{t:'MOOSE & CARIBOU',c:'Living Thing'},{t:'ABSENTEE VOTERS',c:'People'},
+  {t:'ARABIAN SEA',c:'On The Map'},{t:'PICNIC PAVILION',c:'Place'},{t:'SCHOOL CAFETERIA',c:'Places'},
+  {t:'SCHOOL CHRISTMAS PAGEANT',c:'Event'},{t:'MUSIC TEACHER',c:'Occupation'},{t:'STAGE MOTHER',c:'Person'},
+  {t:'THE WASHINGTON POST',c:'Title'},{t:'TIMES SQUARE',c:'On The Map'},{t:'BUSINESS CONVENTION',c:'Events'},
+  {t:'BUSTLING CITY',c:'Place'},{t:'FISHING TACKLE BOX',c:'Around The House'},{t:'STEADY BOYFRIEND',c:'Person'},
+  {t:'THE BRADFORD EXCHANGE',c:'Proper Name'},{t:'ARCHITECTURAL TREASURES',c:'Things'},
+  {t:'NARROW COBBLESTONE STREETS',c:'Places'},{t:'RADIO TUNER',c:'Thing'},{t:'CELEBRITY CHEFS',c:'People'},
+  {t:'SMOKED HAM',c:'Food & Drink'},{t:'COMING UNGLUED',c:'Phrase'},{t:'PRAGUE CASTLE',c:'Landmark'},
+  {t:'MODERN ART',c:'Thing'},{t:'LONGTIME SUBSCRIBER',c:'Person'},{t:'CIVIL WAR BUFF',c:'Person'},
+  {t:'MADISON SQUARE GARDEN',c:'Landmark'},{t:'AGE-OLD CHURCHES',c:'Places'},{t:'NEVER SAY NEVER',c:'Phrase'},
+  {t:'ALL-EXPENSES PAID VACATION',c:'Events'},{t:'SAN FRANCISCO GIANTS',c:'Proper Name'},
+  {t:'OVERNIGHT DELIVERY',c:'Thing'},{t:'ALICE FLO VERN & MEL',c:'Classic TV'},
+  {t:'SEEDLESS WATERMELON',c:'Food & Drink'},{t:'AMAZON RAIN FOREST',c:'Place'},{t:'NATURAL HABITAT',c:'Thing'},
+  {t:'UNIQUE BUILDINGS',c:'Thing'},{t:'GOOD LUCK CHARM',c:'Thing'},{t:'HOWARD & MARION CUNNINGHAM',c:'Classic TV'},
+  {t:'COCKTAIL WAITRESS',c:'Person'},{t:'A GOOD FIT',c:'Phrase'},{t:'GRAVY LADEL',c:'in The Kitchen'},
+  {t:'BIG-CTY DIVERSITY',c:'Phrase'},{t:'RHUBARB PIE',c:'Food & Drink'},{t:'CORNCOB PIPE',c:'Thing'},
+  {t:'SMOKED TROUT',c:'Food & Drink'},{t:'REFLECTING POOL',c:'Place'},{t:'BICYCLE MESSENGER',c:'Person'},
+  {t:'FRESH FRUIT PLATTER',c:'Food & Drink'},{t:'STANDING IN LINE',c:'What Are You Doing?'},
+  {t:'FLEETING MOMENT',c:'Thing'},{t:'SEASON FINALE',c:'show Biz'},{t:'VISITING THE ZOO',c:'What Are You Doing?'},
+  {t:'CLOSED FOR RENOVATIONS',c:'Phrase'},{t:'DOG DAYS OF SUMMER',c:'Events'},{t:'WARM SUNSHINE',c:'Things'},
+  {t:'RECORD & SOUP LABEL',c:'same Name'},{t:'THE CAPITOL ROTUNDA',c:'Landmark'},{t:'EXPERT ARCHER',c:'Person'},
+  {t:'ZOOMING DOWN A WATER SLIDE',c:'What Are You Doing?'},{t:'A DIP IN THE POOL',c:'Fun & Games'},
+  {t:'FBI AGENT',c:'Person'},{t:'DADDY\'S LITTLE GIRL',c:'Person'},{t:'THE BIG SLEEP',c:'book Title'},
+  {t:'GREAT WHITE SHARK',c:'Living Thing'},{t:'SPARE KEY',c:'Thing'},{t:'NEW BRUNSWICK CANADA',c:'On The Map'},
+  {t:'HEALING MASSAGE',c:'Thing'},{t:'OHIO RIVER',c:'On The Map'},{t:'DEEP-DISH PEACH PIE',c:'Food & Drink'},
+  {t:'CULINARY SCHOOL',c:'Place'},{t:'OVAL OFFICE',c:'Place'},{t:'SPICY COCKTAIL SAUCE',c:'Food & Drink'},
+  {t:'TRAVELING IN A SNOWMOBILE',c:'What Are You Doing?'}];
+var WOF_WHEEL = [750,100,100,100,100,200,200,200,300,300,400,500];   // no bankrupt — longer games
+var WOF_VOWELS = 'AEIOU';
+var WOF_VOWEL_COST = 150;
+var WOF_MAX_STEPS = 90;   // safety cap on total actions
+var WOF_SOLVE_BONUS = 1000;   // reward for guessing the whole phrase correctly
+
+var wof = {
+  label: 'Wheel of Fortune', players: ['qwen3.8','gemma4','llama','laguna'],
+  newState: function(){
+    var p = pick(WOF_PUZZLES);
+    return { puzzle: { t: p.t.toUpperCase(), c: p.c }, revealed: {}, called: [],
+             money: [0,0,0,0], player: 0, events: [], steps: 0, over: false, result: '' };
+  },
+  _letter: function(x){ var m = String(x||'').toUpperCase().match(/[A-Z]/); return m ? m[0] : ''; },
+  _count: function(st, L){ var n = 0, t = st.puzzle.t; for(var i=0;i<t.length;i++) if(t[i] === L) n++; return n; },
+  _others: function(st, P){ return st.money.map(function(m, i){ return i === P ? null : ('P' + (i+1) + ' $' + m); }).filter(Boolean).join(', ') || '(none)'; },
+  _remaining: function(st){
+    if(!st.called.length) return 'all letters are still available';   // don't dump the whole alphabet at the start
+    var rc = [], rv = [];
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').forEach(function(L){
+      if(st.called.indexOf(L) >= 0) return;
+      (WOF_VOWELS.indexOf(L) >= 0 ? rv : rc).push(L);
+    });
+    return 'consonants ' + (rc.join(' ') || '(none left)') + ' · vowels ' + (rv.join(' ') || '(none left)');
+  },
+  _board: function(st){
+    return st.puzzle.t.split(' ').map(function(word){
+      return word.split('').map(function(ch){ return /[A-Z]/.test(ch) ? (st.revealed[ch] ? ch : '_') : ch; }).join(' ');
+    }).join('   ');
+  },
+  _solved: function(st, ans){ var n = function(s){ return String(s||'').toUpperCase().replace(/[^A-Z0-9]+/g,' ').trim(); };
+    return !!ans && n(ans) === n(st.puzzle.t); },
+  _ev: function(st, p, text){ st.events.push({ player: p, text: text }); st._note = 'P' + (p+1) + ' ' + text; },
+  _pass: function(st, reason){ st.player = (st.player + 1) % st.money.length; return 'Turn over (' + reason + '). Next player: P' + (st.player+1); },
+  _keep: function(st, reason){ return 'Good — ' + reason + '; your turn continues. Board: ' + wof._board(st) + ' · you have $' + st.money[st.player]; },
+  idle: function(el){
+    el.className = 'board wof';
+    el.innerHTML = '<div class="cat">Wheel of Fortune</div>'
+      + '<div class="wboard">press Play to spin up a puzzle</div>'
+      + '<div class="money">4 players · $' + WOF_VOWEL_COST + ' per vowel · 12-slot wheel</div>';
+  },
+  render: function(st, el){
+    el.className = 'board wof';
+    var money = st.money.map(function(m, i){
+      return '<span class="pm p' + (i+1) + (i === st.player && !st.over ? ' cur' : '') + '">P' + (i+1) + ' $' + m + '</span>';
+    }).join(' ');
+    var rows = st.events.slice(-40).map(function(e){
+      return '<div class="ev p' + (e.player+1) + '"><b>P' + (e.player+1) + '</b> ' + esc(e.text) + '</div>';
+    }).join('');
+    el.innerHTML = '<div class="cat">' + esc(st.puzzle.c) + '</div>'
+      + '<div class="wboard">' + esc(wof._board(st)) + '</div>'
+      + '<div class="money">' + money + '</div>'
+      + '<div class="feed">' + rows + '</div>'
+      + '<div class="turnline">' + (st.over ? esc(st.result) : 'P' + (st.player+1) + ' to act') + '</div>';
+    var feed = el.querySelector('.feed'); if(feed) feed.scrollTop = feed.scrollHeight;
+  },
+  tools: [
+    { type:'function', function:{ name:'get_board', description:'Read the current board, category, your money and the letters already called.', parameters:{ type:'object', properties:{}, required:[] } } },
+    { type:'function', function:{ name:'spin_wheel_and_guess_letter', description:'Spin the wheel, then guess a CONSONANT. Each occurrence pays the spin value; a wrong letter ends your turn.', parameters:{ type:'object', properties:{ letter:{ type:'string', description:'a single consonant' } }, required:['letter'] } } },
+    { type:'function', function:{ name:'buy_vowel', description:'Pay $' + WOF_VOWEL_COST + ' to reveal a vowel (A E I O U). A vowel that is not in the puzzle ends your turn.', parameters:{ type:'object', properties:{ letter:{ type:'string', description:'a single vowel' } }, required:['letter'] } } },
+    { type:'function', function:{ name:'guess_answer', description:'Solve the whole puzzle. Correct wins the game; wrong ends your turn.', parameters:{ type:'object', properties:{ answer:{ type:'string' } }, required:['answer'] } } },
+    { type:'function', function:{ name:'finish_turn', description:'Pass to the next player.', parameters:{ type:'object', properties:{}, required:[] } } }
+  ],
+  runTool: function(name, argsRaw, st){
+    st._acted = true; st.steps++;
+    if(st.steps > WOF_MAX_STEPS){ st.over = true; st.result = 'step limit — puzzle was "' + st.puzzle.t + '"'; st._stopAsk = true; return st.result; }
+    var a = {}; try{ a = (typeof argsRaw === 'string') ? JSON.parse(argsRaw) : (argsRaw || {}); }catch(e){}
+    var P = st.player;
+    if(name === 'get_board'){
+      st._stopAsk = false;   // a read — the model then takes a real action this same ask
+      return 'Category: ' + st.puzzle.c + '\nBoard: ' + wof._board(st) + '\nYour money: $' + st.money[P]
+        + '\nOther players: ' + wof._others(st, P) + '\nLetters still available — ' + wof._remaining(st);
+    }
+    st._stopAsk = true;      // every other tool concludes this ask
+    if(name === 'spin_wheel_and_guess_letter'){
+      var slot = WOF_WHEEL[Math.floor(Math.random() * WOF_WHEEL.length)];
+      var L = wof._letter(a.letter);
+      if(!L || WOF_VOWELS.indexOf(L) >= 0 || st.called.indexOf(L) >= 0){
+        // invalid or already-used consonant — substitute a random UNUSED one so the
+        // spin isn't wasted (weak models otherwise loop on the same dead letters)
+        var av = 'BCDFGHJKLMNPQRSTVWXYZ'.split('').filter(function(x){ return st.called.indexOf(x) < 0; });
+        if(!av.length){ wof._ev(st, P, 'no consonants remain — must buy a vowel or guess'); return wof._keep(st, 'no consonants remain — do NOT spin; buy_vowel or guess_answer'); }
+        var sub = av[Math.floor(Math.random() * av.length)];
+        wof._ev(st, P, 'gave invalid/used "' + (a.letter||'') + '", using "' + sub + '" instead');
+        L = sub;
+      }
+      st.called.push(L);
+      var c = wof._count(st, L);
+      if(c > 0){ st.revealed[L] = true; st.money[P] += slot * c;
+        wof._ev(st, P, 'spun $' + slot + ', "' + L + '" ×' + c + ' → +$' + (slot*c));
+        return wof._keep(st, '"' + L + '" ×' + c); }
+      wof._ev(st, P, 'spun $' + slot + ', no "' + L + '" — loses turn');
+      return wof._pass(st, 'no ' + L);
+    }
+    if(name === 'buy_vowel'){
+      if(st.money[P] < WOF_VOWEL_COST){ wof._ev(st, P, 'wanted a vowel but has only $' + st.money[P]); return wof._keep(st, 'cannot afford a vowel — do something else'); }
+      var V = wof._letter(a.letter);
+      if(!V || WOF_VOWELS.indexOf(V) < 0 || st.called.indexOf(V) >= 0){
+        // invalid or already-used vowel — substitute a random UNUSED vowel (still paid for)
+        var avv = WOF_VOWELS.split('').filter(function(x){ return st.called.indexOf(x) < 0; });
+        if(!avv.length){ wof._ev(st, P, 'no vowels left — loses turn'); return wof._pass(st, 'no vowels left'); }
+        var subv = avv[Math.floor(Math.random() * avv.length)];
+        wof._ev(st, P, 'gave invalid/used vowel "' + (a.letter||'') + '", using "' + subv + '" instead');
+        V = subv;
+      }
+      st.money[P] -= WOF_VOWEL_COST; st.called.push(V);
+      var cv = wof._count(st, V);
+      if(cv > 0){ st.revealed[V] = true; wof._ev(st, P, 'bought "' + V + '" (−$' + WOF_VOWEL_COST + '), ×' + cv + ' revealed'); return wof._keep(st, '"' + V + '" ×' + cv); }
+      wof._ev(st, P, 'bought "' + V + '" (−$' + WOF_VOWEL_COST + '), none in puzzle — loses turn'); return wof._pass(st, 'vowel absent');
+    }
+    if(name === 'guess_answer'){
+      if(wof._solved(st, a.answer)){
+        st.money[P] += WOF_SOLVE_BONUS;   // solve reward
+        st.over = true; st.result = 'P' + (P+1) + ' solves it: "' + st.puzzle.t + '" (+$' + WOF_SOLVE_BONUS + ' → $' + st.money[P] + ')';
+        wof._ev(st, P, 'SOLVES the puzzle — +$' + WOF_SOLVE_BONUS + ' bonus, total $' + st.money[P]); st._note = st.result; return st.result; }
+      wof._ev(st, P, 'guessed "' + (a.answer||'') + '" — wrong, loses turn'); return wof._pass(st, 'wrong solve');
+    }
+    if(name === 'finish_turn'){ wof._ev(st, P, 'finishes the turn'); return wof._pass(st, 'finished'); }
+    st._stopAsk = false; return 'unknown tool: ' + name;
+  },
+  turn: function(st){
+    st._acted = false;   // reset per ask; apply passes the turn if no tool is called
+    var P = st.player;
+    var noCons = !'BCDFGHJKLMNPQRSTVWXYZ'.split('').some(function(c){ return st.called.indexOf(c) < 0; });
+    var canVowel = st.money[P] >= WOF_VOWEL_COST;
+    // DON'T offer buy_vowel when they can't afford it — otherwise a model fixates on it
+    // and loops ("wanted a vowel but has only $0") since that path keeps the turn.
+    var tools = canVowel ? wof.tools : wof.tools.filter(function(tt){ return tt.function.name !== 'buy_vowel'; });
+    return { player: P, tools: tools, messages: [
+      {role:'system', content:'You are playing Wheel of Fortune — it is YOUR turn. Category: "' + st.puzzle.c
+        + '". Board ("_" is a hidden letter): ' + wof._board(st) + '. You have $' + st.money[P]
+        + '. The other players have: ' + wof._others(st, P)
+        + '. Letters still available — ' + wof._remaining(st) + '. Only guess from those. Call EXACTLY ONE tool: '
+        + 'spin_wheel_and_guess_letter (spin, then a CONSONANT — correct letters pay the spin value; a wrong '
+        + 'letter ends your turn), '
+        + (canVowel ? 'buy_vowel (pay $' + WOF_VOWEL_COST + ' for a vowel), ' : '')
+        + 'guess_answer (solve to win), get_board (re-read), or finish_turn (pass). STRATEGY: you win by having '
+        + 'money and solving the puzzle, and the only way to earn money is to spin and call consonants — so you '
+        + 'should almost always spin_wheel_and_guess_letter. '
+        + (canVowel ? 'Only buy_vowel once you need a vowel. ' : 'You cannot afford a vowel ($' + WOF_VOWEL_COST + ') yet — spin to earn money. ')
+        + 'Only guess_answer when you can actually read the phrase, and do NOT finish_turn unless you truly have '
+        + 'no other option — passing earns you nothing.'
+        + (noCons ? ' NOTE: every consonant has been called — you CANNOT spin now; ' + (canVowel ? 'only buy_vowel or guess_answer.' : 'only guess_answer.') : '')},
+      {role:'user', content: noCons ? (canVowel ? 'No consonants remain — buy_vowel or guess_answer.' : 'No consonants remain and you cannot afford a vowel — guess_answer.')
+        : 'Spin the wheel — call spin_wheel_and_guess_letter with a consonant.'}
+    ]};
+  },
+  apply: function(st, text, player){
+    if(!st._acted){ wof._pass(st, 'no tool call'); return {note: 'P' + (player+1) + ' made no move — turn passes'}; }
+    return {note: st._note || ''};
+  }
+};
+
+// ---- runner --------------------------------------------------------------
+var GAMES = [chess, ttt, pictionary, password, wof, hangman];
+var container = document.getElementById('games');
+
+GAMES.forEach(function(game){
+  var el = document.createElement('div');
+  el.className = 'game';
+  // one model-query input per player (2 for most games, 4 for password's two teams)
+  var inputs = game.players.map(function(q, i){
+    return '<input class="p' + (i+1) + '" value="' + q + '" placeholder="player ' + (i+1) + '" title="player ' + (i+1) + '">';
+  }).join('');
+  el.innerHTML =
+    '<h2>' + game.label + ' <label class="thinktoggle"><input type="checkbox" class="thinkbox" checked> thinking</label></h2>' +
+    '<div class="controls">' + inputs + '<button class="play">Play</button></div>' +
+    '<div class="board"></div>' +
+    '<div class="status"></div>' +
+    '<div class="log"></div>';
+  container.appendChild(el);
+
+  var panel = {
+    game: game, el: el,
+    players: Array.prototype.slice.call(el.querySelectorAll('.controls input')),
+    play: el.querySelector('.play'),
+    thinkbox: el.querySelector('.thinkbox'),
+    status: el.querySelector('.status'), board: el.querySelector('.board'),
+    log: el.querySelector('.log'), ac: null
+  };
+  if(game.idle) game.idle(panel.board);         // resting board (no round in progress)
+  else game.render(game.newState(), panel.board);   // show the starting board
+  // one button: Play when idle, Stop (abort) while a game is running.
+  panel.play.addEventListener('click', function(){
+    if(panel.ac) panel.ac.abort();
+    else runGame(panel);
+  });
+});
+
+function setStatus(p, t){ p.status.textContent = t; }
+function setTurn(p, idx){ p.players.forEach(function(inp, i){ inp.classList.toggle('turn', i === idx); }); }
+function logLine(p, cls, html){
+  var d = document.createElement('div'); d.className = cls; d.innerHTML = html;
+  p.log.insertBefore(d, p.log.firstChild);
+}
+
+async function runGame(panel){
+  var g = panel.game;
+  var st = g.newState();
+  panel.ac = new AbortController();
+  panel.play.textContent = 'Stop'; panel.play.classList.add('stop'); panel.log.innerHTML = '';
+  g.render(st, panel.board);
+  var n = 0;
+  try{
+    while(!st.over && !panel.ac.signal.aborted){
+      var t = g.turn(st);
+      setTurn(panel, t.player);   // highlight the current player's input box
+      var model = (panel.players[t.player] || panel.players[0]).value.trim();
+      if(!model){ setStatus(panel, 'player ' + (t.player+1) + ' needs a model query'); break; }
+      n++;
+      var onProg = function(ev){
+        if(ev.stage === 'routing'){
+          setStatus(panel, 'move ' + n + ' · P' + (t.player+1) + ' (' + model + ') · routing…');
+        } else {
+          var who = 'P' + (t.player+1) + ' ' + (ev.model||model).split('/').pop() + (ev.host ? ' @ ' + ev.host : '');
+          var tail = ev.thinking ? ' · thinking: ' + ev.thinking.replace(/\s+/g,' ').slice(-90)
+                   : (ev.content ? ' · answering…' : ' · connected (warming up)…');
+          setStatus(panel, 'move ' + n + ' · ' + who + tail);
+        }
+        if(g.onProgress) g.onProgress(panel, ev, t.player);
+      };
+      var res;
+      try{
+        var msgs = t.messages;
+        var tools = t.tools || g.tools || null;   // per-turn tools (a game may vary them by state) else the game default
+        var _m = (panel.players[t.player] || panel.players[0]).value.trim(); if(_m) model = _m;   // live: pick up input edits
+        var think = !panel.thinkbox || panel.thinkbox.checked;   // live: "thinking" checkbox
+        res = await ask(model, msgs, panel.ac.signal, onProg, tools, think);
+        // tool loop: run any tool calls, feed results back, re-ask until the model
+        // answers with content (capped so it can't spin) — exercises dyva's tool path.
+        var tl = 0;
+        while(res.tool_calls && res.tool_calls.length && g.runTool && tl < 4 && !panel.ac.signal.aborted){
+          tl++;
+          msgs = msgs.concat([{ role:'assistant', content: res.content || '', tool_calls: res.tool_calls }]);
+          res.tool_calls.forEach(function(tc){
+            var fn = tc.function || {};
+            msgs.push({ role:'tool', name: fn.name, tool_call_id: tc.id || '', content: String(g.runTool(fn.name, fn.arguments, st)) });
+            logLine(panel, 'mv p' + (t.player+1), '<span class="host">↳ called ' + esc(fn.name || '?') + '</span>');
+          });
+          if(st && st._stopAsk){ st._stopAsk = false; break; }   // a game action concluded this turn's ask
+          var _m2 = (panel.players[t.player] || panel.players[0]).value.trim(); if(_m2) model = _m2;   // live
+          res = await ask(model, msgs, panel.ac.signal, onProg, tools, !panel.thinkbox || panel.thinkbox.checked);
+        }
+      }catch(e){
+        if(e.name === 'AbortError') break;
+        // A dropped request / routing miss must NOT kill the match — surface it and retry.
+        logLine(panel, 'err', '⚠ ' + model + ': ' + e.message + ' — retrying');
+        await sleep(900);
+        continue;
+      }
+      var out = await g.apply(st, res.content, t.player, res);
+      logLine(panel, 'mv p' + (t.player+1),
+        '<b>P' + (t.player+1) + '</b> ' + out.note +
+        ' <span class="host">· ' + (res.used||model).split('/').pop() + (res.host ? ' @ ' + res.host : '') + '</span>');
+      g.render(st, panel.board);
+      await sleep(350);
+    }
+    if(panel.ac.signal.aborted) setStatus(panel, 'stopped after ' + n + ' moves');
+    else if(st.over) setStatus(panel, 'game over — ' + st.result + ' (' + n + ' moves)');
+  }finally{
+    panel.play.textContent = 'Play'; panel.play.classList.remove('stop'); panel.ac = null;
+    setTurn(panel, -1);   // clear the turn highlight when the game ends/stops
+  }
+}
+</script>
+</body>
+</html>

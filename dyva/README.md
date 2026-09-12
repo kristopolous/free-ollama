@@ -345,7 +345,7 @@ With `"stream": true` the same info arrives as a normal NDJSON/SSE chat stream �
 
 Use `__dyva_info__:next` to move on: it first drops the model's sticky last-successful host (the same action as `GET /next-host` and the dashboard's "next host" link), then returns the *next* host/model the request would land on. The response shape is identical, so you get confirmation of where you moved to — repeat to keep walking down the list. Model matching is case-insensitive and glob-normalized, so `GEMMA*`, `gemma`, and `*gemma*` all target the same sticky host.
 
-Use `__dyva_info__:test` when a match looks bogus. Instead of just reporting the routing choice, dyva actually *probes* the candidates: it sends each one the quick factual question *"What is the name of the first United States President?"* and keeps the first host that answers with "Washington" or "George". Any host that answers wrong (or fails outright) is marked bad and skipped, so walking one suspicious model culls all its deadbeat duplicates. The response shape is the same as `__dyva_info__`, with the host/model of the first passing server:
+Use `__dyva_info__:test` when a match looks bogus. Instead of just reporting the routing choice, dyva actually *probes* the candidates: it sends each one a trivial question *"What color is the sky on a bright sunny day with no clouds?"* and keeps the first host that gives a real answer. The bar is liveness, not trivia: it passes on "blue" **or** any short/one-word reply — a dumb-but-real model that answers "green" or "grey" still counts. Only fakes/broken hosts fail (they parrot the whole prompt back, or return nothing). Those are marked bad and skipped, so walking one suspicious model culls its deadbeat/broken duplicates. The response shape is the same as `__dyva_info__`, with the host/model of the first passing server:
 
 ```bash
 curl http://localhost:11434/api/chat -d '{
@@ -356,6 +356,8 @@ curl http://localhost:11434/api/chat -d '{
 ```
 
 Because a real inference runs per candidate, `:test` is deliberately opt-in and scoped: it only tests the hosts serving the one model you asked for, never the whole catalog.
+
+`__dyva_info__:test-all` is the sweep variant: same probe, but it does **not** stop at the first pass. It probes every candidate that is **not already bad and has never passed** — i.e. hosts whose `smoke_ok` is NULL — culling each failure, and returns `{model, probed, pass_count, fail_count, skip_count, passed[], failed[], skipped_already_passed[]}`. A host that passes is stamped with a `smoke_ok` timestamp in the reputation DB, so a later `:test-all` skips it rather than re-probing — the assumption being a given host:port won't quietly swap a real model for a fake one. (If you ever need to re-verify, clear its reputation.) Use it to cull a whole model's deadbeats/honeypots in one pass rather than walking them one `:test` at a time.
 
 ### Text-to-Image
 
