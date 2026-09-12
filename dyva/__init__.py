@@ -144,6 +144,10 @@ MAX_STREAM_CONTINUES = 6
 # still fans out immediately via _race_hosts' `tried < 2` short-circuit, so a dead
 # host doesn't block). Not a hard pin — failover is preserved, just not speculative.
 CONTINUATION_HEDGE = 3600
+# How long a model's last-good ("sticky") host stays trusted. After this, the warm
+# host is probably cold/evicted (prompt cache gone, maybe the box rebooted), so the
+# hedge's reason to prefer it is stale — drop the stickiness and race normally.
+STICKY_TTL = 6 * 3600   # 6 hours
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
@@ -2038,6 +2042,8 @@ def get_last(model):
         load_last()
     entry = _last_cache.get(model)
     if entry:
+        if time.time() - entry.get("ctime", 0) > STICKY_TTL:
+            return None        # last pull too old — don't treat it as the sticky anymore
         return (entry["host"], entry["full"])
     return None
 

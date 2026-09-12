@@ -19,8 +19,7 @@ case "$SERVICE" in
       for i in ollama vllm lmstudio llama.cpp comfyui a1111 ollama-shodan  gradio; do
         $CMD $i ${EXTRA_ARGS[@]}
         echo ">>   "$?
-        #[[ $? ]] && exit 0
-        #sleep 7200
+        [[ $? ]] || sleep 7200
       done
     done
     exit 0
