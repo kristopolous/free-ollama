@@ -359,6 +359,8 @@ Because a real inference runs per candidate, `:test` is deliberately opt-in and 
 
 `__dyva_info__:test-all` is the sweep variant: same probe, but it does **not** stop at the first pass. It probes every candidate that is **not already bad and has never passed** — i.e. hosts whose `smoke_ok` is NULL — culling each failure, and returns `{model, probed, pass_count, fail_count, skip_count, passed[], failed[], skipped_already_passed[]}`. A host that passes is stamped with a `smoke_ok` timestamp in the reputation DB, so a later `:test-all` skips it rather than re-probing — the assumption being a given host:port won't quietly swap a real model for a fake one. (If you ever need to re-verify, clear its reputation.) Use it to cull a whole model's deadbeats/honeypots in one pass rather than walking them one `:test` at a time.
 
+With `"stream": true` the per-host results are streamed back to the issuer **as each host is probed** (`→ testing …`, `✓ … "blue"`, `✗ … status 500`, `· … skip, already passed`), with a final chunk carrying the full summary in `dyva_info` — so you watch the cull live instead of waiting for it to finish. (On the dashboard's job flow it's a background job whose buffer fills as it goes.)
+
 ### Text-to-Image
 
 The `txt2img` CLI generates images via the proxy:

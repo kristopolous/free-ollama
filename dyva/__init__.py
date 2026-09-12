@@ -4521,8 +4521,10 @@ async def _proxy_generate(request, session):
 
     if _has_info_tag(body):
         if _info_wants_test_all(body):
+            if do_stream:
+                return await _stream_info_test_all(request, session, model, body.get("tools"), False)
             summary = await _run_info_test_all(session, model, tools=body.get("tools"))
-            return _info_response(model, summary, do_stream=do_stream)
+            return _info_response(model, summary, do_stream=False)
         if _info_wants_test(body):
             info = await _run_info_test(session, model, tools=body.get("tools"))
             if info is None:
@@ -6029,8 +6031,28 @@ async def handle_chat_job_submit(request):
         session = request.app["session"]
         model0 = model.split("/")[0] if "/" in model else model
         if _info_wants_test_all(body):
-            info = await _run_info_test_all(session, model0, tools=body.get("tools"))
-        elif _info_wants_test(body):
+            # stream the sweep into the job buffer as a background task, so the
+            # dashboard sees each host's result as it's probed (not all at the end).
+            jid = await _job_new("text", body, model=model)
+            async def _sweep(jid=jid, model0=model0, tools=body.get("tools")):
+                async def emit(line):
+                    await _job_append(jid, json.dumps({"model": model0, "created_at": _now_iso(),
+                        "message": {"role": "assistant", "content": line + "\n"}, "done": False}) + "\n")
+                try:
+                    await emit(f"test-all {model0}: probing non-bad, not-yet-verified hosts…")
+                    summary = await _run_info_test_all(session, model0, tools=tools, emit=emit)
+                    tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad, "
+                            f"{summary['skip_count']} skipped of {summary['probed']} probed")
+                    await _job_append(jid, json.dumps({"model": model0, "created_at": _now_iso(),
+                        "message": {"role": "assistant", "content": "\n" + tail}, "done": True,
+                        "done_reason": "stop", "dyva_info": summary}) + "\n")
+                    await _job_set(jid, status=JOB_COMPLETED, phase=None)
+                except Exception as e:
+                    await _job_set(jid, status=JOB_FAILED, phase=None, error=str(e))
+            asyncio.get_event_loop().create_task(_sweep())
+            return web.json_response({"id": jid, "status": JOB_PENDING,
+                                     "polling_url": f"/api/chat/jobs/{jid}"})
+        if _info_wants_test(body):
             info = await _run_info_test(session, model0, tools=body.get("tools"))
             if info is None:
                 return web.json_response(err_obj(
