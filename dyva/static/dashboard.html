@@ -352,6 +352,10 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .worker-skip{flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer;margin-left:4px}
 .worker-skip:hover{background:var(--accent-bg);color:var(--text)}
 .worker-skip[disabled]{opacity:.6;cursor:default;font-style:italic}
+.worker-flag{flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer;margin-left:4px}
+.worker-flag:hover{background:#a73d5d;border-color:#a73d5d;color:#fff}
+.worker-flag[disabled]{opacity:.6;cursor:default;font-style:italic}
+.worker-flag[disabled]:hover{background:transparent;border-color:var(--border);color:var(--text-2)}
 
 label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-2)}
 input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-3) 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--field-bg);color:var(--text);font-size:var(--fs-md);outline:none;font-family:var(--font-mono)}
@@ -2217,6 +2221,28 @@ function renderWorkers(workers){
       hs.textContent=prov;hs.title=prov;
       sub.appendChild(hs);
     }
+    // Finished worker that actually reached a host: let the user thumbs-down the
+    // (host, resolved model) even though it emitted tokens — cut off, misconfigured
+    // or otherwise bunk. Sends that exact pair straight to the bad tier.
+    if(w.done&&w.host){
+      var fb=document.createElement('button');fb.type='button';fb.className='worker-flag';
+      fb.textContent='👎';
+      fb.title='Mark this host+model as bunk (force to the bad pool) — it emitted tokens but the output was cut off / misconfigured / garbage';
+      fb.addEventListener('click',function(){
+        if(fb.disabled)return;
+        fb.disabled=true;fb.textContent='flagging…';
+        var qs='flag-worker?wid='+encodeURIComponent(w.wid||'')
+             +'&host='+encodeURIComponent(w.host||'')
+             +'&model='+encodeURIComponent(w.rmodel||'');
+        fetch(qs).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(){
+          fb.textContent='flagged bunk';fb.title='forced to the bad pool';
+          if(typeof refreshListsNow==='function')refreshListsNow();
+        }).catch(function(){
+          fb.disabled=false;fb.textContent='👎';
+        });
+      });
+      sub.appendChild(fb);
+    }
     body.appendChild(sub);
     // Two spans, two clocks: finding a host (blue) and running the job on it
     // (green). Data attributes drive the local ticker; the server hands back
@@ -2668,7 +2694,10 @@ function fileIsText(f){
   if(mt===''||mt==='application/octet-stream'){
     var n=(f.name||'').toLowerCase();
     if(/(^|\/)(dockerfile|makefile)$/.test(n))return true;
-    return /\.(txt|text|log|md|markdown|rst|json|jsonl|ndjson|xml|csv|tsv|ya?ml|toml|ini|cfg|conf|env|properties|gradle|js|mjs|cjs|jsx|ts|tsx|py|pyw|rb|pl|pm|php|go|rs|java|kt|kts|c|h|cpp|cc|cxx|hpp|cs|swift|scala|sh|bash|zsh|fish|sql|html|htm|css|scss|sass|less|vue|svelte|r|lua|dart|ex|exs|erl|hs|clj|cljs|el|vim|tf|proto|graphql|gql)$/.test(n);
+    if(/\.(txt|text|log|md|markdown|rst|json|jsonl|ndjson|xml|csv|tsv|ya?ml|toml|ini|cfg|conf|env|properties|gradle|js|mjs|cjs|jsx|ts|tsx|py|pyw|rb|pl|pm|php|go|rs|java|kt|kts|c|h|cpp|cc|cxx|hpp|cs|swift|scala|sh|bash|zsh|fish|sql|html|htm|css|scss|sass|less|vue|svelte|r|lua|dart|ex|exs|erl|hs|clj|cljs|el|vim|tf|proto|graphql|gql)$/.test(n))return true;
+    // no extension at all (e.g. a plain dump named "conversation") -> default to text/plain
+    if(!/\.[a-z0-9]+$/.test(n.replace(/^.*\//,'')))return true;
+    return false;
   }
   return false;
 }

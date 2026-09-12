@@ -5567,6 +5567,53 @@ async def handle_skip_worker(request):
     return web.json_response({"skipped": w.get("model"), "wid": w.get("wid")})
 
 
+async def handle_flag_worker(request):
+    """
+    Thumbs-down a finished worker: force its (host, resolved-model) to bad.
+    ---
+    tags: [Admin]
+    summary: Mark the host+model a finished worker used as bad
+    description: >
+      For a worker that completed but produced garbage (cut off, misconfigured,
+      bunk output despite emitting tokens). Sends that exact (host, resolved
+      model) straight to the bad tier so it is demoted out of routing. Resolves
+      host/model from the worker record when the wid is still tracked; otherwise
+      falls back to the host/model query params the card carries.
+    parameters:
+      - in: query
+        name: wid
+        schema: {type: string}
+        required: false
+        description: Worker id to flag
+      - in: query
+        name: host
+        schema: {type: string}
+        required: false
+        description: Host to flag (fallback when the worker is no longer tracked)
+      - in: query
+        name: model
+        schema: {type: string}
+        required: false
+        description: Resolved model to flag (fallback)
+    responses:
+      '200':
+        description: Flagged bad
+    """
+    wid = request.query.get("wid")
+    w = _workers.get(wid) if wid else None
+    # Prefer the worker record (its host string matches the reputation DB exactly);
+    # fall back to what the card sends so this still works after the worker is trimmed.
+    host = (w.get("host") if w else None) or request.query.get("host")
+    model = (w.get("rmodel") if w else None) or request.query.get("model")
+    if not host or not model:
+        return web.json_response({"error": "no host/model to flag"}, status=404)
+    force_bad(host, model)
+    log.warning(f"worker thumbs-down: host={host} model={model} wid={wid}")
+    await broadcast_activity(host, model, "flagged",
+        f"user flagged bunk output: {model} @ {_norm_host(host)}")
+    return web.json_response({"flagged": True, "host": host, "model": model})
+
+
 async def handle_api_tags(request):
     """
     List models (Ollama-compatible)
@@ -8837,6 +8884,7 @@ async def _run_chat_job(session, jid):
                 errors.append(f"no available servers for '{model_in}'")
                 break
             status = "nohost"
+            ctx_reissues = 0   # context-exhaustion reissues so far this round (capped)
             for model in model_list:
                 # Inner loop = the print-queue "move to another printer": a skip
                 # abandons the current host and re-races the REMAINING servers
@@ -8986,13 +9034,43 @@ async def _run_chat_job(session, jid):
 
                     if skipped:
                         continue         # re-race remaining hosts for this model
+                    sent_ctx = _effective_num_ctx(opayload)
+                    # Context exhaustion: the window cut this generation short —
+                    # either the model hit num_ctx mid-answer (done_reason 'length')
+                    # or the prompt itself filled the window (Ollama silently drops
+                    # the head). Our sizing fell short, NOT the host's fault, so we
+                    # reissue with a decisively larger window — carrying the work so
+                    # far forward so the buffer stays coherent — until it fits or the
+                    # cap is hit. This is the same move /api/chat's _stream_chat_failover
+                    # makes on 'length'; the job pump never did it, so the dashboard
+                    # chat just truncated silently (e.g. rewriting a 16kb story).
+                    _ctx_done = done_obj[0] or {}
+                    if (ctx_reissues < MAX_STREAM_CONTINUES and sent_ctx < NUM_CTX_MAX
+                            and (_ctx_done.get("done_reason") == "length"
+                                 or _is_truncated(_ctx_done, sent_ctx))):
+                        await account_tokens(job_wid, host, full, _ctx_done, sent_ctx)
+                        ctx_reissues += 1
+                        if partial[0].strip():
+                            opayload["messages"] = list(opayload.get("messages") or []) + [
+                                {"role": "assistant", "content": partial[0]},
+                                {"role": "user", "content": "Continue your previous answer from "
+                                 "exactly where it was cut off. Do not repeat what you already wrote."},
+                            ]
+                        # grow decisively: at least 2x, and enough to hold the (now
+                        # larger) prompt the continuation turns it into.
+                        bigger = min(max(sent_ctx * 2, _auto_num_ctx(opayload)), NUM_CTX_MAX)
+                        opayload["options"] = dict(opayload.get("options") or {}, num_ctx=bigger)
+                        await broadcast_activity(host, full, "trying",
+                            f"context exhausted at num_ctx {sent_ctx} — reissuing with {bigger}",
+                            wid=job_wid)
+                        _set_worker_phase(job_wid, None)
+                        continue         # re-race (the host is fine) with the bigger window
                     status = "ok"
                     # Token accounting for the dashboard's own chat path (this job
                     # runner streams to a buffer, so it never hit the _forward_stream
                     # accounting) — so the worker card shows up/down/ctx here too.
                     if done_obj[0]:
-                        await account_tokens(job_wid, host, full, done_obj[0],
-                                             _effective_num_ctx(opayload))
+                        await account_tokens(job_wid, host, full, done_obj[0], sent_ctx)
                     break
                 if status == "ok":
                     break
@@ -12227,6 +12305,7 @@ def make_app():
     app.router.add_get("/workers-ws", handle_workers_ws)
     swagger.add_get("/stop-worker", handle_stop_worker)
     swagger.add_get("/skip-worker", handle_skip_worker)
+    swagger.add_get("/flag-worker", handle_flag_worker)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
     swagger.add_get("/api/version", handle_api_version)

@@ -15,12 +15,10 @@ source .env
 case "$SERVICE" in
   all)
 
-    while [ 0 ]; do
-      for i in ollama vllm lmstudio llama.cpp comfyui a1111 ollama-shodan  gradio; do
-        $CMD $i ${EXTRA_ARGS[@]}
-        echo ">>   "$?
-        [[ $? ]] || sleep 7200
-      done
+    for i in ollama vllm lmstudio llama.cpp comfyui a1111 ollama-shodan  gradio; do
+      $CMD $i ${EXTRA_ARGS[@]}
+      echo ">>   "$?
+      [[ $? ]] || sleep 7200
     done
     exit 0
     ;;
