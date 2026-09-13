@@ -452,7 +452,8 @@ var PICT_THINGS = [
   ['a turtle','turtle'],['a snail','snail'],['a lobster','lobster'],['a starfish','starfish'],['a zebra','zebra'],
   ['a spider','spider'],['a sheep','sheep'],['a porcupine','porcupine'],['a pelican','pelican'],
   ['a jellyfish','jellyfish'],['a mouse','mouse'],['a moose','moose'],['a platypus','platypus'],
-  ['an okapi','okapi'],['an elephant','elephant'] ];
+  ['an elephant','elephant'],
+  ['bigfoot','bigfoot'],['a caveman','caveman'],['a doctor','doctor'],['a mummy','mummy'] ];
 var PICT_ACTIVITIES = [
   ['drinking tea','tea'],['playing tennis','tennis'],['taking a nap','nap'],['singing at church','church'],
   ['riding a bike','bike'],['eating pizza','pizza'],['dancing ballet','ballet'],['playing guitar','guitar'],
@@ -460,14 +461,17 @@ var PICT_ACTIVITIES = [
   ['baking a cake','cake'],['playing chess','chess'],['watering plants','plant'],['juggling balls','juggl'],
   ['painting a picture','paint'],['climbing a ladder','ladder'],['doing karate','karate'],['fishing','fish'],
   ['skateboarding','skate'],['blowing bubbles','bubble'],['playing drums','drum'],['walking a dog','dog'],
-  ['mowing the lawn','lawn'],['praying','pray'],['getting married','married'],['laughing','laugh'],
+  ['mowing the lawn','lawn'],['praying','pray'],['getting married','married'],
   ['sleeping','sleep'],
   ['taking a bath','bath'],['driving a car','car'],['on an airplane','airplane'],['on an escalator','escalator'],
   ['on a computer','computer'],['in a hot air balloon','balloon'],['lifting weights','weights'],
   ['at a bar','bar'],['camping','camping'],['walking on the moon','moon'],
   ['robbing a bank','robbing'],['parachuting','parachuting'],['protesting','protesting'],
   ['at a disco','disco'],['playing basketball','basketball'],['golfing','golfing'],
-  ['riding a rollercoaster','rollercoaster'],['applying makeup','makeup'] ];
+  ['riding a rollercoaster','rollercoaster'],['applying makeup','makeup'],
+  ['at the beach','beach'],['doing laundry','laundry'],['grocery shopping','grocer'],
+  ['gardening','garden'],['running','running'],['watching television','televis'],
+  ['doing magic','magic'] ];
 var PICT_ROUNDS = 10;      // a game is 10 rounds (a new secret each round)
 var PICT_ATTEMPTS = 5;    // up to 5 guesses; points start at 5 and drop 1 each — 3x5 = 15 max, collaborative
 
@@ -489,6 +493,7 @@ var pictionary = {
     st.phase = 'draw'; st.png = ''; st.feedback = ''; st.hint = ''; st.coach = ''; st.focus = '';
     st.guesses = []; st.revealed = { thing: false, activity: false };
     st.pendingGuess = ''; st.pendingValue = 0;   // a guess awaiting the judge's yes/no
+    st.rejected = ''; st.showOptions = false;   // last rejected guess; whether the vocab list was revealed
     st.attempt = 0; st.turns = 0;   // attempt = wrong guesses this round; value = ATTEMPTS - attempt
     st.drawings.push({ marker: true, round: st.round, secret: st.secret.full });   // round divider in the reel
   },
@@ -594,6 +599,26 @@ var pictionary = {
         {role:'user', content:'Is "' + st.pendingGuess + '" close enough to the secret? (yes/no)'}
       ]};
     }
+    if(st.phase === 'choose'){
+      // the guesser's guess was rejected — make them pick what help they want next.
+      // Every option but "see options" routes to the drawer; "see options" hands
+      // over the full vocabulary and returns to guessing on the same drawing.
+      var opts = ['"draw the puzzle again" — redraw the whole thing more clearly',
+                  '"draw only the object" — draw ONLY the subject',
+                  '"draw only the activity" — draw ONLY the action',
+                  '"a different angle" — same secret, drawn from another view'];
+      if(!st.showOptions) opts.push('"see options" — list every possible subject and activity to pick from');
+      var cm = {role:'user', content: 'The judge rejected your guess "' + st.rejected + '" as not close enough. '
+        + 'You do NOT guess now — choose ONE kind of help and reply with just that phrase, verbatim:\n'
+        + opts.join('\n')};
+      if(st.png) cm.images = [st.png];
+      return { player: 1, messages: [
+        {role:'system', content:'You are the GUESSER in Pictionary and your last guess was rejected as not close '
+          + 'enough. Do NOT guess again yet — pick ONE kind of help. Reply with EXACTLY one of the offered '
+          + 'phrases, verbatim, and nothing else.'},
+        cm
+      ]};
+    }
     // guesser: show the rendered drawing through the vision system
     var parts = [];
     if(st.coach) parts.push(st.coach);   // collaborative nudge from the drawing side
@@ -603,6 +628,9 @@ var pictionary = {
       + ' — refine from the drawing, do not repeat them.');
     if(st.revealed.thing) parts.push('(hint) the thing is: ' + st.secret.thing);
     if(st.revealed.activity) parts.push('(hint) the activity is: ' + st.secret.activity);
+    if(st.showOptions) parts.push('The answer is exactly ONE of these subjects doing ONE of these activities.\n'
+      + 'SUBJECTS: ' + PICT_THINGS.map(function(x){ return x[0]; }).join(', ') + '\n'
+      + 'ACTIVITIES: ' + PICT_ACTIVITIES.map(function(x){ return x[0]; }).join(', '));
     parts.push('What is being drawn? Guess the full "<thing> <activity>", or ask for a hint.');
     var um = {role:'user', content: parts.join('\n')};
     if(st.png) um.images = [st.png];
@@ -630,9 +658,40 @@ var pictionary = {
         return pictionary._endRound(st, 'out of guesses — it was ' + st.secret.full);
       }
       pictionary._say(st, '✗ "' + st.pendingGuess + '" — not close enough', 'wrong');
-      st.phase = 'draw'; st.coach = ''; st.hint = '';
-      st.feedback = 'The guesser guessed "' + st.pendingGuess + '", which you did not accept. Draw the secret more clearly.';
-      return {note: 'rejected "' + st.pendingGuess + '" — worth ' + pictionary._value(st) + ' now'};
+      // Hand control to the GUESSER: they pick what help they want next (redraw,
+      // object/activity only, a reveal, or the vocabulary list) and THAT drives the
+      // drawer — so those options actually get used instead of always re-guessing.
+      st.phase = 'choose'; st.coach = ''; st.hint = ''; st.rejected = st.pendingGuess;
+      return {note: 'the judge rejected "' + st.pendingGuess + '" as not close enough — asking the guesser what they want'};
+    }
+    if(st.phase === 'choose'){                           // guesser picked what help they want next
+      var c = String(text||'').toLowerCase();
+      if(c.indexOf('see options') >= 0){                  // reveal the vocabulary, then guess again (no redraw)
+        st.showOptions = true; st.phase = 'guess'; st.hint = 'guesser saw the full option list';
+        pictionary._say(st, '🤔 "see options"', 'hint'); return {note:'choice: see options — vocab revealed'};
+      }
+      st.phase = 'draw';                                  // every choice drives the drawer
+      if(c.indexOf('only the object') >= 0){
+        st.hint = 'guesser asked for the object only';
+        st.feedback = 'The guesser asked to see the OBJECT ONLY. Start your reply with "OBJECT ONLY" on its own '
+          + 'line, then the <svg> of just the subject.';
+        pictionary._say(st, '🤔 "draw only the object"', 'hint'); return {note:'choice: object only'};
+      }
+      if(c.indexOf('only the activity') >= 0){
+        st.hint = 'guesser asked for the activity only';
+        st.feedback = 'The guesser asked to see the ACTIVITY ONLY. Start your reply with "ACTIVITY ONLY" on its '
+          + 'own line, then the <svg> of just the action.';
+        pictionary._say(st, '🤔 "draw only the activity"', 'hint'); return {note:'choice: activity only'};
+      }
+      if(c.indexOf('different angle') >= 0){
+        st.hint = 'guesser asked for a different angle';
+        st.feedback = 'The guesser asked for a different angle — draw the same secret again, clearer and from a '
+          + 'different view.';
+        pictionary._say(st, '🤔 "a different angle"', 'hint'); return {note:'choice: different angle'};
+      }
+      st.hint = 'guesser asked for a clearer drawing';    // "draw the puzzle again" or anything unrecognized
+      st.feedback = 'The judge rejected "' + st.rejected + '" as not close enough. Redraw the secret more clearly.';
+      pictionary._say(st, '🤔 "draw the puzzle again"', 'hint'); return {note:'choice: redraw'};
     }
     if(player === 0){                                    // drawer produced an SVG
       var fm = String(text||'').match(/\b(object|activity)\s+only\b/i);

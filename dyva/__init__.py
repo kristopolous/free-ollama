@@ -147,7 +147,7 @@ CONTINUATION_HEDGE = 3600
 # How long a model's last-good ("sticky") host stays trusted. After this, the warm
 # host is probably cold/evicted (prompt cache gone, maybe the box rebooted), so the
 # hedge's reason to prefer it is stale — drop the stickiness and race normally.
-STICKY_TTL = 6 * 3600   # 6 hours
+STICKY_TTL = 2 * 3600   # 2 hours
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
@@ -858,7 +858,7 @@ TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
 # candidate for a model is the expensive part the operator opts into explicitly.
 QUICK_TEST_TAG = "__dyva_info__:test"
 QUICK_TEST_PROMPT = "What color is #000000? one word answer, this is a test"
-QUICK_TEST_PASS_RE = re.compile(r"\b(black|blue|red|green|gr[ae]y)\b", re.I)
+QUICK_TEST_PASS_RE = re.compile(r"\b(black|white|blue|red|green|gr[ae]y)\b", re.I)
 
 _status_db = None
 _servers_cache = None
@@ -4472,7 +4472,11 @@ async def _run_info_test_all(session, model_in, tools=None, emit=None):
     # fanned out (bounded by WORKER_COUNT). `emit` streams each RESULT as its probe
     # completes (completion order), serialized by a lock so concurrent writes to the
     # one stream don't interleave.
-    cand = [(host, ms[0]) for _prio, host, ms in find_servers(model_in, req_caps) if ms]
+    # Every model on the host that matches the query, not just ms[0]: test-all
+    # means all matching (host, model) pairs, so a host serving qwen2.5:7b AND
+    # qwen2.5:14b against a 'qwen2.5*' glob gets both probed, not only the first.
+    cand = [(host, m) for _prio, host, ms in find_servers(model_in, req_caps) if ms
+            for m in ms]
     candidates = [(h, m) for h, m in cand if not smoke_dated(h, m)]
     skip_count = len(cand) - len(candidates)
     passed, failed = [], []
