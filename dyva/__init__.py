@@ -849,13 +849,16 @@ TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
 # parrot the prompt or echo roll tokens). Kept dead-simple on purpose — a harder
 # factual question ("first US President") culls real-but-dumb models that answer
 # wrong, which isn't the point; we only want to catch fakes/broken hosts. Question
-# is "what color is #000000?" and a host passes if its answer mentions "black" (the
-# current honeypots do NOT; a stale question like sky->blue they eventually learn).
-# Cycling this through every candidate for a model is the expensive part the
-# operator opts into explicitly.
+# is "what color is #000000?" (black). A host passes if its answer names ANY common
+# colour (black/blue/red/green/gray/grey — codellama answers gray) — black is correct,
+# but a real-but-dumb model that flubs it with another colour is still a REAL model,
+# while a canned honeypot ("That's
+# an interesting question…") names no colour at all. The current honeypots fail it;
+# a stale question like sky->blue they eventually learn. Cycling this through every
+# candidate for a model is the expensive part the operator opts into explicitly.
 QUICK_TEST_TAG = "__dyva_info__:test"
 QUICK_TEST_PROMPT = "What color is #000000? one word answer, this is a test"
-QUICK_TEST_PASS_RE = re.compile(r"\bblack\b", re.I)
+QUICK_TEST_PASS_RE = re.compile(r"\b(black|blue|red|green|gr[ae]y)\b", re.I)
 
 _status_db = None
 _servers_cache = None
@@ -1913,9 +1916,9 @@ def mark_smoke(host, model, failed):
     """Record the outcome of a smoke test (the canned-response probe): stamp
     smoke_date=NOW and fail_smoke=1 (failed: answered with a canned/fake response)
     or 0 (passed). Keyed like verdicts (canon_pattern). It only writes the two smoke
-    columns on conflict — it never touches `state`, so a PASS doesn't promote a host
-    (a pass is no longer evidence of a real host) and a FAIL's state='bad' from
-    force_bad is left intact. A brand-new row is created 'unknown'."""
+    columns on conflict — it never touches `state`; the caller decides the tier
+    (add_good on pass, force_bad on fail), so a FAIL's state='bad' is left intact and
+    a PASS's add_good isn't clobbered. A brand-new row is created 'unknown'."""
     model = canon_pattern(model)
     try:
         db = _get_db()
@@ -1928,6 +1931,19 @@ def mark_smoke(host, model, failed):
         db.commit()
     except Exception as e:
         log.debug(f"mark_smoke failed for {host}/{model}: {e}")
+
+
+def smoke_dated(host, model):
+    """True if this (host, model) already has a smoke_date — i.e. it's been smoke-
+    tested before, so :test-all skips re-verifying it (it already has a verdict)."""
+    model = canon_pattern(model)
+    try:
+        row = _get_db().execute(
+            "SELECT smoke_date FROM host_status WHERE host=? AND model=?",
+            [host, model]).fetchone()
+        return bool(row and row[0])
+    except Exception:
+        return False
 
 
 # Failure-kind -> counter column. Whitelisted so the kind can be interpolated
@@ -4310,15 +4326,13 @@ def _info_ndjson(model_in, info):
 
 
 def _quick_test_answer_ok(content):
-    """Pass ONLY if the answer contains the expected word "black" (#000000 is black).
-    The answer is DETERMINISTIC — any real model says black — so there is no
-    short-answer fallback: a canned ack ("Request accepted."), a parroted prompt, a
-    wrong color, or empty all FAIL. (The old 1-3-word fallback existed for the
-    ambiguous "first president" probe that mis-culled real models; with a
-    deterministic hex-colour answer it was just a hole that let short canned
-    non-answers pass — e.g. an llama3.3 proxy replying "Request accepted.") The
-    `\\bblack\\b` match already tolerates chat artifacts like "Black." / "Black</s>"
-    / "Black<|eot_id|>"."""
+    """Pass only if the answer names a common COLOUR (black/blue/red/green/gray/grey). #000000
+    is black, but a real-but-dumb model that flubs it with another colour is still a
+    REAL model — we just need a colour word, which a canned honeypot ("That's an
+    interesting question…", "Request accepted.") never produces. No short-answer
+    fallback (that old 1-3-word branch was a hole that passed short canned acks). The
+    `\\b(...)\\b` match tolerates chat artifacts like "Black." / "Black</s>" /
+    "Black<|eot_id|>"."""
     return bool(content and QUICK_TEST_PASS_RE.search(content))
 
 
@@ -4340,14 +4354,35 @@ async def _run_info_test(session, model_in, tools=None):
     req_caps = needs_caps([])
     if tools:
         req_caps = sorted(set(req_caps) | {"tools"})
-    servers = find_servers(model_in, req_caps)
-    for _prio, host, ms in servers:
-        if not ms:
-            continue
-        ok, _detail = await _quick_probe(session, host, ms[0], model_in, tools)
-        if ok:
-            return {"host": _norm_host(host), "model": ms[0], "service": service_of(host)}
-    return None
+    candidates = [(host, ms[0]) for _prio, host, ms in find_servers(model_in, req_caps) if ms]
+    if not candidates:
+        return None
+    # Fan out (bounded by WORKER_COUNT) instead of walking one host at a time; return
+    # the FIRST host that passes and cancel the rest — the same first-wins shape the
+    # real request path uses. `found` doubles as the done-flag; the guards keep probes
+    # that haven't acquired the semaphore yet from starting once someone has passed.
+    sem = asyncio.Semaphore(WORKER_COUNT)
+    found = {}
+    async def probe(host, model):
+        if found:
+            return
+        async with sem:
+            if found:
+                return
+            ok, _detail = await _quick_probe(session, host, model, model_in, tools)
+        if ok and not found:
+            found.update({"host": _norm_host(host), "model": model, "service": service_of(host)})
+    tasks = [asyncio.ensure_future(probe(h, m)) for h, m in candidates]
+    try:
+        for fut in asyncio.as_completed(tasks):
+            await fut
+            if found:
+                break
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return found or None
 
 
 async def _quick_probe(session, host, full, model_in, tools=None):
@@ -4408,12 +4443,13 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - (parroted/empty): {shown!r}", duration=dur, wid=wid)
         return False, f"{shown}"
-    # A smoke-test PASS is no longer evidence of a real host — honeypots now answer
-    # the quick test correctly (observed in the wild). So a pass confers NOTHING:
-    # no add_good (don't promote), no set_last (don't sticky a maybe-honeypot). It
-    # only records the smoke RESULT (fail_smoke=0, smoke_date=now); the host stays
-    # UNKNOWN until a trustworthy signal grades it (real inference success, or the
-    # planned external-knowledge test). Only a FAIL is load-bearing (force_bad, above).
+    # It answered "black" (the #000000 probe discriminates — honeypots emit canned
+    # filler, not "black"). We don't store a "passed" flag; we just update our LAST
+    # CONTACT POINT (add_good stamps last_good — it responded to us, so it's a good
+    # host by recency) and record THAT WE TESTED IT (mark_smoke: smoke_date=now,
+    # fail_smoke stays 0 = it didn't fail). If honeypots ever learn to answer "black",
+    # revisit — the documented escalation trigger.
+    add_good(host, full)
     mark_smoke(host, full, failed=False)
     log.info(f"quick test PASS (unknown — not promoted) {host} ({full}): answer={shown!r}")
     await broadcast_activity(host, model_in, "connected",
@@ -4422,34 +4458,45 @@ async def _quick_probe(session, host, full, model_in, tools=None):
 
 
 async def _run_info_test_all(session, model_in, tools=None, emit=None):
-    """`__dyva_info__:test-all` — probe EVERY non-bad candidate for the model (never
-    stops at the first pass), culling each failure as it goes. `emit` (async) is
-    called with a human line per host as it happens, so the issuing client can watch
-    the probe live. Returns a summary
-    {model, probed, pass_count, fail_count, passed[], failed[]}."""
+    """`__dyva_info__:test-all` — probe every non-bad candidate that hasn't already
+    been smoke-tested (skip any host with a smoke_date — it already has a verdict, no
+    need to re-verify), fanned out and bounded by WORKER_COUNT, culling each failure as
+    it goes. `emit` (async) streams a line per host as its probe completes. Returns a
+    summary {model, probed, pass_count, fail_count, skip_count, passed[], failed[]}."""
     req_caps = needs_caps([])
     if tools:
         req_caps = sorted(set(req_caps) | {"tools"})
-    # find_servers already excludes bad hosts — a conclusive smoke FAIL goes through
-    # force_bad -> state 'bad', so it never comes back here. A PASS is no longer a
-    # durable "skip me" marker, so we simply probe every non-bad candidate.
+    # find_servers already excludes bad hosts (a conclusive smoke FAIL -> force_bad ->
+    # 'bad'). On top of that we SKIP any host that already has a smoke_date — it's been
+    # tested, so it doesn't need re-verifying. So we only probe the never-tested ones,
+    # fanned out (bounded by WORKER_COUNT). `emit` streams each RESULT as its probe
+    # completes (completion order), serialized by a lock so concurrent writes to the
+    # one stream don't interleave.
+    cand = [(host, ms[0]) for _prio, host, ms in find_servers(model_in, req_caps) if ms]
+    candidates = [(h, m) for h, m in cand if not smoke_dated(h, m)]
+    skip_count = len(cand) - len(candidates)
     passed, failed = [], []
-    for _prio, host, ms in find_servers(model_in, req_caps):
-        if not ms:
-            continue
+    sem = asyncio.Semaphore(WORKER_COUNT)
+    elock = asyncio.Lock()
+    async def _emit(line):
+        if emit:
+            async with elock:
+                await emit(line)
+    async def probe(host, model):
         nh = _norm_host(host)
-        entry = {"host": nh, "model": ms[0], "service": service_of(host)}
-        if emit: await emit(f"   testing {nh} ({ms[0]})…")
-        ok, detail = await _quick_probe(session, host, ms[0], model_in, tools)
+        entry = {"host": nh, "model": model, "service": service_of(host)}
+        async with sem:
+            ok, detail = await _quick_probe(session, host, model, model_in, tools)
         if ok:
             passed.append(entry)
-            if emit: await emit(f"✓  {detail!r}   {nh} ({ms[0]})")
+            await _emit(f"✓  {detail!r}   {nh} ({model})")
         else:
             entry["detail"] = detail
             failed.append(entry)
-            if emit: await emit(f"!! {detail}   {nh} ({ms[0]})")
+            await _emit(f"!! {detail}   {nh} ({model})")
+    await asyncio.gather(*(probe(h, m) for h, m in candidates), return_exceptions=True)
     return {"model": model_in, "probed": len(passed) + len(failed),
-            "pass_count": len(passed), "fail_count": len(failed),
+            "pass_count": len(passed), "fail_count": len(failed), "skip_count": skip_count,
             "passed": passed, "failed": failed}
 
 
@@ -4475,7 +4522,7 @@ async def _stream_info_test_all(request, session, model_in, tools, openai_format
     await emit(f"test-all {model_in}: probing non-bad, not-yet-verified hosts…")
     summary = await _run_info_test_all(session, model_in, tools=tools, emit=emit)
     tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad "
-            f"of {summary['probed']} probed")
+            f"of {summary['probed']} probed ({summary['skip_count']} already tested, skipped)")
     with contextlib.suppress(Exception):
         if openai_format:
             await resp.write(sse_str(sse_chunk(model_in, {"role": "assistant", "content": tail})).encode())
@@ -6191,7 +6238,7 @@ async def handle_chat_job_submit(request):
                     await emit(f"test-all {model0}: probing non-bad, not-yet-verified hosts…")
                     summary = await _run_info_test_all(session, model0, tools=tools, emit=emit)
                     tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad "
-                            f"of {summary['probed']} probed")
+                            f"of {summary['probed']} probed ({summary['skip_count']} already tested, skipped)")
                     await _job_append(jid, json.dumps({"model": model0, "created_at": _now_iso(),
                         "message": {"role": "assistant", "content": "\n" + tail}, "done": True,
                         "done_reason": "stop", "dyva_info": summary}) + "\n")
@@ -7290,7 +7337,13 @@ async def handle_txt2img(request):
         # it rather than spawning a second card, and keep it visible to is_active
         mark_worker_found(job_wid, host)
         _set_worker_phase(job_wid, "rendering")
-        data = await _txt2img_comfyui(session, host, body, model_filter)
+        try:
+            data = await _txt2img_comfyui(session, host, body, model_filter)
+        except ComfyError as e:
+            _set_worker_phase(job_wid, None)
+            await broadcast_activity(host, activity_label, "failed",
+                f"failure: {host} for {activity_label} (comfyui) - {e}", wid=wid)
+            return failed(str(e))
         _set_worker_phase(job_wid, None)
         if data:
             await broadcast_activity(host, activity_label, "connected",
@@ -7366,6 +7419,17 @@ async def handle_txt2img(request):
     comfy_hosts = _idle_first(
         [s.get("server") for s in comfy_candidates if not _img_bad(s.get("server"))])
     data = await _race(comfy_hosts, comfy_attempt, workers=1)   # one host per image; spread, don't spray
+    if data:
+        return await _deliver(data)
+
+    # Phase 4 (recovery): the KNOWN-BAD comfy hosts — tried LAST, but tried. A comfy
+    # "no response" is usually flaky (busy/slow render, or our own workflow), not a
+    # dead host, so we deprioritise bad comfy hosts rather than excluding them forever.
+    # Without this the comfy pool only ever shrinks (a1111 has Phase 2; comfy lacked it),
+    # which is how a model ends up hammering the one host that isn't yet 'bad'.
+    comfy_bad = _idle_first(
+        [s.get("server") for s in comfy_candidates if _img_bad(s.get("server"))])
+    data = await _race(comfy_bad, comfy_attempt, workers=1)
     if data:
         return await _deliver(data)
 
@@ -7720,17 +7784,28 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
         eparams = {"width": width, "height": height, "steps": steps,
                    "cfg_scale": cfg, "seed": seed, "sampler_name": sampler,
                    "match_source": False}
-        try:
-            workflow = _edit_workflow(plan, prompt_text, [], eparams)
-            prompt_id = await comfy_submit(session, host, workflow)
-            raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
-                                           timeout=180, poll=2, view_timeout=30)
-        except ComfyError as e:
-            log.debug(f"txt2img (edit-graph {model_filter}): {host}: {e}")
-            return None
+        workflow = _edit_workflow(plan, prompt_text, [], eparams)
+        prompt_id = await comfy_submit(session, host, workflow)
+        raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
+                                       timeout=180, poll=2, view_timeout=30)
         return {"images": [base64.b64encode(raw).decode()],
                 "_dyva_model": plan["model"], "_dyva_seed": seed,
                 "parameters": "{}", "info": json.dumps({"prompt": body})}
+
+    # KSampler validates sampler_name/scheduler as EXACT strings against its own
+    # enum, and that enum varies per host (custom sampler nodes make it 44, 45 or
+    # 65 long). A fixed "Euler"/"euler" is a coin flip — snap our value onto what
+    # this host actually lists (case-insensitively) so a right sampler under the
+    # wrong casing isn't rejected as value_not_in_list.
+    try:
+        info = await comfy_object_info(session, host)
+    except Exception:
+        info = None
+    if info:
+        sampler = _resolve_combo(
+            _enum_options(info, "KSampler", "sampler_name"), sampler, ["euler"])
+        scheduler = _resolve_combo(
+            _enum_options(info, "KSampler", "scheduler"), scheduler, ["normal", "simple"])
 
     workflow = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
@@ -7749,13 +7824,9 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
                "inputs": {"filename_prefix": "dyva_output", "images": ["6", 0]}}),
     }
 
-    try:
-        prompt_id = await comfy_submit(session, host, workflow)
-        raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
-                                       timeout=120, poll=2, view_timeout=30)
-    except ComfyError as e:
-        log.debug(f"txt2img: {host}: {e}")
-        return None
+    prompt_id = await comfy_submit(session, host, workflow)
+    raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
+                                   timeout=120, poll=2, view_timeout=30)
     return {"images": [base64.b64encode(raw).decode()], "_dyva_model": ckpt,
             "_dyva_seed": seed, "parameters": "{}",
             "info": json.dumps({"prompt": body})}
@@ -11074,6 +11145,28 @@ def _enum_options(info, node, field):
     if isinstance(entry, list) and entry and isinstance(entry[0], list):
         return [x for x in entry[0] if isinstance(x, str)]
     return []
+
+
+def _resolve_combo(options, want, fallbacks=()):
+    """Snap a requested combo value (sampler_name, scheduler, ...) onto what the
+    host's node actually enumerates. ComfyUI validates combos by EXACT string, so
+    an A1111-style "Euler" is rejected against its "euler" list even though it's
+    the same sampler. Try exact, then case-insensitive, then the first preferred
+    fallback present, else the host's first option. With no enum (host didn't
+    advertise it) send the request through unchanged."""
+    if not options:
+        return want
+    if want in options:
+        return want
+    low = {o.lower(): o for o in options}
+    if want and want.lower() in low:
+        return low[want.lower()]
+    for fb in fallbacks:
+        if fb in options:
+            return fb
+        if fb.lower() in low:
+            return low[fb.lower()]
+    return options[0]
 
 
 def _match_rank(needle):

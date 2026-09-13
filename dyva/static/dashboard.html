@@ -1437,17 +1437,13 @@ function refreshModelBars(){
   var items=document.querySelectorAll('.model-item[data-name]');
   for(var i=0;i<items.length;i++){var mid=items[i].getAttribute('data-name');var old=items[i].querySelector('.model-bar');if(old)old.replaceWith(makeModelBar(mid));}
 }
-// Debounced: the activity stream replays its whole backlog on connect, and each
-// connected/failed event would otherwise trigger its own /dashboard-data fetch
-// (~20-25 on load). Collapse any burst into a single trailing fetch.
-var _refreshListsTimer=null;
-function refreshLists(){if(_refreshListsTimer)clearTimeout(_refreshListsTimer);_refreshListsTimer=setTimeout(function(){_refreshListsTimer=null;refreshListsNow()},400)}
 function onActivityMessage(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;
-  // Only refetch the host lists for genuinely-live events. On connect the stream
-  // replays its whole backlog; those are historical and already reflected in the
-  // fresh data loadDashboard() just fetched, so refetching for them is redundant
-  // (that was the 2nd dashboard-data hit on load). Live events have a ~now time.
-  if((d.status==='connected'||d.status==='failed')&&d.time&&(Date.now()/1e3-d.time)<5)refreshLists();paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);paintMediaStatus(d);var c=document.getElementById('activityList');
+  // We deliberately do NOT refetch the host lists / model-bar counts on live events.
+  // dashboard-data loads every good/maybe/bad row from host_status and serializes it,
+  // so polling it per connected/failed event (even debounced) hammers the DB for
+  // counts nobody needs live. Lists/bars refresh on load, the manual 💻 host-count
+  // click, and after a flag — not on every event.
+  paintGenStatus(activeStatus,d);paintGenStatus(activeImgStatus,d);paintMediaStatus(d);var c=document.getElementById('activityList');
   // An event carrying an id owns one line for the life of the request: reuse
   // that line so a fan-out resolves in place instead of stacking a row per host.
   var p=d.id?_actLines[d.id]:null;var fresh=!p;
@@ -1762,6 +1758,13 @@ function makeModelBar(mid){
   return bar;
 }
 function makeModelRow(mid){var d=document.createElement('div');d.className='model-item';d.setAttribute('data-name',mid);d.title=mid;var n=document.createElement('span');n.className='model-name';n.textContent=mid;d.appendChild(n);d.appendChild(makeModelBar(mid));return d}
+// Sort cardinality: good + maybe_good + unknown, EXCLUDING failed/bad hosts — a model
+// served only by dead hosts shouldn't rank above a live one on raw host count.
+function modelRank(mid){
+  var hs=modelHosts[mid]||[],b=0;
+  for(var i=0;i<hs.length;i++)if(_bad.has(hs[i]+' '+mid))b++;
+  return hs.length-b;
+}
 
 // --- Faceted grouping of the model list ------------------------------------
 // The flat list is cardinality-sorted (most-available first), which is useful but
@@ -1907,7 +1910,7 @@ function renderModels(servers){
   });
   var mid;for(mid in modelHosts)modelHosts[mid].sort();
   var ids=Object.keys(modelHosts);
-  ids.sort(function(a,b){return modelHosts[b].length-modelHosts[a].length||(a<b?-1:a>b?1:0)});
+  ids.sort(function(a,b){return modelRank(b)-modelRank(a)||(a<b?-1:a>b?1:0)});
   var textIds=[],imageIds=[];
   ids.forEach(function(id){(imageModels[id]?imageIds:textIds).push(id);});
   _appendModelPane(document.getElementById('modelList'),textIds,_modelFacet,false);
