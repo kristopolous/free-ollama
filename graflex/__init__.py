@@ -29,6 +29,147 @@ WORKING_FILE = os.path.join(CACHE_DIR, "image-gen-working.json")
 NOTWORKING_FILE = os.path.join(CACHE_DIR, "image-gen-notworking.json")
 CLASSIFIER_FILE = os.path.join(os.path.dirname(__file__), os.pardir, "graflex", "model-classifier.json")
 
+# Confirmed honeypot clone fingerprints (see bogus-fingerprints.json): a cloned
+# honeypot image carries the SAME (model, nanosecond timestamp) across every host
+# it's deployed on, while a real host has its own. Scoring this is a cheap,
+# reconstitutable classifier over the check snapshots — no live probing, and
+# unlike the behavioural smoke test it can't be defeated by a host canning a
+# "blue" answer (the honeypots already pass that). Per-host additive score.
+BOGUS_FINGERPRINTS_FILE = os.path.join(os.path.dirname(__file__), "bogus-fingerprints.json")
+_bogus_fp_cache = None
+
+
+def load_bogus_fingerprints():
+    """Confirmed clone fingerprints as a set of (model, timestamp-string) pairs. Cached."""
+    global _bogus_fp_cache
+    if _bogus_fp_cache is not None:
+        return _bogus_fp_cache
+    pairs = set()
+    try:
+        with open(BOGUS_FINGERPRINTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        for model, tslist in (data.get("timestamps") or {}).items():
+            for ts in tslist or []:
+                pairs.add((model, str(ts)))
+    except Exception as e:
+        log.warning(f"bogus-fingerprints: failed to load {BOGUS_FINGERPRINTS_FILE}: {e}")
+    _bogus_fp_cache = pairs
+    return pairs
+
+
+def _fp_model_name(m):
+    if isinstance(m, dict):
+        return m.get("name") or m.get("model") or m.get("id")
+    return m if isinstance(m, str) else None
+
+
+def _fp_model_timestamp(m):
+    """Fingerprint timestamp for a raw model object, either dialect: ollama
+    `modified_at` or openai `created`/`created_at`. Returned as a string."""
+    if not isinstance(m, dict):
+        return None
+    ts = m.get("modified_at")
+    if ts is None:
+        ts = m.get("created", m.get("created_at"))
+    return None if ts is None else str(ts)
+
+
+def bogus_score_from_models(models):
+    """How many of a host's RAW model objects (name + modified_at/created) match a
+    confirmed bogus fingerprint. Per host, additive; 0 = clean. Needs the raw
+    objects, not the name-only list the working.json keeps — so it runs on the
+    probe payload / check snapshot."""
+    fps = load_bogus_fingerprints()
+    if not fps:
+        return 0
+    n = 0
+    for m in models or []:
+        name, ts = _fp_model_name(m), _fp_model_timestamp(m)
+        if name and ts is not None and (name, ts) in fps:
+            n += 1
+    return n
+
+
+def bogus_score_from_payload(payload):
+    """bogus_score for a raw check payload — ollama /api/tags (`models`) or openai
+    /v1/models (`data`)."""
+    if not isinstance(payload, dict):
+        return 0
+    models = payload.get("models")
+    if models is None:
+        models = payload.get("data")
+    return bogus_score_from_models(models or [])
+
+
+def _latest_check_dir(session=None):
+    base = "/tmp/graflex"
+    if session:
+        d = os.path.join(base, session, "check")
+        return d if os.path.isdir(d) else ""
+    best, best_mtime = "", -1
+    try:
+        for entry in os.listdir(base):
+            d = os.path.join(base, entry, "check")
+            if os.path.isdir(d):
+                mt = os.path.getmtime(d)
+                if mt > best_mtime:
+                    best, best_mtime = d, mt
+    except OSError:
+        pass
+    return best
+
+
+def score_bogus(session=None, name=None, apply=False):
+    """Score hosts by confirmed honeypot clone fingerprints (bogus-fingerprints.json)
+    over a check session's raw snapshots. Cheap, offline, RECONSTITUTABLE — edit the
+    fingerprint file and re-run. Reports the bogus-score distribution and worst
+    offenders. With `apply` and a -n/-s name, stamps an additive `bogus_score` onto
+    that working file's records (0 for clean); it never drops a host, so the write
+    is safe. dyva routes bogus-score-ascending (0 first)."""
+    check_dir = _latest_check_dir(session)
+    if not check_dir:
+        log.error("score-bogus: no /tmp/graflex/*/check snapshots found"
+                  + (f" for session {session}" if session else ""))
+        return
+    scores = {}
+    for fn in os.listdir(check_dir):
+        if not fn.endswith(".json"):
+            continue
+        snap = _load_json(os.path.join(check_dir, fn), silent=True)
+        if not isinstance(snap, dict):
+            continue
+        host = snap.get("host")
+        if host:
+            scores[host.rstrip("/")] = bogus_score_from_payload(snap.get("payload") or {})
+    dist = {}
+    for s in scores.values():
+        dist[s] = dist.get(s, 0) + 1
+    flagged = sum(v for k, v in dist.items() if k > 0)
+    log.info(f"score-bogus: {len(scores)} hosts from {check_dir} | "
+             f"clean={dist.get(0, 0)} bogus={flagged} | dist={dict(sorted(dist.items()))}")
+    for s, h in sorted(((s, h) for h, s in scores.items() if s), reverse=True)[:15]:
+        log.info(f"  bogus={s}  {h}")
+    if not apply:
+        log.info("score-bogus: report only — add 'apply' and -n/-s to stamp bogus_score onto the working file")
+        return
+    if not name:
+        log.error("score-bogus apply: need -n/--name (or -s) to pick the working file to stamp")
+        return
+    wf = _cache_file(name, "working")
+    entries = _load_json(wf)
+    if not isinstance(entries, list):
+        log.error(f"score-bogus apply: {wf} is not a host list")
+        return
+    stamped = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        e["bogus_score"] = scores.get(_entry_host(e), e.get("bogus_score", 0))
+        if e["bogus_score"]:
+            stamped += 1
+    _save_json(wf, entries)
+    log.info(f"score-bogus: stamped bogus_score on {len(entries)} records ({stamped} bogus) -> {wf}")
+
 
 def _cache_file(name, suffix):
     prefix = name or "image-gen"
@@ -2661,7 +2802,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "model-probe", "reconstruct"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "model-probe", "reconstruct", "score-bogus"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -2688,6 +2829,15 @@ def main():
     # -i <session> folds in just that sweep's snapshots; no -i rescans everything.
     if args.action == "survey":
         survey(run_ts=args.session)
+        return
+
+    # score-bogus mines the check snapshots for honeypot clone fingerprints — like
+    # survey, it needs no service/name to REPORT (-i folds in one session's snaps).
+    # `apply` + -n/-s stamps bogus_score onto that working file.
+    if args.action == "score-bogus":
+        score_bogus(session=args.session,
+                    name=(args.name or (None if args.service == "all" else args.service)),
+                    apply=("apply" in (args.enrich_args or [])))
         return
 
     if args.query and not args.name:

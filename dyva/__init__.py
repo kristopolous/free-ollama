@@ -195,6 +195,42 @@ VIDEO_JOBS_FILE = os.path.join(CACHE_DIR, "video-jobs.json")
 VIDEO_JOBS_DIR = os.path.join(CACHE_DIR, "video-jobs")
 _VIDEO_JOBS = {}
 _VIDEO_JOB_ID_CTR = 0
+
+
+def _apply_cache_dir(path):
+    """Repoint every on-disk store at `path` instead of the default
+    ~/.cache/free-ollama (the -c/--config flag). The cache dir is the one hard
+    split between two dyva instances, so overriding it is what lets them run on a
+    single box. Recomputes every CACHE_DIR-derived path global; must run before
+    any command or the server touches disk (settings, reputation DB, caches).
+    CLASSIFIER_FILE / NODE_CLASSIFIER_FILE are package-relative, not cache-derived,
+    so they're intentionally left alone."""
+    global CACHE_DIR, CACHE_FILE, NOTWORKING_FILE, BAD_FILE, GOOD_FILE, STATUS_DB
+    global LAST_FILE, KNOWN_FILE, IMG_DIR, AUDIO_DIR, IMG_HISTORY_FILE, THUMB_DIR
+    global CHATS_FILE, CHATS_DB, JOBS_DB, SETTINGS_FILE, VIDEO_JOBS_FILE
+    global VIDEO_JOBS_DIR, CLEANSED_FILE, SURVEY_FILE, MUSIC_JOBS_FILE, MUSIC_JOBS_DIR
+    CACHE_DIR = os.path.abspath(os.path.expanduser(path))
+    CACHE_FILE = os.path.join(CACHE_DIR, "free-ollama.json")
+    NOTWORKING_FILE = os.path.join(CACHE_DIR, "notworking-consolidated.json")
+    BAD_FILE = os.path.join(CACHE_DIR, "bad-hosts.txt")
+    GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
+    STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
+    LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
+    KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
+    IMG_DIR = os.path.join(CACHE_DIR, "images")
+    AUDIO_DIR = os.path.join(CACHE_DIR, "audio")
+    IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
+    THUMB_DIR = os.path.join(IMG_DIR, "thumbs")
+    CHATS_FILE = os.path.join(CACHE_DIR, "chats.json")
+    CHATS_DB = os.path.join(CACHE_DIR, "chats.db")
+    JOBS_DB = os.path.join(CACHE_DIR, "jobs.db")
+    SETTINGS_FILE = os.path.join(CACHE_DIR, "settings.json")
+    VIDEO_JOBS_FILE = os.path.join(CACHE_DIR, "video-jobs.json")
+    VIDEO_JOBS_DIR = os.path.join(CACHE_DIR, "video-jobs")
+    CLEANSED_FILE = os.path.join(CACHE_DIR, "free-ollama.cleansed.json")
+    SURVEY_FILE = os.path.join(CACHE_DIR, "survey.json")
+    MUSIC_JOBS_FILE = os.path.join(CACHE_DIR, "music-jobs.json")
+    MUSIC_JOBS_DIR = os.path.join(CACHE_DIR, "music-jobs")
 VIDEO_JOB_MAX = 200
 VIDEO_JOB_TTL = 3600   # legacy; retention is now count-based
 VIDEO_JOBS_KEEP = 50   # keep the newest N finished videos, like the image gallery
@@ -1852,13 +1888,18 @@ def record_perf(host, model, ttft=None, tps=None):
 
 def mark_smoke_ok(host, model):
     """Stamp NOW (ISO) as when this (host, model) last passed the quick smoke test,
-    so `:test-all` can skip re-probing it. Keyed like verdicts (canon_pattern)."""
+    so `:test-all` can skip re-probing it. Keyed like verdicts (canon_pattern).
+    Passing the smoke test is NO LONGER evidence of a real host (honeypots pass it),
+    so a brand-new row is created as 'unknown', NOT 'good' — this only records that
+    the host was probed and answered, never promotes it. An existing row keeps its
+    real state (on-conflict touches only smoke_ok), so a host made good by genuine
+    inference stays good."""
     model = canon_pattern(model)
     try:
         db = _get_db()
         db.execute(
             "INSERT INTO host_status(host,model,state,failure_streak,smoke_ok)"
-            " VALUES(?,?, 'good', 0, ?)"
+            " VALUES(?,?, 'unknown', 0, ?)"
             " ON CONFLICT(host,model) DO UPDATE SET smoke_ok=excluded.smoke_ok",
             [host, model, _now_iso()])
         db.commit()
@@ -4358,12 +4399,16 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - no real answer (parroted/empty): {shown!r}", duration=dur, wid=wid)
         return False, f"no real answer: {shown}"
-    set_last(full, host, full)
-    add_good(host, full)
-    mark_smoke_ok(host, full)           # remember it passed, so :test-all can skip it
-    log.info(f"quick test PASS {host} ({full}): answer={shown!r}")
+    # A smoke-test PASS is no longer evidence of a real host — honeypots now answer
+    # the sky-color test correctly (observed in the wild). So a pass confers NOTHING:
+    # no add_good (don't promote), no set_last (don't sticky a maybe-honeypot). It
+    # only records smoke_ok so :test-all skips re-probing; the host stays UNKNOWN
+    # until a trustworthy signal grades it (real inference success, or the planned
+    # external-knowledge test). Only a FAIL is load-bearing (force_bad, above).
+    mark_smoke_ok(host, full)
+    log.info(f"quick test PASS (unknown — not promoted) {host} ({full}): answer={shown!r}")
     await broadcast_activity(host, model_in, "connected",
-        f"quick test: {host} for {model_in} - passes. answer: {shown!r}", duration=dur, wid=wid)
+        f"quick test: {host} for {model_in} - answered (unknown, not promoted): {shown!r}", duration=dur, wid=wid)
     return True, shown
 
 
@@ -12476,6 +12521,7 @@ def main():
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
+    parser.add_argument("-c", "--config",   type=str, default="", metavar="DIR", help="data/cache directory (default: ~/.cache/free-ollama). Override it to run more than one dyva on a box.")
     parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache (and cleanse fake/junk hosts), optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
     parser.add_argument("--refresh-only", nargs="?", const=True, default=False, metavar="SOURCE", help="like --refresh but do NOT cleanse — keep everything, including the fake/imposter/phantom hosts")
     parser.add_argument("--cleanse", nargs="*", metavar="TYPE", help="expunge fake MODEL entries from the pool (hosts are never removed; removals logged to free-ollama.cleansed.json): '--cleanse' dry-run report of all; '--cleanse fake|cloud|junk|all [apply]' to act on one type")
@@ -12493,6 +12539,8 @@ def main():
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
+    if args.config:      # repoint every store BEFORE any command/server touches disk
+        _apply_cache_dir(args.config)
     PORT = args.port     # so early ops (e.g. --cleanse apply's reload poke) target the right port
 
     if args.source:
