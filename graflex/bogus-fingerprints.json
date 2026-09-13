@@ -1,0 +1,11 @@
+{
+  "_comment": "Confirmed honeypot clone fingerprints. A fingerprint is a (model name, EXACT timestamp) pair that a cloned honeypot disk image carries identically across many hosts. A real host pulls a model independently and gets its OWN nanosecond-precision modified_at (ollama) / created (openai), so an identical timestamp shared across hosts means one cloned image, not independent deployments. Each match adds one bogus point to the host; hosts are routed bogus-score-ascending (0 first), never hard-dropped. This is an EXACT-match denylist, never a pattern. Derived by clustering the graflex check snapshots: these 6 were each shared by 209-243 of 688 hosts (65% of the pool), versus singleton timestamps for real hosts. Reconstitutable: re-run the scorer over the snapshots any time you edit this file. Extensible: add a top-level \"digests\" block later for content-hash fingerprints if timestamps stop being enough.",
+  "timestamps": {
+    "codellama:13b": ["2023-11-04T14:56:49.277302595-07:00"],
+    "openchat:7b": ["2025-02-03T17:45:24.5347459+08:00"],
+    "llama2:latest": ["2024-04-22T20:42:41.0502575+08:00"],
+    "llama3:latest": ["2023-12-07T09:32:18.757212583-08:00"],
+    "qwen2.5:1.5b": ["2025-02-13T19:55:50.4459752+08:00"],
+    "deepseek-r1:latest": ["2025-03-29T20:18:17.974766226Z"]
+  }
+}
