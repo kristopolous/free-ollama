@@ -4,7 +4,7 @@ Discover public internet hosts via search-engine scraping (FOFA or Shodan) witho
 
 This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json) but there is no output included by default.
 
-Fair warning, running all the probes takes about 10 days. Days with a d. 
+Fair warning, running all the probes takes about 4 days. Days with a d. 
 
 Speedup is possible with multiple accounts and probably proxying through an ip pool but the main governor here is the 3k/daily limit per account. I haven't had an ip blacklisted but I haven't tried account cycling to bypass the 3k limit. If I were the policy author for FOFA I'd do like a 5k ip blacklist limit with like a 14 day window. Not that they'd do that but you know, presume reasonability and work around it.
 
