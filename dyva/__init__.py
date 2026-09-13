@@ -116,6 +116,11 @@ _CURLIFY = False
 
 PORT = 11434
 TIMEOUT = 30
+# TCP connect budget, separate from the overall TIMEOUT. A live host completes the
+# handshake fast even when its inference is slow, so a failure to connect within
+# this is "no connection" (unreachable), while running out the full TIMEOUT after
+# connecting is "connected but slow" (a real timeout) — a genuine TCP distinction.
+CONNECT_TIMEOUT = 10
 WORKER_COUNT = 10
 # Seconds the sticky (last-good) host gets to itself before the rest of the
 # pool is raced alongside it; first to produce wins, the loser is dropped.
@@ -126,6 +131,11 @@ HEDGE_DELAY = 15
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
 # so it's dropped rather than stored.
 TPS_CEILING = 5000
+# Minimum timing window (seconds) before a tps figure means anything. Dividing a
+# token count by a sub-quarter-second denominator explodes into impossibly high
+# rates — whether the host buffered-then-bursted, reported a bogus eval_duration,
+# or is fake. Below this, we simply don't state a tps.
+MIN_TPS_WINDOW = 0.25
 # After the first token, a live stream keeps sending — so any gap longer than this
 # (seconds) is a stalled connection, not slow generation. A per-read watchdog, reset
 # each line, fires on that silence and we fail over. Deliberately AFTER first token
@@ -149,6 +159,7 @@ CONTINUATION_HEDGE = 3600
 # hedge's reason to prefer it is stale — drop the stickiness and race normally.
 STICKY_TTL = 2 * 3600   # 2 hours
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
+EXPLORE_MODE = False   # route UNKNOWN/unvisited hosts first to map more of the pool (slower)
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
                 # settings & sources requires it (localhost always exempt).
@@ -321,7 +332,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -341,6 +352,8 @@ def load_settings():
         ADMIN_PW = s["admin_pw"]
     if isinstance(s.get("local"), bool):
         _LOCAL = s["local"]
+    if isinstance(s.get("explore"), bool):
+        EXPLORE_MODE = s["explore"]
     if "model_list" in s:
         MODEL_LIST = parse_model_list(s["model_list"])
 
@@ -358,7 +371,7 @@ def save_settings(extra=None):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                  "hedge_delay": HEDGE_DELAY,
-                 "min_count": MIN_COUNT, "local": _LOCAL,
+                 "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST})
     if isinstance(extra, dict):
         data.update(extra)
@@ -1238,13 +1251,14 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     # storing the millions-of-tok/s garbage that produces.
     tps = None
     ec, ed = obj.get("eval_count"), obj.get("eval_duration")   # ed is ns, Ollama native
-    if ec and ed and ed > 0:
-        tps = ec / (ed / 1e9)
+    edur = (ed / 1e9) if ed else 0                              # eval window, seconds
+    if ec and edur >= MIN_TPS_WINDOW:      # too short a window can't state a rate
+        tps = ec / edur
     else:
         w = _workers.get(wid)
         if w and c and w.get("found"):
             _run = time.time() - w["found"]
-            if _run > 0:
+            if _run >= MIN_TPS_WINDOW:       # same floor on the wall-clock denominator
                 cand = c / _run
                 if cand <= TPS_CEILING:      # else it's a read-speed artifact, not a rate
                     tps = cand
@@ -2265,7 +2279,12 @@ def needs_caps(messages):
 
 async def probe_host(session, host):
     try:
-        resp = await asyncio.wait_for(session.get(f"{host}/api/ps"), timeout=TIMEOUT)
+        # Phased timeout: a dead host fails fast in the connect phase (~CONNECT_TIMEOUT)
+        # instead of tying up a worker for the full TIMEOUT. /api/ps is cheap (no
+        # inference), so a live host answers it quickly regardless of model warm-up.
+        resp = await session.get(
+            f"{host}/api/ps",
+            timeout=aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT))
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
         return False
     if resp.status != 200:
@@ -2579,7 +2598,9 @@ def _known_capable(host, model, caps):
 # model name. last/good/maybe deliberately outrank a stale bad mark, so a host
 # with one transient failure isn't buried behind the unreachable junk; a host
 # dead at the connection level drops to the bad tier for everything at once.
-TIER_LAST, TIER_GOOD, TIER_MAYBE, TIER_UNKNOWN, TIER_BAD = -3, -2, -1, 0, 1
+# TIER_EXPLORE outranks everything: in Explore mode an unknown/unvisited host is
+# what we most want to try (to map the pool), so it sorts ahead of last/good.
+TIER_EXPLORE, TIER_LAST, TIER_GOOD, TIER_MAYBE, TIER_UNKNOWN, TIER_BAD = -4, -3, -2, -1, 0, 1
 
 
 def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False):
@@ -2593,7 +2614,10 @@ def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False):
         return TIER_MAYBE
     if in_bad:
         return TIER_BAD
-    return TIER_UNKNOWN
+    # A genuine unknown (no mark at all). Explore mode pushes these to the FRONT
+    # so the router spends its attempts discovering unmapped hosts — deliberately
+    # slower, but it's how the unknown pool gets characterized.
+    return TIER_EXPLORE if EXPLORE_MODE else TIER_UNKNOWN
 
 
 def capability_tier(host, key, marks, last_host, extra_bad=False):
@@ -2613,17 +2637,20 @@ def load_marks():
     return load_good(), load_maybe(), load_bad(), load_unreachable()
 
 
-def _checked_rank(s):
-    """Sort key for the unknown tier: most-recently-checked first. Returns the
-    negated epoch of the entry's `checked` timestamp (so newer sorts earlier);
-    hosts with no/invalid timestamp fall to the back (inf)."""
+def _checked_rank(s, explore=False):
+    """Sort key within the unknown tier. Normally: most-recently-checked first
+    (recently reachable => likelier still up), no/invalid timestamp to the back.
+    In Explore mode the goal is the opposite — reach unmapped ground — so a
+    never-checked host sorts to the FRONT and, among checked ones, the oldest
+    (least-recently-visited) goes first."""
     ck = s.get("checked")
     if not ck:
-        return float("inf")
+        return float("-inf") if explore else float("inf")
     try:
-        return -datetime.datetime.fromisoformat(ck).timestamp()
+        ts = datetime.datetime.fromisoformat(ck).timestamp()
+        return ts if explore else -ts
     except Exception:
-        return float("inf")
+        return float("-inf") if explore else float("inf")
 
 
 def find_servers(sub, caps=None):
@@ -2749,7 +2776,7 @@ def _find_servers_raw(sub, caps=None):
         # Within the UNKNOWN tier only, try the most-recently-checked hosts
         # first (recently reachable => likelier still up). Other tiers keep
         # their existing order via a constant secondary key (stable sort).
-        crank = _checked_rank(s) if prio == TIER_UNKNOWN else 0
+        crank = _checked_rank(s, EXPLORE_MODE) if prio in (TIER_UNKNOWN, TIER_EXPLORE) else 0
         matched.append((prio, crank, host, ms))
     matched.sort(key=lambda x: (x[0], x[1]))
     return [(p, h, m) for p, c, h, m in matched]
@@ -3468,6 +3495,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
     rid = uuid.uuid4().hex[:8]
     oai = speaks_openai(host)
     resp, ep = None, endpoint
+    tried = []   # per-dialect outcome (status + body peek), surfaced if BOTH miss
     for attempt_oai in (oai, not oai):
         ep = (("/v1/completions" if endpoint == "/api/generate"
                else "/v1/chat/completions") if attempt_oai else endpoint)
@@ -3506,24 +3534,36 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
                  + (f" num_ctx={_nctx}" if _nctx else ""))
         _t0 = time.time()
         try:
-            resp = await asyncio.wait_for(
-                session.post(f"{host}{ep}", json=p), timeout=TIMEOUT)
+            # Phased timeout: a short sock_connect so a dead host fails fast in the
+            # CONNECT phase, while a live-but-slow host gets the full TIMEOUT to
+            # answer. This is what lets the caller tell "no connection" from "too
+            # slow" (see the except handler on the send site).
+            resp = await session.post(
+                f"{host}{ep}", json=p,
+                timeout=aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT))
         except Exception as e:
             log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
                      f"after {time.time()-_t0:.1f}s")
             raise
         log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s")
         if resp.status not in (404, 405, 501):
-            return resp, attempt_oai, ep
+            return resp, attempt_oai, ep, None
+        st = resp.status
         peek = ""
         try:
-            peek = (await resp.text())[:200]
+            peek = " ".join((await resp.text()).split())[:160]
         except Exception:
             pass
         await resp.release()
         resp = None
+        dia = "openai" if attempt_oai else "ollama"
+        tried.append(f"{dia} {ep} HTTP {st}" + (f": {peek}" if peek else ""))
         log.debug(f"{host}: {ep} -> {peek[:80]}; trying the other dialect")
-    return None, oai, ep
+    # Both dialects reported the endpoint missing. Hand back WHAT they actually
+    # said (status + body) so a real 404 is distinguishable from an intermediary
+    # (proxy/LB) 501/HTML or a connection-limit page masquerading as a miss.
+    why = "no chat endpoint — " + "; ".join(tried)
+    return None, oai, ep, why
 
 
 def _is_tool_continuation(messages):
@@ -3595,24 +3635,43 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         # "Unexpected endpoint or method" is a labelling problem, not a broken
         # host, and 38% of the pool speaks OpenAI rather than Ollama.
         try:
-            resp, oai, ep = await _send_chat(session, host, full, payload, endpoint, do_stream)
+            resp, oai, ep, why = await _send_chat(session, host, full, payload, endpoint, do_stream)
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             dur = time.time() - start
             # str(e) carries the real reason for connection/client errors
             # ("Cannot connect to host ... Connect call failed"); TimeoutError's
-            # is empty, so fall back to the name (the [50.00s] duration already
-            # says it was a read timeout, not an instant refusal).
+            # is empty, so fall back to the name.
             detail = " ".join(str(e).split())[:200] or type(e).__name__
+            # A real TCP distinction the old code flattened into one "timeout":
+            #  - NO CONNECTION: a connector error (refused / DNS / no route) or a
+            #    timeout that fired in the CONNECT phase (~CONNECT_TIMEOUT, well
+            #    under TIMEOUT). The box is dead -> unreachable.
+            #  - CONNECTED BUT SLOW: a timeout at ~TIMEOUT means the host accepted
+            #    the socket and just didn't answer in time (cold start / slow
+            #    inference). It's alive, not dead -> a real timeout, shown amber.
+            no_socket = (isinstance(e, (aiohttp.ClientConnectorError, ConnectionRefusedError))
+                         or (isinstance(e, asyncio.TimeoutError) and dur < CONNECT_TIMEOUT + 2))
+            if no_socket:
+                await broadcast_activity(host, model, "failed",
+                    f"failure: {host} for {model} - no connection: {detail}", duration=dur, wid=wid)
+                return unreachable_host(f"no connection: {detail}")
+            if isinstance(e, asyncio.TimeoutError):
+                # Connected but too slow (cold start / slow inference). It's alive,
+                # not dead — so DON'T penalise it (a slow cold host is often fast
+                # once warm). Skip records nothing; the race already moved on.
+                msg = f"too slow — connected, no answer in {dur:.0f}s"
+                await broadcast_activity(host, model, "warming",
+                    f"slow: {host} for {model} - {msg}", duration=dur, wid=wid)
+                return skip(msg)
+            # some other mid-connection error (disconnect, payload) — a real fault
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - {detail}", duration=dur, wid=wid)
-            return (timed_out(detail) if isinstance(e, asyncio.TimeoutError)
-                    else failed(detail))
+            return failed(detail)
         if resp is None:
             dur = time.time() - start
             await broadcast_activity(host, model, "failed",
-                f"failure: {host} for {model} - no chat endpoint (tried both dialects)",
-                duration=dur, wid=wid)
-            return unsuitable("no chat endpoint (tried /api/chat and /v1/chat/completions)")
+                f"failure: {host} for {model} - {why}", duration=dur, wid=wid)
+            return unsuitable(why)
 
         if resp.status != 200:
             dur = time.time() - start
@@ -3638,6 +3697,15 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             # what says "model not found", the OOM trace behind a 500, etc.
             snippet = " ".join(body.split())[:200]
             detail = f"status {code}" + (f": {snippet}" if snippet else "")
+            # Ollama answers 500 "...llm server loading model" while it pages the
+            # weights into VRAM — the host is healthy, just cold. That is NOT a
+            # failure: marking it bad would demote a good host for being warm-up
+            # slow. Skip (records nothing) so the race moves on and this host stays
+            # eligible once loaded; show it as a transient "warming", not red.
+            if "loading model" in body.lower():
+                await broadcast_activity(host, model, "warming",
+                    f"warming up: {host} for {model} - model loading", duration=dur, wid=wid)
+                return skip(detail)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - {detail}", duration=dur, wid=wid)
             return failed(detail)
@@ -4388,8 +4456,10 @@ async def _run_info_test(session, model_in, tools=None):
 async def _quick_probe(session, host, full, model_in, tools=None):
     """One quick factual probe against a single host: updates reputation (bad on any
     failure or wrong answer, good on a pass) and emits an activity line. Returns
-    (passed, detail). The shared primitive behind `:test` (first pass wins) and
-    `:test-all` (probe every candidate)."""
+    (verdict, detail): True = passed, False = failed (marked bad), None = inconclusive
+    — connected but too slow to answer, so the host is left UNMARKED and re-testable
+    (a slow/cold host is often fast once warm). The shared primitive behind `:test`
+    (first pass wins) and `:test-all` (probe every candidate)."""
     wid = asyncio.current_task().get_name()
     payload = {"model": full, "messages": [{"role": "user", "content": QUICK_TEST_PROMPT}], "stream": False}
     if tools:
@@ -4399,18 +4469,31 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     try:
         # Same send primitive as the real request path: the host's own dialect with a
         # fallback to the other (a probe that forced /api/chat culled every OpenAI host).
-        resp, oai, _ep = await _send_chat(session, host, full, payload, "/api/chat", False)
+        resp, oai, _ep, why = await _send_chat(session, host, full, payload, "/api/chat", False)
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+        dur = time.time() - start
+        detail = " ".join(str(e).split())[:200] or type(e).__name__
+        no_socket = (isinstance(e, (aiohttp.ClientConnectorError, ConnectionRefusedError))
+                     or (isinstance(e, asyncio.TimeoutError) and dur < CONNECT_TIMEOUT + 2))
+        if isinstance(e, asyncio.TimeoutError) and not no_socket:
+            # Connected but too slow to answer — INCONCLUSIVE, not a failure. Don't
+            # mark it (no add_bad, no smoke date), so a slow/cold host stays eligible
+            # to be re-probed once warm. `None` verdict = neither pass nor fail.
+            await broadcast_activity(host, model_in, "warming",
+                f"quick test: {host} for {model_in} - too slow, connected (no answer in {dur:.0f}s)",
+                duration=dur, wid=wid)
+            return None, f"too slow — connected, no answer in {dur:.0f}s"
         add_bad(host, full)
+        msg = ("no connection: " + detail) if no_socket else detail
         await broadcast_activity(host, model_in, "failed",
-            f"quick test: {host} for {model_in} - {type(e).__name__}", duration=time.time() - start, wid=wid)
-        return False, type(e).__name__
+            f"quick test: {host} for {model_in} - {msg}", duration=dur, wid=wid)
+        return False, msg
     if resp is None:
         add_bad(host, full)
         await broadcast_activity(host, model_in, "failed",
-            f"quick test: {host} for {model_in} - no chat endpoint (tried both dialects)",
+            f"quick test: {host} for {model_in} - {why}",
             duration=time.time() - start, wid=wid)
-        return False, "no chat endpoint"
+        return False, why
     if resp.status != 200:
         await resp.release()
         add_bad(host, full)
@@ -4479,7 +4562,7 @@ async def _run_info_test_all(session, model_in, tools=None, emit=None):
             for m in ms]
     candidates = [(h, m) for h, m in cand if not smoke_dated(h, m)]
     skip_count = len(cand) - len(candidates)
-    passed, failed = [], []
+    passed, failed, inconclusive = [], [], []
     sem = asyncio.Semaphore(WORKER_COUNT)
     elock = asyncio.Lock()
     async def _emit(line):
@@ -4494,6 +4577,11 @@ async def _run_info_test_all(session, model_in, tools=None, emit=None):
         if ok:
             passed.append(entry)
             await _emit(f"✓  {detail!r}   {nh} ({model})")
+        elif ok is None:
+            # too slow / connected — inconclusive, host left unmarked and re-testable
+            entry["detail"] = detail
+            inconclusive.append(entry)
+            await _emit(f"⋯  {detail}   {nh} ({model})")
         else:
             entry["detail"] = detail
             failed.append(entry)
@@ -4501,7 +4589,8 @@ async def _run_info_test_all(session, model_in, tools=None, emit=None):
     await asyncio.gather(*(probe(h, m) for h, m in candidates), return_exceptions=True)
     return {"model": model_in, "probed": len(passed) + len(failed),
             "pass_count": len(passed), "fail_count": len(failed), "skip_count": skip_count,
-            "passed": passed, "failed": failed}
+            "inconclusive_count": len(inconclusive),
+            "passed": passed, "failed": failed, "inconclusive": inconclusive}
 
 
 async def _stream_info_test_all(request, session, model_in, tools, openai_format):
@@ -4527,6 +4616,8 @@ async def _stream_info_test_all(request, session, model_in, tools, openai_format
     summary = await _run_info_test_all(session, model_in, tools=tools, emit=emit)
     tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad "
             f"of {summary['probed']} probed ({summary['skip_count']} already tested, skipped)")
+    if summary.get('inconclusive_count'):
+        tail += f"; {summary['inconclusive_count']} too slow (inconclusive, left unmarked)"
     with contextlib.suppress(Exception):
         if openai_format:
             await resp.write(sse_str(sse_chunk(model_in, {"role": "assistant", "content": tail})).encode())
@@ -5123,6 +5214,7 @@ async def handle_settings_get(request):
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "hedge_delay": HEDGE_DELAY,
                               "min_count": MIN_COUNT, "local": _LOCAL,
+                              "explore": EXPLORE_MODE,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources()})
@@ -5138,7 +5230,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -5165,6 +5257,8 @@ async def handle_settings_post(request):
         MIN_COUNT = body["min_count"]
     if isinstance(body.get("local"), bool):
         _LOCAL = body["local"]
+    if isinstance(body.get("explore"), bool):
+        EXPLORE_MODE = body["explore"]
     if "model_list" in body:
         MODEL_LIST = parse_model_list(body["model_list"])
     # admin_pw: only when the key is present. A non-empty value sets/changes the
@@ -5187,6 +5281,7 @@ async def handle_settings_post(request):
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "hedge_delay": HEDGE_DELAY,
                               "min_count": MIN_COUNT, "local": _LOCAL,
+                              "explore": EXPLORE_MODE,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources(),

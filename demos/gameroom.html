@@ -491,7 +491,7 @@ var pictionary = {
     var t = st.thingDeck.pop(), a = st.actDeck.pop();
     st.secret = { thing: t[0], activity: a[0], full: t[0] + ' ' + a[0], tkw: t[1], akw: a[1] };
     st.phase = 'draw'; st.png = ''; st.feedback = ''; st.hint = ''; st.coach = ''; st.focus = '';
-    st.guesses = []; st.revealed = { thing: false, activity: false };
+    st.guesses = [];
     st.pendingGuess = ''; st.pendingValue = 0;   // a guess awaiting the judge's yes/no
     st.rejected = ''; st.showOptions = false;   // last rejected guess; whether the vocab list was revealed
     st.attempt = 0; st.turns = 0;   // attempt = wrong guesses this round; value = ATTEMPTS - attempt
@@ -626,8 +626,6 @@ var pictionary = {
     if(st.guesses.length) parts.push('Your earlier guesses (all still wrong): '
       + st.guesses.map(function(x){ return '"' + x + '"'; }).join(', ')
       + ' — refine from the drawing, do not repeat them.');
-    if(st.revealed.thing) parts.push('(hint) the thing is: ' + st.secret.thing);
-    if(st.revealed.activity) parts.push('(hint) the activity is: ' + st.secret.activity);
     if(st.showOptions) parts.push('The answer is exactly ONE of these subjects doing ONE of these activities.\n'
       + 'SUBJECTS: ' + PICT_THINGS.map(function(x){ return x[0]; }).join(', ') + '\n'
       + 'ACTIVITIES: ' + PICT_ACTIVITIES.map(function(x){ return x[0]; }).join(', '));
@@ -639,8 +637,8 @@ var pictionary = {
         + 'a person, animal, or thing performing an action — e.g. "a dog surfing", "a robot dancing", '
         + '"a ghost singing". Your guess must name BOTH the subject AND what it is doing. Study the drawing, '
         + 'then reply with EXACTLY one line: either "GUESS: <subject> <activity>" (your best full guess), or — if '
-        + 'you are unsure — one of these hint requests verbatim: "i need more details", "just give me the thing", '
-        + '"just give me the activity", "can I get a different angle". When you cannot tell what it is, say '
+        + 'you are unsure — one of these hint requests verbatim: "i need more details", "draw just the object", '
+        + '"draw just the activity", "can I get a different angle". When you cannot tell what it is, say '
         + '"i need more details".'},
       um
     ]};
@@ -720,13 +718,17 @@ var pictionary = {
       pictionary._say(st, '❓ "can I get a different angle"', 'hint');
       return {note:'hint: different angle'};
     }
-    if(low.indexOf('give me the thing') >= 0 && !st.revealed.thing){
-      st.revealed.thing = true; st.hint = 'revealed the thing: ' + st.secret.thing;
-      pictionary._say(st, '❓ "just give me the thing"', 'hint'); return {note:'hint: the thing'};
+    if(low.indexOf('just the object') >= 0){
+      st.phase = 'draw'; st.hint = 'guesser asked for the object only';
+      st.feedback = 'The guesser asked to see the OBJECT ONLY. Start your reply with "OBJECT ONLY" on its own '
+        + 'line, then the <svg> of just the subject.';
+      pictionary._say(st, '❓ "draw just the object"', 'hint'); return {note:'hint: object only'};
     }
-    if(low.indexOf('give me the activity') >= 0 && !st.revealed.activity){
-      st.revealed.activity = true; st.hint = 'revealed the activity: ' + st.secret.activity;
-      pictionary._say(st, '❓ "just give me the activity"', 'hint'); return {note:'hint: the activity'};
+    if(low.indexOf('just the activity') >= 0){
+      st.phase = 'draw'; st.hint = 'guesser asked for the activity only';
+      st.feedback = 'The guesser asked to see the ACTIVITY ONLY. Start your reply with "ACTIVITY ONLY" on its '
+        + 'own line, then the <svg> of just the action.';
+      pictionary._say(st, '❓ "draw just the activity"', 'hint'); return {note:'hint: activity only'};
     }
     var g = text, gm = String(text||'').match(/guess\s*[:\-]\s*(.+)/i);
     if(gm) g = gm[1];

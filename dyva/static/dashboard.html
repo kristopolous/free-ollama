@@ -199,6 +199,7 @@ body.chat{height:100vh;height:100dvh}
 .status-trying{color:var(--accent)}
 .status-connected{color:var(--ok)}
 .status-failed{color:var(--err)}
+.status-warming{color:var(--warn)}
 .content-line{padding:2px 0;color:var(--text-2)}
 .done-line{color:var(--text-faint);font-style:italic}
 .model-item{padding:var(--sp-2) 0;border-bottom:1px solid var(--border);font-size:var(--fs-md);display:flex;justify-content:space-between}
@@ -1353,6 +1354,7 @@ __SD_MODELS__
 </div>
 <input type="file" id="mlFile" accept=".txt,.list,.text,text/plain" style="display:none">
 <label class="setting"><span class="setting-text"><span class="setting-name">Localhost only</span><small class="setting-help">Restrict inference endpoints to localhost only (a remote host that reaches this port can't chat or generate). Equivalent to the <code>./dyva -l</code> flag; saved here it persists across restarts.</small></span><input type="checkbox" id="setLocal"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Explore mode</span><small class="setting-help">Discover more of the unknown network: route hosts we haven't visited (unknown state) to the front of the line, ahead of known-good ones. Deliberately slower — a request may probe cold hosts first — but it maps out the pool. Off by default.</small></span><input type="checkbox" id="setExplore"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><template id="setAdminPwTpl"><input type="text" id="adminPwUserDecoy" name="username" class="admin-pw-decoy" placeholder="username" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" tabindex="-1" aria-hidden="true"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></span></label>
 <div class="setting-sources">
 <div class="src-head"><span class="setting-name">Additional sources</span><button type="button" id="srcHelpBtn" class="src-help-btn" title="Format &amp; examples">?</button>
@@ -7476,6 +7478,7 @@ function populateSettings(s){
   document.getElementById('setMinCount').value=s.min_count;
   setModelList(s.model_list||[],false);
   document.getElementById('setLocal').checked=!!s.local;
+  document.getElementById('setExplore').checked=!!s.explore;
   setPwState(!!s.admin_pw_set);
   document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
   document.getElementById('srcError').textContent='';
@@ -7563,7 +7566,8 @@ function saveSettings(){
     hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
     model_list:_modelList,
-    local:document.getElementById('setLocal').checked
+    local:document.getElementById('setLocal').checked,
+    explore:document.getElementById('setExplore').checked
   };
   if(isNaN(body.workers)||body.workers<1)delete body.workers;
   if(isNaN(body.timeout)||body.timeout<1)delete body.timeout;
@@ -7592,6 +7596,7 @@ function saveSettings(){
       document.getElementById('setMinCount').value=s.min_count;
       setModelList(s.model_list||[],false);
       document.getElementById('setLocal').checked=!!s.local;
+      document.getElementById('setExplore').checked=!!s.explore;
       setPwState(!!s.admin_pw_set);
       document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
       st.style.color='var(--ok)';st.textContent=s.refreshed?'saved · sources re-pulled':'saved';setTimeout(function(){st.textContent=''},3000);
