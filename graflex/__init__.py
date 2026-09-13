@@ -119,13 +119,15 @@ def _latest_check_dir(session=None):
     return best
 
 
-def score_bogus(session=None, name=None, apply=False):
-    """Score hosts by confirmed honeypot clone fingerprints (bogus-fingerprints.json)
-    over a check session's raw snapshots. Cheap, offline, RECONSTITUTABLE — edit the
-    fingerprint file and re-run. Reports the bogus-score distribution and worst
-    offenders. With `apply` and a -n/-s name, stamps an additive `bogus_score` onto
-    that working file's records (0 for clean); it never drops a host, so the write
-    is safe. dyva routes bogus-score-ascending (0 first)."""
+def score_bogus(session=None, name=None):
+    """Stamp a per-host `bogus_score` onto the working file(s) from confirmed honeypot
+    clone fingerprints (bogus-fingerprints.json) matched against a check session's raw
+    snapshots. Purely ADDITIVE and RECONSTITUTABLE — it only writes the bogus_score
+    field, never drops a host or any other field, and the value is recomputed from the
+    fingerprint file + snapshots every run. So there's nothing to guard and no dry-run:
+    it just does it. A host not seen this session keeps its prior bogus_score (0 if
+    none). `name` picks one service's working file; None / "all" stamps every one.
+    dyva routes bogus-score-ascending (0 first)."""
     check_dir = _latest_check_dir(session)
     if not check_dir:
         log.error("score-bogus: no /tmp/graflex/*/check snapshots found"
@@ -147,28 +149,32 @@ def score_bogus(session=None, name=None, apply=False):
     flagged = sum(v for k, v in dist.items() if k > 0)
     log.info(f"score-bogus: {len(scores)} hosts from {check_dir} | "
              f"clean={dist.get(0, 0)} bogus={flagged} | dist={dict(sorted(dist.items()))}")
-    for s, h in sorted(((s, h) for h, s in scores.items() if s), reverse=True)[:15]:
-        log.info(f"  bogus={s}  {h}")
-    if not apply:
-        log.info("score-bogus: report only — add 'apply' and -n/-s to stamp bogus_score onto the working file")
-        return
-    if not name:
-        log.error("score-bogus apply: need -n/--name (or -s) to pick the working file to stamp")
-        return
-    wf = _cache_file(name, "working")
-    entries = _load_json(wf)
-    if not isinstance(entries, list):
-        log.error(f"score-bogus apply: {wf} is not a host list")
-        return
-    stamped = 0
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        e["bogus_score"] = scores.get(_entry_host(e), e.get("bogus_score", 0))
-        if e["bogus_score"]:
-            stamped += 1
-    _save_json(wf, entries)
-    log.info(f"score-bogus: stamped bogus_score on {len(entries)} records ({stamped} bogus) -> {wf}")
+    # Full bogus list to a file (sorted worst-first) so the hundreds are inspectable
+    # without scrolling the terminal.
+    bogus_sorted = sorted(((s, h) for h, s in scores.items() if s), reverse=True)
+    report_path = os.path.join(os.getcwd(), "bogus-report.txt")
+    try:
+        with open(report_path, "w") as fh:
+            for s, h in bogus_sorted:
+                fh.write("%d\t%s\n" % (s, h))
+        log.info(f"score-bogus: {len(bogus_sorted)} bogus hosts -> {report_path}")
+    except Exception as e:
+        log.warning(f"score-bogus: could not write {report_path}: {e}")
+    targets = list(SERVICE_CONFIG) if (not name or name == "all") else [name]
+    for svc in targets:
+        wf = _cache_file(svc, "working")
+        entries = _load_json(wf, silent=True)
+        if not isinstance(entries, list):
+            continue   # service not surveyed — skip silently
+        stamped = 0
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            e["bogus_score"] = scores.get(_entry_host(e), e.get("bogus_score", 0))
+            if e["bogus_score"]:
+                stamped += 1
+        _save_json(wf, entries)
+        log.info(f"score-bogus: {svc}: stamped bogus_score on {len(entries)} records ({stamped} bogus) -> {wf}")
 
 
 def _cache_file(name, suffix):
@@ -323,18 +329,28 @@ def _save_json(path, data):
     _save_json_atomic(path, data)
 
 
+def _host_ident(hostport):
+    """Readable, reversible snapshot filename for a host — so you can find a host's
+    file by eye (1.2.3.4_11434, ollama.example.com_8080) instead of running an md5
+    yourself. Keeps dots/dashes; turns ':' and any other unsafe char into '_'. A
+    distinct host:port yields a distinct name, so (unlike the old _tag md5[:8] stub)
+    there are no filename collisions."""
+    return re.sub(r'[^A-Za-z0-9._-]', '_', str(hostport))
+
+
 def _save_check_snapshot(host, port, data):
     """Cache a raw model-list API response (ollama /api/tags, vllm /v1/models,
     lmstudio /v1/models, llama.cpp /v1/models) to
     /tmp/graflex/{date}/check/{ident}.json following the same /tmp/graflex
-    dir and %Y%m%d%H%M%S date convention as the fetch result files. The
-    filename uses the _tag() md5 hash of the full host:port so the port can't
-    collide; the real host (with port), a unix check_time, and the raw payload
-    are all stored in a super-structure inside the file. The date is the active
-    session run_ts when resuming (-i) so already-saved hosts are skippable."""
+    dir and %Y%m%d%H%M%S date convention as the fetch result files. The filename
+    is a readable, reversible encoding of the full host:port (see _host_ident) so a
+    host's snapshot is findable by eye; the real host (with port), a unix
+    check_time, and the raw payload are all stored in a super-structure inside the
+    file. The date is the active session run_ts when resuming (-i) so already-saved
+    hosts are skippable."""
     from datetime import datetime, timezone
     hostport = f"{host}:{port}"
-    ident = _tag(hostport)
+    ident = _host_ident(hostport)
     date = _RUN_TS or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     tmp_dir = os.path.join("/tmp/graflex", date, "check")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -349,7 +365,7 @@ def _save_check_snapshot(host, port, data):
 def _check_snapshot_exists(host, port, run_ts):
     """True if a snapshot for host:port was already saved in this session, so a
     resumed -i run skips hosts it already checked."""
-    ident = _tag(f"{host}:{port}")
+    ident = _host_ident(f"{host}:{port}")
     return os.path.exists(os.path.join("/tmp/graflex", run_ts, "check", f"{ident}.json"))
 
 
@@ -2372,7 +2388,7 @@ def reconstruct(name=None, session=None):
 async def _model_probe(service, name=None, check_timeout=60, workers=10, session=None):
     """For every working host, POST /api/show for each model it lists and save
     the results to /tmp/graflex/<run_ts>/models/<ident>.json — one file per
-    host:port, named by the same base16 _tag() as check/, holding
+    host:port, named by the same readable _host_ident() as check/, holding
     {model-name: /api/show result}. /api/show is cheap, so every model is called
     iteratively (N models -> N calls) with a small sleep. -i <session> resumes:
     a host whose file already exists is skipped. (ollama-oriented; /api/show is
@@ -2400,7 +2416,7 @@ async def _model_probe(service, name=None, check_timeout=60, workers=10, session
     async def probe(entry, http):
         nonlocal done
         hostport = entry["host"]
-        path = os.path.join(out_dir, f"{_tag(hostport)}.json")
+        path = os.path.join(out_dir, f"{_host_ident(hostport)}.json")
         if os.path.exists(path):          # -i resume: already probed this host
             return
         base = (entry.get("url") or f"http://{hostport}").rstrip("/")
@@ -2831,13 +2847,12 @@ def main():
         survey(run_ts=args.session)
         return
 
-    # score-bogus mines the check snapshots for honeypot clone fingerprints — like
-    # survey, it needs no service/name to REPORT (-i folds in one session's snaps).
-    # `apply` + -n/-s stamps bogus_score onto that working file.
+    # score-bogus mines the check snapshots for honeypot clone fingerprints and stamps
+    # bogus_score onto the working file(s) — like survey, needs no service to run.
+    # -i picks a session's snapshots; -n/-s picks one service, else all get stamped.
     if args.action == "score-bogus":
-        score_bogus(session=args.session,
-                    name=(args.name or (None if args.service == "all" else args.service)),
-                    apply=("apply" in (args.enrich_args or [])))
+        _all = args.service == "all" or (args.name or "").strip().lower() == "all"
+        score_bogus(session=args.session, name=(None if _all else (args.name or args.service)))
         return
 
     if args.query and not args.name:

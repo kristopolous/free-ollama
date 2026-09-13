@@ -441,8 +441,9 @@ def _stored_sources():
 
 def _config_sources():
     """Additional user-configured fetch sources from settings.json.
-    Each entry: {"name", "url", "mapping"} where mapping maps a target field to
-    {"field": <source field>} (copy from the row) or {"value": <constant>}.
+    Each entry: {"name", "url", "mapping"}. Row fields carry through under their own
+    name by default; the mapping only RENAMES a field ({"field": <source field>}) or
+    sets a CONSTANT ({"value": <constant>}) — see _apply_source_mapping.
     Only JSON-list sources are supported here; CSV / transform-heavy sources
     stay built-in. Configured sources are fetched FIRST and take precedence."""
     if not os.path.exists(SETTINGS_FILE):
@@ -472,19 +473,19 @@ SOURCE_DEF_EXAMPLE = """expected a JSON list of source *definitions*, e.g.
 
 [{
   "name": "graflex",
-  "url": "https://9ol.es/graflex-4a8621dd9470.json",
+  "url": "https://example.com/example.json",
   "mapping": {
     "server":  {"field": "url"},
-    "models":  {"field": "models"},
-    "version": {"field": "version"},
     "service": {"value": "ollama"}
   }
 }]
 
-Each definition needs a "url" (where the host rows live) and a "mapping" that
-says which field of each row holds what. A mapping entry is either
-{"field": "<row key>"} to copy from the row or {"value": "<constant>"}, and
-"server" (or "url") is required so hosts can be keyed."""
+Each definition needs a "url" (where the host rows live) and a "mapping". Every
+field of a row carries through under its OWN name by default, so the mapping only
+names the exceptions: {"field": "<row key>"} RENAMES a differently-named field
+(here url -> server) and {"value": "<constant>"} forces a constant. Fields that
+map to themselves (models, version, bogus_score, the geo fields, ...) need no
+entry. "server" (or "url") is required so hosts can be keyed."""
 
 
 def validate_source_defs(defs):
@@ -817,8 +818,15 @@ def hosts_cli(argv):
 
 
 def _apply_source_mapping(row, mapping):
-    """Turn a raw source row into a host entry per the mapping."""
-    out = {}
+    """Turn a raw source row into a host entry.
+
+    IMPLICIT DEFAULT: every field of the row carries through under its OWN name. So
+    a field that maps to itself needs NO mapping entry, and new fields (bogus_score,
+    the geo fields, ...) pass through automatically without touching the mapping.
+    The mapping is only for RENAMES — {"server": {"field": "url"}} copies the row's
+    `url` into `server` — and CONSTANTS — {"service": {"value": "ollama"}} forces a
+    value. `models`, `version`, `service`-if-already-present, etc. need no entry."""
+    out = dict(row) if isinstance(row, dict) else {}
     if isinstance(mapping, dict):
         for target, spec in mapping.items():
             if not isinstance(spec, dict):
@@ -840,13 +848,14 @@ TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
 # The `__dyva_info__:test` probe: a TRIVIAL question bogus servers get wrong (they
 # parrot the prompt or echo roll tokens). Kept dead-simple on purpose — a harder
 # factual question ("first US President") culls real-but-dumb models that answer
-# wrong, which isn't the point; we only want to catch fakes/broken hosts. A host
-# passes if its answer mentions "blue". Cycling this through every candidate for a
-# model is the expensive part the operator opts into explicitly.
+# wrong, which isn't the point; we only want to catch fakes/broken hosts. Question
+# is "what color is #000000?" and a host passes if its answer mentions "black" (the
+# current honeypots do NOT; a stale question like sky->blue they eventually learn).
+# Cycling this through every candidate for a model is the expensive part the
+# operator opts into explicitly.
 QUICK_TEST_TAG = "__dyva_info__:test"
-QUICK_TEST_PROMPT = ("Do not be conversational. This is a test. "
-                     "What color is the sky on a bright sunny day with no clouds? Answer in one word.")
-QUICK_TEST_PASS_RE = re.compile(r"\bblue\b", re.I)
+QUICK_TEST_PROMPT = "What color is #000000? one word answer, this is a test"
+QUICK_TEST_PASS_RE = re.compile(r"\bblack\b", re.I)
 
 _status_db = None
 _servers_cache = None
@@ -1774,14 +1783,28 @@ def _get_db():
                      # (overwritten each run), not an average — NULL until measured.
                      "ttft REAL",
                      "tps REAL",
-                     # ISO timestamp this (host, model) last PASSED the quick smoke
-                     # test, so `:test-all` can skip re-probing it — a host:port isn't
-                     # swapping a real model for a fake one under us. NULL = never passed.
-                     "smoke_ok TEXT"):
+                     # The smoke test (the canned-response probe). fail_smoke is a BOOL:
+                     # 1 = the host ANSWERED but with a canned/fake response — conclusive,
+                     # unlike the flaky fail_* counters (a 404 is transient; a canned answer
+                     # is a verdict). smoke_date is the ISO date of the last smoke RESULT
+                     # (pass or fail); NULL = never smoke-tested. Split into two columns
+                     # (not one tri-state col) so an ad-hoc audit query stays trivial, e.g.
+                     # `WHERE smoke_date IS NOT NULL AND fail_smoke=1`.
+                     "fail_smoke INTEGER NOT NULL DEFAULT 0",
+                     "smoke_date TEXT"):
             try:
                 _status_db.execute(f"ALTER TABLE host_status ADD COLUMN {_col}")
             except sqlite3.OperationalError:
                 pass    # already there
+        # smoke_ok recorded a PASS, but a pass is no longer evidence of a real host
+        # (honeypots pass the quick test), so it's dead data — drop it. SQLite >= 3.35;
+        # on an older build the DROP no-ops and the dead column stays, harmless.
+        try:
+            _status_db.execute("ALTER TABLE host_status DROP COLUMN smoke_ok")
+        except sqlite3.OperationalError:
+            pass
+        # The dashboard's per-model bars count rows by state, so index it.
+        _status_db.execute("CREATE INDEX IF NOT EXISTS ix_host_status_state ON host_status(state)")
         _status_db.commit()
         if need_migrate:
             _migrate_status_from_txt()
@@ -1886,37 +1909,25 @@ def record_perf(host, model, ttft=None, tps=None):
         log.debug(f"record_perf failed for {host}/{model}: {e}")
 
 
-def mark_smoke_ok(host, model):
-    """Stamp NOW (ISO) as when this (host, model) last passed the quick smoke test,
-    so `:test-all` can skip re-probing it. Keyed like verdicts (canon_pattern).
-    Passing the smoke test is NO LONGER evidence of a real host (honeypots pass it),
-    so a brand-new row is created as 'unknown', NOT 'good' — this only records that
-    the host was probed and answered, never promotes it. An existing row keeps its
-    real state (on-conflict touches only smoke_ok), so a host made good by genuine
-    inference stays good."""
+def mark_smoke(host, model, failed):
+    """Record the outcome of a smoke test (the canned-response probe): stamp
+    smoke_date=NOW and fail_smoke=1 (failed: answered with a canned/fake response)
+    or 0 (passed). Keyed like verdicts (canon_pattern). It only writes the two smoke
+    columns on conflict — it never touches `state`, so a PASS doesn't promote a host
+    (a pass is no longer evidence of a real host) and a FAIL's state='bad' from
+    force_bad is left intact. A brand-new row is created 'unknown'."""
     model = canon_pattern(model)
     try:
         db = _get_db()
         db.execute(
-            "INSERT INTO host_status(host,model,state,failure_streak,smoke_ok)"
-            " VALUES(?,?, 'unknown', 0, ?)"
-            " ON CONFLICT(host,model) DO UPDATE SET smoke_ok=excluded.smoke_ok",
-            [host, model, _now_iso()])
+            "INSERT INTO host_status(host,model,state,failure_streak,fail_smoke,smoke_date)"
+            " VALUES(?,?, 'unknown', 0, ?, ?)"
+            " ON CONFLICT(host,model) DO UPDATE SET fail_smoke=excluded.fail_smoke,"
+            " smoke_date=excluded.smoke_date",
+            [host, model, 1 if failed else 0, _now_iso()])
         db.commit()
     except Exception as e:
-        log.debug(f"mark_smoke_ok failed for {host}/{model}: {e}")
-
-
-def smoke_ok_at(host, model):
-    """ISO timestamp of this (host, model)'s last smoke-test pass, or None."""
-    model = canon_pattern(model)
-    try:
-        row = _get_db().execute(
-            "SELECT smoke_ok FROM host_status WHERE host=? AND model=?",
-            [host, model]).fetchone()
-        return row[0] if row else None
-    except Exception:
-        return None
+        log.debug(f"mark_smoke failed for {host}/{model}: {e}")
 
 
 # Failure-kind -> counter column. Whitelisted so the kind can be interpolated
@@ -4299,19 +4310,16 @@ def _info_ndjson(model_in, info):
 
 
 def _quick_test_answer_ok(content):
-    """The quick test only needs to tell a REAL model from a fake/broken host — NOT
-    to grade trivia. So pass if the answer says "blue" (the expected reply) OR is just
-    a short, crisp answer — a working-but-dumb model that replies "green" or "grey" is
-    still a real model and must pass. Only fakes fail: they parrot the whole prompt
-    back (long) or emit nothing. Chat artifacts like `</s>` / `<|…|>` are stripped
-    first, so "Green.</s>" reads as the single word "green"."""
-    if not content:
-        return False
-    if QUICK_TEST_PASS_RE.search(content):
-        return True
-    cleaned = re.sub(r"</?s>|<\|[^|]*\|>|[^\w\s]", " ", content, flags=re.I)
-    words = cleaned.split()
-    return 1 <= len(words) <= 3
+    """Pass ONLY if the answer contains the expected word "black" (#000000 is black).
+    The answer is DETERMINISTIC — any real model says black — so there is no
+    short-answer fallback: a canned ack ("Request accepted."), a parroted prompt, a
+    wrong color, or empty all FAIL. (The old 1-3-word fallback existed for the
+    ambiguous "first president" probe that mis-culled real models; with a
+    deterministic hex-colour answer it was just a hole that let short canned
+    non-answers pass — e.g. an llama3.3 proxy replying "Request accepted.") The
+    `\\bblack\\b` match already tolerates chat artifacts like "Black." / "Black</s>"
+    / "Black<|eot_id|>"."""
+    return bool(content and QUICK_TEST_PASS_RE.search(content))
 
 
 async def _run_info_test(session, model_in, tools=None):
@@ -4395,17 +4403,18 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         return False, f"error: {str(data['error'])[:80]}"
     if not _quick_test_answer_ok(content):
         force_bad(host, full)
-        log.warning(f"quick test FAIL {host} ({full}): no real answer={shown!r}")
+        mark_smoke(host, full, failed=True)   # conclusive: answered with a canned/fake response
+        log.warning(f"quick test FAIL {host} ({full}): {shown!r}")
         await broadcast_activity(host, model_in, "failed",
-            f"quick test: {host} for {model_in} - no real answer (parroted/empty): {shown!r}", duration=dur, wid=wid)
-        return False, f"no real answer: {shown}"
+            f"quick test: {host} for {model_in} - (parroted/empty): {shown!r}", duration=dur, wid=wid)
+        return False, f"{shown}"
     # A smoke-test PASS is no longer evidence of a real host — honeypots now answer
-    # the sky-color test correctly (observed in the wild). So a pass confers NOTHING:
+    # the quick test correctly (observed in the wild). So a pass confers NOTHING:
     # no add_good (don't promote), no set_last (don't sticky a maybe-honeypot). It
-    # only records smoke_ok so :test-all skips re-probing; the host stays UNKNOWN
-    # until a trustworthy signal grades it (real inference success, or the planned
-    # external-knowledge test). Only a FAIL is load-bearing (force_bad, above).
-    mark_smoke_ok(host, full)
+    # only records the smoke RESULT (fail_smoke=0, smoke_date=now); the host stays
+    # UNKNOWN until a trustworthy signal grades it (real inference success, or the
+    # planned external-knowledge test). Only a FAIL is load-bearing (force_bad, above).
+    mark_smoke(host, full, failed=False)
     log.info(f"quick test PASS (unknown — not promoted) {host} ({full}): answer={shown!r}")
     await broadcast_activity(host, model_in, "connected",
         f"quick test: {host} for {model_in} - answered (unknown, not promoted): {shown!r}", duration=dur, wid=wid)
@@ -4417,37 +4426,31 @@ async def _run_info_test_all(session, model_in, tools=None, emit=None):
     stops at the first pass), culling each failure as it goes. `emit` (async) is
     called with a human line per host as it happens, so the issuing client can watch
     the probe live. Returns a summary
-    {model, probed, pass_count, fail_count, skip_count, passed[], failed[], skipped_already_passed[]}."""
+    {model, probed, pass_count, fail_count, passed[], failed[]}."""
     req_caps = needs_caps([])
     if tools:
         req_caps = sorted(set(req_caps) | {"tools"})
-    # find_servers already excludes bad hosts; on top of that we only PROBE the ones
-    # that have never passed (smoke_ok NULL) and SKIP the already-verified — a host:port
-    # isn't swapping a real model for a fake one under us.
-    passed, failed, skipped = [], [], []
+    # find_servers already excludes bad hosts — a conclusive smoke FAIL goes through
+    # force_bad -> state 'bad', so it never comes back here. A PASS is no longer a
+    # durable "skip me" marker, so we simply probe every non-bad candidate.
+    passed, failed = [], []
     for _prio, host, ms in find_servers(model_in, req_caps):
         if not ms:
             continue
         nh = _norm_host(host)
         entry = {"host": nh, "model": ms[0], "service": service_of(host)}
-        prior = smoke_ok_at(host, ms[0])   # keyed by the resolved model, same as _quick_probe marks
-        if prior:
-            entry["smoke_ok"] = prior
-            skipped.append(entry)
-            if emit: await emit(f"· {nh} ({ms[0]}) — skip, already passed {prior}")
-            continue
-        if emit: await emit(f"→ testing {nh} ({ms[0]})…")
+        if emit: await emit(f"   testing {nh} ({ms[0]})…")
         ok, detail = await _quick_probe(session, host, ms[0], model_in, tools)
         if ok:
             passed.append(entry)
-            if emit: await emit(f"✓ {nh} ({ms[0]}) — {detail!r}")
+            if emit: await emit(f"✓  {detail!r}   {nh} ({ms[0]})")
         else:
             entry["detail"] = detail
             failed.append(entry)
-            if emit: await emit(f"✗ {nh} ({ms[0]}) — {detail}")
+            if emit: await emit(f"!! {detail}   {nh} ({ms[0]})")
     return {"model": model_in, "probed": len(passed) + len(failed),
-            "pass_count": len(passed), "fail_count": len(failed), "skip_count": len(skipped),
-            "passed": passed, "failed": failed, "skipped_already_passed": skipped}
+            "pass_count": len(passed), "fail_count": len(failed),
+            "passed": passed, "failed": failed}
 
 
 async def _stream_info_test_all(request, session, model_in, tools, openai_format):
@@ -4471,8 +4474,8 @@ async def _stream_info_test_all(request, session, model_in, tools, openai_format
             pass
     await emit(f"test-all {model_in}: probing non-bad, not-yet-verified hosts…")
     summary = await _run_info_test_all(session, model_in, tools=tools, emit=emit)
-    tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad, "
-            f"{summary['skip_count']} skipped (already passed) of {summary['probed']} probed")
+    tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad "
+            f"of {summary['probed']} probed")
     with contextlib.suppress(Exception):
         if openai_format:
             await resp.write(sse_str(sse_chunk(model_in, {"role": "assistant", "content": tail})).encode())
@@ -6187,8 +6190,8 @@ async def handle_chat_job_submit(request):
                 try:
                     await emit(f"test-all {model0}: probing non-bad, not-yet-verified hosts…")
                     summary = await _run_info_test_all(session, model0, tools=tools, emit=emit)
-                    tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad, "
-                            f"{summary['skip_count']} skipped of {summary['probed']} probed")
+                    tail = (f"done — {summary['pass_count']} ok, {summary['fail_count']} bad "
+                            f"of {summary['probed']} probed")
                     await _job_append(jid, json.dumps({"model": model0, "created_at": _now_iso(),
                         "message": {"role": "assistant", "content": "\n" + tail}, "done": True,
                         "done_reason": "stop", "dyva_info": summary}) + "\n")
