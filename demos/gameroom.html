@@ -34,7 +34,19 @@
   .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:10px}
   .controls input{flex:1 1 100px;min-width:0}
   .pinput{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:3px}   /* shrink to share the row so Play always fits beside the inputs */
+  .controls.wrap .pinput{flex:1 1 130px}   /* 4+ inputs (wheel of fortune): let them wrap to multiple rows */
   .controls .play{flex:0 0 auto}
+  /* team games: row 3 is a scoreboard line — [ answer | round | play/stop ] */
+  .controls.teams .scoreline{flex:0 0 100%;display:flex;align-items:center;gap:12px;margin-top:2px;font-size:12px}
+  .controls.teams .scoreline .sl-answer{color:#fff}
+  .controls.teams .scoreline .sl-answer b{color:#fff}
+  .controls.teams .scoreline .sl-round{color:var(--text2)}
+  .controls.teams .scoreline .play{margin-left:auto}   /* pushed to the right of the row */
+  .teamgroup{flex:1 1 220px;min-width:0;border:1px solid var(--line);border-radius:8px;padding:5px 8px}
+  .teamgroup .tlabel{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:.62rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2,#9aa);margin-bottom:4px}
+  .teamgroup .tlabel .tscore{color:var(--accent)}
+  .teamgroup .teaminputs{display:flex;gap:6px}
+  .teamgroup .teaminputs input{flex:1 1 0;min-width:0}
   .pinput input{flex:none;width:100%}
   .plabel{font-size:.62rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2,#9aa);padding-left:3px}
   .controls input.p1{border-left:3px solid var(--x)}
@@ -113,7 +125,7 @@
   .pict .draw .wait{color:#888;font-size:12px;padding:24px}
   .pict .draw .think{width:100%;max-height:320px;overflow:auto;padding:10px;margin:0;font:11px/1.45 ui-monospace,SFMono-Regular,monospace;color:#555;white-space:pre-wrap;text-align:left}
   .pict .draw .think b{color:#222;display:block;margin-bottom:6px}
-  .pict .hint{font-size:12px;color:var(--o);margin-top:6px}
+  .pict .hint{font-size:12px;color:var(--o)}
   /* move log */
   .log{max-height:150px;overflow:auto;font:11px/1.5 ui-monospace,monospace;color:var(--text2);padding-top:6px}
   .log .mv{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -514,16 +526,16 @@ var hangman = {
 // lands. The human always sees the solution on the board.
 var PICT_THINGS = [
   ['a king','king'],['an alien','alien'],['a goldfish','goldfish'],['an octopus','octopus'],
-  ['a crocodile','crocodile'],['a robot','robot'],['a wizard','wizard'],['a pirate','pirate'],
+  ['a crocodile','crocodile'],['a robot','robot'],['a bearded wizard','wizard'],['a pirate','pirate'],
   ['a penguin','penguin'],['a dragon','dragon'],['a cowboy','cowboy'],['a ghost','ghost'],
   ['a dinosaur','dinosaur'],['a mermaid','mermaid'],['a snowman','snowman'],['a knight','knight'],
   ['a monkey','monkey'],['a vampire','vampire'],['a chef','chef'],['a clown','clown'],
-  ['a giraffe','giraffe'],['an astronaut','astronaut'],['a witch','witch'],['a frog','frog'],
+  ['a giraffe','giraffe'],['an astronaut','astronaut'],['an ugly witch','witch'],['a frog','frog'],
   ['a bear','bear'],['a ninja','ninja'],['a unicorn','unicorn'],['a shark','shark'],
-  ['a farmer','farmer'],['a scientist','scientist'],
+  ['a bodybuilder in a speedo','bodybuilder'],['a scientist','scientist'],
   ['a cat','cat'],['a rabbit','rabbit'],['a horse','horse'],['a goat','goat'],['a dog','dog'],['a pig','pig'],
   ['a bat','bat'],['a bug','bug'],['a bee','bee'],['a bird','bird'],['a whale','whale'],['a chicken','chicken'],
-  ['a mime','mime'],['a frenchman', 'frenchman'],
+  ['a minecraft character','minecraft'],['a frenchman', 'frenchman'],
   ['a clam','clam'],['a centipede','centipede'],['a lizard','lizard'],['a squid','squid'],['a hippo','hippo'],
   ['a turtle','turtle'],['a snail','snail'],['a lobster','lobster'],['a masked serial killer','killer'],['a starfish','starfish'],['a zebra','zebra'],
   ['a spider','spider'],['a sheep','sheep'],['a porcupine','porcupine'],['a pelican','pelican'],
@@ -533,27 +545,31 @@ var PICT_THINGS = [
   ['an occult symbol','occult'] ];
 var PICT_ACTIVITIES = [
   ['drinking tea','tea'],['playing tennis','tennis'],['doing archery','archery'],['asleep at church','nap'],['singing at church','church'],
-  ['jousting','jousting'],
-  ['riding a bike','bike'],['eating pizza','pizza'],['dancing ballet','ballet'],['playing accordion','accordion'],
+  ['jousting','jousting'],['at an adult video store', 'adult'],
+  ['riding a bike on a halfpipe','bike'],['eating pizza','pizza'],['poledancing','poledancing'],['playing accordion','accordion'],
   ['reading a book','book'],['flying a kite','kite'],['brushing teeth','teeth'],['surfing a wave','surf'],
   ['baking a cake','cake'],['playing chess','chess'],['watering plants','plant'],['juggling balls','juggl'],
   ['painting a picture','paint'],['climbing a ladder','ladder'],['doing karate','karate'],['fishing','fish'],
   ['skateboarding','skate'],['blowing bubbles','bubble'],['playing drums','drum'],['walking a dog','dog'],
-  ['mowing the lawn','lawn'],['posing high fashion','fashion'],['modelling for art','modelling'],['getting married in vegas','married'],
+  ['mowing the lawn','lawn'],['posing a slender black high fashion outfit on a milan runway','fashion'],['modelling for art','modelling'],['getting married in vegas','married'],
+  ['drawn as a picasso', 'picasso'],
   ['sleeping through an earthquake','sleep'],
-  ['taking a luxurious bubble bath','bath'],['driving a car','car'],['in an airplane','airplane'],['on an escalator','escalator'],
-  ['on a computer','computer'],['in a hot air balloon','balloon'],['lifting weights','weights'],
+  ['taking a luxurious bubble bath','bath'],['dangerously speeding a car','car'],['in a helicopter','helicopter'],['on a slide','slide'],
+  ['at a piet mondrian museum', 'museum'],
+  ['using a computer','computer'],['in a hot air balloon','balloon'],['lifting weights','weights'],
   ['at a bar','bar'],['camping','camping'],['drunk on the moon','moon'],
   ['robbing a bank','robbing'],['parachuting into a volcano','parachuting'],['protesting','protesting'],
-  ['rioting and looting', 'rioting'],
+  ['doing motorcycle tricks', 'motorcycle'],
   ['at a 1970s disco','disco'],['playing basketball','basketball'],['miniature golfing','golfing'],
   ['riding a rollercoaster','rollercoaster'],['applying makeup','makeup'],
   ['at the beach','beach'],['doing laundry','laundry'],['grocery shopping','grocer'],
   ['gardening','garden'],['running','running'],['watching television','televis'],
   ['doing magic','magic'],['shakespearean acting','shakespear'],['climbing a mountain','mountain'],
   ['boxing someone','boxing'],['breaking out of prison','prison'],['gambling at a casino','casino'] ];
-var PICT_ROUNDS = 10;      // a game is 10 rounds (a new secret each round)
-var PICT_ATTEMPTS = 5;    // up to 5 guesses; points start at 5 and drop 1 each — 3x5 = 15 max, collaborative
+var PICT_ROUNDS = 10;         // a game is 10 rounds (a new secret each round)
+var PICT_ROUND_POINTS = 10;   // each round starts worth 10; you keep what's left when you get it
+var PICT_GUESS_COST = 2;      // a wrong guess costs 2
+var PICT_QUESTION_COST = 1;   // a yes/no question to the artist costs 1
 
 var pictionary = {
   label: 'Pictionary', players: ['qwen3.8','gemma4','glm'], roles: ['artist','guesser','judge'],   // P1 draws, P2 guesses, P3 judges
@@ -570,18 +586,19 @@ var pictionary = {
     if(!st.actDeck || !st.actDeck.length) st.actDeck = shuffle(PICT_ACTIVITIES);
     var t = st.thingDeck.pop(), a = st.actDeck.pop();
     st.secret = { thing: t[0], activity: a[0], full: t[0] + ' ' + a[0], tkw: t[1], akw: a[1] };
-    st.phase = 'draw'; st.png = ''; st.feedback = ''; st.hint = ''; st.coach = ''; st.focus = '';
-    st.guesses = [];
-    st.pendingGuess = ''; st.pendingValue = 0;   // a guess awaiting the judge's yes/no
-    st.rejected = ''; st.showOptions = false; st.verdict = '';   // last rejected guess; vocab shown; last judge rating
+    st.phase = 'draw'; st.png = ''; st.feedback = '';
+    st.guesses = []; st.pendingGuess = ''; st.pendingQuestion = ''; st.verdict = ''; st.showOptions = false;
+    st.guessesSinceDraw = 0;   // cap guesses per drawing — must ask for a new picture after 2
+    st.focus = '';   // 'object'/'activity' when the current drawing is an isolated part
+    st.budget = PICT_ROUND_POINTS;   // points left this round; wrong guess −2, yes/no question −1
     st.roundStart = Date.now();   // cosmetic per-round timer origin
     st._svgTool = ''; st._svgPart = '';   // draw_svg tool output for the current drawer turn
-    st.attempt = 0; st.turns = 0;   // attempt = wrong guesses this round; value = ATTEMPTS - attempt
+    st.turns = 0;
     st.drawings.push({ marker: true, round: st.round, secret: st.secret.full });   // round divider in the reel
   },
-  _value: function(st){ return PICT_ATTEMPTS - st.attempt; },
+  _value: function(st){ return Math.max(0, st.budget); },   // what a correct guess is worth now = points left
   _endRound: function(st, note){
-    var max = PICT_ROUNDS * PICT_ATTEMPTS;
+    var max = PICT_ROUNDS * PICT_ROUND_POINTS;
     if(st.round >= PICT_ROUNDS){
       st.over = true; st.result = 'final score ' + st.score + '/' + max;
       return {note: note + ' — game over: ' + st.score + '/' + max};
@@ -601,11 +618,20 @@ var pictionary = {
   // An OBVIOUS match (both keywords present) is accepted without bothering the judge;
   // anything short of that goes to the impartial judge (model 3, see the 'judge' phase).
   _obvious: function(n, s){ return n.indexOf(s.tkw) >= 0 && n.indexOf(s.akw) >= 0; },
+  // A guess is IN-VOCAB only if it references one of the game's real subjects AND one
+  // of its real activities (by their keyword). Off-vocab guesses (e.g. "a merchant …")
+  // are bounced to the options instead of wasting a guess — checked in code, no judge.
+  _validGuess: function(g){
+    var low = ' ' + String(g).toLowerCase() + ' ';
+    var hasSubj = PICT_THINGS.some(function(t){ return low.indexOf(t[1]) >= 0; });
+    var hasAct = PICT_ACTIVITIES.some(function(a){ return low.indexOf(a[1]) >= 0; });
+    return hasSubj && hasAct;
+  },
   // Award the pending guess and end the round.
   _award: function(st){
-    var pts = st.pendingValue;
+    var pts = Math.max(0, st.budget);   // keep whatever points are left this round
     st.score += pts;
-    pictionary._say(st, '✓ "' + st.pendingGuess + '" (+' + pts + ')', 'correct');
+    pictionary._say(st, '👩‍⚖️ ✓ (+' + pts + ')', 'correct');
     return pictionary._endRound(st, 'accepted "' + st.pendingGuess + '" (+' + pts + ')');
   },
   // Build the reel: one div.card per round, holding that round's drawings, the
@@ -704,17 +730,26 @@ var pictionary = {
       // </svg> — a guaranteed truncation. Ask for real output room (both dialects).
       return { player: 0, think: false, tools: pictionary._drawTools,
         options: { num_ctx: 8192, num_predict: -1 }, max_tokens: 4096, messages: [
-        {role:'system', content:'You are the DRAWER in a COLLABORATIVE game of Pictionary — you and the '
-          + 'guesser are on the SAME team and you WANT them to get it. The secret is a SUBJECT doing an ACTIVITY. '
+        {role:'system', content:'You are the ARTIST in a COLLABORATIVE game of Pictionary — you and the guesser '
+          + 'are on the SAME team and you WANT them to get it. The secret is a SUBJECT doing an ACTIVITY. '
           + 'OBJECT (what to draw): "' + st.secret.thing + '". ACTIVITY (what it is doing): "' + st.secret.activity
-          + '". So draw "' + st.secret.full + '". The guesser does NOT know it, so do NOT write any of those words (or letters spelling them) '
-          + 'in the image. Submit your drawing by calling the draw_svg tool with ONE complete, self-contained '
-          + '<svg> element (viewBox; no external images/scripts/fonts; no text labels). When you are told the '
-          + 'guesser is close, keep what already worked and redraw to EMPHASIZE the part they are missing (add '
-          + 'the telling detail, make it bigger or clearer). If the guesser is stuck you MAY break it down: set '
-          + 'the tool\'s "part" to "object" (just the thing) or "activity" (just the action). If you cannot call '
-          + 'the tool, reply with ONLY the raw <svg> element and nothing else.'},
+          + '". So draw "' + st.secret.full + '". The guesser does NOT know it — do NOT write any of those words '
+          + '(or letters spelling them) in the image. Submit your drawing by calling the draw_svg tool with ONE '
+          + 'complete, self-contained <svg> element (viewBox; no external images/scripts/fonts; no text labels). '
+          + 'If the request asks you to draw ONLY the object or ONLY the activity, set the tool\'s "part" to '
+          + '"object" or "activity" and draw just that part. If you cannot call the tool, reply with ONLY the raw '
+          + '<svg> element and nothing else.'},
         {role:'user', content: st.feedback || 'Draw it.'}
+      ]};
+    }
+    if(st.phase === 'answer'){
+      // the ARTIST (who knows the secret) answers the guesser's yes/no question
+      return { player: 0, think: false, messages: [
+        {role:'system', content:'You are the ARTIST in Pictionary. The secret is "' + st.secret.full + '" '
+          + '(object "' + st.secret.thing + '", activity "' + st.secret.activity + '"). The guesser asks yes/no '
+          + 'questions about it. Answer TRUTHFULLY with EXACTLY one word — "yes" or "no". If it is not a yes/no '
+          + 'question, answer "no".'},
+        {role:'user', content: 'Question: ' + st.pendingQuestion}
       ]};
     }
     if(st.phase === 'judge'){
@@ -737,56 +772,40 @@ var pictionary = {
         {role:'user', content:'The guess is "' + st.pendingGuess + '". Rate the object and the activity.'}
       ]};
     }
-    if(st.phase === 'choose'){
-      // the guesser's guess was rejected — make them pick what help they want next.
-      // Every option but "see options" routes to the drawer; "see options" hands
-      // over the full vocabulary and returns to guessing on the same drawing.
-      var opts = ['"draw the puzzle again" — redraw the whole thing more clearly',
-                  '"draw only the object" — draw ONLY the subject',
-                  '"draw only the activity" — draw ONLY the action',
-                  '"a different angle" — same secret, drawn from another view'];
-      if(!st.showOptions) opts.push('"see options" — list every possible subject and activity to pick from');
-      var cm = {role:'user', content: 'The judge rated your guess "' + st.rejected + '" — '
-        + (st.verdict || 'not close enough') + '. (Use that: work on the part rated "close" or "wrong".) '
-        + 'You do NOT guess now — choose ONE kind of help and reply with just that phrase, verbatim:\n'
-        + opts.join('\n')};
-      if(st.png) cm.images = [st.png];
-      return { player: 1, messages: [
-        {role:'system', content:'You are the GUESSER in Pictionary and your last guess was rejected as not close '
-          + 'enough. Do NOT guess again yet — pick ONE kind of help. Reply with EXACTLY one of the offered '
-          + 'phrases, verbatim, and nothing else.'},
-        cm
-      ]};
-    }
-    // guesser: show the rendered drawing through the vision system
+    // guesser: study the drawing, then GUESS, ask a yes/no question, or use a FREE option
     var parts = [];
-    if(st.coach) parts.push(st.coach);   // collaborative nudge from the drawing side
-    if(st.focus) parts.push('This drawing shows ONLY the ' + st.focus + ' — name just that part.');
+    if(st.feedback){ parts.push(st.feedback); st.feedback = ''; }   // e.g. "that wasn't a guess, pick one"
+    if(st.focus){   // isolated redraw: remind them what they already got right so they don't re-guess it
+      var keep = (st.focus === 'object') ? 'activity' : 'object';
+      parts.push('Remember: your guess "' + st.pendingGuess + '" was rated — ' + st.verdict + '. The '
+        + keep + ' was NOT wrong, so KEEP it exactly as you guessed. Only the ' + st.focus + ' was wrong: this '
+        + 'new drawing shows ONLY the ' + st.focus + ', so change JUST that part and guess the full answer again.');
+    }
     if(st.guesses.length) parts.push('Your earlier guesses (all still wrong): '
-      + st.guesses.map(function(x){ return '"' + x + '"'; }).join(', ')
-      + ' — refine from the drawing, do not repeat them.');
-    if(st.verdict) parts.push('The judge rated your last guess — ' + st.verdict
+      + st.guesses.map(function(x){ return '"' + x + '"'; }).join(', ') + ' — do not repeat them.');
+    if(st.verdict && !st.focus) parts.push('The judge rated your last guess — ' + st.verdict
       + '. Keep the part rated "right"; change the part rated "close" or "wrong".');
-    if(st.showOptions) parts.push('The answer is exactly ONE of these subjects doing ONE of these activities.\n'
+    if(st.guessesSinceDraw >= 2) parts.push('You have used your 2 guesses on this picture — reply DRAW AGAIN '
+      + 'for a fresh drawing before you can guess again.');
+    if(st.showOptions) parts.push('The answer is exactly ONE of these subjects doing ONE of these activities:\n'
       + 'SUBJECTS: ' + PICT_THINGS.map(function(x){ return x[0]; }).join(', ') + '\n'
       + 'ACTIVITIES: ' + PICT_ACTIVITIES.map(function(x){ return x[0]; }).join(', '));
-    parts.push('What is being drawn? Guess the full "<thing> <activity>", or ask for a hint.');
+    parts.push('You have ' + pictionary._value(st) + ' points left this round.');
     var um = {role:'user', content: parts.join('\n')};
     if(st.png) um.images = [st.png];
     return { player: 1, messages: [
-      {role:'system', content:'You are GUESSING in Pictionary. The answer is ALWAYS a SUBJECT doing an ACTIVITY — '
-        + 'a person, animal, or thing performing an action — e.g. "a dog surfing", "a robot dancing", '
-        + '"a ghost singing". Your guess must name BOTH the subject AND what it is doing. Study the drawing, '
-        + 'then reply with EXACTLY one line: either "GUESS: <subject> <activity>" (your best full guess), or — if '
-        + 'you are unsure — one of these hint requests verbatim: "i need more details", "draw just the object", '
-        + '"draw just the activity", "can I get a different angle". When you cannot tell what it is, say '
-        + '"i need more details".'},
+      {role:'system', content:'You are GUESSING in Pictionary. The answer is a SUBJECT doing an ACTIVITY '
+        + '(e.g. "a dog surfing"). Study the drawing and GUESS. Reply with EXACTLY one line — one of:\n'
+        + '  GUESS: <subject> <activity>   — your guess (a wrong guess costs 2 points)\n'
+        + '  SEE OPTIONS                   — list the valid subjects and activities\n'
+        + '  DRAW AGAIN                    — get another drawing\n'
+        + '  ASK: <a yes/no question>      — if stuck, ask the artist a yes/no question (costs 1 point)'},
       um
     ]};
   },
   apply: async function(st, text, player, res){
     st.turns++;
-    if(st.turns > 24){ return pictionary._endRound(st, 'stalled — it was ' + st.secret.full); }   // safety vs a hint loop
+    if(st.turns > 40){ return pictionary._endRound(st, 'stalled — it was ' + st.secret.full); }   // safety cap (budget also bounds a round)
     if(st.phase === 'judge'){                            // the impartial judge rates the pending guess
       var jt = String(text||'').toLowerCase();
       var rate = function(part){ var m = jt.match(new RegExp(part + '\\s*[:\\-]?\\s*(right|close|wrong)')); return m ? m[1] : ''; };
@@ -797,48 +816,35 @@ var pictionary = {
         obj = act = yes ? 'right' : 'wrong';
       }
       obj = obj || 'wrong'; act = act || 'wrong';
-      st.verdict = 'object ' + obj + ', activity ' + act;   // granular, shown to guesser + drawer
+      st.verdict = 'object ' + obj + ', activity ' + act;   // granular, shown to guesser
       if(obj === 'right' && act === 'right'){ return pictionary._award(st); }   // both nailed → win
-      st.attempt++;                                       // anything short of both-right costs a point
-      pictionary._say(st, '✗ "' + st.pendingGuess + '" — ' + st.verdict, 'judge');
-      if(st.attempt >= PICT_ATTEMPTS){
-        return pictionary._endRound(st, 'out of guesses — it was ' + st.secret.full);
+      st.budget -= PICT_GUESS_COST;                       // a wrong guess costs 2
+      pictionary._say(st, '👩‍⚖️ ✗ ' + st.verdict + ' (−' + PICT_GUESS_COST + ')', 'judge');
+      if(st.budget <= 0){ return pictionary._endRound(st, 'out of points — it was ' + st.secret.full); }
+      // If exactly one part is WRONG (the other right/close), force the artist to draw
+      // that missing part in ISOLATION — the guesser has the rest, just needs this.
+      var oWrong = (obj === 'wrong'), aWrong = (act === 'wrong');
+      if(oWrong !== aWrong){
+        var isolate = oWrong ? 'object' : 'activity';
+        st.phase = 'draw';
+        st.feedback = 'The guesser has the ' + (oWrong ? 'ACTIVITY' : 'OBJECT') + ' but NOT the '
+          + isolate.toUpperCase() + '. Draw ONLY the ' + isolate + ' — call draw_svg with part="' + isolate + '" '
+          + 'and an <svg> of just the ' + (oWrong ? 'subject ("' + st.secret.thing + '")' : 'activity ("' + st.secret.activity + '")') + ', clearly.';
+        return {note: 'judge: ' + st.verdict + ' — forcing an isolated ' + isolate + ' drawing'};
       }
-      // Hand control to the GUESSER: they pick what help they want next (redraw,
-      // object/activity only, or the vocabulary list) and THAT drives the drawer.
-      st.phase = 'choose'; st.coach = ''; st.hint = ''; st.rejected = st.pendingGuess;
-      return {note: 'judge: ' + st.verdict + ' — asking the guesser what they want'};
+      st.phase = 'guess';
+      return {note: 'judge: ' + st.verdict + ' — ' + st.budget + ' pts left'};
     }
-    if(st.phase === 'choose'){                           // guesser picked what help they want next
-      var c = String(text||'').toLowerCase();
-      if(c.indexOf('see options') >= 0){                  // reveal the vocabulary, then guess again (no redraw)
-        st.showOptions = true; st.phase = 'guess'; st.hint = 'guesser saw the full option list';
-        pictionary._say(st, '🤔 "see options"', 'hint'); return {note:'choice: see options — vocab revealed'};
-      }
-      st.phase = 'draw';                                  // every choice drives the drawer
-      if(c.indexOf('only the object') >= 0){
-        st.hint = 'guesser asked for the object only';
-        st.feedback = 'The guesser asked to see the OBJECT ONLY. Start your reply with "OBJECT ONLY" on its own '
-          + 'line, then the <svg> of just the subject.';
-        pictionary._say(st, '🤔 "draw only the object"', 'hint'); return {note:'choice: object only'};
-      }
-      if(c.indexOf('only the activity') >= 0){
-        st.hint = 'guesser asked for the activity only';
-        st.feedback = 'The guesser asked to see the ACTIVITY ONLY. Start your reply with "ACTIVITY ONLY" on its '
-          + 'own line, then the <svg> of just the action.';
-        pictionary._say(st, '🤔 "draw only the activity"', 'hint'); return {note:'choice: activity only'};
-      }
-      if(c.indexOf('different angle') >= 0){
-        st.hint = 'guesser asked for a different angle';
-        st.feedback = 'The guesser asked for a different angle — draw the same secret again, clearer and from a '
-          + 'different view.';
-        pictionary._say(st, '🤔 "a different angle"', 'hint'); return {note:'choice: different angle'};
-      }
-      st.hint = 'guesser asked for a clearer drawing';    // "draw the puzzle again" or anything unrecognized
-      st.feedback = 'The judge rejected "' + st.rejected + '" as not close enough. Redraw the secret more clearly.';
-      pictionary._say(st, '🤔 "draw the puzzle again"', 'hint'); return {note:'choice: redraw'};
+    if(st.phase === 'answer'){                            // the ARTIST answered the yes/no question
+      var yn = /\b(yes|yeah|yep|yup|correct|true)\b/i.test(String(text||'')) && !/\bno\b/i.test(String(text||'')) ? 'yes' : 'no';
+      st.budget -= PICT_QUESTION_COST;                    // a yes/no question costs 1
+      pictionary._say(st, '🤷 ' + st.pendingQuestion + ' → 🎨 ' + yn + ' (−' + PICT_QUESTION_COST + ')', 'hint');
+      st.pendingQuestion = '';
+      if(st.budget <= 0){ return pictionary._endRound(st, 'out of points — it was ' + st.secret.full); }
+      st.phase = 'guess';
+      return {note: 'artist answered "' + yn + '" — ' + st.budget + ' pts left'};
     }
-    if(player === 0){                                    // drawer produced an SVG (draw_svg tool, or raw text)
+    if(player === 0){                                    // artist produced an SVG (draw_svg tool, or raw text)
       // Look wherever the SVG landed: the draw_svg tool arg, the content, or — for a
       // reasoning model that ignored "no thinking" — inside the thinking tokens.
       // extractSvg only returns a CLOSED <svg>…</svg>; a raw tool-arg can be a
@@ -846,9 +852,6 @@ var pictionary = {
       var svg = st._svgTool || extractSvg(text) || extractSvg(res && res.thinking);
       var part = st._svgPart; st._svgTool = ''; st._svgPart = '';   // consume; don't leak into the next turn
       if(!svg || !/<\/svg>/i.test(svg)){
-        // TRUNCATED (the drawing was cut off) vs ABSENT (no <svg> at all) — surface
-        // which, so it isn't silently "no svg". A 'length' finish, or an opened-but-
-        // never-closed <svg anywhere in the output, means it was cut off.
         var raw = String(svg || '') + ' ' + String((res && (res.content || res.thinking)) || '');
         var truncated = (res && res.doneReason === 'length') || (/<svg/i.test(raw) && !/<\/svg>/i.test(raw));
         if(truncated){
@@ -858,55 +861,58 @@ var pictionary = {
         st.feedback = 'Call draw_svg with ONE complete <svg> element (or reply with just the raw <svg>).';
         return {note:'no svg — redraw'};
       }
-      // focus: the tool\'s "part", else an "OBJECT ONLY"/"ACTIVITY ONLY" marker in freeform text
-      var fm = String(text||'').match(/\b(object|activity)\s+only\b/i);
-      st.focus = (part === 'object' || part === 'activity') ? part : (fm ? fm[1].toLowerCase() : '');
       svg = stripText(svg);   // never let a written-in label reach the guesser
       try{ st.png = (await rasterize(svg)).split(',')[1]; }   // strip data: prefix for ollama
       catch(e){ st.feedback = 'That drawing did not render — draw a simpler, valid <svg>.'; return {note:'render failed — redraw'}; }
+      st.focus = (part === 'object' || part === 'activity') ? part : '';   // isolated part vs full scene
       st.drawings.push({ svg: svg, host: (res && res.host) || '', round: st.round });   // kept across all rounds
-      st.phase = 'guess'; st.feedback = '';
-      return {note: 'drew (' + svg.length + ' chars)'};
+      st.phase = 'guess'; st.feedback = ''; st.guessesSinceDraw = 0;   // fresh picture — guess cap resets
+      return {note: 'drew' + (st.focus ? ' (' + st.focus + ' only)' : '') + ' (' + svg.length + ' chars)'};
     }
-    // guesser: a hint request (does NOT cost an attempt) or a guess (does)
-    var low = String(text||'').toLowerCase();
-    if(low.indexOf('more detail') >= 0){                 // guesser is lost — drawer may break it down
-      st.phase = 'draw'; st.hint = 'guesser needs more detail';
-      st.feedback = 'The guesser needs more detail. You MAY break it down: start your reply with "OBJECT ONLY" or '
-        + '"ACTIVITY ONLY" on its own line, then the <svg> of just that component — or redraw the whole thing more clearly.';
-      pictionary._say(st, '❓ "i need more details"', 'hint');
-      return {note:'hint: needs more detail'};
+    // guesser: FREE options (see options / draw again), or GUESS, or ASK a yes/no question
+    var body = String(text||'').trim();
+    var low = body.toLowerCase();
+    if(/see\s+options/.test(low) && !/guess\s*[:\-]/i.test(body)){   // FREE: reveal the vocabulary, guess again
+      st.showOptions = true;
+      pictionary._say(st, '🤷 see options', 'hint');
+      return {note: 'see options — vocabulary revealed (0 pts)'};
     }
-    if(low.indexOf('different angle') >= 0){
-      st.phase = 'draw'; st.hint = 'guesser asked for a different angle';
-      st.feedback = 'The guesser asked for a different angle — draw the same secret again, clearer and from a different view.';
-      pictionary._say(st, '❓ "can I get a different angle"', 'hint');
-      return {note:'hint: different angle'};
+    if(/(draw again|another drawing|more drawing|redraw|draw it again)/.test(low) && !/guess\s*[:\-]/i.test(body)){   // FREE: artist redraws
+      st.phase = 'draw'; st.feedback = 'The guesser asked for another drawing — draw the same secret again, clearer.';
+      pictionary._say(st, '🤷 draw again', 'hint');
+      return {note: 'draw againn — 0 pts'};
     }
-    if(low.indexOf('just the object') >= 0){
-      st.phase = 'draw'; st.hint = 'guesser asked for the object only';
-      st.feedback = 'The guesser asked to see the OBJECT ONLY. Start your reply with "OBJECT ONLY" on its own '
-        + 'line, then the <svg> of just the subject.';
-      pictionary._say(st, '❓ "draw just the object"', 'hint'); return {note:'hint: object only'};
+    var am = body.match(/ask\s*[:\-]\s*(.+)/i);
+    if(am || (/\?\s*$/.test(body) && !/guess\s*[:\-]/i.test(body))){   // a question → the artist answers yes/no
+      st.pendingQuestion = (am ? am[1] : body).replace(/["\n]/g, ' ').trim().slice(0, 140);
+      st.phase = 'answer';
+      return {note: 'asked the artist: "' + st.pendingQuestion + '"'};
     }
-    if(low.indexOf('just the activity') >= 0){
-      st.phase = 'draw'; st.hint = 'guesser asked for the activity only';
-      st.feedback = 'The guesser asked to see the ACTIVITY ONLY. Start your reply with "ACTIVITY ONLY" on its '
-        + 'own line, then the <svg> of just the action.';
-      pictionary._say(st, '❓ "draw just the activity"', 'hint'); return {note:'hint: activity only'};
-    }
-    var g = text, gm = String(text||'').match(/guess\s*[:\-]\s*(.+)/i);
+    var g = body, gm = body.match(/guess\s*[:\-]\s*(.+)/i);
     if(gm) g = gm[1];
     g = g.replace(/["\n]/g, ' ').trim().slice(0, 60);
-    var n = g.toLowerCase();
-    st.guesses.push(g);
-    st.pendingGuess = g; st.pendingValue = pictionary._value(st);   // lock the value at guess time
-    if(pictionary._obvious(n, st.secret)){               // blatant match — accept, no need to ask
-      return pictionary._award(st);
+    if(!g){   // empty/blank guess — don't deduct points, just ask again for a real one
+      st.feedback = 'That was not a guess. Reply with "GUESS: <subject> <activity>" (or SEE OPTIONS / DRAW AGAIN / ASK).';
+      return {note: 'empty guess — asking again (no cost)'};
     }
-    st.phase = 'judge';                                  // otherwise the DRAWER decides (yes/no)
-    pictionary._say(st, '❔ "' + g + '" — asking the judge', 'hint');
-    return {note: 'guessed "' + g + '" — asking the judge if it counts'};
+    if(!pictionary._validGuess(g)){   // names something outside the game's vocabulary — help, don't penalise
+      st.showOptions = true;   // reveal the vocab so the next prompt lists the valid answers
+      st.feedback = '"' + g + '" is not one of the game\'s subjects/activities — pick a SUBJECT and an ACTIVITY from the options below.';
+      pictionary._say(st, '🤷 ' + g + '?', 'hint');   // show the guesser making the guess
+      pictionary._say(st, '👩‍⚖️ not a valid guess — showing the options', 'judge');
+      return {note: 'invalid guess — showed options (no cost)'};
+    }
+    if(st.guessesSinceDraw >= 2){   // no more blind guessing on the same picture — force a new drawing
+      st.feedback = 'You have already guessed twice on this picture. Reply DRAW AGAIN to get a fresh drawing (or SEE OPTIONS) before guessing again.';
+      return {note: 'blocked — 2 guesses on this picture; must DRAW AGAIN (no cost)'};
+    }
+    st.guessesSinceDraw++;
+    st.guesses.push(g);
+    st.pendingGuess = g;
+    pictionary._say(st, '🤷 ' + g + '?', 'hint');        // show the guess once, before it's judged
+    if(pictionary._obvious(g.toLowerCase(), st.secret)){ return pictionary._award(st); }   // blatant match
+    st.phase = 'judge';                                  // otherwise the impartial judge rates it
+    return {note: 'guessed "' + g + '" — asking the judge'};
   }
 };
 
@@ -922,7 +928,8 @@ var PASSWORD_ATTEMPTS = 10;    // up to 10 guesses; points start at 10 and drop 
 
 var password = {
   label: 'Password', players: ['qwen3.8','gemma4','muse','laguna'],
-  _team: function(t){ return t === 0 ? 'Team A' : 'Team B'; },
+  teams: ['Team 1', 'Team 2'],   // 2 models per team; giver/guesser roles swap each round
+  _team: function(t){ return t === 0 ? 'Team 1' : 'Team 2'; },
   _value: function(st){ return PASSWORD_ATTEMPTS - st.attempt; },   // this attempt's worth
   newState: function(){
     var st = { round: 0, scores: [0, 0], events: [], deck: shuffle(PASSWORD_WORDS), over: false, result: '' };
@@ -941,8 +948,7 @@ var password = {
   },
   idle: function(el){
     el.className = 'board pw';
-    el.innerHTML = '<div class="answer">🔑 password: <b>hidden until you press Play</b></div>'
-      + '<div class="scores">20 rounds · Team A (P1 clue / P2 guess) vs Team B (P3 clue / P4 guess)</div>'
+    el.innerHTML = '<div class="scores">' + PASSWORD_ROUNDS + ' rounds · Team 1 vs Team 2 (clue/guess roles swap each round)</div>'
       + '<div class="feed"><span class="wait">press Play to start</span></div>';
   },
   render: function(st, el){
@@ -959,12 +965,19 @@ var password = {
     var feed = cards.map(function(c){
       return '<div class="card"><div class="rdhd">round ' + c.round + ' · <b>' + esc(c.secret) + '</b></div>' + c.rows.join('') + '</div>';
     }).join('');
-    el.innerHTML = '<div class="answer">🔑 <b>' + esc(st.secret) + '</b> · round ' + st.round + '/' + PASSWORD_ROUNDS
-        + ' · this guess worth ' + password._value(st) + '</div>'
-      + '<div class="scores">Team A: <b>' + st.scores[0] + '</b> &nbsp; Team B: <b>' + st.scores[1] + '</b></div>'
-      + '<div class="feed">' + feed + '</div>'
+    el.innerHTML = '<div class="feed">' + feed + '</div>'
       + '<div class="turnline">' + (st.over ? '— ' + esc(st.result) : password._team(st.team) + ' to ' + st.phase) + '</div>';
     var f = el.querySelector('.feed'); if(f) f.scrollTop = f.scrollHeight;
+    // the scoreboard lives up in the controls (el.parentNode holds both): team scores
+    // in the team headers, and the row-3 scoreline = [ answer | round | play/stop ]
+    var host = el.parentNode;
+    if(host){
+      host.querySelectorAll('.tscore').forEach(function(s){
+        var ti = +s.getAttribute('data-team'); s.textContent = 'score ' + (st.scores[ti] || 0);
+      });
+      var sa = host.querySelector('.sl-answer'); if(sa) sa.innerHTML = '🔑 <b>' + esc(st.secret) + '</b>';
+      var sr = host.querySelector('.sl-round'); if(sr) sr.textContent = 'round ' + st.round + '/' + PASSWORD_ROUNDS;
+    }
   },
   turn: function(st){
     var giver = st.team * 2, guesser = st.team * 2 + 1;
@@ -1236,18 +1249,39 @@ var container = document.getElementById('games');
 GAMES.forEach(function(game){
   var el = document.createElement('div');
   el.className = 'game';
-  // one model-query input per player (2 for most games, 4 for password's two teams).
-  // A game may name its roles (e.g. Pictionary: artist / guesser / judge); else "player N".
-  var inputs = game.players.map(function(q, i){
-    var role = (game.roles && game.roles[i]) || ('player ' + (i+1));
-    // label ABOVE the input — the placeholder is hidden once the box has a value,
-    // and the role (artist/guesser/judge) is what communicates who's who.
-    return '<div class="pinput"><span class="plabel">' + esc(role) + '</span>'
-      + '<input class="p' + (i+1) + '" value="' + q + '" title="' + esc(role) + '"></div>';
-  }).join('');
+  var _box = function(q, i, title){
+    return '<input class="p' + (i+1) + '" value="' + q + '" title="' + esc(title) + '">';
+  };
+  var inputs;
+  if(game.teams){
+    // grouped by TEAM (e.g. Password): a labelled box per team holding its model
+    // inputs. Roles inside a team swap each round, so the members aren't labelled.
+    var per = game.players.length / game.teams.length;
+    inputs = game.teams.map(function(tlabel, ti){
+      var boxes = '';
+      for(var k = 0; k < per; k++){ var idx = ti * per + k; boxes += _box(game.players[idx], idx, tlabel); }
+      return '<div class="teamgroup"><span class="tlabel">' + esc(tlabel)
+        + '<span class="tscore" data-team="' + ti + '">score 0</span></span>'
+        + '<div class="teaminputs">' + boxes + '</div></div>';
+    }).join('');
+  } else {
+    // one input per player, labelled with its role (Pictionary: artist/guesser/judge)
+    // above the box — the placeholder hides once the box has a value.
+    inputs = game.players.map(function(q, i){
+      var role = (game.roles && game.roles[i]) || ('player ' + (i+1));
+      return '<div class="pinput"><span class="plabel">' + esc(role) + '</span>' + _box(q, i, role) + '</div>';
+    }).join('');
+  }
+  // 2–3 inputs shrink to share one row with Play; team games (password) put the team
+  // boxes on their own row(s) with Play below; other 4+ (wheel of fortune) just wrap.
+  var ctlClass = game.teams ? 'controls teams' : (game.players.length > 3 ? 'controls wrap' : 'controls');
+  // team games put the Play button on a row-3 scoreboard the game fills: [ answer | round | play/stop ]
+  var ctlTail = game.teams
+    ? '<div class="scoreline"><span class="sl-answer"></span><span class="sl-round"></span><button class="play">Play</button></div>'
+    : '<button class="play">Play</button>';
   el.innerHTML =
     '<h2>' + game.label + ' <label class="thinktoggle"><input type="checkbox" class="thinkbox" checked> thinking</label></h2>' +
-    '<div class="controls">' + inputs + '<button class="play">Play</button></div>' +
+    '<div class="' + ctlClass + '">' + inputs + ctlTail + '</div>' +
     '<div class="board"></div>' +
     '<div class="thinkrow"></div>' +
     '<div class="status"></div>' +

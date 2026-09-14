@@ -129,6 +129,21 @@ Clearing a key leaves those hosts unranked, so they get retried on the next
 request. This is the thing to reach for when you've fixed something and want
 the hosts that failed for the old reason reconsidered.
 
+### Explore mode
+
+The **Explore mode** setting (dashboard Settings tab, off by default) inverts the
+routing order for `unknown` hosts: instead of leaning on known-good hosts, it
+sends the never-visited ones to the *front* of the line so the router spends its
+attempts characterising the unmapped pool.
+
+**Caution — it raises your soft-ban risk.** The unvisited frontier is
+disproportionately where the canary honeypots live, and hitting a burst of fresh
+IPs in quick succession is exactly the traffic pattern Cloudflare/WAF reputation
+systems flag — which can earn *your* egress IP a soft (rate-limit) ban, not any
+single target. Normal routing stays quiet because it reuses vetted hosts; Explore
+mode deliberately pokes the unknown. Reserve it for deliberate, paced survey
+passes rather than routine routing.
+
 ### Bad pairings
 
 Some failures are facts about a **(host, model) pairing** rather than about
