@@ -4082,17 +4082,24 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
         m = (obj or {}).get("message") or {}
         if isinstance(m.get("content"), str):
             partial[0] += m["content"]
+        # Count tool-call argument text as progress too (partial[1]) — a drawing
+        # streamed as draw_svg args is NOT content, so otherwise a mostly-complete
+        # tool call looks like "0 chars" when the stream ends.
+        if len(partial) > 1:
+            for tc in (m.get("tool_calls") or []):
+                a = ((tc or {}).get("function") or {}).get("arguments")
+                if a is not None:
+                    partial[1] += len(a if isinstance(a, str) else json.dumps(a))
 
     try:
         if openai_format:
             first = json.loads(first_line)
+            accum(first)                      # count content AND tool-call args
             msg = dict(first.get("message", {}))
             tcs = msg.pop("tool_calls", None)
             if tcs:
                 msg["tool_calls"] = _fmt_tool_calls(tcs)
                 msg["content"] = None
-            else:
-                accum(first)
             await cw(sse_str(sse_chunk(full, msg)).encode())
         else:
             await cw(first_line + b"\n")
@@ -4135,19 +4142,17 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 else:
                     await cw(line + b"\n")
                 return "done"
-            # a normal content chunk
+            # a normal content OR tool-call chunk — accum() counts both as progress
+            accum(obj)
             if openai_format:
                 m = dict((obj or {}).get("message", {}))
                 tcs = m.pop("tool_calls", None)
                 if tcs:
                     m["tool_calls"] = _fmt_tool_calls(tcs)
                     m["content"] = None
-                else:
-                    accum(obj)
                 await cw(sse_str(sse_chunk(full, m)).encode())
             else:
                 await cw(line + b"\n")
-                accum(obj)
         return "truncated"
     except _ClientGone:
         log.debug("Client disconnected during stream")
@@ -4177,7 +4182,7 @@ async def _forward_stream(request, response, resp, first_line, host, full, opena
         await resp.release()
         return
     await _pump_stream(response, resp, first_line, host, full, openai_format,
-                       upstream_openai, wid, num_ctx, [""])
+                       upstream_openai, wid, num_ctx, ["", 0])
 
 
 async def _write_terminal_done(response, full, openai_format):
@@ -4235,7 +4240,7 @@ async def _stream_chat_failover(request, session, model, servers, opayload,
         await resp.release()
         return response
 
-    partial = [""]
+    partial = ["", 0]     # [content so far, tool-call-arg chars so far]
     payload = opayload
     dead = set()          # hosts that dropped the CONNECTION — don't retry those
     continues = 0
@@ -4245,30 +4250,42 @@ async def _stream_chat_failover(request, session, model, servers, opayload,
                                     oai, job_wid, _effective_num_ctx(payload), partial)
         if status in ("done", "client"):
             break
+        made = len(partial[0]) + partial[1]   # real progress: content + tool-call args
         # Two kinds of mid-stream truncation, both continued on the SAME open client
         # connection by carrying the work forward — capped so the loop can't spin:
-        #  'truncated' the connection dropped with no done token: the host is suspect,
-        #              so log a failure, penalise it, and DON'T retry it (move on).
+        #  'truncated' the stream ended with no done token. If it barely produced
+        #              anything the host is suspect (penalise, don't retry); but if it
+        #              had streamed most of the answer (e.g. a nearly-complete drawing
+        #              in tool-call args) that's a cutoff, not a dead host — retry for a
+        #              complete answer WITHOUT dinging it.
         #  'length'    the answer hit the context window (done_reason 'length'): the
         #              host is FINE, it just needs a bigger window — keep it eligible.
-        if status == "truncated":
+        if status == "truncated" and made <= 40:
             await broadcast_activity(host, full, "failed",
                 f"truncated without end token: {host} dropped mid-stream after "
-                f"{len(partial[0])} chars — failing over", wid=job_wid)
+                f"{made} chars — failing over", wid=job_wid)
             record_verdict(host, full, failed("truncated without end token"))
             dead.add(host)
+        elif status == "truncated":
+            await broadcast_activity(host, full, "warming",
+                f"stream ended without a done token on {host} after {made} chars — "
+                f"retrying for a complete answer (not penalised)", wid=job_wid)
         else:  # 'length'
             await broadcast_activity(host, full, "trying",
-                f"answer hit the context window on {host} at {len(partial[0])} chars — "
+                f"answer hit the context window on {host} at {made} chars — "
                 f"continuing with a larger window", wid=job_wid)
         continues += 1
         remaining = [s for s in servers if s[1] not in dead]
-        if continues <= MAX_STREAM_CONTINUES and remaining and partial[0].strip():
+        # continue on any real progress — streamed CONTENT (carry it forward) or a
+        # tool call (partial[1]): a tool-call argument can't be resumed mid-string,
+        # so re-race the original request fresh, just with a bigger window.
+        if continues <= MAX_STREAM_CONTINUES and remaining and (partial[0].strip() or partial[1] > 0):
             prev_ctx = _effective_num_ctx(payload)
-            payload = _continuation_payload(payload, partial[0])
-            if status == "length":
-                # the window is what cut it off — grow it decisively (at least 2x),
-                # not just by the length of the partial we appended.
+            if partial[0].strip():
+                payload = _continuation_payload(payload, partial[0])
+            if status == "length" or partial[1] > 0:
+                # the window (or a cut-off tool call) is what stopped it — grow it
+                # decisively (at least 2x) so the retry has room to finish.
                 opts = dict(payload.get("options") or {})
                 opts["num_ctx"] = min(max(opts.get("num_ctx", 0), prev_ctx * 2), NUM_CTX_MAX)
                 payload["options"] = opts
