@@ -1794,6 +1794,12 @@ def _get_db():
                      "fail_conn INTEGER NOT NULL DEFAULT 0",
                      "fail_other INTEGER NOT NULL DEFAULT 0",
                      "last_fail TEXT",
+                     # The actual TEXT of the most recent failure (the real upstream
+                     # error / detail we surface), overwritten each fail. The counters
+                     # say how OFTEN and the kind buckets say roughly WHAT; this keeps
+                     # the concrete last message so the failure CLASS can be inspected
+                     # (e.g. "loading model" vs "no chat endpoint" vs a 500 body).
+                     "last_fail_reason TEXT",
                      # Latest measured performance for this (host, model): ttft =
                      # time-to-first-token in seconds (send -> first streamed line),
                      # tps = tokens/second on the last generation. MOST-RECENT only
@@ -1808,7 +1814,16 @@ def _get_db():
                      # (not one tri-state col) so an ad-hoc audit query stays trivial, e.g.
                      # `WHERE smoke_date IS NOT NULL AND fail_smoke=1`.
                      "fail_smoke INTEGER NOT NULL DEFAULT 0",
-                     "smoke_date TEXT"):
+                     "smoke_date TEXT",
+                     # Race participation, independent of the pass/fail counters: how
+                     # often this (host, model) WON a race (was the accepted answer)
+                     # vs LOST one (raced but a peer won, or it failed), plus the last
+                     # time it was in a race. This is how Explore mode buckets the
+                     # fleet — every host it races gets a race record even when the
+                     # winner's arrival cancels it before a good/bad verdict lands.
+                     "race_won INTEGER NOT NULL DEFAULT 0",
+                     "race_lost INTEGER NOT NULL DEFAULT 0",
+                     "last_race TEXT"):
             try:
                 _status_db.execute(f"ALTER TABLE host_status ADD COLUMN {_col}")
             except sqlite3.OperationalError:
@@ -1820,6 +1835,33 @@ def _get_db():
             _status_db.execute("ALTER TABLE host_status DROP COLUMN smoke_ok")
         except sqlite3.OperationalError:
             pass
+        # Give host_status an atomic AUTOINCREMENT id: rows get a stable, monotonic
+        # identity, so "the most recent" is a plain ORDER BY id DESC. SQLite can't
+        # ALTER a PRIMARY KEY in, so this is a ONE-TIME REBUILD — recreate the table
+        # with `id` as INTEGER PRIMARY KEY AUTOINCREMENT and (host,model) demoted to
+        # a UNIQUE constraint (the ON CONFLICT(host,model) upserts still fire).
+        # Columns are reconstructed from the LIVE schema so every incrementally-added
+        # column carries across untouched, and the whole swap is one transaction so
+        # it either completes or leaves the old table intact.
+        info = _status_db.execute("PRAGMA table_info(host_status)").fetchall()
+        if info and not any(r[1] == "id" for r in info):
+            defs = []
+            for _cid, name, ctype, notnull, dflt, _pk in info:
+                d = f"{name} {ctype or 'TEXT'}"
+                if notnull:
+                    d += " NOT NULL"
+                if dflt is not None:
+                    d += f" DEFAULT {dflt}"
+                defs.append(d)
+            collist = ", ".join(r[1] for r in info)
+            _status_db.executescript(
+                "BEGIN;"
+                "CREATE TABLE host_status_new(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                + ", ".join(defs) + ", UNIQUE(host, model));"
+                f"INSERT INTO host_status_new({collist}) SELECT {collist} FROM host_status;"
+                "DROP TABLE host_status;"
+                "ALTER TABLE host_status_new RENAME TO host_status;"
+                "COMMIT;")
         # The dashboard's per-model bars count rows by state, so index it.
         _status_db.execute("CREATE INDEX IF NOT EXISTS ix_host_status_state ON host_status(state)")
         _status_db.commit()
@@ -1984,12 +2026,15 @@ def _failure_kind(verdict, detail):
     return "other"
 
 
-def add_bad(host, model, kind="other"):
+def add_bad(host, model, kind="other", reason=None):
     """Failure: good -> maybe_good, maybe_good stays, unknown -> bad, bad stays.
     failure_streak is incremented in every case. Also bumps the cumulative
-    `failure` total plus the per-kind counter and stamps `last_fail` — survey
-    data, recorded alongside the tier state that still drives routing."""
+    `failure` total plus the per-kind counter, stamps `last_fail`, and records
+    the concrete `last_fail_reason` text (the real error/detail) so the failure
+    CLASS can be inspected later — survey data, recorded alongside the tier
+    state that still drives routing."""
     model = canon_pattern(model)
+    reason = (" ".join(str(reason).split())[:500] or None) if reason else None
     db = _get_db()
     cur = _state_of(host, model)
     if cur is None:
@@ -2000,24 +2045,29 @@ def add_bad(host, model, kind="other"):
         new_state = cur
     col = _FAIL_COLS.get(kind, "fail_other")
     db.execute(
-        f"INSERT INTO host_status(host,model,state,last_good,failure_streak,failure,{col},last_fail)"
-        f" VALUES(?,?,?,NULL,1,1,1,?)"
+        f"INSERT INTO host_status(host,model,state,last_good,failure_streak,failure,{col},last_fail,last_fail_reason)"
+        f" VALUES(?,?,?,NULL,1,1,1,?,?)"
         f" ON CONFLICT(host,model) DO UPDATE SET"
         f" state=?, failure_streak=failure_streak+1, failure=failure+1,"
-        f" {col}={col}+1, last_fail=excluded.last_fail",
-        (host, model, new_state, _now_iso(), new_state))
+        f" {col}={col}+1, last_fail=excluded.last_fail,"
+        f" last_fail_reason=excluded.last_fail_reason",
+        (host, model, new_state, _now_iso(), reason, new_state))
     db.commit()
 
 
-def force_bad(host, model):
-    """Explicit user skip: send straight to bad regardless of current tier."""
+def force_bad(host, model, reason=None):
+    """Explicit skip: send straight to bad regardless of current tier. `reason`
+    is the concrete cause (user flag, smoke canned answer, ...) stored as
+    last_fail_reason for later inspection of the failure class."""
     model = canon_pattern(model)
+    reason = (" ".join(str(reason).split())[:500] or None) if reason else None
     db = _get_db()
     db.execute(
-        "INSERT INTO host_status(host,model,state,last_good,failure_streak)"
-        " VALUES(?,?, 'bad', NULL, 0)"
-        " ON CONFLICT(host,model) DO UPDATE SET state='bad'",
-        (host, model))
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak,last_fail,last_fail_reason)"
+        " VALUES(?,?, 'bad', NULL, 0, ?, ?)"
+        " ON CONFLICT(host,model) DO UPDATE SET state='bad',"
+        " last_fail=excluded.last_fail, last_fail_reason=excluded.last_fail_reason",
+        (host, model, _now_iso(), reason))
     db.commit()
 
 
@@ -3035,10 +3085,31 @@ def record_verdict(host, key, outcome):
     elif v == V_UNREACHABLE:
         # host-wide, so it isn't re-probed as "unknown" for every other key...
         mark_unreachable(host)
-        add_bad(host, key, "conn")  # ...plus the per-key mark, so looking at
+        add_bad(host, key, "conn", reason=outcome.detail)  # ...plus the per-key mark
     elif v in (V_UNSUITABLE, V_FAILED, V_TIMEOUT):   # this key shows who failed it
-        add_bad(host, key, _failure_kind(v, outcome.detail))
+        add_bad(host, key, _failure_kind(v, outcome.detail), reason=outcome.detail)
     # V_SKIP records nothing on purpose
+
+
+def record_race(host, key, won):
+    """Record that this (host, model) took part in a race — won it (was the
+    accepted answer) or lost it (a peer won first, or it failed). Separate from
+    the good/bad tier: a host out-raced before it could answer gets a race_lost
+    and a last_race stamp even though no good/bad verdict was reached, which is
+    how Explore mode accumulates a picture of the whole fleet over time."""
+    model = canon_pattern(key)
+    col = "race_won" if won else "race_lost"
+    db = _get_db()
+    # state 'unknown' on a fresh row: it isn't good/maybe/bad, so routing still
+    # treats it as the unknown tier (load_good/maybe/bad filter by state) — the
+    # row just now carries the race history. An existing verdict is untouched.
+    db.execute(
+        f"INSERT INTO host_status(host,model,state,{col},last_race)"
+        f" VALUES(?,?, 'unknown', 1, ?)"
+        f" ON CONFLICT(host,model) DO UPDATE SET"
+        f" {col}={col}+1, last_race=excluded.last_race",
+        (host, model, _now_iso()))
+    db.commit()
 
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
@@ -3101,6 +3172,11 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 if not att.done():
                     att.cancel()
                 if done.is_set():
+                    # A peer won the race (done set by a win, not a user stop) and
+                    # cancelled this in-flight attempt: count it as a race loss so
+                    # the fleet picture fills in even without a good/bad verdict.
+                    if not stopped:
+                        record_race(host_of(item), key, won=False)
                     raise           # real stop / post-win cleanup: let it die
                 tally[V_SKIP] += 1
                 record_verdict(host_of(item), key, skip("skipped by user"))
@@ -3117,10 +3193,13 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             tally[outcome.verdict] += 1
             record_verdict(host_of(item), key, outcome)
             if outcome.verdict == V_ACCEPTED:
+                record_race(host_of(item), key, won=True)
                 mark_worker_found(wwid, host_of(item))
                 await result_queue.put(outcome.result)
                 done.set()
                 return
+            elif outcome.verdict != V_SKIP:      # tried and didn't win = a race loss
+                record_race(host_of(item), key, won=False)
 
     _tasks_holder = []
 
@@ -3806,6 +3885,19 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             f"success: {host} for {model}", duration=dur, wid=wid, rmodel=full)
         return accepted(("ok_stream", host, full, resp, first_line, first, oai), extra=full)
 
+    # Queueing theory: with several requests in flight for the SAME model, each
+    # should land on a DIFFERENT server, not all race onto the one best host.
+    # Order candidates load-aware WITHIN their reputation tier (idle before busy),
+    # so concurrent workers fan out across idle hosts. One refinement for the warm
+    # sticky/last host: it earns a head start when uncontended, but the moment it's
+    # already busy it loses that lead (demoted to its underlying good tier) so a
+    # burst spreads across idle good hosts instead of queueing on the warm one.
+    def _order_key(it):
+        prio, host = it[0], it[1]
+        load = _inflight.get(host, 0) + (1 if is_active(host) else 0)
+        eff = TIER_GOOD if (prio == TIER_LAST and load > 0) else prio
+        return (eff, load)
+    servers = sorted(servers, key=_order_key)   # stable: recency order survives ties
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
         hedge_delay=hedge_delay)
@@ -4483,20 +4575,20 @@ async def _quick_probe(session, host, full, model_in, tools=None):
                 f"quick test: {host} for {model_in} - too slow, connected (no answer in {dur:.0f}s)",
                 duration=dur, wid=wid)
             return None, f"too slow — connected, no answer in {dur:.0f}s"
-        add_bad(host, full)
         msg = ("no connection: " + detail) if no_socket else detail
+        add_bad(host, full, reason=f"smoke: {msg}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - {msg}", duration=dur, wid=wid)
         return False, msg
     if resp is None:
-        add_bad(host, full)
+        add_bad(host, full, reason=f"smoke: {why}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - {why}",
             duration=time.time() - start, wid=wid)
         return False, why
     if resp.status != 200:
         await resp.release()
-        add_bad(host, full)
+        add_bad(host, full, reason=f"smoke: status {resp.status}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - status {resp.status}", duration=time.time() - start, wid=wid)
         return False, f"status {resp.status}"
@@ -4504,7 +4596,7 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         data = await resp.json()
     except Exception:
         await resp.release()
-        add_bad(host, full)
+        add_bad(host, full, reason="smoke: bad response (JSON decode failed)")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - bad response", duration=time.time() - start, wid=wid)
         return False, "bad response"
@@ -4515,12 +4607,12 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     dur = time.time() - start
     shown = content.strip()[:160]
     if "error" in data:
-        add_bad(host, full)
+        add_bad(host, full, reason=f"smoke error: {data['error']}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - error: {data['error']}", duration=dur, wid=wid)
         return False, f"error: {str(data['error'])[:80]}"
     if not _quick_test_answer_ok(content):
-        force_bad(host, full)
+        force_bad(host, full, reason=f"smoke: canned/parroted answer: {shown}")
         mark_smoke(host, full, failed=True)   # conclusive: answered with a canned/fake response
         log.warning(f"quick test FAIL {host} ({full}): {shown!r}")
         await broadcast_activity(host, model_in, "failed",
@@ -4823,6 +4915,49 @@ async def _proxy_generate(request, session):
         await _unregister_worker(job_wid)
 
 
+_DASH_TPL = {"mtime": None, "html": None}
+_STYLE_RE = re.compile(r'(<style[^>]*>)(.*?)(</style>)', re.S | re.I)
+_SCRIPT_RE = re.compile(r'(<script(?![^>]*\bsrc=)[^>]*>)(.*?)(</script>)', re.S | re.I)
+
+
+def _dashboard_template():
+    """dashboard.html, loaded once and — if rjsmin/rcssmin are installed — served
+    with its inline <script>/<style> BODIES minified: comments and whitespace
+    stripped, nothing restructured. rjsmin/rcssmin are regex strippers, not AST
+    rewriters, so they don't mangle the hand-written JS the way an AST minifier
+    (minify-html) did. Only the script/style CONTENTS are touched; the HTML and its
+    __PLACEHOLDER__ tokens are left alone, and the per-request .replace()s run on
+    this cached string. Cached per file mtime; ANY error — or the packages being
+    absent — falls back to the fully raw file, so it degrades safely."""
+    path = os.path.join(os.path.dirname(__file__), "static", "dashboard.html")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    if _DASH_TPL["html"] is not None and _DASH_TPL["mtime"] == mtime:
+        return _DASH_TPL["html"]
+    with open(path, encoding="utf-8") as f:
+        raw = f.read()
+    html = raw
+    try:
+        import rjsmin
+        import rcssmin
+        html = _STYLE_RE.sub(
+            lambda m: m.group(1) + rcssmin.cssmin(m.group(2)) + m.group(3), html)
+        html = _SCRIPT_RE.sub(
+            lambda m: m.group(1) + rjsmin.jsmin(m.group(2)) + m.group(3), html)
+        log.info(f"dashboard.html minified {len(raw)} -> {len(html)} bytes "
+                 f"({100 * (1 - len(html) / max(len(raw), 1)):.0f}% smaller)")
+    except ImportError:
+        pass          # optional deps absent — serve the raw file
+    except Exception as e:
+        log.warning(f"dashboard minify failed, serving raw: {e}")
+        html = raw    # any surprise -> fully unminified, never a half-minified doc
+    _DASH_TPL["mtime"] = mtime
+    _DASH_TPL["html"] = html
+    return html
+
+
 async def handle_dashboard(request):
     """
     Dashboard (HTML)
@@ -4838,30 +4973,20 @@ async def handle_dashboard(request):
               type: string
     """
     servers = load_servers()
-    models = all_models()
-    tpl_dir = os.path.join(os.path.dirname(__file__), "static")
-    with open(os.path.join(tpl_dir, "dashboard.html"), encoding="utf-8") as f:
-        html = f.read()
+    html = _dashboard_template()
     # Only small scalars and the SD-model datalist are inlined; the Server Room's
     # heavy data (per-model hosts, good/bad/last lists, checked timestamps) AND
     # the chat model list are fetched from /dashboard-models + /dashboard-data and
     # rendered client-side, so nothing large is duplicated in the document.
-    sd_models = set()
-    for s in servers:
-        if s.get("service") != "a1111":
-            continue
-        for m in s.get("models", []):
-            title = m.split(" [")[0] if " [" in m else m
-            sd_models.add(title)
-    sd_options = "".join(f'<option value="{h}"></option>' for h in sorted(sd_models))
+    # (The image-model datalist is no longer inlined — loadImageModels() fetches
+    #  sdapi/v1/sd-models and fills #sdModels client-side, so a server-injected
+    #  a1111-only option list was both dead weight and wrong for the comfy models.)
     html = html.replace("__PORT__", str(PORT))
     html = html.replace("__WORKER_COUNT__", str(WORKER_COUNT))
     html = html.replace("__TIMEOUT__", str(TIMEOUT))
-    html = html.replace("__SERVER_COUNT__", str(len(servers)))
-    html = html.replace("__MODEL_COUNT__", str(len(models)))
+    html = html.replace("__SERVER_COUNT__", f"{len(servers):,}")
     html = html.replace("__DYVA_VERSION__", VERSION)
     html = html.replace("__HOSTS_LOADED__", _hosts_loaded_str())
-    html = html.replace("__SD_MODELS__", sd_options)
     return web.Response(text=html, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-cache"})
 
@@ -5121,16 +5246,37 @@ async def handle_dashboard_models(request):
               type: object
     """
     servers = load_servers()
-    out = []
+    # Key by MODEL, not by host: the client sorts/facets/filters on aggregates
+    # (how many hosts, how many good/bad), never on the host IPs — those are fetched
+    # on demand (see /dashboard-model-hosts). This turns an (hosts x their models)
+    # payload — the whole private inventory — into one small row per distinct model.
+    agg = {}   # model id -> {"count": n, "image": bool}
     for s in servers:
-        host = s.get("server", "")
-        if not host:
+        if not s.get("server"):
             continue
-        entry = {"host": host, "service": s.get("service"), "models": s.get("models", [])}
-        ck = s.get("checked")
-        if ck:
-            entry["checked"] = ck
-        out.append(entry)
+        is_img = s.get("service") in ("a1111", "comfyui")
+        for m in s.get("models") or []:
+            if not m:
+                continue
+            a = agg.get(m)
+            if a is None:
+                a = agg[m] = {"count": 0, "image": is_img}
+            a["count"] += 1
+            if is_img:
+                a["image"] = True
+    # Complete good/bad host counts per model straight from the reputation DB — one
+    # GROUP BY, and unlike the dashboard-data panes these aren't a truncated slice,
+    # so the coverage bars are exact again.
+    gb = {}
+    for model, state, n in _get_db().execute(
+            "SELECT model, state, COUNT(*) FROM host_status "
+            "WHERE state IN ('good','bad') GROUP BY model, state").fetchall():
+        gb.setdefault(model, {})[state] = n
+    out = []
+    for m, a in agg.items():
+        c = gb.get(canon_pattern(m), {})
+        out.append({"id": m, "count": a["count"], "image": a["image"],
+                    "good": c.get("good", 0), "bad": c.get("bad", 0)})
     # ship the survey's per-model sizes so the client filter understands ">10gb",
     # and the release-date lookup so it understands ">2026-02" (fuzzy-matched
     # client-side, same as the server does for routing).
@@ -5151,7 +5297,7 @@ async def handle_dashboard_models(request):
             c = classify_model(m)
             if c:
                 kind[m] = c
-    body = json.dumps({"servers": out, "sizes": sizes, "dates": _load_release_dates(),
+    body = json.dumps({"models": out, "sizes": sizes, "dates": _load_release_dates(),
                        "params": _load_ollama_params(), "kind": kind})
     # This payload is large but changes slowly; serve it with an ETag so the
     # browser revalidates and gets a tiny 304 instead of re-downloading it.
@@ -5160,6 +5306,33 @@ async def handle_dashboard_models(request):
         return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
     return web.Response(text=body, content_type="application/json",
                         headers={"ETag": etag, "Cache-Control": "no-cache"})
+
+
+async def handle_model_hosts(request):
+    """
+    Hosts for one model (JSON)
+    ---
+    tags: [UI]
+    summary: GET /dashboard-model-hosts?q=<model> — the hosts serving one model, on demand
+    description: >
+      dashboard-models ships only per-model AGGREGATES (no IPs); this returns the
+      actual host list for a single model when the operator clicks it — host,
+      last-checked time, and each host's reputation state for that model.
+    responses:
+      '200':
+        description: Model plus its host list
+    """
+    q = request.query.get("q", "")
+    if not q:
+        return web.json_response({"model": q, "hosts": []})
+    states = {h: st for h, st in _get_db().execute(
+        "SELECT host, state FROM host_status WHERE model=?",
+        (canon_pattern(q),)).fetchall()}
+    hosts = [{"host": s.get("server", ""), "checked": s.get("checked"),
+              "state": states.get(s.get("server", ""), "unknown")}
+             for s in load_servers()
+             if s.get("server") and q in (s.get("models") or [])]
+    return web.json_response({"model": q, "hosts": hosts})
 
 
 async def handle_dashboard_data(request):
@@ -5176,24 +5349,36 @@ async def handle_dashboard_data(request):
             schema:
               type: object
     """
-    bad = load_bad()
-    good = load_good()
-    maybe = load_maybe()
+    # Send only the most-recent N per state, not the whole pool: a 15k-host bad
+    # list must not be serialized and shipped in full just to show 30 rows. The
+    # true totals ride along as counts; the filter box searches this recent slice.
+    # "Recent" = most-recently-touched (last_fail for bad, last_good for good, ...
+    # via COALESCE), newest first, id as the stable tiebreak.
+    DASH_RECENT = 200
+    db = _get_db()
+    counts = dict(db.execute(
+        "SELECT state, COUNT(*) FROM host_status GROUP BY state").fetchall())
+
+    def _recent(state):
+        rows = db.execute(
+            "SELECT host, model FROM host_status WHERE state=? "
+            "ORDER BY COALESCE(last_fail, last_race, last_good) DESC, id DESC "
+            "LIMIT ?", (state, DASH_RECENT)).fetchall()
+        # The host-wide unreachable mark is a \x00-prefixed sentinel "model"; strip
+        # it for display (the raw null byte renders as a tofu box otherwise).
+        return [f"{h} {m}".replace(UNREACHABLE_KEY, "(unreachable)") for h, m in rows]
+
     load_last()
     last = [{"host": entry["host"], "model": model}
             for model, entry in list(_last_cache.items())[:20]]
-    # The host-wide unreachable mark is stored under a \x00-prefixed sentinel
-    # "model" so it can't collide with a real model name; strip that for display
-    # (the raw null byte otherwise renders as a tofu box in the dashboard).
-    bad_display = sorted(k.replace(UNREACHABLE_KEY, "(unreachable)") for k in bad)
     return web.json_response({
         "last": last,
-        "good": sorted(good),
-        "maybe": sorted(maybe),
-        "bad": bad_display,
-        "good_count": len(good),
-        "maybe_count": len(maybe),
-        "bad_count": len(bad),
+        "good": _recent("good"),
+        "maybe": _recent("maybe_good"),
+        "bad": _recent("bad"),
+        "good_count": counts.get("good", 0),
+        "maybe_count": counts.get("maybe_good", 0),
+        "bad_count": counts.get("bad", 0),
     })
 
 
@@ -5590,7 +5775,7 @@ async def handle_skip_good(request):
     if not host or not model:
         return web.json_response({"error": "missing host or model parameter"}, status=400)
 
-    force_bad(host, model)
+    force_bad(host, model, reason="manual mark-bad")
 
     raise web.HTTPFound("/")
 
@@ -5822,7 +6007,7 @@ async def handle_flag_worker(request):
     model = (w.get("rmodel") if w else None) or request.query.get("model")
     if not host or not model:
         return web.json_response({"error": "no host/model to flag"}, status=404)
-    force_bad(host, model)
+    force_bad(host, model, reason="user flag: bunk output")
     log.warning(f"worker thumbs-down: host={host} model={model} wid={wid}")
     await broadcast_activity(host, model, "flagged",
         f"user flagged bunk output: {model} @ {_norm_host(host)}")
@@ -7356,11 +7541,11 @@ async def handle_txt2img(request):
                         await _unregister_worker(job_wid)
                         return web.json_response(data)
                 else:
-                    add_bad(last_host, IMG_KEY)
+                    add_bad(last_host, IMG_KEY, reason=f"a1111 img HTTP {r.status}")
                     await broadcast_activity(last_host, activity_label, "failed",
                         f"failure: {last_host} for {activity_label} - HTTP {r.status}")
         except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as _e:
-            add_bad(last_host, IMG_KEY)
+            add_bad(last_host, IMG_KEY, reason=f"a1111 img: {' '.join(str(_e).split())[:200] or type(_e).__name__}")
             await broadcast_activity(last_host, activity_label, "failed",
                 f"failure: {last_host} for {activity_label} - {type(_e).__name__}")
 
@@ -7445,6 +7630,11 @@ async def handle_txt2img(request):
             return failed(str(e))
         _set_worker_phase(job_wid, None)
         if data:
+            # Stamp the RESOLVED model on the worker (not just the host) so a
+            # thumbs-down flags the exact (host, resolved-model) that ran, the
+            # same as text — the routing key here is a sentinel/query, not what
+            # actually rendered.
+            mark_worker_found(job_wid, host, data.get("_dyva_model"))
             await broadcast_activity(host, activity_label, "connected",
                 f"success: {host} for {activity_label} (comfyui)",
                 duration=time.time() - t0, wid=wid, rmodel=data.get("_dyva_model"))
@@ -11597,9 +11787,10 @@ def _pair_key(cap, model):
     return f"{cap}!{_sep_insensitive(os.path.splitext(base)[0])}"
 
 
-def remember_bad_pair(host, cap, model):
+def remember_bad_pair(host, cap, model, reason=None):
     if model:
-        force_bad(host, _pair_key(cap, model))
+        force_bad(host, _pair_key(cap, model),
+                  reason=reason or f"structural: {cap} model unusable on this host")
 
 
 def bad_pairs_for(host, cap):
@@ -12332,7 +12523,7 @@ async def _run_music_job(session, jid):
         job["error"] = str(e) or type(e).__name__
         if host:
             log.warning(f"music: {host}: {job['error']}")
-            add_bad(host, MUSIC_KEY)
+            add_bad(host, MUSIC_KEY, reason=f"music: {job['error']}")
             await broadcast_activity(host, label, "failed", f"{label}: {job['error']}", duration=time.time() - t0)
         _music_job_save()
 
@@ -12600,6 +12791,7 @@ def make_app():
     swagger.add_get("/dashboard", handle_dashboard)
     swagger.add_get("/dashboard-data", handle_dashboard_data)
     swagger.add_get("/dashboard-models", handle_dashboard_models)
+    swagger.add_get("/dashboard-model-hosts", handle_model_hosts)
     swagger.add_get("/settings", handle_settings_get)
     swagger.add_post("/settings", handle_settings_post)
     swagger.add_post("/settings/test", handle_settings_test)

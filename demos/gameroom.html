@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Game Room — two models play (dyva)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=Bungee+Spice&display=swap" rel="stylesheet">
 <style>
   :root{--bg:#12141a;--panel:#1b1f28;--line:#2d323e;--text:#e9ecf2;--text2:#9aa3b4;--accent:#7cc0ff;
         --x:#3fd0c0;   /* player 1 / X — teal */
@@ -12,6 +15,7 @@
         --p4:#6fb3ff;  /* player 4 — blue */
         --err:#ff6b6b; /* errors & wrong/miss — red is reserved for these */}
   *{box-sizing:border-box}
+  a {color: #ccf}
   body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
   header{padding:18px 22px 6px}
   h1{margin:0;font-size:22px}
@@ -27,17 +31,31 @@
   .game h2{margin:0 0 10px;font-size:16px}
   .thinktoggle{font-size:11px;font-weight:400;color:var(--text2);cursor:pointer;vertical-align:middle}
   .thinktoggle input{vertical-align:middle;margin-right:2px}
-  .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+  .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:10px}
   .controls input{flex:1 1 100px;min-width:0}
+  .pinput{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:3px}   /* shrink to share the row so Play always fits beside the inputs */
+  .controls .play{flex:0 0 auto}
+  .pinput input{flex:none;width:100%}
+  .plabel{font-size:.62rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2,#9aa);padding-left:3px}
   .controls input.p1{border-left:3px solid var(--x)}
   .controls input.p2{border-left:3px solid var(--o)}
   .controls input.p3{border-left:3px solid var(--p3)}
   .controls input.p4{border-left:3px solid var(--p4)}
-  /* whose turn it is: a dark tint of that player's color on their input */
-  .controls input.turn.p1{background:color-mix(in srgb, var(--x) 22%, #12151c)}
-  .controls input.turn.p2{background:color-mix(in srgb, var(--o) 22%, #12151c)}
-  .controls input.turn.p3{background:color-mix(in srgb, var(--p3) 22%, #12151c)}
-  .controls input.turn.p4{background:color-mix(in srgb, var(--p4) 22%, #12151c)}
+  /* whose turn it is: gently PULSE the input between the default bg and a tint of
+     that player's color while they're playing, rather than a static fill. */
+  @keyframes pulseX{ 0%,100%{background-color:#12151c} 50%{background-color:color-mix(in srgb, var(--x) 40%, #12151c)} }
+  @keyframes pulseO{ 0%,100%{background-color:#12151c} 50%{background-color:color-mix(in srgb, var(--o) 40%, #12151c)} }
+  @keyframes pulseP3{ 0%,100%{background-color:#12151c} 50%{background-color:color-mix(in srgb, var(--p3) 40%, #12151c)} }
+  @keyframes pulseP4{ 0%,100%{background-color:#12151c} 50%{background-color:color-mix(in srgb, var(--p4) 40%, #12151c)} }
+  .controls input.turn.p1{animation:pulseX 3.2s ease-in-out infinite}
+  .controls input.turn.p2{animation:pulseO 3.2s ease-in-out infinite}
+  .controls input.turn.p3{animation:pulseP3 3.2s ease-in-out infinite}
+  .controls input.turn.p4{animation:pulseP4 3.2s ease-in-out infinite}
+  @media (prefers-reduced-motion:reduce){ .controls input.turn{animation:none}
+    .controls input.turn.p1{background-color:color-mix(in srgb, var(--x) 34%, #12151c)}
+    .controls input.turn.p2{background-color:color-mix(in srgb, var(--o) 34%, #12151c)}
+    .controls input.turn.p3{background-color:color-mix(in srgb, var(--p3) 34%, #12151c)}
+    .controls input.turn.p4{background-color:color-mix(in srgb, var(--p4) 34%, #12151c)} }
   .controls button{flex:0 0 auto}
   button{background:var(--accent);color:#06233f;border:0;border-radius:6px;padding:8px 16px;font-weight:700;cursor:pointer;font-size:13px}
   button.stop{background:#33384a;color:var(--text)}
@@ -45,6 +63,8 @@
   /* fixed-height so the wrapping thinking tail can't grow the card (or the 2x2 row);
      wrap + break so a long token can't push the box wide either */
   .status{font-size:12px;color:var(--text2);height:52px;border-top:1px solid var(--line);padding-top:8px;margin-top:8px;line-height:1.4;white-space:normal;overflow-wrap:anywhere;overflow:hidden}
+  .thinkrow{font:11px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--text-faint,#5b6270);white-space:nowrap;overflow:hidden;height:1.6em;margin-top:6px}
+  .thinkrow:empty{display:none}
   .board{margin-bottom:8px}
   /* chess */
   .chess{display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);width:100%;max-width:320px;aspect-ratio:1/1;border:1px solid #000;margin:0 auto}
@@ -65,12 +85,19 @@
   .hang .guessed{font-size:12px;color:var(--text2)}
   .hang .guessed .miss{color:var(--err)}
   /* pictionary */
-  .pict .answer{font-size:12px;color:var(--text2);margin-bottom:6px}
-  .pict .answer b{color:var(--accent)}
-  .pict .reel{max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+  .pict .answer{font-size:12px;color:#fff;margin-bottom:6px;text-align:center}
+  .pict .answer b{color:#fff}
+  .pict .scoreboard{display:flex;flex-direction:column;gap:5px;background:#0d1017;border:1px solid var(--line);border-radius:6px;padding:6px 12px;margin-bottom:6px}
+  .pict .scoreboard .sb-hud{display:flex;align-items:center;justify-content:space-between;gap:12px;font:16px/1.3 'Bungee Spice',ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.04em;color:var(--text2)}
+  .pict .scoreboard .sb-hud b{font-family:'Bungee',ui-monospace,monospace;color:#fff;font-weight:400}
+  .pict .scoreboard .sb-row2{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .pict .scoreboard .sb-answer{font:12px/1.4 system-ui,sans-serif;color:#fff}
+  .pict .scoreboard .sb-answer b{color:#fff}
+  .pict .scoreboard .sb-timer{font:14px/1 'Bungee',ui-monospace,monospace;color:#fff;font-variant-numeric:tabular-nums;flex:0 0 auto}
+  .pict .reel{max-height:520px;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
   .pict .shot .cap{font-size:11px;color:var(--text2);margin-bottom:4px}
-  .pict .shot .pic{background:#0f1218;border-radius:6px;min-height:110px;max-height:200px;overflow:hidden;display:flex;align-items:center;justify-content:center}
-  .pict .shot .pic svg{width:100%;height:auto;max-height:200px;display:block}
+  .pict .shot .pic{background:#0f1218;border-radius:6px;min-height:200px;max-height:380px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+  .pict .shot .pic svg{width:100%;height:auto;max-height:380px;display:block}
   .pict .shot .pic .wait{color:#888;font-size:12px;padding:20px}
   .pict .shot.pending .pic{outline:1px dashed var(--line);outline-offset:-1px}
   .pict .card{background:#12151c;border:1px solid var(--line);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:8px}
@@ -80,6 +107,7 @@
   .pict .say.correct{color:var(--accent);font-weight:700}
   .pict .say.close{color:var(--p3)}
   .pict .say.wrong{color:var(--err)}
+  .pict .say.judge{color:var(--p3)}
   .pict .draw{background:#0f1218;border-radius:6px;min-height:160px;display:flex;align-items:center;justify-content:center;overflow:hidden}
   .pict .draw svg{width:100%;height:auto;max-height:320px;display:block}
   .pict .draw .wait{color:#888;font-size:12px;padding:24px}
@@ -119,7 +147,7 @@
 <body>
 <header>
   <h1>🎲 Game Room</h1>
-  <div class="sub">Models play each other turn by turn — chess, tic-tac-toe, pictionary, password, wheel of fortune, hangman. The board just moves; illegal moves are allowed. The point is that nobody stalls, no request drops, and routing keeps working. Each move shows the host that served it.</div>
+  <div class="sub">A demo of the <a href="https://pypi.org/project/dyva">Dyva dynamic router</a>: different models on different servers play a vartiety of classic games. Vision systems, tool-calling, and dyva model syntax, all in real-time.</div>
 </header>
 
 <div class="top">
@@ -144,11 +172,16 @@ function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 
 // One streamed chat turn. stream:true (not false) so a big/slow model only has to
 // bound first-token, never the whole reply — same reason as the other demos.
-async function ask(model, messages, signal, onProgress, tools, think){
+async function ask(model, messages, signal, onProgress, tools, think, opts){
   // onProgress reports the phase so the UI can distinguish routing vs cold-start vs
   // thinking vs answering: {stage:'routing'|'connected'|'stream', host, model, thinking, content}.
+  // `opts` lets a turn request a bigger output window (num_ctx/num_predict/max_tokens)
+  // so a long reply — e.g. a full <svg> — isn't truncated by dyva's prompt-sized default.
   if(onProgress) onProgress({stage:'routing', host:'', model:model, thinking:'', content:''});
-  var payload = { model: model, stream: true, messages: messages, options: { temperature: 0.7 } };
+  opts = opts || {};
+  var payload = { model: model, stream: true, messages: messages,
+    options: Object.assign({ temperature: 0.7 }, opts.options || {}) };
+  if(opts.max_tokens) payload.max_tokens = opts.max_tokens;   // OpenAI-dialect output cap
   if(tools) payload.tools = tools;
   if(think === false) payload.think = false;   // "thinking" unchecked — skip reasoning to speed play
   var r = await fetch(apiBase() + '/api/chat', {
@@ -163,7 +196,13 @@ async function ask(model, messages, signal, onProgress, tools, think){
     throw new Error(em);
   }
   if(onProgress) onProgress({stage:'connected', host:host, model:used, thinking:'', content:''});
-  var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', content = '', thinking = '', tcalls = [];
+  var reader = r.body.getReader(), dec = new TextDecoder(), buf = '', content = '', thinking = '';
+  // Streamed tool_calls arrive as FRAGMENTS — a call's function.arguments (e.g. a
+  // big <svg> string) is split across many chunks. Merge by index, concatenating
+  // arguments; a fragment with a name starts a call, one with neither name nor
+  // index continues the current one. (Dedup-by-name kept only the first fragment,
+  // which truncated any tool that actually takes arguments.)
+  var toolAcc = [], _ti = -1, doneReason = '';
   while(true){
     var chunk = await reader.read();
     if(chunk.done) break;
@@ -172,19 +211,32 @@ async function ask(model, messages, signal, onProgress, tools, think){
     while((nl = buf.indexOf('\n')) >= 0){
       var line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
       if(!line) continue;
-      try{ var d = JSON.parse(line); if(d.message){
+      try{ var d = JSON.parse(line);
+        if(d.done_reason) doneReason = d.done_reason;   // 'length' = truncated (cut off), 'stop' = complete
+        if(d.message){
         if(d.message.thinking) thinking += d.message.thinking;
         if(d.message.content) content += d.message.content;
-        if(d.message.tool_calls) d.message.tool_calls.forEach(function(tc){ tcalls.push(tc); });
+        if(d.message.tool_calls) d.message.tool_calls.forEach(function(tc){
+          var fn = tc.function || {}, idx;
+          if(tc.index != null){ idx = tc.index; _ti = idx; }
+          else if(fn.name){ idx = (_ti = _ti + 1); }
+          else { idx = (_ti < 0 ? (_ti = 0) : _ti); }
+          var slot = toolAcc[idx] || (toolAcc[idx] = { id:'', function:{ name:'', arguments:'' } });
+          if(tc.id) slot.id = tc.id;
+          if(fn.name) slot.function.name = fn.name;
+          if(fn.arguments != null) slot.function.arguments +=
+            (typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments));
+        });
       } }catch(e){}
     }
-    if(onProgress) onProgress({stage:'stream', host:host, model:used, thinking:thinking, content:content});
+    if(onProgress){
+      var ta = '';
+      for(var _k = 0; _k < toolAcc.length; _k++){ if(toolAcc[_k]){ ta = toolAcc[_k].function.arguments || ''; break; } }
+      onProgress({stage:'stream', host:host, model:used, thinking:thinking, content:content, toolArgs:ta});
+    }
   }
-  // dedupe streamed tool-call fragments by function name (our tools take no args, so
-  // the name is enough to identify a call) so we don't run the same one twice
-  var seen = {}, toolCalls = [];
-  tcalls.forEach(function(tc){ var nm = tc && tc.function && tc.function.name; if(nm && !seen[nm]){ seen[nm] = 1; toolCalls.push(tc); } });
-  return { content: content, used: used, host: host, thinking: thinking, tool_calls: toolCalls };
+  var toolCalls = toolAcc.filter(function(t){ return t && t.function && t.function.name; });
+  return { content: content, used: used, host: host, thinking: thinking, tool_calls: toolCalls, doneReason: doneReason };
 }
 
 function pick(a){ return a[Math.floor(Math.random() * a.length)]; }
@@ -194,6 +246,29 @@ function pick(a){ return a[Math.floor(Math.random() * a.length)]; }
 function shuffle(a){ a = a.slice(); for(var i = a.length - 1; i > 0; i--){ var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; } return a; }
 function esc(s){ return String(s).replace(/[&<>]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; }); }
 function extractSvg(t){ var m = String(t||'').match(/<svg[\s\S]*?<\/svg>/i); return m ? m[0] : null; }
+// A best-effort renderable snapshot of the SVG streamed SO FAR, for the live
+// "drawing appears as it generates" preview. The markup arrives either as raw
+// content (freeform) or inside the draw_svg tool's arguments (partial JSON like
+// {"svg":"<svg ...). We pull the <svg-onward, close the root so a mid-stream
+// fragment still renders, and strip scripts/handlers since it goes to innerHTML.
+function partialSvg(content, toolArgs, thinking){
+  var s = String(content || '');
+  if(!/<svg/i.test(s) && toolArgs){
+    var m = String(toolArgs).match(/"svg"\s*:\s*"/);
+    if(m){
+      var tail = String(toolArgs).slice(m.index + m[0].length);
+      try{ s = JSON.parse('"' + tail.replace(/"[^"]*$/, '').replace(/\\?$/, '') + '"'); }
+      catch(e){ s = tail.replace(/\\"/g,'"').replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\\\/g,'\\'); }
+    }
+  }
+  if(!/<svg/i.test(s) && thinking) s = String(thinking);   // a reasoning model draws in its thinking
+  var i = s.search(/<svg/i);
+  if(i < 0) return '';
+  s = s.slice(i);
+  s = s.replace(/<script[\s\S]*?(<\/script>|$)/gi, '').replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  if(!/<\/svg>/i.test(s)) s += '</svg>';   // close the root so a partial still paints
+  return s;
+}
 // Drawers routinely ignore "don't write the words" and label the answer right on
 // the picture — which the vision guesser then just READS. Enforce the rule ourselves
 // by stripping every text-bearing element before the drawing is shown or rasterized.
@@ -448,35 +523,40 @@ var PICT_THINGS = [
   ['a farmer','farmer'],['a scientist','scientist'],
   ['a cat','cat'],['a rabbit','rabbit'],['a horse','horse'],['a goat','goat'],['a dog','dog'],['a pig','pig'],
   ['a bat','bat'],['a bug','bug'],['a bee','bee'],['a bird','bird'],['a whale','whale'],['a chicken','chicken'],
+  ['a mime','mime'],['a frenchman', 'frenchman'],
   ['a clam','clam'],['a centipede','centipede'],['a lizard','lizard'],['a squid','squid'],['a hippo','hippo'],
-  ['a turtle','turtle'],['a snail','snail'],['a lobster','lobster'],['a starfish','starfish'],['a zebra','zebra'],
+  ['a turtle','turtle'],['a snail','snail'],['a lobster','lobster'],['a masked serial killer','killer'],['a starfish','starfish'],['a zebra','zebra'],
   ['a spider','spider'],['a sheep','sheep'],['a porcupine','porcupine'],['a pelican','pelican'],
   ['a jellyfish','jellyfish'],['a mouse','mouse'],['a moose','moose'],['a platypus','platypus'],
   ['an elephant','elephant'],
-  ['bigfoot','bigfoot'],['a caveman','caveman'],['a doctor','doctor'],['a mummy','mummy'] ];
+  ['a traditional chinese peasant','peasant'],['michael jackson','michael jackson'],['a doctor','doctor'],['a mummy','mummy'],
+  ['an occult symbol','occult'] ];
 var PICT_ACTIVITIES = [
-  ['drinking tea','tea'],['playing tennis','tennis'],['taking a nap','nap'],['singing at church','church'],
-  ['riding a bike','bike'],['eating pizza','pizza'],['dancing ballet','ballet'],['playing guitar','guitar'],
+  ['drinking tea','tea'],['playing tennis','tennis'],['doing archery','archery'],['asleep at church','nap'],['singing at church','church'],
+  ['jousting','jousting'],
+  ['riding a bike','bike'],['eating pizza','pizza'],['dancing ballet','ballet'],['playing accordion','accordion'],
   ['reading a book','book'],['flying a kite','kite'],['brushing teeth','teeth'],['surfing a wave','surf'],
   ['baking a cake','cake'],['playing chess','chess'],['watering plants','plant'],['juggling balls','juggl'],
   ['painting a picture','paint'],['climbing a ladder','ladder'],['doing karate','karate'],['fishing','fish'],
   ['skateboarding','skate'],['blowing bubbles','bubble'],['playing drums','drum'],['walking a dog','dog'],
-  ['mowing the lawn','lawn'],['praying','pray'],['getting married','married'],
-  ['sleeping','sleep'],
-  ['taking a bath','bath'],['driving a car','car'],['on an airplane','airplane'],['on an escalator','escalator'],
+  ['mowing the lawn','lawn'],['posing high fashion','fashion'],['modelling for art','modelling'],['getting married in vegas','married'],
+  ['sleeping through an earthquake','sleep'],
+  ['taking a luxurious bubble bath','bath'],['driving a car','car'],['in an airplane','airplane'],['on an escalator','escalator'],
   ['on a computer','computer'],['in a hot air balloon','balloon'],['lifting weights','weights'],
-  ['at a bar','bar'],['camping','camping'],['walking on the moon','moon'],
-  ['robbing a bank','robbing'],['parachuting','parachuting'],['protesting','protesting'],
-  ['at a disco','disco'],['playing basketball','basketball'],['golfing','golfing'],
+  ['at a bar','bar'],['camping','camping'],['drunk on the moon','moon'],
+  ['robbing a bank','robbing'],['parachuting into a volcano','parachuting'],['protesting','protesting'],
+  ['rioting and looting', 'rioting'],
+  ['at a 1970s disco','disco'],['playing basketball','basketball'],['miniature golfing','golfing'],
   ['riding a rollercoaster','rollercoaster'],['applying makeup','makeup'],
   ['at the beach','beach'],['doing laundry','laundry'],['grocery shopping','grocer'],
   ['gardening','garden'],['running','running'],['watching television','televis'],
-  ['doing magic','magic'] ];
+  ['doing magic','magic'],['shakespearean acting','shakespear'],['climbing a mountain','mountain'],
+  ['boxing someone','boxing'],['breaking out of prison','prison'],['gambling at a casino','casino'] ];
 var PICT_ROUNDS = 10;      // a game is 10 rounds (a new secret each round)
 var PICT_ATTEMPTS = 5;    // up to 5 guesses; points start at 5 and drop 1 each — 3x5 = 15 max, collaborative
 
 var pictionary = {
-  label: 'Pictionary', players: ['qwen3.8','gemma4','llama'],   // P1 draws, P2 guesses, P3 judges
+  label: 'Pictionary', players: ['qwen3.8','gemma4','glm'], roles: ['artist','guesser','judge'],   // P1 draws, P2 guesses, P3 judges
   newState: function(){
     var st = { round: 0, score: 0, drawings: [], over: false, result: '' };   // drawings persist across ALL rounds
     pictionary._newRound(st);
@@ -493,7 +573,9 @@ var pictionary = {
     st.phase = 'draw'; st.png = ''; st.feedback = ''; st.hint = ''; st.coach = ''; st.focus = '';
     st.guesses = [];
     st.pendingGuess = ''; st.pendingValue = 0;   // a guess awaiting the judge's yes/no
-    st.rejected = ''; st.showOptions = false;   // last rejected guess; whether the vocab list was revealed
+    st.rejected = ''; st.showOptions = false; st.verdict = '';   // last rejected guess; vocab shown; last judge rating
+    st.roundStart = Date.now();   // cosmetic per-round timer origin
+    st._svgTool = ''; st._svgPart = '';   // draw_svg tool output for the current drawer turn
     st.attempt = 0; st.turns = 0;   // attempt = wrong guesses this round; value = ATTEMPTS - attempt
     st.drawings.push({ marker: true, round: st.round, secret: st.secret.full });   // round divider in the reel
   },
@@ -511,8 +593,7 @@ var pictionary = {
     // Before Play: DON'T reveal a random secret (picking one here is what made the
     // puzzle appear to "change" every time an input was edited and Play re-rolled it).
     el.className = 'board pict';
-    el.innerHTML = '<div class="answer">🔑 solution: <b>hidden until you press Play</b></div>'
-      + '<div class="reel"><div class="shot"><div class="pic"><span class="wait">press Play to start a round</span></div></div></div>';
+    el.innerHTML = '<div class="reel"><div class="shot"><div class="pic"><span class="wait">press Play to start a round</span></div></div></div>';
   },
   // the reel timeline is a mix of round markers, drawings, and the guesser's
   // guesses/hint-requests (pushed by _say) — so the back-and-forth shows in order.
@@ -540,10 +621,10 @@ var pictionary = {
     });
     if(!st.over && st.phase === 'draw'){
       if(!cur){ cur = { round: st.round, secret: st.secret.full, shots: [] }; cards.push(cur); }
-      cur.shots.push('<div class="shot pending"><div class="cap">drawing…</div><div class="pic"><span class="wait">drawing…</span></div></div>');
+      cur.shots.push('<div class="shot pending"><div class="pic"></div></div>');
     }
     var html = cards.map(function(c){
-      return '<div class="card"><div class="rdhd">round ' + c.round + ' · <b>' + esc(c.secret) + '</b></div>' + c.shots.join('') + '</div>';
+      return '<div class="card"><div class="rdhd">Round ' + c.round + '! <b>' + esc(c.secret) + '</b></div>' + c.shots.join('') + '</div>';
     }).join('');
     return '<div class="reel">' + html + '</div>';
   },
@@ -551,14 +632,32 @@ var pictionary = {
     if(player !== 0) return;                    // only the DRAWER paints the pending slot
     var pic = panel.board.querySelector('.reel .pending .pic');
     if(!pic) return;                            // no round in progress (e.g. guessing)
-    // STABLE one-liner only — streaming the thinking here jittered the board; the
-    // live thinking runs on the status line below instead.
-    var msg = ev.stage === 'routing' ? 'routing to a host…'
-            : (!ev.thinking && !ev.content) ? 'connected' + (ev.host ? ' · ' + ev.host : '') + ' — warming up…'
-            : 'drawing on ' + (ev.host || '…') + '…';
-    pic.innerHTML = '<span class="wait">' + esc(msg) + '</span>';
+    // Once the <svg> starts streaming (raw or via the draw_svg tool args), paint the
+    // partial drawing live so it builds up in the slot instead of a "waiting" label.
+    // paint the drawing as it streams in; before that, leave the slot empty — the
+    // "Round N!" banner above it carries the state (no "drawing…" text needed).
+    var live = (ev.stage === 'stream') ? partialSvg(ev.content, ev.toolArgs, ev.thinking) : '';
+    if(live) pic.innerHTML = live;
     var reel = panel.board.querySelector('.reel');   // only auto-scroll if already at the bottom
     if(reel && reel.scrollHeight - reel.scrollTop - reel.clientHeight < 60) reel.scrollTop = reel.scrollHeight;
+  },
+  _scoreboard: function(st){
+    // arcade-style HUD strip: Round X/N | Score | worth-of-next-guess
+    return '<div class="scoreboard">'
+      + '<div class="sb-hud">'
+      +   '<span>Round: <b>' + st.round + '</b></span>'
+      +   '<span>Score: <b>' + st.score + '</b></span>'
+      +   '<span><b>' + pictionary._value(st) + '</b> pts</span>'
+      + '</div>'
+      + '<div class="sb-row2">'
+      +   '<span class="sb-answer"><b>' + esc(st.secret.full) + '</b></span>'
+      +   '<span class="sb-timer">' + pictionary._clock(st) + '</span>'
+      + '</div>'
+      + '</div>';
+  },
+  _clock: function(st){   // cosmetic per-round stopwatch (means nothing, looks cool)
+    var s = Math.max(0, Math.floor((Date.now() - (st.roundStart || Date.now())) / 1000));
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
   },
   render: function(st, el){
     el.className = 'board pict';
@@ -567,36 +666,75 @@ var pictionary = {
     var old = el.querySelector('.reel');
     var atBottom = !old || (old.scrollHeight - old.scrollTop - old.clientHeight < 40);
     var prevTop = old ? old.scrollTop : 0;
-    el.innerHTML = '<div class="answer">🔑 <b>' + esc(st.secret.full) + '</b> · round ' + st.round + '/' + PICT_ROUNDS
-        + ' · score ' + st.score + '/' + (PICT_ROUNDS * PICT_ATTEMPTS) + ' · this guess worth ' + pictionary._value(st) + '</div>'
+    el.innerHTML = pictionary._scoreboard(st)
       + pictionary._reel(st)
       + (st.hint ? '<div class="hint">↳ ' + esc(st.hint) + '</div>' : '');
     var reel = el.querySelector('.reel'); if(reel) reel.scrollTop = atBottom ? reel.scrollHeight : prevTop;
   },
+  tools: null,   // set per-turn: only the DRAW phase offers draw_svg (below)
+  _drawTools: [{
+    type: 'function',
+    function: {
+      name: 'draw_svg',
+      description: 'Submit your Pictionary drawing as one complete inline <svg> element '
+        + '(with a viewBox; no text labels, external images, scripts or fonts).',
+      parameters: { type: 'object', properties: {
+        svg: { type: 'string', description: 'The complete <svg>...</svg> markup for the drawing.' },
+        part: { type: 'string', enum: ['object', 'activity', 'full'],
+                description: 'Draw only the object, only the activity, or the full scene (default full).' }
+      }, required: ['svg'] }
+    }
+  }],
+  runTool: function(name, argsRaw, st){
+    var a = {}; try{ a = (typeof argsRaw === 'string') ? JSON.parse(argsRaw) : (argsRaw || {}); }catch(e){}
+    // weak models sometimes double-encode the whole arg object as a JSON string
+    if(typeof a === 'string'){ try{ a = JSON.parse(a); }catch(e){ a = { svg: a }; } }
+    if(name === 'draw_svg'){
+      st._svgTool = String((a && a.svg) || '');
+      st._svgPart = String((a && a.part) || '').toLowerCase();
+      st._stopAsk = true;   // the drawing concludes this ask — don't re-prompt
+      return 'ok';
+    }
+    st._stopAsk = false; return 'unknown tool: ' + name;
+  },
   turn: function(st){
     if(st.phase === 'draw'){
-      return { player: 0, messages: [
+      // A full <svg> is a LONG output; dyva sizes num_ctx from the (tiny) prompt, so
+      // without this the drawing overruns the window and the stream cuts before
+      // </svg> — a guaranteed truncation. Ask for real output room (both dialects).
+      return { player: 0, think: false, tools: pictionary._drawTools,
+        options: { num_ctx: 8192, num_predict: -1 }, max_tokens: 4096, messages: [
         {role:'system', content:'You are the DRAWER in a COLLABORATIVE game of Pictionary — you and the '
-          + 'guesser are on the SAME team and you WANT them to get it. The secret answer is: "' + st.secret.full
-          + '". The guesser does NOT know it, so do NOT write any of those words (or letters spelling them) '
-          + 'in the image. Draw the secret as ONE complete, self-contained <svg> element (viewBox; no external '
-          + 'images/scripts/fonts; no text labels). When you are told the guesser is close, keep what already '
-          + 'worked and redraw to EMPHASIZE the part they are missing (add the telling detail, make it bigger '
-          + 'or clearer). If the guesser is stuck, you MAY break the clue down: start your reply with a single '
-          + 'line "OBJECT ONLY" (draw just the thing) or "ACTIVITY ONLY" (draw just the activity), then the '
-          + '<svg> of only that component. Otherwise reply with ONLY the <svg> and nothing else.'},
+          + 'guesser are on the SAME team and you WANT them to get it. The secret is a SUBJECT doing an ACTIVITY. '
+          + 'OBJECT (what to draw): "' + st.secret.thing + '". ACTIVITY (what it is doing): "' + st.secret.activity
+          + '". So draw "' + st.secret.full + '". The guesser does NOT know it, so do NOT write any of those words (or letters spelling them) '
+          + 'in the image. Submit your drawing by calling the draw_svg tool with ONE complete, self-contained '
+          + '<svg> element (viewBox; no external images/scripts/fonts; no text labels). When you are told the '
+          + 'guesser is close, keep what already worked and redraw to EMPHASIZE the part they are missing (add '
+          + 'the telling detail, make it bigger or clearer). If the guesser is stuck you MAY break it down: set '
+          + 'the tool\'s "part" to "object" (just the thing) or "activity" (just the action). If you cannot call '
+          + 'the tool, reply with ONLY the raw <svg> element and nothing else.'},
         {role:'user', content: st.feedback || 'Draw it.'}
       ]};
     }
     if(st.phase === 'judge'){
       // an IMPARTIAL third model rules — the drawer can't, since collaborative scoring
       // gives it a reason to accept anything.
+      // Grade leniency by how far into the game we are — later rounds get the
+      // benefit of the doubt so the match doesn't grind out on near-misses.
+      var _prog = st.round / PICT_ROUNDS;
+      var lenience = _prog >= 0.66
+          ? ' This is a LATE round — be LENIENT: when a part is borderline between "close" and "right", give it "right".'
+          : _prog >= 0.33
+          ? ' Be moderately forgiving on a borderline part.'
+          : ' Judge strictly.';
       return { player: 2, messages: [
-        {role:'system', content:'You are an IMPARTIAL JUDGE in Pictionary. The secret answer is "' + st.secret.full
-          + '". A player guessed "' + st.pendingGuess + '". Accept it ONLY if it clearly means the same thing — a '
-          + 'paraphrase or a partial that names both the subject and the activity counts (e.g. "a mouse mowing" for '
-          + '"a mouse mowing the lawn"); reject it if it misses the subject or the activity, or is too vague.'},
-        {role:'user', content:'Is "' + st.pendingGuess + '" close enough to the secret? (yes/no)'}
+        {role:'system', content:'You are an IMPARTIAL JUDGE in Pictionary. The secret is a SUBJECT doing an '
+          + 'ACTIVITY. SUBJECT: "' + st.secret.thing + '". ACTIVITY: "' + st.secret.activity + '". Rate the guess '
+          + 'on EACH part SEPARATELY as one of: right (correct, or a clear synonym/paraphrase), close (related or '
+          + 'adjacent but not it), or wrong (missing or unrelated).' + lenience + ' Reply with EXACTLY one line in '
+          + 'this format and nothing else: object: <right|close|wrong>, activity: <right|close|wrong>'},
+        {role:'user', content:'The guess is "' + st.pendingGuess + '". Rate the object and the activity.'}
       ]};
     }
     if(st.phase === 'choose'){
@@ -608,7 +746,8 @@ var pictionary = {
                   '"draw only the activity" — draw ONLY the action',
                   '"a different angle" — same secret, drawn from another view'];
       if(!st.showOptions) opts.push('"see options" — list every possible subject and activity to pick from');
-      var cm = {role:'user', content: 'The judge rejected your guess "' + st.rejected + '" as not close enough. '
+      var cm = {role:'user', content: 'The judge rated your guess "' + st.rejected + '" — '
+        + (st.verdict || 'not close enough') + '. (Use that: work on the part rated "close" or "wrong".) '
         + 'You do NOT guess now — choose ONE kind of help and reply with just that phrase, verbatim:\n'
         + opts.join('\n')};
       if(st.png) cm.images = [st.png];
@@ -626,6 +765,8 @@ var pictionary = {
     if(st.guesses.length) parts.push('Your earlier guesses (all still wrong): '
       + st.guesses.map(function(x){ return '"' + x + '"'; }).join(', ')
       + ' — refine from the drawing, do not repeat them.');
+    if(st.verdict) parts.push('The judge rated your last guess — ' + st.verdict
+      + '. Keep the part rated "right"; change the part rated "close" or "wrong".');
     if(st.showOptions) parts.push('The answer is exactly ONE of these subjects doing ONE of these activities.\n'
       + 'SUBJECTS: ' + PICT_THINGS.map(function(x){ return x[0]; }).join(', ') + '\n'
       + 'ACTIVITIES: ' + PICT_ACTIVITIES.map(function(x){ return x[0]; }).join(', '));
@@ -646,21 +787,27 @@ var pictionary = {
   apply: async function(st, text, player, res){
     st.turns++;
     if(st.turns > 24){ return pictionary._endRound(st, 'stalled — it was ' + st.secret.full); }   // safety vs a hint loop
-    if(st.phase === 'judge'){                            // the DRAWER rules on the pending guess
+    if(st.phase === 'judge'){                            // the impartial judge rates the pending guess
       var jt = String(text||'').toLowerCase();
-      var accept = /\byes\b|\baccept|\bcorrect\b|close enough|\bsure\b/.test(jt) && !/\bno\b|\breject/.test(jt);
-      if(accept){ return pictionary._award(st); }
-      st.attempt++;                                       // rejected — costs a point
+      var rate = function(part){ var m = jt.match(new RegExp(part + '\\s*[:\\-]?\\s*(right|close|wrong)')); return m ? m[1] : ''; };
+      var obj = rate('object') || rate('subject');
+      var act = rate('activity') || rate('action');
+      if(!obj && !act){                                   // judge ignored the format — fall back to accept/reject
+        var yes = /\byes\b|\baccept|\bcorrect\b|close enough|\bsure\b/.test(jt) && !/\bno\b|\breject/.test(jt);
+        obj = act = yes ? 'right' : 'wrong';
+      }
+      obj = obj || 'wrong'; act = act || 'wrong';
+      st.verdict = 'object ' + obj + ', activity ' + act;   // granular, shown to guesser + drawer
+      if(obj === 'right' && act === 'right'){ return pictionary._award(st); }   // both nailed → win
+      st.attempt++;                                       // anything short of both-right costs a point
+      pictionary._say(st, '✗ "' + st.pendingGuess + '" — ' + st.verdict, 'judge');
       if(st.attempt >= PICT_ATTEMPTS){
-        pictionary._say(st, '✗ "' + st.pendingGuess + '" — rejected', 'wrong');
         return pictionary._endRound(st, 'out of guesses — it was ' + st.secret.full);
       }
-      pictionary._say(st, '✗ "' + st.pendingGuess + '" — not close enough', 'wrong');
       // Hand control to the GUESSER: they pick what help they want next (redraw,
-      // object/activity only, a reveal, or the vocabulary list) and THAT drives the
-      // drawer — so those options actually get used instead of always re-guessing.
+      // object/activity only, or the vocabulary list) and THAT drives the drawer.
       st.phase = 'choose'; st.coach = ''; st.hint = ''; st.rejected = st.pendingGuess;
-      return {note: 'the judge rejected "' + st.pendingGuess + '" as not close enough — asking the guesser what they want'};
+      return {note: 'judge: ' + st.verdict + ' — asking the guesser what they want'};
     }
     if(st.phase === 'choose'){                           // guesser picked what help they want next
       var c = String(text||'').toLowerCase();
@@ -691,11 +838,29 @@ var pictionary = {
       st.feedback = 'The judge rejected "' + st.rejected + '" as not close enough. Redraw the secret more clearly.';
       pictionary._say(st, '🤔 "draw the puzzle again"', 'hint'); return {note:'choice: redraw'};
     }
-    if(player === 0){                                    // drawer produced an SVG
+    if(player === 0){                                    // drawer produced an SVG (draw_svg tool, or raw text)
+      // Look wherever the SVG landed: the draw_svg tool arg, the content, or — for a
+      // reasoning model that ignored "no thinking" — inside the thinking tokens.
+      // extractSvg only returns a CLOSED <svg>…</svg>; a raw tool-arg can be a
+      // truncated "<svg…" with no closing tag, so validate completeness explicitly.
+      var svg = st._svgTool || extractSvg(text) || extractSvg(res && res.thinking);
+      var part = st._svgPart; st._svgTool = ''; st._svgPart = '';   // consume; don't leak into the next turn
+      if(!svg || !/<\/svg>/i.test(svg)){
+        // TRUNCATED (the drawing was cut off) vs ABSENT (no <svg> at all) — surface
+        // which, so it isn't silently "no svg". A 'length' finish, or an opened-but-
+        // never-closed <svg anywhere in the output, means it was cut off.
+        var raw = String(svg || '') + ' ' + String((res && (res.content || res.thinking)) || '');
+        var truncated = (res && res.doneReason === 'length') || (/<svg/i.test(raw) && !/<\/svg>/i.test(raw));
+        if(truncated){
+          st.feedback = 'Your <svg> was cut off before it finished — draw something SIMPLER so the whole <svg> fits.';
+          return {note: 'truncated svg (output cut off) — redraw simpler'};
+        }
+        st.feedback = 'Call draw_svg with ONE complete <svg> element (or reply with just the raw <svg>).';
+        return {note:'no svg — redraw'};
+      }
+      // focus: the tool\'s "part", else an "OBJECT ONLY"/"ACTIVITY ONLY" marker in freeform text
       var fm = String(text||'').match(/\b(object|activity)\s+only\b/i);
-      st.focus = fm ? fm[1].toLowerCase() : '';          // drawer may isolate one component
-      var svg = extractSvg(text);
-      if(!svg){ st.feedback = 'Reply with ONE complete <svg> element and nothing else.'; return {note:'no svg — redraw'}; }
+      st.focus = (part === 'object' || part === 'activity') ? part : (fm ? fm[1].toLowerCase() : '');
       svg = stripText(svg);   // never let a written-in label reach the guesser
       try{ st.png = (await rasterize(svg)).split(',')[1]; }   // strip data: prefix for ollama
       catch(e){ st.feedback = 'That drawing did not render — draw a simpler, valid <svg>.'; return {note:'render failed — redraw'}; }
@@ -1065,20 +1230,26 @@ var wof = {
 };
 
 // ---- runner --------------------------------------------------------------
-var GAMES = [chess, ttt, pictionary, password, wof, hangman];
+var GAMES = [pictionary, chess, ttt, password, wof, hangman];
 var container = document.getElementById('games');
 
 GAMES.forEach(function(game){
   var el = document.createElement('div');
   el.className = 'game';
-  // one model-query input per player (2 for most games, 4 for password's two teams)
+  // one model-query input per player (2 for most games, 4 for password's two teams).
+  // A game may name its roles (e.g. Pictionary: artist / guesser / judge); else "player N".
   var inputs = game.players.map(function(q, i){
-    return '<input class="p' + (i+1) + '" value="' + q + '" placeholder="player ' + (i+1) + '" title="player ' + (i+1) + '">';
+    var role = (game.roles && game.roles[i]) || ('player ' + (i+1));
+    // label ABOVE the input — the placeholder is hidden once the box has a value,
+    // and the role (artist/guesser/judge) is what communicates who's who.
+    return '<div class="pinput"><span class="plabel">' + esc(role) + '</span>'
+      + '<input class="p' + (i+1) + '" value="' + q + '" title="' + esc(role) + '"></div>';
   }).join('');
   el.innerHTML =
     '<h2>' + game.label + ' <label class="thinktoggle"><input type="checkbox" class="thinkbox" checked> thinking</label></h2>' +
     '<div class="controls">' + inputs + '<button class="play">Play</button></div>' +
     '<div class="board"></div>' +
+    '<div class="thinkrow"></div>' +
     '<div class="status"></div>' +
     '<div class="log"></div>';
   container.appendChild(el);
@@ -1114,6 +1285,12 @@ async function runGame(panel){
   panel.play.textContent = 'Stop'; panel.play.classList.add('stop'); panel.log.innerHTML = '';
   g.render(st, panel.board);
   var n = 0;
+  // cosmetic live ticker: keep the scoreboard's per-round timer counting between
+  // moves (render only fires per move). Re-finds the element since render rebuilds it.
+  var _timer = setInterval(function(){
+    var el = panel.board.querySelector('.sb-timer');
+    if(el && st.roundStart){ var s = Math.floor((Date.now() - st.roundStart) / 1000); el.textContent = Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); }
+  }, 1000);
   try{
     while(!st.over && !panel.ac.signal.aborted){
       var t = g.turn(st);
@@ -1126,9 +1303,14 @@ async function runGame(panel){
           setStatus(panel, 'move ' + n + ' · P' + (t.player+1) + ' (' + model + ') · routing…');
         } else {
           var who = 'P' + (t.player+1) + ' ' + (ev.model||model).split('/').pop() + (ev.host ? ' @ ' + ev.host : '');
-          var tail = ev.thinking ? ' · thinking: ' + ev.thinking.replace(/\s+/g,' ').slice(-90)
-                   : (ev.content ? ' · answering…' : ' · connected (warming up)…');
-          setStatus(panel, 'move ' + n + ' · ' + who + tail);
+          setStatus(panel, 'move ' + n + ' · ' + who + (ev.content ? ' · answering…' : ev.thinking ? ' · thinking…' : ' · connected (warming up)…'));
+        }
+        // thinking tokens fly by on their own single-line row (newest kept in view,
+        // older scrolled off — never wraps or overflows the panel)
+        var think = panel.el.querySelector('.thinkrow');
+        if(think){
+          think.textContent = ev.thinking ? ev.thinking.replace(/\s+/g,' ').slice(-600) : '';
+          think.scrollLeft = think.scrollWidth;
         }
         if(g.onProgress) g.onProgress(panel, ev, t.player);
       };
@@ -1137,8 +1319,12 @@ async function runGame(panel){
         var msgs = t.messages;
         var tools = t.tools || g.tools || null;   // per-turn tools (a game may vary them by state) else the game default
         var _m = (panel.players[t.player] || panel.players[0]).value.trim(); if(_m) model = _m;   // live: pick up input edits
-        var think = !panel.thinkbox || panel.thinkbox.checked;   // live: "thinking" checkbox
-        res = await ask(model, msgs, panel.ac.signal, onProg, tools, think);
+        // per-turn override (t.think) wins — the drawer forces thinking OFF so the
+        // model emits the SVG directly instead of burying it in reasoning tokens;
+        // otherwise the panel's "thinking" checkbox decides.
+        var think = (t.think != null) ? t.think : (!panel.thinkbox || panel.thinkbox.checked);
+        var askOpts = { options: t.options, max_tokens: t.max_tokens };
+        res = await ask(model, msgs, panel.ac.signal, onProg, tools, think, askOpts);
         // tool loop: run any tool calls, feed results back, re-ask until the model
         // answers with content (capped so it can't spin) — exercises dyva's tool path.
         var tl = 0;
@@ -1152,7 +1338,7 @@ async function runGame(panel){
           });
           if(st && st._stopAsk){ st._stopAsk = false; break; }   // a game action concluded this turn's ask
           var _m2 = (panel.players[t.player] || panel.players[0]).value.trim(); if(_m2) model = _m2;   // live
-          res = await ask(model, msgs, panel.ac.signal, onProg, tools, !panel.thinkbox || panel.thinkbox.checked);
+          res = await ask(model, msgs, panel.ac.signal, onProg, tools, think, askOpts);
         }
       }catch(e){
         if(e.name === 'AbortError') break;
@@ -1171,6 +1357,7 @@ async function runGame(panel){
     if(panel.ac.signal.aborted) setStatus(panel, 'stopped after ' + n + ' moves');
     else if(st.over) setStatus(panel, 'game over — ' + st.result + ' (' + n + ' moves)');
   }finally{
+    clearInterval(_timer);
     panel.play.textContent = 'Play'; panel.play.classList.remove('stop'); panel.ac = null;
     setTurn(panel, -1);   // clear the turn highlight when the game ends/stops
   }

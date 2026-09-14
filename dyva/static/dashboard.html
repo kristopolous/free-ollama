@@ -901,7 +901,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <img src="dyva.avif" alt="" width="56" height="56">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
-<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span id="hostsPill" title="servers - loaded at __HOSTS_LOADED__" style="cursor:pointer"> <span id="hostsIcon">💻</span> <span id="serverCount">__SERVER_COUNT__</span> </span>&middot;<span title="model count"> 🤖 <span id="modelCount">__MODEL_COUNT__</span> </span>&middot;<span title="version"><a title="guide" href="guide" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
+<p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span id="hostsPill" title="servers - loaded at __HOSTS_LOADED__" style="cursor:pointer"> <span id="hostsIcon">💻</span> <span id="serverCount">__SERVER_COUNT__</span> </span>&middot;<span title="version"><a title="guide" href="guide" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
 </p>
 </div>
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾<span id="actBadge" class="act-badge" hidden></span></button>
@@ -1076,9 +1076,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="field generate-only">
 <label for="sdModel">Image model</label>
 <input id="sdModel" type="text" list="sdModels" placeholder="type or select an image model..." autocomplete="off">
-<datalist id="sdModels">
-__SD_MODELS__
-</datalist>
+<datalist id="sdModels"></datalist>
 </div>
 <div class="field edit-only">
 <label for="editModel">Edit model</label>
@@ -1436,8 +1434,13 @@ function refreshListsNow(){fetch('dashboard-data').then(function(r){return r.jso
 // changes (e.g. a :test-all sweep) rebuild each visible bar in place — cheap, and
 // no list rebuild/scroll-jump like a full renderModels would cause.
 function refreshModelBars(){
-  var items=document.querySelectorAll('.model-item[data-name]');
-  for(var i=0;i<items.length;i++){var mid=items[i].getAttribute('data-name');var old=items[i].querySelector('.model-bar');if(old)old.replaceWith(makeModelBar(mid));}
+  // Bars read the per-model aggregates (modelAgg), which come from dashboard-models
+  // — so refresh those counts (small now, ETag-304 when unchanged) and repaint.
+  fetch('dashboard-models').then(function(r){return r.json()}).then(function(mv){
+    (mv.models||[]).forEach(function(m){if(m.id)modelAgg[m.id]={count:m.count||0,good:m.good||0,bad:m.bad||0}});
+    var items=document.querySelectorAll('.model-item[data-name]');
+    for(var i=0;i<items.length;i++){var mid=items[i].getAttribute('data-name');var old=items[i].querySelector('.model-bar');if(old)old.replaceWith(makeModelBar(mid));}
+  }).catch(function(){});
 }
 function onActivityMessage(e){try{if(paused)return;var d=JSON.parse(e.data);if(!d.message)return;
   // We deliberately do NOT refetch the host lists / model-bar counts on live events.
@@ -1475,14 +1478,13 @@ document.getElementById('activityBtn').addEventListener('click',function(e){e.st
   var pill=document.getElementById('hostsPill');if(!pill)return;
   pill.addEventListener('click',function(){
     if(pill._busy)return;pill._busy=true;
-    var sc=document.getElementById('serverCount'),mc=document.getElementById('modelCount'),
+    var sc=document.getElementById('serverCount'),
         ic=document.getElementById('hostsIcon');
     // Indicate the reload by swapping the emoji (💻 → 🚚), not by replacing the
     // number — changing the count's width shifts the header and reads as a glitch.
     if(ic)ic.textContent='🚚';
     fetch('reload-hosts',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
-      if(sc)sc.textContent=d.servers;
-      if(mc&&d.models!=null)mc.textContent=d.models;
+      if(sc)sc.textContent=fmtCount(d.servers);
       if(d.loaded)pill.title='servers - loaded at '+d.loaded;
     }).catch(function(){}).then(function(){if(ic)ic.textContent='💻';pill._busy=false;});
   });
@@ -1658,6 +1660,10 @@ function globSearch(query,list,key){
   var k=key||function(x){return x};
   return (list||[]).filter(function(x){return matchModel(k(x),query)});
 }
+// Thousands-separated counts for the tab badges (locale-aware). One shared
+// formatter so a 12,345-host pool doesn't read as a wall of digits.
+var NUM_FMT=new Intl.NumberFormat();
+function fmtCount(n){var v=Number(n);return isFinite(v)?NUM_FMT.format(v):String(n)}
 // The tab labels are icons now, so the count carries the meaning: how many
 // models in that pane match the current filter. The words live in title=.
 function updateModelPaneCounts(q){
@@ -1670,9 +1676,9 @@ function updateModelPaneCounts(q){
       if(matchModel(rows[i].getAttribute('data-name'),q||''))hit++;
     }
     var el=document.getElementById(t[1]);
-    if(el)el.textContent=hit;
+    if(el)el.textContent=fmtCount(hit);
     var btn=el&&el.parentNode;
-    if(btn)btn.title=hit+' '+t[2].toLowerCase()+(q?' matching \u201c'+q+'\u201d':'');
+    if(btn)btn.title=fmtCount(hit)+' '+t[2].toLowerCase()+(q?' matching \u201c'+q+'\u201d':'');
   });
 }
 function filterModels(){
@@ -1728,7 +1734,7 @@ try{var savedMpane=localStorage.getItem('dyva_modelpane');if(savedMpane&&savedMp
 var _currentModel=null;
 // Server Room data is fetched (not inlined) and rendered here, so each host
 // string lives in the payload once instead of being repeated per model.
-var modelHosts={},hostChecked={},imageModels={};
+var modelAgg={},imageModels={};   // model id -> {count,good,bad}; host lists fetched on demand
 var _good=new Set(),_bad=new Set();
 function checkedAgo(iso){if(!iso)return'';var t=Date.parse(iso);if(isNaN(t))return'';var days=Math.floor((Date.now()-t)/86400000);if(days<=0)return'today';if(days===1)return'1 day';return days+' days'}
 // A model's host coverage as a partitioned bar rather than "g/b/u" text: working
@@ -1743,9 +1749,8 @@ function modelBarWidth(total){
   return Math.min(MBAR_MAX, Math.max(MBAR_MIN, Math.round(Math.pow(total,MBAR_POW)*MBAR_K)));
 }
 function makeModelBar(mid){
-  var hs=modelHosts[mid]||[],g=0,b=0;
-  hs.forEach(function(h){if(_good.has(h+' '+mid))g++;else if(_bad.has(h+' '+mid))b++});
-  var total=hs.length,u=total-g-b,W=modelBarWidth(total);
+  var a=modelAgg[mid]||{count:0,good:0,bad:0};
+  var g=a.good||0,b=a.bad||0,total=a.count||0,u=Math.max(0,total-g-b),W=modelBarWidth(total);
   var bar=document.createElement('span');bar.className='model-bar';
   bar.title=g+' working · '+b+' failing · '+u+' untested';
   if(W<=0||total<=0)return bar;
@@ -1763,17 +1768,16 @@ function makeModelRow(mid){var d=document.createElement('div');d.className='mode
 // Sort cardinality: good + maybe_good + unknown, EXCLUDING failed/bad hosts — a model
 // served only by dead hosts shouldn't rank above a live one on raw host count.
 function modelRank(mid){
-  var hs=modelHosts[mid]||[],b=0;
-  for(var i=0;i<hs.length;i++)if(_bad.has(hs[i]+' '+mid))b++;
-  return hs.length-b;
+  var a=modelAgg[mid]||{count:0,bad:0};
+  return (a.count||0)-(a.bad||0);
 }
 
 // --- Faceted grouping of the model list ------------------------------------
 // The flat list is cardinality-sorted (most-available first), which is useful but
 // not universal — family, parameter size, and kind/provenance are other useful
 // CUTS of the same set. The group control picks one; each is a pure re-render over
-// modelHosts. Facets are derived from the model NAME (best-effort, tunable).
-var _modelFacet='count',_lastModelServers=null,_collapsedGroups={};
+// modelAgg. Facets are derived from the model NAME (best-effort, tunable).
+var _modelFacet='count',_lastModels=null,_collapsedGroups={};
 try{_modelFacet=localStorage.getItem('dyva_modelfacet')||'count';}catch(e){}
 try{(JSON.parse(localStorage.getItem('dyva_collapsed'))||[]).forEach(function(k){_collapsedGroups[k]=1;});}catch(e){}
 function toggleGroup(wrap,key){
@@ -1865,7 +1869,7 @@ function _facetGroups(ids,facet,isImage){
     var ord=function(l){if(l==='Unknown size')return 1e9;var mm=l.match(/^(\d+)/);return mm?+mm[1]:5e8;};
     labels.sort(function(a,b){return ord(a)-ord(b);});
   }else{                                        // biggest group first (host coverage)
-    var cov=function(l){var t=0;map[l].forEach(function(id){t+=(modelHosts[id]||[]).length;});return t;};
+    var cov=function(l){var t=0;map[l].forEach(function(id){t+=((modelAgg[id]||{}).count||0);});return t;};
     labels.sort(function(a,b){return cov(b)-cov(a)||(a<b?-1:1);});
   }
   return labels.map(function(l){return {label:l,ids:map[l]};});
@@ -1898,20 +1902,15 @@ function _appendModelPane(container,ids,facet,isImage){
 // up under text. Names only; unambiguous diffusion/media families.
 var _IMG_NAME_RE=/(flux|black[-_]?forest|stable[-_]?diffusion|(?:^|[-_/])sdxl|(?:^|[-_/])sd[-_.]?[0-9]|dreamshaper|juggernaut|pony|playground[-_]?v|kolors|hidream|qwen[-_]?image|hunyuan[-_]?(?:image|video|dit)|(?:^|[-_/])wan[-_.]?[0-9]|(?:^|[-_/])ltx|mochi|cogvideo|animatediff|z[-_]?image)/i;
 function _isImageModelName(m){return _IMG_NAME_RE.test(String(m));}
-function renderModels(servers){
-  _lastModelServers=servers;
-  modelHosts={};hostChecked={};imageModels={};
-  servers.forEach(function(s){
-    var host=s.host||'';if(s.checked)hostChecked[host]=s.checked;
-    var isImg=(s.service==='a1111'||s.service==='comfyui');
-    (s.models||[]).forEach(function(m){
-      if(isImg||_isImageModelName(m)){imageModels[m]=1;var t=m.indexOf(' [');if(t>=0)imageModels[m.slice(0,t)]=1}
-      if(/[:-]cloud/.test(m)||!m.length)return;
-      (modelHosts[m]=modelHosts[m]||[]).push(host);
-    });
+function renderModels(models){
+  _lastModels=models;
+  modelAgg={};imageModels={};
+  models.forEach(function(m){
+    var id=m.id||'';if(!id)return;
+    modelAgg[id]={count:m.count||0,good:m.good||0,bad:m.bad||0};
+    if(m.image||_isImageModelName(id)){imageModels[id]=1;var t=id.indexOf(' [');if(t>=0)imageModels[id.slice(0,t)]=1}
   });
-  var mid;for(mid in modelHosts)modelHosts[mid].sort();
-  var ids=Object.keys(modelHosts);
+  var ids=Object.keys(modelAgg).filter(function(id){return id.length&&!/[:-]cloud/.test(id)});
   ids.sort(function(a,b){return modelRank(b)-modelRank(a)||(a<b?-1:a>b?1:0)});
   var textIds=[],imageIds=[];
   ids.forEach(function(id){(imageModels[id]?imageIds:textIds).push(id);});
@@ -1927,7 +1926,7 @@ function renderModels(servers){
     _modelFacet=b.getAttribute('data-facet')||'count';
     try{localStorage.setItem('dyva_modelfacet',_modelFacet);}catch(err){}
     ctl.querySelectorAll('.gbtn').forEach(function(x){x.classList.toggle('active',x===b);});
-    if(_lastModelServers)renderModels(_lastModelServers);
+    if(_lastModels)renderModels(_lastModels);
   });
 })();
 // A host is an address; listing one without letting you open it is a waste of
@@ -2012,17 +2011,21 @@ function hostRow(host,model,skipHref){
 // the actual number of matches beyond what's shown.
 var _hostData={last:[],good:[],maybe:[],bad:[]};
 function _byModel(a,b){var am=a.slice(a.indexOf(' ')+1),bm=b.slice(b.indexOf(' ')+1);return am<bm?-1:am>bm?1:(a<b?-1:a>b?1:0)}
-function _setCount(id,n){var e=document.getElementById(id);if(e)e.textContent=n}
-function renderKeyPane(listId,moreId,countId,arr,q,skip){
+function _setCount(id,n){var e=document.getElementById(id);if(e)e.textContent=fmtCount(n)}
+function renderKeyPane(listId,moreId,countId,arr,q,skip,total){
   var c=document.getElementById(listId);c.innerHTML='';
   var matched=globSearch(q,arr);
   matched.slice(0,30).forEach(function(x){
     var i=x.indexOf(' '),h=x.slice(0,i),mo=x.slice(i+1);
     c.appendChild(hostRow(h,mo,skip?'skip-good?host='+encodeURIComponent(h)+'&model='+encodeURIComponent(mo):null));
   });
-  var more=matched.length-Math.min(matched.length,30);
-  document.getElementById(moreId).innerHTML=more>0?'<div class="more">... and '+more+' more</div>':'';
-  _setCount(countId,matched.length);
+  // The client only holds the most-recent slice the server sent, not the whole
+  // pool — so when unfiltered, show the server's TRUE total (matched.length would
+  // undercount). While filtering, show matches within the loaded slice.
+  var eff=(q||total==null)?matched.length:total;
+  var more=Math.max(0,eff-Math.min(matched.length,30));
+  document.getElementById(moreId).innerHTML=more>0?'<div class="more">... and '+fmtCount(more)+' more</div>':'';
+  _setCount(countId,eff);
 }
 function renderHostPanes(){
   var q=document.getElementById('modelFilter').value.trim();
@@ -2032,15 +2035,17 @@ function renderHostPanes(){
     +(q&&_hostData.last.length?'None matching the filter':'None')+'</div>'}
   else lm.forEach(function(e){last.appendChild(hostRow(e.host,e.model,'next-host?model='+encodeURIComponent(e.model||'')))});
   _setCount('cnt-last',lm.length);
-  renderKeyPane('goodList','goodMore','cnt-good',_hostData.good,q,true);
-  renderKeyPane('maybeList','maybeMore','cnt-maybe',_hostData.maybe,q,true);
-  renderKeyPane('badList','badMore','cnt-bad',_hostData.bad,q,false);
+  renderKeyPane('goodList','goodMore','cnt-good',_hostData.good,q,true,_hostData.good_count);
+  renderKeyPane('maybeList','maybeMore','cnt-maybe',_hostData.maybe,q,true,_hostData.maybe_count);
+  renderKeyPane('badList','badMore','cnt-bad',_hostData.bad,q,false,_hostData.bad_count);
 }
 function renderHostLists(d){
   _hostData.last=d.last||[];
   _hostData.good=(d.good||[]).filter(function(x){return x.indexOf(' ')>=0}).sort(_byModel);
   _hostData.maybe=(d.maybe||[]).filter(function(x){return x.indexOf(' ')>=0}).sort(_byModel);
-  _hostData.bad=(d.bad||[]).filter(function(x){return x.indexOf(' ')>=0}).sort();
+  // bad arrives most-recent-first from the server — keep that order (don't sort).
+  _hostData.bad=(d.bad||[]).filter(function(x){return x.indexOf(' ')>=0});
+  _hostData.good_count=d.good_count; _hostData.maybe_count=d.maybe_count; _hostData.bad_count=d.bad_count;
   renderHostPanes();
 }
 function agoText(secs){
@@ -2387,7 +2392,7 @@ function loadDashboard(){
     _modelKind=mv.kind||{};        // {model: 'image'|'image_edit'|'edit'|'lora'|'vision'|'video'|'music'|'audio'|'other'} — hand-curated classifier
     _RELEASE_KEYS=Object.keys(_RELEASE_DATES).sort(function(a,b){return b.length-a.length});
     _relDateMemo={};
-    renderModels(mv.servers||[]);
+    renderModels(mv.models||[]);
     renderHostLists(dv);
     hideSnack();
   }).catch(function(){
@@ -2416,15 +2421,23 @@ document.getElementById('serverroom').addEventListener('click',function(e){
 // "back" link can restore it without re-running the model click.
 function renderHostListFor(){
   var model=_currentModel;if(!model)return;
-  var hosts=(modelHosts[model]||[]).slice().sort(function(a,b){
-    var ta=hostChecked[a]?Date.parse(hostChecked[a]):NaN,tb=hostChecked[b]?Date.parse(hostChecked[b]):NaN;
-    if(isNaN(ta))ta=-Infinity;if(isNaN(tb))tb=-Infinity;
-    return tb-ta||(a<b?-1:a>b?1:0);
-  });
+  // The pane data is per-model aggregates only (no IPs). Fetch this one model's
+  // host list on demand — friction by design ("cookies on the high shelf").
   var card=document.getElementById('hostCard');card.style.display='';
-  document.getElementById('hostCardTitle').textContent=model+' ('+hosts.length+' hosts)';
-  var list=document.getElementById('hostList');list.innerHTML='';
-  hosts.forEach(function(h){var d=document.createElement('div');d.className='model-item';d.style.cursor='pointer';d.title='host details';var n=document.createElement('span');n.className='host-name';n.textContent=h;d.appendChild(n);var ago=checkedAgo(hostChecked[h]);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=hostChecked[h];d.appendChild(t)}d.addEventListener('click',function(){if(_selHostRow===d){closeHostDetailCard();return}selectHostRow(d);openHostDetail(h)});list.appendChild(d)});
+  var title=document.getElementById('hostCardTitle');title.textContent=model+' (…)';
+  var list=document.getElementById('hostList');
+  list.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">loading hosts…</div>';
+  fetch('dashboard-model-hosts?q='+encodeURIComponent(model)).then(function(r){return r.json()}).then(function(res){
+    if(_currentModel!==model)return;   // selection changed while the fetch was in flight
+    var hosts=(res.hosts||[]).slice().sort(function(a,b){
+      var ta=a.checked?Date.parse(a.checked):NaN,tb=b.checked?Date.parse(b.checked):NaN;
+      if(isNaN(ta))ta=-Infinity;if(isNaN(tb))tb=-Infinity;
+      return tb-ta||(a.host<b.host?-1:a.host>b.host?1:0);
+    });
+    title.textContent=model+' ('+fmtCount(hosts.length)+' hosts)';
+    list.innerHTML='';
+    hosts.forEach(function(o){var h=o.host;var d=document.createElement('div');d.className='model-item';d.style.cursor='pointer';d.title='host details';var n=document.createElement('span');n.className='host-name';n.textContent=h;d.appendChild(n);var ago=checkedAgo(o.checked);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=o.checked;d.appendChild(t)}d.addEventListener('click',function(){if(_selHostRow===d){closeHostDetailCard();return}selectHostRow(d);openHostDetail(h)});list.appendChild(d)});
+  }).catch(function(){if(_currentModel===model)list.innerHTML='<div style="color:var(--err);font-size:var(--fs-md)">failed to load hosts</div>'});
 }
 loadDashboard();
 </script>
