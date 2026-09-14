@@ -610,8 +610,39 @@ def _model_name(model):
 MODEL_EXTS = (".safetensors", ".sft", ".ckpt", ".pth", ".pt", ".bin", ".gguf", ".onnx")
 
 
+def _iter_models(models):
+    """Yield (name, meta_dict) from any `models` shape — a list of name strings, a
+    list of raw /api/tags model dicts (whose `capabilities` become `caps`), or an
+    existing Form A object keyed by name. Best-effort and fail-safe: an item it
+    can't read a name from is skipped, never raised."""
+    if isinstance(models, dict):
+        for name, meta in models.items():
+            if isinstance(name, str) and name:
+                yield name, (dict(meta) if isinstance(meta, dict) else {})
+    elif isinstance(models, (list, tuple)):
+        for m in models:
+            name = _model_name(m)
+            if not name:
+                continue
+            caps = m.get("capabilities") if isinstance(m, dict) else None
+            yield name, ({"caps": list(caps)} if isinstance(caps, list) else {})
+
+
 def _filter_models(models):
-    return [m for m in models if not _model_name(m).endswith(":cloud")]
+    """Normalize any input to the canonical Form A object — {name: {caps:[...]}} or
+    {name: {}} — with :cloud proxy entries dropped. Accepts a list of names, a list
+    of raw /api/tags model dicts (capabilities captured as caps), or an existing
+    Form A object. An empty {} for a model means 'caps unknown from this source',
+    never 'has no caps'."""
+    out = {}
+    for name, meta in _iter_models(models):
+        if name.endswith(":cloud"):
+            continue
+        if name in out:
+            out[name].update(meta)
+        else:
+            out[name] = meta
+    return out
 
 
 def _is_offline_msg(msg):
@@ -822,8 +853,10 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     data = await resp.json()
                     await resp.release()
                     _save_check_snapshot(host, port, data)
-                    models = _filter_models([m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)])
-                    model = models[0] if models else None
+                    # Pass the RAW /api/tags entries (not just names) so each model's
+                    # `capabilities` is captured as `caps` in the Form A object.
+                    models = _filter_models(data.get("models", []))
+                    model = next(iter(models), None)
                     if model:
                         show_body = {"model": model}
                         show_url = f"{base_url}api/show"
@@ -2350,12 +2383,14 @@ def reconstruct(name=None, session=None):
         raw = payload.get("models")
         if not isinstance(raw, list):
             raw = payload.get("data") if isinstance(payload.get("data"), list) else []
-        names = [n for n in (_model_name(m) for m in raw) if n]
-        names = _filter_models(names)
-        if not names:
+        # Pass the RAW entries so /api/tags `capabilities` is preserved as caps in
+        # the rebuilt Form A object (the snapshots carry it); _filter_models also
+        # drops the :cloud passthroughs.
+        models = _filter_models(raw)
+        if not models:
             empty += 1
             continue
-        if set(names) <= HONEYPOT_MODELS:   # whole catalog is the frozen set => honeypot
+        if set(models) <= HONEYPOT_MODELS:   # whole catalog is the frozen set => honeypot
             honeypots += 1
             continue
         rebuilt += 1
@@ -2363,7 +2398,7 @@ def reconstruct(name=None, session=None):
         scheme = "https" if port == "443" else "http"
         checked = datetime.fromtimestamp(snap.get("check_time", 0), timezone.utc).isoformat()
         rec = {"service": "ollama", "url": f"{scheme}://{host}/",
-               "models": names, "checked": checked, "host": host}
+               "models": models, "checked": checked, "host": host}
         prev = by_host.get(host)
         if prev is None:
             by_host[host] = rec
@@ -2383,79 +2418,6 @@ def reconstruct(name=None, session=None):
              f"({empty} listed nothing usable, {honeypots} honeypots dropped); "
              f"{added} new, {refreshed} refreshed; pool now {len(merged)} "
              f"(was {len(existing)}) in {os.path.basename(working_file)}")
-
-
-async def _model_probe(service, name=None, check_timeout=60, workers=10, session=None):
-    """For every working host, POST /api/show for each model it lists and save
-    the results to /tmp/graflex/<run_ts>/models/<ident>.json — one file per
-    host:port, named by the same readable _host_ident() as check/, holding
-    {model-name: /api/show result}. /api/show is cheap, so every model is called
-    iteratively (N models -> N calls) with a small sleep. -i <session> resumes:
-    a host whose file already exists is skipped. (ollama-oriented; /api/show is
-    an ollama endpoint.)"""
-    from datetime import datetime, timezone
-    global _RUN_TS
-    if session:
-        _RUN_TS = session
-    elif not _RUN_TS:
-        _RUN_TS = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        log.info(f"model-probe session {_RUN_TS} — resume with -i {_RUN_TS}")
-    if name is None:
-        name = service
-    working = _load_json(_cache_file(name, "working"))
-    hosts = [h for h in (working or [])
-             if isinstance(h, dict) and h.get("host") and h.get("models")]
-    if not hosts:
-        log.warning(f"model-probe: no {service or '?'} working hosts with models — run check first")
-        return
-    out_dir = os.path.join("/tmp/graflex", _RUN_TS, "models")
-    os.makedirs(out_dir, exist_ok=True)
-    sem = asyncio.Semaphore(workers)
-    done = 0
-
-    async def probe(entry, http):
-        nonlocal done
-        hostport = entry["host"]
-        path = os.path.join(out_dir, f"{_host_ident(hostport)}.json")
-        if os.path.exists(path):          # -i resume: already probed this host
-            return
-        base = (entry.get("url") or f"http://{hostport}").rstrip("/")
-        models = entry.get("models") or []
-        results = {}
-        async with sem:
-            for m in models:
-                try:
-                    r = await asyncio.wait_for(
-                        http.post(base + "/api/show", json={"model": m}),
-                        timeout=check_timeout)
-                    if r.status == 200:
-                        results[m] = await r.json(content_type=None)
-                    else:
-                        body = ""
-                        try:
-                            body = (await r.text())[:300]
-                        except Exception:
-                            pass
-                        results[m] = {"error": f"HTTP {r.status}", "body": body}
-                    await r.release()
-                except Exception as e:
-                    results[m] = {"error": str(e) or type(e).__name__}
-                await asyncio.sleep(0.5)   # be nice
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"host": hostport, "probe_time": time.time(), "models": results},
-                      f, indent=2)
-        done += 1
-        log.info(f"+ {hostport}: /api/show for {len(results)}/{len(models)} models")
-
-    timeout = aiohttp.ClientTimeout(total=check_timeout + 5)
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False),
-                                     timeout=timeout) as http:
-        await asyncio.gather(*[probe(h, http) for h in hosts], return_exceptions=True)
-    log.info(f"model-probe: {done} host(s) probed -> {out_dir}")
-
-
-def model_probe(service, name=None, check_timeout=60, workers=10, session=None):
-    asyncio.run(_model_probe(service, name, check_timeout, workers, session))
 
 
 def _load_classifier():
@@ -2818,7 +2780,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "model-probe", "reconstruct", "score-bogus"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "reconstruct", "score-bogus"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -2887,19 +2849,6 @@ def main():
         refresh = "refresh" in rest
         keyarg = next((x for x in rest if x != "refresh"), None)
         sys.exit(enrich_file(fargs[0], keyarg, refresh=refresh))
-
-    if args.action == "model-probe":
-        log.info("--- model-probe ---")
-        try:
-            for svc in pipe_services:
-                if all_services:
-                    log.info(f"--- model-probe: {svc} ---")
-                model_probe(service=svc, name=(None if all_services else args.name),
-                            check_timeout=args.check_timeout, workers=args.workers,
-                            session=args.session)
-        except KeyboardInterrupt:
-            log.warning("model-probe interrupted")
-        return
 
     if args.action == "reconstruct":
         log.info("--- reconstruct ---")

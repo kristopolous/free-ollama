@@ -93,6 +93,13 @@ STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
 UNREACHABLE_KEY = "\x00unreachable"
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
+# Append-only provenance log of dyva's OWN runtime probes — "what WE tested a host
+# for" (the vision balloon, etc.), distinct from the endpoint's /api/tags
+# self-report and from host-status.db's merged best-effort-current status. Shape:
+# {host: [{date, model, capability, result}, ...]}. Full history is kept on
+# purpose: if a probe is later found buggy, or an endpoint is caught lying about
+# its caps, these separate raw histories are what let us untangle which was wrong.
+PROBE_FILE = os.path.join(CACHE_DIR, "host-probe.json")
 IMG_DIR = os.path.join(CACHE_DIR, "images")
 # Generated speech kept on disk so a chat transcript can reference it by URL —
 # the response body is raw bytes, which a saved conversation can't hold.
@@ -111,6 +118,7 @@ IMG_HISTORY_MAX = 1000
 CAP_REFRESH_TTL = 3600
 _last_cache = None
 _knowns_cache = None
+_probe_cache = None
 _LOCAL = False
 _CURLIFY = False
 
@@ -217,7 +225,7 @@ def _apply_cache_dir(path):
     CLASSIFIER_FILE / NODE_CLASSIFIER_FILE are package-relative, not cache-derived,
     so they're intentionally left alone."""
     global CACHE_DIR, CACHE_FILE, NOTWORKING_FILE, BAD_FILE, GOOD_FILE, STATUS_DB
-    global LAST_FILE, KNOWN_FILE, IMG_DIR, AUDIO_DIR, IMG_HISTORY_FILE, THUMB_DIR
+    global LAST_FILE, KNOWN_FILE, PROBE_FILE, IMG_DIR, AUDIO_DIR, IMG_HISTORY_FILE, THUMB_DIR
     global CHATS_FILE, CHATS_DB, JOBS_DB, SETTINGS_FILE, VIDEO_JOBS_FILE
     global VIDEO_JOBS_DIR, CLEANSED_FILE, SURVEY_FILE, MUSIC_JOBS_FILE, MUSIC_JOBS_DIR
     CACHE_DIR = os.path.abspath(os.path.expanduser(path))
@@ -228,6 +236,7 @@ def _apply_cache_dir(path):
     STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
     LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
     KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
+    PROBE_FILE = os.path.join(CACHE_DIR, "host-probe.json")
     IMG_DIR = os.path.join(CACHE_DIR, "images")
     AUDIO_DIR = os.path.join(CACHE_DIR, "audio")
     IMG_HISTORY_FILE = os.path.join(IMG_DIR, "history.json")
@@ -857,6 +866,11 @@ def _apply_source_mapping(row, mapping):
 
 TRIAL_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 TRIAL_SEE_RE = re.compile(r"\bred\b", re.I)
+# Versioned id of the vision probe METHODOLOGY, logged with every host-probe.json
+# event as `test`. "rs0" = red-square v0 (send a 1x1 red pixel, look for "red").
+# Bump this (rs1, ...) whenever the probe changes, so a later-found flaw in one
+# version's results can be isolated and re-derived from the provenance log.
+BALLOON_TEST = "rs0"
 
 # The `__dyva_info__:test` probe: a TRIVIAL question bogus servers get wrong (they
 # parrot the prompt or echo roll tokens). Kept dead-simple on purpose — a harder
@@ -1404,6 +1418,60 @@ _CLEANSE_REASONS = set(_CLEANSE_KINDS.values())
 # we expunge only the two things that are unambiguous from the name alone.
 
 
+def _iter_model_entries(models):
+    """Yield (name, meta_dict) from a record's `models` field in ANY shape it may
+    have on disk or in memory — the legacy list of name strings, a list of
+    {name,...} dicts, or the Form A object keyed by model name. Best-effort and
+    fail-safe: an item it doesn't recognise is skipped, never raised, so a
+    populated host can never look empty just because its models field is in an
+    unexpected shape (see the parse-failure-must-not-cull rule)."""
+    if isinstance(models, dict):
+        for name, meta in models.items():
+            if isinstance(name, str) and name:
+                yield name, (meta if isinstance(meta, dict) else {})
+    elif isinstance(models, list):
+        for m in models:
+            if isinstance(m, str) and m:
+                yield m, {}
+            elif isinstance(m, dict):
+                n = m.get("name")
+                if isinstance(n, str) and n:
+                    yield n, m
+
+
+def model_names(rec):
+    """The model names on a record, tolerant of every `models` shape."""
+    return [n for n, _ in _iter_model_entries(rec.get("models"))]
+
+
+def model_caps(rec, name):
+    """Advertised caps for one model on this record ([] if unknown from this
+    source). [] means 'not known here' — never asserts the model HAS no caps."""
+    for n, meta in _iter_model_entries(rec.get("models")):
+        if n == name:
+            c = meta.get("caps")
+            return list(c) if isinstance(c, list) else []
+    return []
+
+
+def _normalize_models(rec):
+    """Rewrite rec['models'] into the canonical Form A object ({name: {caps:[...]}}
+    / {name: {}}) so every downstream consumer sees one shape. FAIL-SAFE: a
+    `models` value we can't recognise at all is LEFT UNTOUCHED — never zeroed — so
+    a parse gap can't turn a populated host into a dead one and trigger a cull."""
+    models = rec.get("models")
+    if not isinstance(models, (list, dict)):
+        return                              # None/scalar/garbage: leave it, don't invent emptiness
+    norm = {}
+    for name, meta in _iter_model_entries(models):
+        # last write wins on dup names; merge shallowly so caps aren't lost
+        prev = norm.get(name)
+        norm[name] = {**prev, **meta} if (prev and meta) else (meta or prev or {})
+    if norm or (isinstance(models, (list, dict)) and len(models) == 0):
+        rec["models"] = norm               # recognised (incl. legitimately empty)
+    # a non-empty models we recognised NOTHING in: leave the original untouched
+
+
 def _cleanse_scan(records):
     """Classify every model in the merged pool WITHOUT mutating. Returns a list of
     {host, model, reason} for each unambiguously-junk model entry — purely
@@ -1411,7 +1479,7 @@ def _cleanse_scan(records):
     out = []
     for r in records:
         host = _host_of(r)
-        for m in (r.get("models") or []):
+        for m in model_names(r):
             if _is_fake_name(m):
                 reason = "fake_commercial_name"
             elif _is_cloud_tag(m):
@@ -1434,12 +1502,19 @@ def _cleanse_apply(records, reasons=None):
     for e in todo:
         rm[e["host"]].add(e["model"])
     for r in records:
-        models = r.get("models") or []
         drop = rm.get(_host_of(r))
-        if drop:
-            kept = [m for m in models if m not in drop]
-            if len(kept) != len(models):
-                r["models"] = kept
+        if not drop:
+            continue
+        models = r.get("models")
+        if isinstance(models, dict):
+            kept = {n: v for n, v in models.items() if n not in drop}   # preserve caps on the survivors
+        elif isinstance(models, list):
+            kept = [m for m in models if (m if isinstance(m, str) else
+                                          (m.get("name") if isinstance(m, dict) else None)) not in drop]
+        else:
+            continue                                                    # unparseable: leave it, never zero it
+        if len(kept) != len(models):
+            r["models"] = kept
     return todo
 
 
@@ -1710,6 +1785,25 @@ def load_servers():
         else:
             with open(CACHE_FILE, encoding="utf-8") as f:
                 _servers_cache = json.load(f)
+            # Normalize every record's `models` to canonical Form A at INGEST, so
+            # the rest of dyva sees one shape regardless of what the graflex source
+            # (list-of-names, list-of-dicts, or Form A object) delivered. Fail-safe:
+            # an unrecognised value is left as-is, never zeroed. In-memory only —
+            # this cache is never written back to CACHE_FILE in normal operation.
+            if isinstance(_servers_cache, list):
+                _cap_rows = []
+                for _r in _servers_cache:
+                    if not isinstance(_r, dict):
+                        continue
+                    _normalize_models(_r)
+                    _h = _r.get("server")          # host_caps is keyed by the scheme-full server field
+                    _ms = _r.get("models")
+                    if _h and isinstance(_ms, dict):
+                        for _name, _meta in _ms.items():
+                            _c = _meta.get("caps") if isinstance(_meta, dict) else None
+                            if isinstance(_c, list) and _c:
+                                _cap_rows.append((_h, _name, ",".join(sorted(set(_c)))))
+                _infill_caps(_cap_rows)            # gap-fill only; never clobbers measured rows
         _servers_loaded_at = time.time()   # when this process last read the file
     return _servers_cache or []
 
@@ -1864,10 +1958,52 @@ def _get_db():
                 "COMMIT;")
         # The dashboard's per-model bars count rows by state, so index it.
         _status_db.execute("CREATE INDEX IF NOT EXISTS ix_host_status_state ON host_status(state)")
+        # Per-(host, model) capabilities — dyva's runtime-discovered source of truth,
+        # folded in from the legacy known-hosts.json. Keyed on the EXACT /api/tags
+        # model name (a different namespace from host_status's canon'd query keys),
+        # so it's its own table, not columns on host_status. `caps` is the sorted,
+        # comma-joined capability list exactly as known-hosts.json stored it (lossless:
+        # keeps image/audio and any future cap with no schema churn); `refreshed` is
+        # when this host's /api/tags was last pulled (NULL => never, refresh is due).
+        _status_db.execute(
+            "CREATE TABLE IF NOT EXISTS host_caps("
+            "host TEXT NOT NULL, model TEXT NOT NULL, caps TEXT, refreshed REAL, "
+            "PRIMARY KEY(host, model))")
+        _migrate_known_hosts_to_caps(_status_db)
         _status_db.commit()
         if need_migrate:
             _migrate_status_from_txt()
     return _status_db
+
+
+def _migrate_known_hosts_to_caps(db):
+    """One-time import of the legacy known-hosts.json into the host_caps table.
+
+    The JSON file is READ ONLY and left completely untouched on disk — never
+    deleted, renamed, or rewritten. There is no backup of it and it is unique
+    survey data (per-(host,model) capability fidelity graflex does not reliably
+    capture), so it stays as a frozen point-in-time record. Runs once: if
+    host_caps already holds anything, this no-ops."""
+    if db.execute("SELECT 1 FROM host_caps LIMIT 1").fetchone() is not None:
+        return
+    if not os.path.exists(KNOWN_FILE):
+        return
+    try:
+        with open(KNOWN_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return
+    rows = []
+    for host, rec in (data or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        refreshed = rec.get("refreshed")
+        for model, caps in (rec.get("models") or {}).items():
+            rows.append((host, model, ",".join(sorted(set(caps or []))), refreshed))
+    if rows:
+        db.executemany(
+            "INSERT OR IGNORE INTO host_caps(host, model, caps, refreshed) VALUES(?,?,?,?)",
+            rows)
 
 
 def _migrate_status_from_txt():
@@ -2059,6 +2195,7 @@ def force_bad(host, model, reason=None):
     """Explicit skip: send straight to bad regardless of current tier. `reason`
     is the concrete cause (user flag, smoke canned answer, ...) stored as
     last_fail_reason for later inspection of the failure class."""
+    clear_last(host, model)   # drop the sticky FIRST (pre-canon `full`) so the bad mark isn't outranked by TIER_LAST
     model = canon_pattern(model)
     reason = (" ".join(str(reason).split())[:500] or None) if reason else None
     db = _get_db()
@@ -2196,6 +2333,23 @@ def set_last(model, host, full):
     else:
         _last_cache[model] = {"host": host, "full": full, "ctime": now, "count": 1}
     save_last()
+
+
+def clear_last(host, full=None):
+    """Drop any last-success sticky entries pointing at this host (and resolved
+    model `full`, if given). Without this a force_bad'd / user-flagged pair keeps
+    being routed to first: the sticky is checked as TIER_LAST *ahead* of the bad
+    tier (and the resolve shortcut returns it without a bad check), so a bad mark
+    alone can't move it to the back. Called by force_bad so a flag actually sticks."""
+    if _last_cache is None:
+        load_last()
+    stale = [q for q, e in list((_last_cache or {}).items())
+             if isinstance(e, dict) and e.get("host") == host
+             and (full is None or e.get("full") == full)]
+    for q in stale:
+        del _last_cache[q]
+    if stale:
+        save_last()
 
 
 def match_model(model_name, pattern):
@@ -2350,22 +2504,111 @@ async def probe_host(session, host):
 
 
 def load_knowns():
+    """In-memory view of host_caps, shaped exactly like the old known-hosts.json
+    ({host: {refreshed, models: {model: [caps]}}}) so every reader is unchanged.
+    Built once from SQL; writers keep it in sync in place. The host-level
+    `refreshed` is the most recent across that host's rows."""
     global _knowns_cache
     if _knowns_cache is None:
         _knowns_cache = {}
-        if os.path.exists(KNOWN_FILE):
-            try:
-                with open(KNOWN_FILE, encoding="utf-8") as f:
-                    _knowns_cache = json.load(f)
-            except Exception:
-                _knowns_cache = {}
+        try:
+            for host, model, caps, refreshed in _get_db().execute(
+                    "SELECT host, model, caps, refreshed FROM host_caps"):
+                entry = _knowns_cache.setdefault(host, {"models": {}})
+                entry["models"][model] = caps.split(",") if caps else []
+                if refreshed is not None and refreshed > entry.get("refreshed", 0):
+                    entry["refreshed"] = refreshed
+        except Exception:
+            _knowns_cache = {}
     return _knowns_cache
 
 
-def save_knowns():
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(KNOWN_FILE, "w", encoding="utf-8") as f:
-        json.dump(_knowns_cache, f, indent=2)
+def _upsert_caps(host, model, caps_list, refreshed=None):
+    """Persist one (host, model)'s capabilities to host_caps and mirror the change
+    into the in-memory cache. `refreshed` is only written when given, so a plain
+    capability mark (e.g. the vision balloon) never clobbers the host's last
+    /api/tags-refresh timestamp with NULL."""
+    caps_list = sorted(set(caps_list))
+    entry = load_knowns().setdefault(host, {"models": {}})
+    entry.setdefault("models", {})[model] = caps_list
+    if refreshed is not None:
+        entry["refreshed"] = refreshed
+    db = _get_db()
+    if refreshed is not None:
+        db.execute(
+            "INSERT INTO host_caps(host, model, caps, refreshed) VALUES(?,?,?,?)"
+            " ON CONFLICT(host, model) DO UPDATE SET caps=excluded.caps,"
+            " refreshed=excluded.refreshed",
+            (host, model, ",".join(caps_list), refreshed))
+    else:
+        db.execute(
+            "INSERT INTO host_caps(host, model, caps, refreshed) VALUES(?,?,?,NULL)"
+            " ON CONFLICT(host, model) DO UPDATE SET caps=excluded.caps",
+            (host, model, ",".join(caps_list)))
+    db.commit()
+
+
+def _load_probes():
+    global _probe_cache
+    if _probe_cache is None:
+        _probe_cache = {}
+        if os.path.exists(PROBE_FILE):
+            try:
+                with open(PROBE_FILE, encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    _probe_cache = d
+            except (ValueError, OSError):
+                _probe_cache = {}
+    return _probe_cache
+
+
+def record_probe(host, model, test, capability, result):
+    """Append one runtime-probe event to host-probe.json — the append-only
+    provenance record of what WE behaviorally tested (e.g. the vision balloon),
+    kept separate from the endpoint's /api/tags self-report and from
+    host-status.db's merged status. `test` is the VERSIONED id of the probe
+    methodology (e.g. "rs0"), so a result can be traced to the exact test that
+    produced it; `result` is a plain pass/fail BOOLEAN (the `capability` field
+    already says what was tested), not a descriptive string. Nothing is
+    overwritten or de-duped: the full history is the point, so a later-discovered
+    probe bug or a lying endpoint can be untangled after the fact. Written
+    atomically (tmp + replace) so an interrupted write can't corrupt the log."""
+    probes = _load_probes()
+    probes.setdefault(host, []).append(
+        {"date": _now_iso(), "model": model, "test": test,
+         "capability": capability, "result": result})
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = PROBE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(probes, f, indent=2)
+        os.replace(tmp, PROBE_FILE)
+    except OSError as e:
+        log.debug(f"record_probe write failed for {host}: {e}")
+
+
+def _infill_caps(rows):
+    """Gap-fill host_caps from graflex's ADVERTISED caps — rows of
+    (host, model, caps_csv). INSERT OR IGNORE: an existing (host, model) row (any
+    caps dyva already MEASURED, e.g. a balloon verdict, or pulled itself) is left
+    untouched; advertised caps only populate the gaps. This is the tier-1 -> merged
+    status infill: provenance stays upstream (advertised on the graflex record,
+    measured in host-probe.json), host_caps is just the best-effort current view.
+    Returns the number of rows offered (not necessarily inserted)."""
+    if not rows:
+        return 0
+    try:
+        db = _get_db()
+        db.executemany(
+            "INSERT OR IGNORE INTO host_caps(host, model, caps, refreshed) VALUES(?,?,?,NULL)",
+            rows)
+        db.commit()
+        global _knowns_cache
+        _knowns_cache = None          # rebuild the in-memory view to include infilled rows
+    except Exception as e:
+        log.debug(f"caps infill failed: {e}")
+    return len(rows)
 
 
 def _knowns_refresh_due(host):
@@ -2391,16 +2634,17 @@ async def refresh_host_caps(session, host):
         return
     await resp.release()
     prev = (load_knowns().get(host) or {}).get("models", {})
-    models = {}
+    now = time.time()
+    wrote = False
     for m in data.get("models") or []:
         name = m.get("name")
         if not name:
             continue
-        models[name] = sorted(set((m.get("capabilities") or [])) | set(prev.get(name) or []))
-    if not models:
+        merged = sorted(set((m.get("capabilities") or [])) | set(prev.get(name) or []))
+        _upsert_caps(host, name, merged, refreshed=now)
+        wrote = True
+    if not wrote:
         return
-    load_knowns()[host] = {"refreshed": time.time(), "models": models}
-    save_knowns()
 
 
 # Model knowledge base built by `graflex survey` from the probe logs (real
@@ -2572,8 +2816,7 @@ def _known_has(host, model, cap):
 
 
 def _mark_known(host, model, caps_list):
-    load_knowns().setdefault(host, {}).setdefault("models", {})[model] = caps_list
-    save_knowns()
+    _upsert_caps(host, model, caps_list)
 
 
 def mark_vision(host, model):
@@ -3696,15 +3939,17 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 return skip("trial balloon inconclusive")
             if sees:
                 mark_vision(host, full)
+                record_probe(host, full, BALLOON_TEST, "vision", True)   # provenance: WE tested it
                 set_last(model, host, full)
                 await broadcast_activity(host, model, "trying",
                     f"trial balloon: {full} has vision", wid=wid)
             else:
                 mark_no_vision(host, full)
+                record_probe(host, full, BALLOON_TEST, "vision", False)   # provenance: WE tested it
                 await broadcast_activity(host, model, "failed",
                     f"trial balloon: {full} has no vision", wid=wid)
-                # No reputation mark: vision-ness lives in known-hosts.json, and
-                # the model itself is fine — just not for this request.
+                # No reputation mark: the merged current status lives in
+                # host_caps; the model itself is fine — just not for this request.
                 return skip("no vision")
 
         start = time.time()
