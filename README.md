@@ -49,7 +49,7 @@ Here's the web interface so you can see the status while you're running it. [I m
 
 Actual documentation? Alright, whatever. [Here you go](dyva).
 
-<img alt="sshot" src="https://github.com/user-attachments/assets/ca8f99a0-1026-4b02-a054-8256f6b3c66c" />
+<img alt="sshot" src="https://github.com/user-attachments/assets/5afdf551-d62f-4146-a4b6-9e0bdc9ac4bc" />
 
 Now where's that $50 million seed round...
 
