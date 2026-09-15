@@ -2,7 +2,7 @@
 <img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
-  <img src=https://static.pepy.tech/badge/dyva/week><br/> <i>(That number is too big. It's supposed to be a secret)</i> <br/>
+  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>(This number is too big. It's supposed to be a secret)</i> <br/>
   <br/><strong>Paying for cloud GPUs is for chumps with self-respect.</strong>
 </p>
 
