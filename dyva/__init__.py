@@ -17,6 +17,7 @@ import random
 import re
 import shutil
 import subprocess
+import traceback
 import sys
 import threading
 import time
@@ -3397,6 +3398,16 @@ def _find_servers_raw(sub, caps=None):
         ms = [m for m in models if match_model(m, sub)]
         if not ms:
             continue
+        # Embedding models can't chat, so a plain text query ("qwen3") must not
+        # sweep in "qwen3-embedding:0.6b" just because the name contains the
+        # pattern. Routing is symmetric on the "embed" substring: ask for embed
+        # and you get embedders; don't, and they're dropped. Per-MODEL (not
+        # whole-host) — a host may serve qwen3:8b AND qwen3-embedding:0.6b, both
+        # matching "qwen3"; keep the chat one, drop the embedder.
+        if "embed" not in sub:
+            ms = [m for m in ms if "embed" not in m.lower()]
+            if not ms:
+                continue
         if any(re.search(r"[:-]cloud", m) for m in ms) and not re.search(r"[:-]cloud", sub):
             continue
         host = s.get("server", "")
@@ -3733,6 +3744,22 @@ def record_race(host, key, won):
     db.commit()
 
 
+def _write_worker_job(rec):
+    """Append one race record to ~/.cache/free-ollama/worker-jobs.jsonl.
+
+    Append-only, best-effort, never raises: a broken log line must not take down
+    a chat request. One JSON object per line so it greps/tails cleanly. This is a
+    diagnostic instrument (how many candidates a race actually tried and why it
+    ended), not reputation — it touches no DB and no live survey state.
+    """
+    try:
+        path = os.path.join(CACHE_DIR, "worker-jobs.jsonl")
+        with open(path, "a") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
                       label=None, hedge_delay=0, key_of=None):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
@@ -3775,6 +3802,15 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     host_of = host_of or (lambda item: item)
     key_of = key_of or (lambda item: key)   # reputation key per item (resolved model for chat)
     _attempt_tasks = set()
+    # Per-request race log: one entry per host actually attempted, with the
+    # wall-clock timing and the verdict. This is the definitive instrument for
+    # "explore mode said no host after 8.6s" — the entry COUNT says how many of
+    # the candidates were tried, and each outcome/detail says why the race ended
+    # (exhausted vs. all-failed vs. a peer win). Appended lock-free: a worker
+    # builds its record and appends in one synchronous step (no await between),
+    # so asyncio can't interleave two appends.
+    race_log = []
+    race_start = time.time()
 
     async def worker():
         nonlocal tried
@@ -3792,6 +3828,19 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             # cancels the worker task and sets `done`; a "skip" cancels only the
             # attempt, leaving `done` clear so the loop pulls the next host.
             _ih = host_of(item)
+            _astart = time.time()
+            _rec = {"host": _ih, "model": key_of(item), "start_time": _astart,
+                    "connect_time": None, "finish_time": None, "generation_time": None,
+                    "token_count": None, "outcome": None, "detail": None}
+            race_log.append(_rec)
+            def _log_done(outcome_str, detail=None, tokens=None, _rec=_rec, _astart=_astart):
+                _rec["finish_time"] = time.time()
+                _rec["generation_time"] = _rec["finish_time"] - _astart
+                _rec["outcome"] = outcome_str
+                if detail is not None:
+                    _rec["detail"] = str(detail)[:400]
+                if tokens is not None:
+                    _rec["token_count"] = tokens
             att = asyncio.ensure_future(attempt(item, wid, done))
             _attempt_tasks.add(att)
             _inflight[_ih] += 1     # count the attempt NOW (cold-start window), not at first token
@@ -3804,14 +3853,37 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                     # A peer won the race (done set by a win, not a user stop) and
                     # cancelled this in-flight attempt: count it as a race loss so
                     # the fleet picture fills in even without a good/bad verdict.
+                    _log_done("cancelled" if not stopped else "stopped")
                     if not stopped:
                         record_race(host_of(item), key_of(item), won=False)
                     raise           # real stop / post-win cleanup: let it die
+                _log_done("skipped")
                 tally[V_SKIP] += 1
                 record_verdict(host_of(item), key_of(item), skip("skipped by user"), sticky_key=key)
                 await broadcast_activity(host_of(item), label or key, "failed",
                     f"skipped: {host_of(item)}", wid=wid)
                 continue            # skip: move on to the next candidate host
+            except Exception as e:
+                # attempt() is supposed to ALWAYS return an Outcome; if it RAISES,
+                # that's a bug in the attempt path (e.g. an unguarded payload
+                # transform in _send_chat), not the host's fault. Before this
+                # guard, such an exception escaped worker() and killed the task
+                # with no verdict — so a single bad host aborted the whole race
+                # ("no host after 8s", same hosts re-fronted forever, empty tally).
+                # Capture the EXACT exception + traceback into the race log so it
+                # can be fixed at the source, treat it as a skip (no reputation
+                # penalty — our bug, not theirs), and move to the next candidate.
+                _log_done("error", detail=f"{type(e).__name__}: {e}")
+                _rec["traceback"] = traceback.format_exc()[-1500:]
+                tally[V_SKIP] += 1
+                log.warning("attempt raised for %s / %s: %s",
+                            host_of(item), key_of(item), traceback.format_exc())
+                try:
+                    await broadcast_activity(host_of(item), label or key, "failed",
+                        f"error: {host_of(item)} - {type(e).__name__}: {e}", wid=wid)
+                except Exception:
+                    pass
+                continue            # our bug on this host — move on, don't abort the race
             finally:
                 _attempt_tasks.discard(att)
                 _inflight[_ih] -= 1
@@ -3819,6 +3891,11 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                     del _inflight[_ih]
             if outcome is None:
                 outcome = skip()
+            _tok = None
+            if isinstance(outcome.extra, dict):
+                _tok = (outcome.extra.get("eval_count") or outcome.extra.get("token_count")
+                        or outcome.extra.get("tokens"))
+            _log_done(outcome.verdict, detail=outcome.detail, tokens=_tok)
             tally[outcome.verdict] += 1
             record_verdict(host_of(item), key_of(item), outcome, sticky_key=key)
             if outcome.verdict == V_ACCEPTED:
@@ -3903,6 +3980,18 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     finally:
         if job_wid is None:
             await _unregister_worker(wwid)
+        _write_worker_job({
+            "model_query": key,
+            "label": label or key,
+            "start_time": race_start,
+            "end_time": time.time(),
+            "candidates": len(entries),
+            "tried": tried,
+            "stopped": stopped,
+            "won": bool(race_log) and any(r.get("outcome") == V_ACCEPTED for r in race_log),
+            "tally": dict(tally),
+            "race": race_log,
+        })
 
     return result, stopped, tried, tally
 
@@ -4295,7 +4384,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
     # Both dialects reported the endpoint missing. Hand back WHAT they actually
     # said (status + body) so a real 404 is distinguishable from an intermediary
     # (proxy/LB) 501/HTML or a connection-limit page masquerading as a miss.
-    why = join(tried)
+    why = "; ".join(tried)
     return None, oai, ep, why
 
 
@@ -5315,6 +5404,7 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     # revisit — the documented escalation trigger.
     add_good(host, full)
     mark_smoke(host, full, failed=False)
+    record_perf(host, full, ttft=dur)   # the smoke response arrived at `dur` — that's our TTFT
     log.info(f"quick test PASS (unknown — not promoted) {host} ({full}): answer={shown!r}")
     await broadcast_activity(host, model_in, "connected",
         f"quick test: {host} for {model_in} - answered (unknown, not promoted): {shown!r}", duration=dur, wid=wid)
