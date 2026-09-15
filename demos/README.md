@@ -1,6 +1,8 @@
 # dyva demos
 
-Small, self-contained web apps built on top of the [dyva](../dyva) router. Each one
+<img  alt="ss" src="https://github.com/user-attachments/assets/d8d74681-1469-4cd8-89c9-e2d3cfb859d3" />
+
+Small, self-contained web apps built on top of the [dyva](../dyva) enterprise-grade router! Each one
 talks to a running dyva server over plain `POST /api/chat` and nothing else.
 
 They look like toys — a model drawing dinosaurs, bots playing hangman — but they're
