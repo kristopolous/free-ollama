@@ -36,6 +36,7 @@ case "$SERVICE" in
 
     jq -s 'add' ~/.cache/free-ollama/*-notworking.json > ~/.cache/free-ollama/notworking-consolidated.json
 
+    cp "$HOME/.cache/free-ollama/host-status.db" "$HOME/.cache/free-ollama/backups/host-status-${DATE}.db"
     ./dyva.py --refresh
     exit
     ;;
