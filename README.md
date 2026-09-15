@@ -2,7 +2,7 @@
 <img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
-  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>(This number is too big. It's supposed to be a secret)</i> <br/>
+  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>(This number is too big. It's supposhost-status.dbed to be a secret)</i> <br/>
   <br/><strong>Paying for cloud GPUs is for chumps with self-respect.</strong>
 </p>
 
@@ -27,7 +27,9 @@ Your path to victory is **free-ollama**!
 
 ## What's actually out there?
 
-Some of the surveys reveal hardware specs and it's mostly CPU, about 70%. In that remaining 30%, the venerable RTX 4090 takes the top spot with 4.5% followed by "All AMD (this survey buckets them all)" at 3% and the rest being difficult to justify any claims on given their low population density.
+Some of the surveys reveal hardware specs and it's mostly CPU, about 70%. This makes economically. A cheap VPS is about 1/70th the cost of a decent GPU but only about 1/7th the inference speed.
+
+In that remaining 30%, the venerable RTX 4090 takes the top spot with 4.5% followed by "All AMD (this survey buckets them all)" at 3% and the rest being difficult to justify any claims on given their low population density.
 
 About 1.5% are professional class (A6000/A5000) for example, and approximately 4% are server class (L4, A100, H100, V100 etc)
 
