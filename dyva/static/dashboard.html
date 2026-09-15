@@ -189,8 +189,19 @@ body.chat{height:100vh;height:100dvh}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:var(--sp-4)}
 .card{background:transparent;border-radius:var(--r-lg);padding:0;box-shadow:none;overflow:visible}
 .card-inner{background:var(--surface);border-radius:var(--r-lg);padding:var(--sp-5);box-shadow:var(--shadow-card);height:var(--card-h);overflow:hidden;display:flex;flex-direction:column}
-/* the click-to-view host card fits its content instead of a fixed height */
-#hostCard .card-inner,#hostDetailCard .card-inner{height:auto;max-height:var(--card-h);overflow:auto}
+/* the click-to-view host-detail card fits its content instead of a fixed height */
+#hostDetailCard .card-inner{height:auto;max-height:var(--card-h);overflow:auto}
+/* the model-host card keeps the base fixed height so its stats-strip / host-list
+   split stays proportional (a model aggregate on top, the scrolling list below) */
+#modelStats{flex:0 0 3rem;min-height:0;overflow:auto;margin-bottom:var(--sp-4);padding-bottom:var(--sp-3);border-bottom:1px solid var(--border)}
+#modelStats .stat-pct{color:var(--text-muted);font-size:var(--fs-sm);margin-left:6px;display:inline-block;width:2.8em;text-align:right;font-variant-numeric:tabular-nums}
+#modelStats:empty{display:none}
+#modelStats .two-column{display:flex;gap:var(--sp-6)}
+#modelStats .two-column>div{flex:1;min-width:0}
+#modelStats table{width:100%;border-collapse:collapse;font-size:var(--fs-md)}
+#modelStats td{padding:2px 0}
+#modelStats td:first-child{color:var(--text-muted)}
+#modelStats td:last-child{text-align:right;font-variant-numeric:tabular-nums;color:var(--text)}
 /* tabs + filter stay pinned; only the list scrolls */
 #mpane-text,#mpane-image,#pane-last,#pane-good,#pane-maybe,#pane-bad,#pane-workers,#hostList{flex:1;min-height:0;overflow-y:auto}
 .card h2{font-size:var(--fs-xl);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:10px}
@@ -963,7 +974,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 <div class="card" id="hostCard" style="display:none">
 <h2 id="hostCardTitle">Hosts</h2>
-<div class="card-inner"><div id="hostList"></div></div>
+<div class="card-inner"><div id="modelStats" class="model-stats"></div><div id="hostList"></div></div>
 </div>
 <div class="card" id="hostDetailCard" style="display:none">
 <h2><span id="hostDetailTitle">Host</span></h2>
@@ -1828,7 +1839,7 @@ var _KINDS=[
   ['Embedding',/embed|bge|gte|nomic|minilm|mxbai|e5[-_]/],
   ['Vision',/vision|llava|moondream|(?:^|[-_:/])vl(?:[-_:.]|$)/],
   ['Code',/cod(?:e|er|ing)|starcoder|codestral/],
-  ['Abliterated / uncensored',/abliterat|uncensor|dolphin/],
+  ['Abliterated / uncensored',/[ao]bliterat|uncensor|dolphin/],
   ['Distilled',/distill/],
   ['Instruct / chat',/instruct|-it(?:[-_:.]|$)|chat/]
 ];
@@ -2451,6 +2462,7 @@ function renderHostListFor(){
   var card=document.getElementById('hostCard');card.style.display='';
   var title=document.getElementById('hostCardTitle');title.textContent=model+' (…)';
   var list=document.getElementById('hostList');
+  var stats=document.getElementById('modelStats');stats.innerHTML='';
   list.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">loading hosts…</div>';
   fetch('dashboard-model-hosts?q='+encodeURIComponent(model)).then(function(r){return r.json()}).then(function(res){
     if(_currentModel!==model)return;   // selection changed while the fetch was in flight
@@ -2460,6 +2472,15 @@ function renderHostListFor(){
       return tb-ta||(a.host<b.host?-1:a.host>b.host?1:0);
     });
     title.textContent=model+' ('+fmtCount(hosts.length)+' hosts)';
+    var st=res.stats||{};var tot=st.total||0;
+    function cell(n){n=n||0;return fmtCount(n)+(tot?' <span class="stat-pct">'+Math.round(n/tot*100)+'%</span>':'');}
+    stats.innerHTML='<div class="two-column"><div><table>'
+      +'<tr><td>Good</td><td>'+cell(st.good)+'</td></tr>'
+      +'<tr><td>Bad</td><td>'+cell(st.bad)+'</td></tr>'
+      +'</table></div><div><table>'
+      +'<tr><td>Failed smoke</td><td>'+cell(st.fail_smoke)+'</td></tr>'
+      +'<tr><td>Untested</td><td>'+cell(st.unknown)+'</td></tr>'
+      +'</table></div></div>';
     list.innerHTML='';
     hosts.forEach(function(o){var h=o.host;var d=document.createElement('div');d.className='model-item';d.style.cursor='pointer';d.title='host details';var n=document.createElement('span');n.className='host-name';n.textContent=h;d.appendChild(n);var ago=checkedAgo(o.checked);if(ago){var t=document.createElement('span');t.className='host-checked';t.textContent=ago;t.title=o.checked;d.appendChild(t)}d.addEventListener('click',function(){if(_selHostRow===d){closeHostDetailCard();return}selectHostRow(d);openHostDetail(h)});list.appendChild(d)});
   }).catch(function(){if(_currentModel===model)list.innerHTML='<div style="color:var(--err);font-size:var(--fs-md)">failed to load hosts</div>'});

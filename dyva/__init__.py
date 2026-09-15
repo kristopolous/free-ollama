@@ -6107,15 +6107,26 @@ async def handle_model_hosts(request):
     """
     q = request.query.get("q", "")
     if not q:
-        return web.json_response({"model": q, "hosts": []})
-    states = {h: st for h, st in _get_db().execute(
-        f"SELECT host, state FROM host_status WHERE model=? AND {_LIVE_REAL}",
-        (canon_pattern(q),)).fetchall()}
+        return web.json_response({"model": q, "hosts": [], "stats": {}})
+    rows = _get_db().execute(
+        f"SELECT host, state, fail_smoke FROM host_status WHERE model=? AND {_LIVE_REAL}",
+        (canon_pattern(q),)).fetchall()
+    states = {h: st for h, st, _fs in rows}
+    smoke_fail = {h for h, _st, fs in rows if fs}
     hosts = [{"host": s.get("server", ""), "checked": s.get("checked"),
               "state": states.get(s.get("server", ""), "unknown")}
              for s in load_servers()
              if s.get("server") and q in (s.get("models") or [])]
-    return web.json_response({"model": q, "hosts": hosts})
+    # Model-level aggregate for the host card's stats strip: counts across the
+    # hosts that CURRENTLY serve this model (the displayed list), not stale
+    # host_status rows. untested = hosts with no reputation row (state unknown).
+    stats = {"total": len(hosts), "good": 0, "bad": 0, "maybe_good": 0,
+             "unknown": 0, "fail_smoke": 0}
+    for hobj in hosts:
+        stats[hobj["state"]] = stats.get(hobj["state"], 0) + 1
+        if hobj["host"] in smoke_fail:
+            stats["fail_smoke"] += 1
+    return web.json_response({"model": q, "hosts": hosts, "stats": stats})
 
 
 async def handle_dashboard_data(request):
