@@ -1610,6 +1610,323 @@ def cleanse_from_argv(argv):
     return cleanse_pool(kind=kind, apply=apply)
 
 
+# =============================================================================
+# TEMPORARY reputation-cleanup workbench  (added 2026-09; safe to REMOVE ~1 month
+# later, once the legacy query-keyed rows have aged out of host_status).
+#
+# host_status accumulated rows keyed by the model QUERY (e.g. "qwen3.8",
+# "qwen3.>12gb") as well as the real RESOLVED model, so one physical (host,model)
+# fragmented into several conflicting rows (see reputation-keyed-by-resolved-model).
+# New writes are now fixed to key by the resolved model, so this fragmentation
+# stops accumulating and this whole block — the `--rep-cleanup` arg, its dispatch,
+# and every function below down to rep_cleanup_cli — can be deleted wholesale in a
+# month. Everything here works on COPIES (`working`, `consolidated`) and NEVER
+# drops, merges, or edits host_status itself.
+# =============================================================================
+CHECK_SNAPSHOT_GLOB = "/tmp/graflex/*/check/*.json"
+
+
+def _load_check_registry():
+    """host:port -> set of REAL model names, unioned from every graflex check/
+    snapshot (the raw /api/tags `models[].name` or /v1/models `data[].id`). This is
+    the registry of models a host actually advertised — the oracle for telling a
+    real resolved model from a synthetic query pattern in host_status."""
+    import glob
+    reg = {}
+    for p in glob.glob(CHECK_SNAPSHOT_GLOB):
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+        except (ValueError, OSError):
+            continue
+        host = d.get("host") if isinstance(d, dict) else None
+        payload = d.get("payload") if isinstance(d, dict) else None
+        if not host or not isinstance(payload, dict):
+            continue
+        items = payload.get("models")
+        if not isinstance(items, list):
+            items = payload.get("data") if isinstance(payload.get("data"), list) else []
+        names = reg.setdefault(host, set())
+        for m in items:
+            if isinstance(m, str) and m:
+                names.add(m)
+            elif isinstance(m, dict):
+                n = m.get("name") or m.get("id") or m.get("model")
+                if isinstance(n, str) and n:
+                    names.add(n)
+    return reg
+
+
+def _rep_cleanup_init():
+    """Cleanup step 1: build a non-destructive `working` copy of host_status with an
+    `is_query` flag decided from the check/ registry:
+        0  -> the model is a REAL registered model for that host
+        1  -> the model is NOT registered (a synthetic query pattern)
+        NULL -> no check/ snapshot for that host, so undecided
+    host_status itself is left completely untouched."""
+    reg = _load_check_registry()
+    if not reg:
+        print(f"no check snapshots found under {CHECK_SNAPSHOT_GLOB} — run a graflex check first",
+              file=sys.stderr)
+        return 1
+    db = _get_db()
+    db.executescript(
+        "DROP TABLE IF EXISTS working;"          # `working` is our scratch copy, not source data
+        "CREATE TABLE working AS SELECT * FROM host_status;")
+    try:
+        db.execute("ALTER TABLE working ADD COLUMN is_query INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    rows = db.execute("SELECT host, model FROM working").fetchall()
+    real = query = no_check = sentinels = 0
+    for host, model in rows:
+        names = reg.get(_norm_host(host))     # strip scheme -> host:port, matches the snapshot host field
+        if names is not None and model in names:
+            flag = 0; real += 1               # provably a real registered model on this host
+        else:
+            # DEFAULT unknown to is_query=1 (assume synthetic until proven real). A host
+            # with no check/ data, or a name not in its snapshot, stays 1 for now; a later
+            # pass infills real names and re-sweeps the host to merge what it can, leaving
+            # the rest as-is.
+            flag = 1; query += 1
+            if names is None:
+                no_check += 1
+            elif str(model).startswith("__") or "!" in str(model):
+                sentinels += 1                 # capability sentinel / pairing key, not a user query
+        db.execute("UPDATE working SET is_query=? WHERE host=? AND model=?", (flag, host, model))
+    db.commit()
+    print(f"built `working` from host_status ({len(rows)} rows), host_status untouched:")
+    print(f"  is_query=0  real registered models      : {real}")
+    print(f"  is_query=1  synthetic / unproven        : {query}")
+    print(f"              - no check/ data for host    : {no_check} (assumed query, infill later)")
+    if sentinels:
+        print(f"              - capability sentinels/pairs : {sentinels} (not query patterns)")
+    print(f"  registry: {len(reg)} hosts with check snapshots")
+    return 0
+
+
+def _working_cols():
+    return [r[1] for r in _get_db().execute("PRAGMA table_info(working)")]
+
+
+def _rep_cleanup_resolve():
+    """Cleanup step 2a: add `resolved_model` to `working` — the real (host, model)
+    each row maps to. is_query=0 rows resolve to themselves; is_query=1 rows are run
+    through dyva's OWN matcher (find_servers) against the host's models, and map
+    CONCLUSIVELY only when the query lands on exactly ONE model on that host
+    (len(ms)==1). Ambiguous (>1) or unresolvable (0) rows get resolved_model=NULL and
+    are left for a later pass. host_status untouched."""
+    db = _get_db()
+    if "model" not in _working_cols():
+        print("no `working` table — run `--rep-cleanup init` first", file=sys.stderr)
+        return 1
+    for col in ("resolved_model", "resolved_models"):   # single mapping + the full list (for smoke spread)
+        if col not in _working_cols():
+            db.execute(f"ALTER TABLE working ADD COLUMN {col} TEXT")
+    qcache = {}
+    def _resolved_on(host_np, query):
+        if query not in qcache:
+            qcache[query] = {_norm_host(h): ms for _p, h, ms in find_servers(query)}
+        return qcache[query].get(host_np)
+    real = single = ambiguous = none_ = 0
+    for host, model, isq in db.execute("SELECT host, model, is_query FROM working").fetchall():
+        rm = None
+        if isq == 0:
+            rm = model; ms = [model]; real += 1        # already a real model
+        else:
+            ms = list(_resolved_on(_norm_host(host), model) or [])
+            if len(ms) == 1:
+                rm = ms[0]; single += 1                 # conclusive: full stats attributable
+            elif len(ms) > 1:
+                ambiguous += 1                          # only the smoke result is claimable
+            else:
+                none_ += 1                              # unresolvable: no claimable data
+        db.execute("UPDATE working SET resolved_model=?, resolved_models=? WHERE host=? AND model=?",
+                   (rm, json.dumps(ms), host, model))
+    db.commit()
+    print("resolved `working` rows to real models (host_status untouched):")
+    print(f"  already real (is_query=0)            : {real}")
+    print(f"  query -> exactly one model (mapped)  : {single}  (full stats attributed)")
+    print(f"  query -> multiple models (ambiguous) : {ambiguous}  (only the smoke result is claimed, spread per model)")
+    print(f"  query -> no model (unresolvable)     : {none_}  (dropped — better no data than inaccurate)")
+    return 0
+
+
+# Best-state wins on a conflict; a later bad read can downgrade it. bad is the
+# floor (worse than an unknown/absent verdict), good the ceiling.
+_STATE_RANK = {"good": 3, "maybe_good": 2, "unknown": 1, "bad": 0}
+
+# SAFETY VALVE: never fold more than this many rows into one (host, model). A
+# bad/greedy query that resolved to "everything" would otherwise collapse the whole
+# table into a single row; a group bigger than this is refused and left un-merged.
+MERGE_MAX = 5
+
+# Columns carried from working into the rebuilt host_status on promote (id is the
+# table's own AUTOINCREMENT and regenerates; sources/is_query/resolved_model are
+# workbench-only and dropped).
+_PROMOTE_COLS = ("host", "model", "state", "failure_streak", "success", "failure",
+                 "fail_timeout", "fail_4xx", "fail_5xx", "fail_conn", "fail_other",
+                 "last_fail", "last_fail_reason", "fail_smoke", "smoke_date",
+                 "race_won", "race_lost", "last_race", "last_good", "ttft", "tps")
+
+
+def _sweep_and_merge(groups):
+    """TEMPORARY cleanup primitive (removable with the rest of the workbench).
+    Given {(host, real_model): [working-row dicts]}, fold each group into ONE record:
+    success/failure/fail_*/race_* SUMMED, last_fail/last_race/last_good/smoke_date
+    MAXed (last_fail_reason from the most-recent fail), ttft/tps AVERAGED, state = the
+    BEST of the group (downgradeable later), failure_streak = min. A group larger than
+    MERGE_MAX is REFUSED (a bad query resolving to everything must not collapse the
+    table) — its members are returned in `skipped_keys` and left un-merged by the
+    caller. Returns (records, conflicts, skipped_groups, skipped_keys). This is also
+    the shape the future infill re-sweep reuses: regroup a host's rows on fresh real
+    names, merge what maps, leave the rest."""
+    def _num(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+    records, conflicts, skipped_groups, skipped_keys = [], 0, 0, set()
+    for (host, model), rs in groups.items():
+        if len(rs) > MERGE_MAX:                       # the safety valve
+            skipped_groups += 1
+            for r in rs:
+                skipped_keys.add((r["host"], r["model"]))
+            continue
+        if len({r.get("state") for r in rs if r.get("state")}) > 1:
+            conflicts += 1
+        best = max((r.get("state") for r in rs), key=lambda s: _STATE_RANK.get(s, -1))
+        _sum = lambda f: sum(int(r.get(f) or 0) for r in rs)
+        _max = lambda f: max((r.get(f) for r in rs if r.get(f)), default=None)
+        failed = sorted((r for r in rs if r.get("last_fail")), key=lambda r: r["last_fail"])
+        ttfts = [v for v in (_num(r.get("ttft")) for r in rs) if v is not None]
+        tpss = [v for v in (_num(r.get("tps")) for r in rs) if v is not None]
+        records.append((
+            host, model, best,
+            _sum("success"), _sum("failure"),
+            _sum("fail_timeout"), _sum("fail_4xx"), _sum("fail_5xx"), _sum("fail_conn"), _sum("fail_other"),
+            min((int(r.get("failure_streak") or 0) for r in rs), default=0),
+            failed[-1]["last_fail"] if failed else None,
+            failed[-1].get("last_fail_reason") if failed else None,
+            1 if any(int(r.get("fail_smoke") or 0) for r in rs) else 0, _max("smoke_date"),
+            _sum("race_won"), _sum("race_lost"), _max("last_race"), _max("last_good"),
+            round(sum(ttfts) / len(ttfts), 2) if ttfts else None,
+            round(sum(tpss) / len(tpss), 2) if tpss else None,
+            len(rs),
+        ))
+    return records, conflicts, skipped_groups, skipped_keys
+
+
+def _rep_cleanup_grouped():
+    """Group working rows that have a resolved_model into {(host, resolved_model): [rows]}."""
+    db = _get_db()
+    cols = _working_cols()
+    if "resolved_model" not in cols:
+        return None, None
+    groups = {}
+    for row in db.execute("SELECT * FROM working WHERE resolved_model IS NOT NULL AND resolved_model != ''"):
+        d = dict(zip(cols, row))
+        groups.setdefault((d["host"], d["resolved_model"]), []).append(d)
+    return groups, cols
+
+
+def _rep_cleanup_consolidate():
+    """Cleanup step 2b: build the `consolidated` preview table via _sweep_and_merge —
+    one row per (host, resolved_model). host_status is NOT touched."""
+    db = _get_db()
+    groups, _cols = _rep_cleanup_grouped()
+    if groups is None:
+        print("run `--rep-cleanup resolve` first", file=sys.stderr)
+        return 1
+    records, conflicts, skipped_groups, _skk = _sweep_and_merge(groups)
+    db.execute("DROP TABLE IF EXISTS consolidated")
+    db.execute(
+        "CREATE TABLE consolidated("
+        "host TEXT NOT NULL, model TEXT NOT NULL, state TEXT, success INTEGER, failure INTEGER,"
+        "fail_timeout INTEGER, fail_4xx INTEGER, fail_5xx INTEGER, fail_conn INTEGER, fail_other INTEGER,"
+        "failure_streak INTEGER, last_fail TEXT, last_fail_reason TEXT, fail_smoke INTEGER, smoke_date TEXT,"
+        "race_won INTEGER, race_lost INTEGER, last_race TEXT, last_good TEXT, ttft REAL, tps REAL,"
+        "sources INTEGER, PRIMARY KEY(host, model))")
+    db.executemany("INSERT OR REPLACE INTO consolidated VALUES(" + ",".join("?" * 22) + ")", records)
+    db.commit()
+    merged = sum(1 for r in records if r[-1] > 1)
+    print("built `consolidated` (host_status untouched):")
+    print(f"  {len(records)} distinct (host, real-model) records")
+    print(f"  {merged} folded from >1 working row; {conflicts} had conflicting states (took best)")
+    print(f"  {skipped_groups} group(s) REFUSED for exceeding the {MERGE_MAX}-row merge cap (left un-merged)")
+    return 0
+
+
+def _rep_cleanup_promote():
+    """Cleanup step 3: make the cleaned data the REAL host_status. Backs up the current
+    host_status to host_status_bak_<ts> FIRST, then replaces its rows with the merged
+    (host, real-model) records PLUS every working row not covered by a merge (rows whose
+    (host, resolved_model) group was refused by the safety valve, or that never resolved)
+    carried forward as-is — so nothing is dropped. The table schema (incl. the id
+    AUTOINCREMENT) is preserved; only rows are replaced. Aborts if the result would
+    shrink the table by more than half (a guard against a bad merge)."""
+    db = _get_db()
+    groups, cols = _rep_cleanup_grouped()
+    if groups is None:
+        print("run `--rep-cleanup resolve` first", file=sys.stderr)
+        return 1
+    records, conflicts, skipped_groups, skipped_keys = _sweep_and_merge(groups)
+    # Carry forward every working row NOT consumed by a merge: unresolved rows AND the
+    # rows in refused (over-cap) groups keep their original (host, model) and stats.
+    ci = {c: i for i, c in enumerate(cols)}
+    merged_rows = [dict(zip(("host", "model", "state", "success", "failure", "fail_timeout",
+                             "fail_4xx", "fail_5xx", "fail_conn", "fail_other", "failure_streak",
+                             "last_fail", "last_fail_reason", "fail_smoke", "smoke_date",
+                             "race_won", "race_lost", "last_race", "last_good", "ttft", "tps",
+                             "sources"), r)) for r in records]
+    carried = []
+    for row in db.execute("SELECT * FROM working"):
+        rm = row[ci["resolved_model"]]
+        host, model = row[ci["host"]], row[ci["model"]]
+        if rm and (host, model) not in skipped_keys:
+            continue                            # consumed by a merged record
+        carried.append({c: row[ci[c]] for c in cols if c in ci})
+    new_rows = merged_rows + carried
+    old_count = db.execute("SELECT COUNT(*) FROM host_status").fetchone()[0]
+    if new_rows and len(new_rows) < old_count * 0.5:
+        print(f"ABORT: would shrink host_status {old_count} -> {len(new_rows)} (>50% drop) — "
+              f"refusing. Inspect `working`/`consolidated` first.", file=sys.stderr)
+        return 1
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+    bak = f"host_status_bak_{ts}"
+    db.execute(f"CREATE TABLE {bak} AS SELECT * FROM host_status")   # back up BEFORE touching it
+    vals = "(" + ",".join("?" * len(_PROMOTE_COLS)) + ")"
+    payload = [tuple(r.get(c) for c in _PROMOTE_COLS) for r in new_rows]
+    db.execute("BEGIN")
+    db.execute("DELETE FROM host_status")
+    db.executemany(
+        f"INSERT INTO host_status({','.join(_PROMOTE_COLS)}) VALUES{vals}", payload)
+    db.execute("COMMIT")
+    print(f"promoted: host_status is now {len(new_rows)} rows "
+          f"({len(merged_rows)} merged real-model records + {len(carried)} carried-forward), "
+          f"was {old_count}. Backup: {bak}. {skipped_groups} group(s) left un-merged (over {MERGE_MAX}-row cap).")
+    return 0
+
+
+def rep_cleanup_cli(argv):
+    """`--rep-cleanup [STEP]`: reputation cleanup workbench (TEMPORARY).
+    Steps: 'init' (copy host_status -> `working` + is_query flag), 'resolve' (map each
+    row to its real model via find_servers), 'consolidate' (preview the folded records
+    in `consolidated`), 'promote' (back up host_status, then replace it with the cleaned
+    rows). Only 'promote' modifies host_status, and it backs up first."""
+    step = (str(argv[0]).lower() if argv else "init")
+    if step == "init":
+        return _rep_cleanup_init()
+    if step == "resolve":
+        return _rep_cleanup_resolve()
+    if step == "consolidate":
+        return _rep_cleanup_consolidate()
+    if step == "promote":
+        return _rep_cleanup_promote()
+    print(f"unknown rep-cleanup step '{step}' (known: init, resolve, consolidate, promote)", file=sys.stderr)
+    return 2
+
+
 def refresh_cache(source=None, cleanse=True):
     global _servers_cache
     _servers_cache = None
@@ -3319,12 +3636,20 @@ def skip(detail=None):
     return Outcome(V_SKIP, None, "", detail)
 
 
-def record_verdict(host, key, outcome):
-    """The one place a race turns a verdict into reputation."""
+def record_verdict(host, key, outcome, sticky_key=None):
+    """The one place a race turns a verdict into reputation.
+
+    `key` is the reputation key and MUST be the RESOLVED model (host/real-model is
+    the primitive — never host/query). `sticky_key` is the key the last-success
+    STICKY is stored under, which stays the QUERY the caller searched with (that's
+    how get_last(query) finds it); it defaults to `key` for capability races where
+    the two are the same sentinel. The resolved model is still recorded as the
+    sticky's `full` value via outcome.extra."""
+    sticky_key = key if sticky_key is None else sticky_key
     v = outcome.verdict
     if v == V_ACCEPTED:
         add_good(host, key)
-        set_last(key, host, outcome.extra or "")
+        set_last(sticky_key, host, outcome.extra or "")
     elif v == V_UNREACHABLE:
         # host-wide, so it isn't re-probed as "unknown" for every other key...
         mark_unreachable(host)
@@ -3356,7 +3681,7 @@ def record_race(host, key, won):
 
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
-                      label=None, hedge_delay=0):
+                      label=None, hedge_delay=0, key_of=None):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -3371,6 +3696,13 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
       key     - the reputation/worker key: a model name, or a __capability__
                 sentinel like __tts__
       host_of - pulls the host out of an entry (default: the entry is the host)
+      key_of  - pulls the REPUTATION key out of an entry (default: the shared
+                `key`). The chat race passes the per-host RESOLVED model here, so
+                reputation is stored under (host, real-model) — never under the
+                user's query pattern, which would fragment one model into several
+                conflicting rows. `key` itself stays the query, used only for the
+                sticky (via record_verdict's sticky_key), the worker label, and
+                the kind. Capability races leave key_of unset (key == sentinel).
       label   - what the /workers view calls this job (default: the key). The
                 reputation key and the human label are not the same thing —
                 txt2img wants the prompt there, not "__a1111__".
@@ -3388,6 +3720,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     tried = 0
     tally = collections.Counter()
     host_of = host_of or (lambda item: item)
+    key_of = key_of or (lambda item: key)   # reputation key per item (resolved model for chat)
     _attempt_tasks = set()
 
     async def worker():
@@ -3419,10 +3752,10 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                     # cancelled this in-flight attempt: count it as a race loss so
                     # the fleet picture fills in even without a good/bad verdict.
                     if not stopped:
-                        record_race(host_of(item), key, won=False)
+                        record_race(host_of(item), key_of(item), won=False)
                     raise           # real stop / post-win cleanup: let it die
                 tally[V_SKIP] += 1
-                record_verdict(host_of(item), key, skip("skipped by user"))
+                record_verdict(host_of(item), key_of(item), skip("skipped by user"), sticky_key=key)
                 await broadcast_activity(host_of(item), label or key, "failed",
                     f"skipped: {host_of(item)}", wid=wid)
                 continue            # skip: move on to the next candidate host
@@ -3434,15 +3767,15 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             if outcome is None:
                 outcome = skip()
             tally[outcome.verdict] += 1
-            record_verdict(host_of(item), key, outcome)
+            record_verdict(host_of(item), key_of(item), outcome, sticky_key=key)
             if outcome.verdict == V_ACCEPTED:
-                record_race(host_of(item), key, won=True)
+                record_race(host_of(item), key_of(item), won=True)
                 mark_worker_found(wwid, host_of(item))
                 await result_queue.put(outcome.result)
                 done.set()
                 return
             elif outcome.verdict != V_SKIP:      # tried and didn't win = a race loss
-                record_race(host_of(item), key, won=False)
+                record_race(host_of(item), key_of(item), won=False)
 
     _tasks_holder = []
 
@@ -4145,6 +4478,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     servers = sorted(servers, key=_order_key)   # stable: recency order survives ties
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
+        key_of=lambda it: it[2][0],   # reputation keyed by the RESOLVED model (ms[0]), not the query
         hedge_delay=hedge_delay)
     return result, errors, stopped
 
@@ -9693,7 +10027,7 @@ async def _run_chat_job(session, jid):
                             # the host stalled / dropped mid-stream — fail over like a
                             # skip (carry the partial to the next host), but record it as
                             # a real failure so reputation reflects it.
-                            record_verdict(host, model, timed_out(f"stream stalled — no tokens for {STREAM_STALL}s"))
+                            record_verdict(host, full, timed_out(f"stream stalled — no tokens for {STREAM_STALL}s"))
                             errors.append(f"{host}: stream stalled")
                             servers = [s for s in servers if s[1] != host]
                             if partial[0].strip():
@@ -9706,7 +10040,7 @@ async def _run_chat_job(session, jid):
                             ctl["stall"] = False
                             skipped = True
                         elif ctl["skip"]:
-                            record_verdict(host, model, skip("skipped by user"))
+                            record_verdict(host, full, skip("skipped by user"))
                             errors.append(f"{host}: skipped by user")
                             servers = [s for s in servers if s[1] != host]
                             # EXPERIMENTAL skip-continuation (inherently undefined —
@@ -13185,6 +13519,13 @@ def main():
                              "right and the verb comes last: '--hosts' for a summary, '--hosts bad' "
                              "for the keys marked bad, '--hosts bad __tts__' for the hosts carrying "
                              "that mark, and '--hosts bad __tts__ del' to clear them")
+    parser.add_argument("--rep-cleanup", nargs="*", metavar="STEP",
+                        help="reputation-table cleanup workbench (TEMPORARY migration). Steps: 'init' (copy "
+                             "host_status -> `working` + is_query flag from the graflex check/ snapshots), "
+                             "'resolve' (map each row to its real model via find_servers), 'consolidate' "
+                             "(preview folded (host, real-model) records in `consolidated`), 'promote' (back up "
+                             "host_status, then replace it with the cleaned rows). Only 'promote' edits "
+                             f"host_status, backs up first, refuses to merge >{5} rows into one, and aborts on a >50% shrink")
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     args = parser.parse_args()
@@ -13200,6 +13541,9 @@ def main():
 
     if args.cleanse is not None:
         sys.exit(cleanse_from_argv(args.cleanse))
+
+    if args.rep_cleanup is not None:
+        sys.exit(rep_cleanup_cli(args.rep_cleanup))
 
     if args.refresh or args.refresh_only:
         cleanse = not args.refresh_only        # --refresh cleanses; --refresh-only keeps everything
