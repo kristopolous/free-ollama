@@ -27,6 +27,7 @@ Your path to victory is **free-ollama**!
 
 * Dyva's architecture draws a hard line at incurring any *additional* costs. That's strictly not allowed - only unused time on idle machines.
 * graflex surveys can be reconstructed but the output of them is kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. I'm happy to share it for legitimate research purposes. You can find me.
+* The built-in sources are still about 2,500 servers so it's not nothing....
 
 ## What's actually out there?
 
