@@ -642,7 +642,7 @@ var pictionary = {
       if(d.marker){ cur = { round: d.round, secret: d.secret, shots: [] }; cards.push(cur); return; }
       if(!cur){ cur = { round: d.round || 1, secret: '', shots: [] }; cards.push(cur); }
       if(d.say){ cur.shots.push('<div class="say ' + (d.cls || '') + '">' + esc(d.say) + '</div>'); return; }
-      cur.shots.push('<div class="shot"><div class="cap">' + (d.host ? esc(d.host) : 'drawing') + '</div>'
+      cur.shots.push('<div class="shot"><div class="cap">' + (d.host ? '' : 'drawing') + '</div>'
         + '<div class="pic">' + d.svg + '</div></div>');
     });
     if(!st.over && st.phase === 'draw'){

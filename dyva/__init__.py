@@ -769,7 +769,7 @@ def hosts_cli(argv):
             _hosts_usage()
             return 1
         totals = dict(db.execute(
-            "SELECT state, COUNT(*) FROM host_status GROUP BY state").fetchall())
+            f"SELECT state, COUNT(*) FROM host_status WHERE {_LIVE_REAL} GROUP BY state").fetchall())
         if not totals:
             print("host reputation table is empty")
             return 0
@@ -817,7 +817,7 @@ def hosts_cli(argv):
     if not doing:
         for key in resolved:
             hosts = [h for (h,) in db.execute(
-                "SELECT host FROM host_status WHERE state=? AND model=? ORDER BY host",
+                f"SELECT host FROM host_status WHERE state=? AND model=? AND {_LIVE_REAL} ORDER BY host",
                 (state, key))]
             print(f"{_key_label(key)}: {len(hosts)} host{'' if len(hosts) == 1 else 's'} "
                   f"marked '{state}'")
@@ -1266,13 +1266,21 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     tps = None
     ec, ed = obj.get("eval_count"), obj.get("eval_duration")   # ed is ns, Ollama native
     edur = (ed / 1e9) if ed else 0                              # eval window, seconds
-    if ec and edur >= MIN_TPS_WINDOW:      # too short a window can't state a rate
-        tps = ec / edur
+    if ec and edur > 0:
+        # The host's OWN eval_duration is a reliably measured generation time at ANY
+        # length — so state the rate (the dashboard already shows it from the same
+        # numbers). MIN_TPS_WINDOW is NOT applied here; it belongs to the wall-clock
+        # fallback below, where a host that buffered-then-bursted collapses the
+        # denominator into an impossibly-high rate. TPS_CEILING still rejects a
+        # degenerate near-zero eval_duration.
+        cand = ec / edur
+        if cand <= TPS_CEILING:
+            tps = cand
     else:
         w = _workers.get(wid)
         if w and c and w.get("found"):
             _run = time.time() - w["found"]
-            if _run >= MIN_TPS_WINDOW:       # same floor on the wall-clock denominator
+            if _run >= MIN_TPS_WINDOW:       # the floor belongs HERE (wall-clock denominator)
                 cand = c / _run
                 if cand <= TPS_CEILING:      # else it's a read-speed artifact, not a rate
                     tps = cand
@@ -2493,7 +2501,7 @@ def smoke_dated(host, model):
     model = canon_pattern(model)
     try:
         row = _get_db().execute(
-            "SELECT smoke_date FROM host_status WHERE host=? AND model=?",
+            f"SELECT smoke_date FROM host_status WHERE host=? AND model=? AND {_LIVE_REAL}",
             [host, model]).fetchone()
         return bool(row and row[0])
     except Exception:
@@ -4012,6 +4020,35 @@ def openai_payload(p):
     return out
 
 
+def _carry_upstream_timing(out, obj):
+    """Carry an upstream's token counts / timing onto the Ollama-shaped `out` so
+    account_tokens can compute tps. Beyond Ollama's own eval_count/eval_duration:
+      - llama.cpp puts a `timings` block on its final chunk/response — predicted_n
+        (generated tokens), predicted_ms, prompt_n, prompt_ms — the true rate even
+        over the OpenAI dialect, which otherwise reports no timing at all;
+      - an OpenAI host with stream_options.include_usage puts counts in `usage`.
+    Ollama durations are NANOSECONDS; llama.cpp reports MILLISECONDS."""
+    if not isinstance(obj, dict):
+        return out
+    tim = obj.get("timings")
+    if isinstance(tim, dict):
+        if tim.get("predicted_n") is not None:
+            out["eval_count"] = tim["predicted_n"]
+        if tim.get("predicted_ms") is not None:
+            out["eval_duration"] = int(float(tim["predicted_ms"]) * 1e6)
+        if tim.get("prompt_n") is not None:
+            out["prompt_eval_count"] = tim["prompt_n"]
+        if tim.get("prompt_ms") is not None:
+            out["prompt_eval_duration"] = int(float(tim["prompt_ms"]) * 1e6)
+    usage = obj.get("usage")
+    if isinstance(usage, dict):
+        if out.get("eval_count") is None and usage.get("completion_tokens") is not None:
+            out["eval_count"] = usage["completion_tokens"]
+        if out.get("prompt_eval_count") is None and usage.get("prompt_tokens") is not None:
+            out["prompt_eval_count"] = usage["prompt_tokens"]
+    return out
+
+
 def openai_to_ollama(data, model):
     """One non-streaming OpenAI completion, in Ollama's shape."""
     ch = ((data.get("choices") or [{}])[0]) or {}
@@ -4027,11 +4064,7 @@ def openai_to_ollama(data, model):
            "done": True, "done_reason": ch.get("finish_reason") or "stop"}
     if msg.get("tool_calls"):
         out["message"]["tool_calls"] = msg["tool_calls"]
-    usage = data.get("usage") or {}
-    if usage:
-        out["prompt_eval_count"] = usage.get("prompt_tokens")
-        out["eval_count"] = usage.get("completion_tokens")
-    return out
+    return _carry_upstream_timing(out, data)   # usage + llama.cpp `timings`
 
 
 def openai_stream_to_ollama(line, model):
@@ -4090,7 +4123,7 @@ def openai_stream_to_ollama(line, model):
            "done": bool(fin)}
     if fin:
         out["done_reason"] = fin
-    return out
+    return _carry_upstream_timing(out, obj)   # llama.cpp `timings` / OpenAI `usage` on the final chunk
 
 
 def _maybe_json(v):
@@ -4262,7 +4295,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
     # Both dialects reported the endpoint missing. Hand back WHAT they actually
     # said (status + body) so a real 404 is distinguishable from an intermediary
     # (proxy/LB) 501/HTML or a connection-limit page masquerading as a miss.
-    why = "no chat endpoint — " + "; ".join(tried)
+    why = join(tried)
     return None, oai, ep, why
 
 
@@ -4356,7 +4389,10 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             if no_socket:
                 await broadcast_activity(host, model, "failed",
                     f"failure: {host} for {model} - no connection: {detail}", duration=dur, wid=wid)
-                return unreachable_host(f"no connection: {detail}")
+                # last_fail_reason gets the RAW exception text (str(e)), not our
+                # "no connection:" wrapper — so failures group cleanly. The feed
+                # line above keeps the human-readable prefix.
+                return unreachable_host(detail)
             if isinstance(e, asyncio.TimeoutError):
                 # Connected but too slow (cold start / slow inference). It's alive,
                 # not dead — so DON'T penalise it (a slow cold host is often fast
@@ -4407,6 +4443,15 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             if "loading model" in body.lower():
                 await broadcast_activity(host, model, "warming",
                     f"warming up: {host} for {model} - model loading", duration=dur, wid=wid)
+                return skip(detail)
+            # 503 Service Unavailable = the host is ALIVE but at capacity — a full
+            # queue / llama.cpp's "maximum number of pending requests", vLLM's "no
+            # slot", etc. That's a busy signal, not a bad host: skip (no penalty, its
+            # reputation untouched) so the race moves to another host. "maybe good,
+            # just busy", same family as the warm-up case.
+            if code == 503:
+                await broadcast_activity(host, model, "warming",
+                    f"busy: {host} for {model} - {detail}", duration=dur, wid=wid)
                 return skip(detail)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - {detail}", duration=dur, wid=wid)
@@ -5253,7 +5298,10 @@ async def _quick_probe(session, host, full, model_in, tools=None):
             f"quick test: {host} for {model_in} - error: {data['error']}", duration=dur, wid=wid)
         return False, f"error: {str(data['error'])[:80]}"
     if not _quick_test_answer_ok(content):
-        force_bad(host, full, reason=f"smoke: canned/parroted answer: {shown}")
+        # Stored reason is JUST what the host sent — the actual survey signal. Our
+        # "smoke: canned/parroted answer:" label is constant (already implied by
+        # fail_smoke=1), so it encodes zero survey bits; drop it and keep the response.
+        force_bad(host, full, reason=shown)
         mark_smoke(host, full, failed=True)   # conclusive: answered with a canned/fake response
         log.warning(f"quick test FAIL {host} ({full}): {shown!r}")
         await broadcast_activity(host, model_in, "failed",
@@ -5833,11 +5881,15 @@ async def handle_host_info(request):
     # Reputation + capability caps from the SQLite store, keyed by the full URL.
     try:
         db = _get_db()
+        capmap = {m: c for (m, c) in db.execute(
+            "SELECT model, caps FROM host_caps WHERE host=?", (server_url,)).fetchall()}
         out["reputation"] = [
-            {"model": m, "state": st, "last_good": lg, "failure_streak": fs}
-            for (m, st, lg, fs) in db.execute(
-                "SELECT model, state, last_good, failure_streak FROM host_status "
-                "WHERE host=? ORDER BY model", (server_url,)).fetchall()]
+            {"model": m, "state": st, "last_good": lg, "failure_streak": fs,
+             "ttft": ttft, "tps": tps, "fail_smoke": fsm, "smoke_date": sd,
+             "caps": capmap.get(m)}
+            for (m, st, lg, fs, ttft, tps, fsm, sd) in db.execute(
+                f"SELECT model, state, last_good, failure_streak, ttft, tps, fail_smoke, smoke_date "
+                f"FROM host_status WHERE host=? AND {_LIVE_REAL} ORDER BY model", (server_url,)).fetchall()]
         caps = []
         for (cap, node, voices, checked) in db.execute(
                 "SELECT capability, node, voices, checked FROM host_nodes "
@@ -5910,8 +5962,8 @@ async def handle_dashboard_models(request):
     # so the coverage bars are exact again.
     gb = {}
     for model, state, n in _get_db().execute(
-            "SELECT model, state, COUNT(*) FROM host_status "
-            "WHERE state IN ('good','bad') GROUP BY model, state").fetchall():
+            f"SELECT model, state, COUNT(*) FROM host_status "
+            f"WHERE state IN ('good','bad') AND {_LIVE_REAL} GROUP BY model, state").fetchall():
         gb.setdefault(model, {})[state] = n
     out = []
     for m, a in agg.items():
@@ -5967,7 +6019,7 @@ async def handle_model_hosts(request):
     if not q:
         return web.json_response({"model": q, "hosts": []})
     states = {h: st for h, st in _get_db().execute(
-        "SELECT host, state FROM host_status WHERE model=?",
+        f"SELECT host, state FROM host_status WHERE model=? AND {_LIVE_REAL}",
         (canon_pattern(q),)).fetchall()}
     hosts = [{"host": s.get("server", ""), "checked": s.get("checked"),
               "state": states.get(s.get("server", ""), "unknown")}
@@ -5998,11 +6050,11 @@ async def handle_dashboard_data(request):
     DASH_RECENT = 200
     db = _get_db()
     counts = dict(db.execute(
-        "SELECT state, COUNT(*) FROM host_status GROUP BY state").fetchall())
+        f"SELECT state, COUNT(*) FROM host_status WHERE {_LIVE_REAL} GROUP BY state").fetchall())
 
     def _recent(state):
         rows = db.execute(
-            "SELECT host, model FROM host_status WHERE state=? "
+            f"SELECT host, model FROM host_status WHERE state=? AND {_LIVE_REAL} "
             "ORDER BY COALESCE(last_fail, last_race, last_good) DESC, id DESC "
             "LIMIT ?", (state, DASH_RECENT)).fetchall()
         # The host-wide unreachable mark is a \x00-prefixed sentinel "model"; strip
@@ -10027,7 +10079,15 @@ async def _run_chat_job(session, jid):
                         if _m.get("content"):
                             partial[0] += _m["content"]   # for skip-continuation
                         if obj.get("done"):
-                            done_obj[0] = obj
+                            # Don't let a bare terminator (OpenAI's `data: [DONE]`, which
+                            # carries no token stats) CLOBBER a real done object that already
+                            # carried eval_count/eval_duration (e.g. llama.cpp's `timings`
+                            # chunk arrives just before [DONE]). Otherwise account_tokens
+                            # gets an empty object and no tps is recorded, even though the
+                            # dashboard already showed it from the earlier chunk.
+                            prev = done_obj[0]
+                            if prev is None or obj.get("eval_count") is not None or prev.get("eval_count") is None:
+                                done_obj[0] = obj
                         return json.dumps(obj, ensure_ascii=False), bool(obj.get("done"))
 
                     async def _pump():
@@ -10072,8 +10132,11 @@ async def _run_chat_job(session, jid):
                             # the host stalled / dropped mid-stream — fail over like a
                             # skip (carry the partial to the next host), but record it as
                             # a real failure so reputation reflects it.
-                            record_verdict(host, full, timed_out(f"stream stalled — no tokens for {STREAM_STALL}s"))
-                            errors.append(f"{host}: stream stalled")
+                            # Stored reason is a STABLE code (no interpolated timeout,
+                            # no em-dash) so last_fail_reason groups cleanly; the feed
+                            # line below carries the readable text.
+                            record_verdict(host, full, timed_out("stream stalled"))
+                            errors.append(f"{host}: stream stalled — no tokens for {STREAM_STALL}s")
                             servers = [s for s in servers if s[1] != host]
                             if partial[0].strip():
                                 opayload["messages"] = list(opayload.get("messages") or []) + [
@@ -12439,7 +12502,7 @@ def bad_pairs_for(host, cap):
     pre = f"{cap}!"
     out = set()
     for (m,) in _get_db().execute(
-            "SELECT model FROM host_status WHERE host=? AND state='bad' AND model LIKE ?",
+            f"SELECT model FROM host_status WHERE host=? AND state='bad' AND model LIKE ? AND {_LIVE_REAL}",
             (host, pre + "%")):
         out.add(m[len(pre):])
     return out

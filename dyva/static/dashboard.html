@@ -297,6 +297,12 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .hd-row .hd-v{color:var(--text-2);text-align:right;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:.8rem}
 .hd-sec{margin:.9em 0 .2em;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint)}
 .hd-item{display:flex;justify-content:space-between;gap:10px;font-family:var(--font-mono);font-size:.78rem;padding:2px 0;color:var(--text-2)}
+.hd-model{margin:8px 0}
+.hd-model-name{font-family:var(--font-mono);font-size:.8rem;color:var(--text-2);overflow-wrap:anywhere}
+table.hd-model-kv{margin:2px 0 0 1.4em;border-collapse:collapse;font-family:var(--font-mono);font-size:.72rem}
+table.hd-model-kv td{padding:1px 12px 1px 0;vertical-align:top;color:var(--text-2)}
+table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
+.hd-smoke-ok{color:#39d353}.hd-smoke-bad{color:var(--err)}.hd-dim{color:var(--text-faint)}
 .hd-st-good{color:#39d353}.hd-st-bad{color:var(--err)}.hd-st-maybe_good{color:var(--accent)}
 .hd-attr{margin-top:1em;font-size:.64rem;color:var(--text-faint)}
 .host-checked{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap;font-size:var(--fs-xs)}
@@ -376,7 +382,10 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .messages{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);height:46vh;overflow-y:auto;overflow-anchor:none;padding:.75em;margin-bottom:.75em}
 .msg{margin-bottom:.75em}
 .msg .role{font-size:var(--fs-2xs);color:var(--text-dim);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);margin-bottom:.25em;display:flex;align-items:center;gap:.4em;position:relative}
-.msg .role .role-meta{text-transform:none;letter-spacing:0;font-family:var(--font-mono);color:var(--text-faint);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg .role .role-meta{text-transform:none;letter-spacing:0;font-family:var(--font-mono);color:var(--text-faint);min-width:0;display:inline-flex;align-items:center;gap:.35em}
+.msg .role .role-meta .rm-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg .role .role-meta .copy-curl{flex-shrink:0}
+.msg .role .role-meta .copy-curl svg{width:11px;height:11px}
 .msg .actions{display:inline-flex;align-items:center;gap:.15em;height:.75rem;overflow:visible;opacity:0;pointer-events:none}
 .msg:hover .actions{opacity:1;pointer-events:auto}
 .msg .actions .act{cursor:pointer;color:var(--accent);font-size:1rem;line-height:1;height:1.5rem;min-width:1.5rem;margin:-.375rem 0;padding:0 4px;border-radius:var(--r-sm);user-select:none;display:inline-flex;align-items:center;justify-content:center}
@@ -1978,14 +1987,30 @@ function hostDetailHtml(host,j){
   h.push(row('host','<a href="'+escHtml(href)+'" target="_blank" rel="noopener noreferrer">'+escHtml(url)+' ↗</a>'));
   if(j.asn)h.push(row('network','AS'+j.asn+(j.as_org?' · '+escHtml(j.as_org):'')));
   h.push(row('source',j.source?escHtml(j.source):''));
-  h.push(row('tps',(j.tps!=null&&j.tps!=='')?escHtml(String(j.tps)):''));
   h.push(row('checked',j.lastUpdate?escHtml(String(j.lastUpdate)):''));
-  var models=j.models||[],rep={};(j.reputation||[]).forEach(function(r){rep[r.model]=r});
+  // honeypot signal from graflex's model/size-signature detection (higher = more suspect)
+  h.push(row('bogus score',(j.bogus_score!=null&&j.bogus_score!=='')?escHtml(String(j.bogus_score)):''));
+  // j.models may be a Form A object {name:{}} or a legacy array of names; also fold in
+  // any model host_status has a reputation row for even if the record's list omits it.
+  var rep={};(j.reputation||[]).forEach(function(r){rep[r.model]=r});
+  var models=Array.isArray(j.models)?j.models.slice():Object.keys(j.models||{});
+  (j.reputation||[]).forEach(function(r){if(models.indexOf(r.model)<0)models.push(r.model)});
   if(models.length){
     h.push('<div class="hd-sec">models ('+models.length+')</div>');
+    var dim='<span class="hd-dim">-</span>';
     models.slice(0,50).forEach(function(m){
-      var r=rep[m],st=r?('<span class="hd-st-'+escHtml(r.state)+'">'+escHtml(r.state)+'</span>'):'';
-      h.push('<div class="hd-item"><span>'+escHtml(String(m).replace(/\\/g,'/').split('/').pop())+'</span>'+st+'</div>');
+      var r=rep[m]||{};
+      var name=escHtml(String(m).replace(/\\/g,'/').split('/').pop());
+      // smoke: smoke_date present => tested; fail_smoke=1 => canned/fake answer
+      var rows=[
+        ['state', r.state?escHtml(r.state):dim],
+        ['ttft', (r.ttft!=null&&r.ttft!=='')?(escHtml(String(r.ttft))+'s'):dim],
+        ['tps', (r.tps!=null&&r.tps!=='')?(escHtml(String(r.tps))+' t/s'):dim],
+        ['smoke', r.smoke_date?(r.fail_smoke?'canned':'passed'):'<span class="hd-dim">untested</span>'],
+        ['caps', r.caps?escHtml(String(r.caps).split(',').join(' · ')):dim]
+      ];
+      var trs=rows.map(function(kv){return '<tr><td class="hd-kv-k">'+kv[0]+'</td><td>'+kv[1]+'</td></tr>'}).join('');
+      h.push('<div class="hd-model"><span class="hd-model-name">'+name+'</span><table class="hd-model-kv">'+trs+'</table></div>');
     });
     if(models.length>50)h.push('<div class="hd-attr">… and '+(models.length-50)+' more</div>');
   }
@@ -3489,6 +3514,20 @@ function regenerateFrom(index){
   sendChat();
 }
 function retryUserMsg(index){regenerateFrom(index)}
+// A minimal, replayable curl to the host that answered — just the LAST user
+// message, not the whole history — so a payload is easy to inspect. Dialect
+// picks the endpoint (Ollama /api/chat vs OpenAI-compatible /v1/chat/completions).
+function hostCurl(host,fmodel,service){
+  if(!host)return '';
+  var base=(/^https?:\/\//.test(host)?host:'http://'+host).replace(/\/+$/,'');
+  var path=/ollama/i.test(service||'')?'/api/chat':'/v1/chat/completions';
+  var last='';
+  var ms=(currentChat&&currentChat.messages)||[];
+  for(var i=ms.length-1;i>=0;i--){ if(ms[i]&&ms[i].role==='user'){ last=ms[i].content; break; } }
+  var body=JSON.stringify({model:fmodel||'',messages:[{role:'user',content:last||''}],stream:false});
+  // single-quote the JSON for the shell; escape any embedded single quotes
+  return "curl -s "+base+path+" -H 'Content-Type: application/json' -d '"+body.replace(/'/g,"'\\''")+"'";
+}
 function setAssistantLabel(el,host,fmodel,tps,service){
   // The label is uppercased by .role; a hostname and a model filename are not
   // words, and shouting them makes them harder to read. Keep ASSISTANT in the
@@ -3507,8 +3546,23 @@ function setAssistantLabel(el,host,fmodel,tps,service){
     if(lbl.nextSibling)lbl.parentNode.insertBefore(meta,lbl.nextSibling);
     else lbl.parentNode.appendChild(meta);
   }
-  meta.textContent=bits.join(' ');
+  // Text lives in its own child so the curl button can sit INSIDE the meta span,
+  // right after the host name — not out in the .role action cluster (the speak/copy
+  // buttons carry order:-1, which would yank a sibling button over there).
+  var txt=meta.querySelector('.rm-text');
+  if(!txt){txt=document.createElement('span');txt.className='rm-text';meta.insertBefore(txt,meta.firstChild);}
+  txt.textContent=bits.join(' ');
   meta.title=bits.join(' ');
+  if(host){
+    var cb=meta.querySelector('.copy-curl');
+    if(!cb){
+      cb=makeCopyBtn(function(){ return hostCurl(el._curlHost,el._curlModel,el._curlSvc); });
+      cb.classList.add('copy-curl');
+      cb.title='Copy a curl for this host';cb.setAttribute('aria-label','Copy a curl for this host');
+      meta.appendChild(cb);   // inside meta, immediately after the host text
+    }
+    el._curlHost=host;el._curlModel=fmodel;el._curlSvc=service;
+  }
 }
 function newChat(){_stickBottom=true;saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[],documents:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
 function loadChatById(id){
