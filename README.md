@@ -49,9 +49,9 @@ https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ## Method 1: Liberated Infrastructure
 
-**Dyva** is a managed proxy that you can connect to with any OpenAI, Ollama, ComfyUI, SGLang, LM Studio, llama.cpp, vllm, or a1111 compatible client (graflex finds the open ones). 
+**Dyva** is a managed proxy that you can connect to with any OpenAI, Fooocus, Ollama, ComfyUI, SGLang, LM Studio, llama.cpp, vllm, or a1111 compatible client (graflex finds the open ones). 
 
-It will cycle through and find working hosts automatically. 
+It will cycle through and find working hosts automatically. This is where the majority of the work is in these days.
 
 You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable. You can also do fallbacks with a comma such as "gemma3,qwen3.6" (try the first, fall back to the second), filter by size like "qwen >10gb", and — here's the genuinely novel part — filter by release date like "qwen>2026" (a bare year, month, or day; released after that), so "qwen>2026>5gb" means the freshest large Qwen anywhere on the fleet. As far as we know nothing else lets you route by a model's release date, because nothing else routes over an uncontrolled, discovered substrate — a normal provider just has one catalog and exact ids.
 
@@ -76,7 +76,7 @@ Now where's that $50 million seed round...
 Also let's take a moment and appreciate that magnificent icon, generated with one of these shady ip addresses!
 
 <center>
-<img width="450" alt="dyva" src="https://github.com/user-attachments/assets/33f0f350-2913-4729-a0a9-1400ff02ef75" />
+<img alt="dyva" src="https://github.com/user-attachments/assets/2439201b-d263-43ca-a1b6-1954d873bd45" />
 </center>
 
 ### Image Generation
