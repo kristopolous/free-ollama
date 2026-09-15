@@ -704,11 +704,11 @@ def _hosts_counts(state=None):
     db = _get_db()
     if state:
         rows = db.execute(
-            "SELECT model, COUNT(*) FROM host_status WHERE state=? GROUP BY model ORDER BY 2 DESC, 1",
+            f"SELECT model, COUNT(*) FROM host_status WHERE state=? AND {_LIVE_REAL} GROUP BY model ORDER BY 2 DESC, 1",
             (state,)).fetchall()
     else:
         rows = db.execute(
-            "SELECT model, COUNT(*) FROM host_status GROUP BY model ORDER BY 2 DESC, 1").fetchall()
+            f"SELECT model, COUNT(*) FROM host_status WHERE {_LIVE_REAL} GROUP BY model ORDER BY 2 DESC, 1").fetchall()
     return rows
 
 
@@ -1761,15 +1761,6 @@ _STATE_RANK = {"good": 3, "maybe_good": 2, "unknown": 1, "bad": 0}
 # table into a single row; a group bigger than this is refused and left un-merged.
 MERGE_MAX = 5
 
-# Columns carried from working into the rebuilt host_status on promote (id is the
-# table's own AUTOINCREMENT and regenerates; sources/is_query/resolved_model are
-# workbench-only and dropped).
-_PROMOTE_COLS = ("host", "model", "state", "failure_streak", "success", "failure",
-                 "fail_timeout", "fail_4xx", "fail_5xx", "fail_conn", "fail_other",
-                 "last_fail", "last_fail_reason", "fail_smoke", "smoke_date",
-                 "race_won", "race_lost", "last_race", "last_good", "ttft", "tps")
-
-
 def _sweep_and_merge(groups):
     """TEMPORARY cleanup primitive (removable with the rest of the workbench).
     Given {(host, real_model): [working-row dicts]}, fold each group into ONE record:
@@ -1788,14 +1779,17 @@ def _sweep_and_merge(groups):
             return None
     records, conflicts, skipped_groups, skipped_keys = [], 0, 0, set()
     for (host, model), rs in groups.items():
-        if len(rs) > MERGE_MAX:                       # the safety valve
+        full = [r for r in rs if not r.get("_smoke_only")]   # smoke-only spreads don't count toward the cap
+        if len(full) > MERGE_MAX:                     # the safety valve (a bad query must not collapse many rows)
             skipped_groups += 1
-            for r in rs:
+            for r in full:
                 skipped_keys.add((r["host"], r["model"]))
             continue
         if len({r.get("state") for r in rs if r.get("state")}) > 1:
             conflicts += 1
-        best = max((r.get("state") for r in rs), key=lambda s: _STATE_RANK.get(s, -1))
+        # best state of the group; a group with only smoke-only contributions has no
+        # verdict, so it coalesces to 'unknown' (state is NOT NULL in host_status).
+        best = max((r.get("state") for r in rs), key=lambda s: _STATE_RANK.get(s, -1)) or "unknown"
         _sum = lambda f: sum(int(r.get(f) or 0) for r in rs)
         _max = lambda f: max((r.get(f) for r in rs if r.get(f)), default=None)
         failed = sorted((r for r in rs if r.get("last_fail")), key=lambda r: r["last_fail"])
@@ -1817,24 +1811,44 @@ def _sweep_and_merge(groups):
     return records, conflicts, skipped_groups, skipped_keys
 
 
-def _rep_cleanup_grouped():
-    """Group working rows that have a resolved_model into {(host, resolved_model): [rows]}."""
+def _rep_cleanup_contributions():
+    """Build {(host, real_model): [contribution dicts]} from `working`:
+      - a resolved-single row (or an is_query=0 real row) contributes its FULL stats to
+        (host, resolved_model);
+      - an AMBIGUOUS row (query resolved to >1 model) contributes ONLY its smoke result
+        to EACH resolved model on that host — the smoke test is a host-level fact, while
+        success/failure/tps are not attributable to a specific model, so they are dropped;
+      - an UNRESOLVABLE row (resolved to 0 models) contributes nothing — better no data
+        than inaccurate data.
+    Returns (groups, cols) or (None, None) if resolve hasn't run."""
     db = _get_db()
     cols = _working_cols()
-    if "resolved_model" not in cols:
+    if "resolved_models" not in cols:
         return None, None
     groups = {}
-    for row in db.execute("SELECT * FROM working WHERE resolved_model IS NOT NULL AND resolved_model != ''"):
+    for row in db.execute("SELECT * FROM working"):
         d = dict(zip(cols, row))
-        groups.setdefault((d["host"], d["resolved_model"]), []).append(d)
+        rm = d.get("resolved_model")
+        if rm:
+            groups.setdefault((d["host"], rm), []).append(d)          # full stats
+            continue
+        try:
+            rms = json.loads(d.get("resolved_models") or "[]")
+        except (ValueError, TypeError):
+            rms = []
+        if len(rms) > 1 and (d.get("fail_smoke") or d.get("smoke_date")):
+            for m in rms:                                             # smoke-only, per resolved model
+                groups.setdefault((d["host"], m), []).append(
+                    {"host": d["host"], "model": m, "state": None, "_smoke_only": True,
+                     "fail_smoke": d.get("fail_smoke"), "smoke_date": d.get("smoke_date")})
     return groups, cols
 
 
 def _rep_cleanup_consolidate():
     """Cleanup step 2b: build the `consolidated` preview table via _sweep_and_merge —
-    one row per (host, resolved_model). host_status is NOT touched."""
+    one row per (host, real model). host_status is NOT touched."""
     db = _get_db()
-    groups, _cols = _rep_cleanup_grouped()
+    groups, _cols = _rep_cleanup_contributions()
     if groups is None:
         print("run `--rep-cleanup resolve` first", file=sys.stderr)
         return 1
@@ -1857,54 +1871,62 @@ def _rep_cleanup_consolidate():
     return 0
 
 
+# Order of the merged-record tuple from _sweep_and_merge (last field `sources` is dropped).
+_MERGED_FIELDS = ("host", "model", "state", "success", "failure", "fail_timeout", "fail_4xx",
+                  "fail_5xx", "fail_conn", "fail_other", "failure_streak", "last_fail",
+                  "last_fail_reason", "fail_smoke", "smoke_date", "race_won", "race_lost",
+                  "last_race", "last_good", "ttft", "tps", "sources")
+
+
 def _rep_cleanup_promote():
-    """Cleanup step 3: make the cleaned data the REAL host_status. Backs up the current
-    host_status to host_status_bak_<ts> FIRST, then replaces its rows with the merged
-    (host, real-model) records PLUS every working row not covered by a merge (rows whose
-    (host, resolved_model) group was refused by the safety valve, or that never resolved)
-    carried forward as-is — so nothing is dropped. The table schema (incl. the id
-    AUTOINCREMENT) is preserved; only rows are replaced. Aborts if the result would
-    shrink the table by more than half (a guard against a bad merge)."""
+    """Cleanup step 3: make the cleaned data the REAL host_status, NON-destructively.
+    Backs up host_status to host_status_bak_<ts>, then in one transaction: UPSERTs each
+    merged (host, real-model) record (is_query=0, deleted_at=NULL) — overwriting the
+    original real-model row in place or inserting a new one — and SOFT-DELETES every
+    legacy query row (is_query=1 per `working`) by stamping deleted_at. No rows are
+    dropped; prioritization reads (is_query=0 AND deleted_at IS NULL) then see only the
+    clean, real-model set. Aborts if the merge produced nothing (resolve/consolidate not
+    run). Re-runnable."""
     db = _get_db()
-    groups, cols = _rep_cleanup_grouped()
+    groups, _cols = _rep_cleanup_contributions()
     if groups is None:
         print("run `--rep-cleanup resolve` first", file=sys.stderr)
         return 1
-    records, conflicts, skipped_groups, skipped_keys = _sweep_and_merge(groups)
-    # Carry forward every working row NOT consumed by a merge: unresolved rows AND the
-    # rows in refused (over-cap) groups keep their original (host, model) and stats.
-    ci = {c: i for i, c in enumerate(cols)}
-    merged_rows = [dict(zip(("host", "model", "state", "success", "failure", "fail_timeout",
-                             "fail_4xx", "fail_5xx", "fail_conn", "fail_other", "failure_streak",
-                             "last_fail", "last_fail_reason", "fail_smoke", "smoke_date",
-                             "race_won", "race_lost", "last_race", "last_good", "ttft", "tps",
-                             "sources"), r)) for r in records]
-    carried = []
-    for row in db.execute("SELECT * FROM working"):
-        rm = row[ci["resolved_model"]]
-        host, model = row[ci["host"]], row[ci["model"]]
-        if rm and (host, model) not in skipped_keys:
-            continue                            # consumed by a merged record
-        carried.append({c: row[ci[c]] for c in cols if c in ci})
-    new_rows = merged_rows + carried
-    old_count = db.execute("SELECT COUNT(*) FROM host_status").fetchone()[0]
-    if new_rows and len(new_rows) < old_count * 0.5:
-        print(f"ABORT: would shrink host_status {old_count} -> {len(new_rows)} (>50% drop) — "
-              f"refusing. Inspect `working`/`consolidated` first.", file=sys.stderr)
+    records, conflicts, skipped_groups, _skk = _sweep_and_merge(groups)
+    if not records:
+        print("ABORT: no merged records produced — run init/resolve/consolidate and inspect first.",
+              file=sys.stderr)
         return 1
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+    ri = {c: i for i, c in enumerate(_MERGED_FIELDS)}
+    up_cols = [c for c in _MERGED_FIELDS if c != "sources"]
+    set_clause = ", ".join(f"{c}=excluded.{c}" for c in up_cols if c not in ("host", "model"))
+    merged_keys = {(r[ri["host"]], r[ri["model"]]) for r in records}   # the real-model rows we keep live
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S_%f")
     bak = f"host_status_bak_{ts}"
-    db.execute(f"CREATE TABLE {bak} AS SELECT * FROM host_status")   # back up BEFORE touching it
-    vals = "(" + ",".join("?" * len(_PROMOTE_COLS)) + ")"
-    payload = [tuple(r.get(c) for c in _PROMOTE_COLS) for r in new_rows]
+    db.execute(f"CREATE TABLE {bak} AS SELECT * FROM host_status")     # full snapshot, belt-and-suspenders
+    now = _now_iso()
     db.execute("BEGIN")
-    db.execute("DELETE FROM host_status")
-    db.executemany(
-        f"INSERT INTO host_status({','.join(_PROMOTE_COLS)}) VALUES{vals}", payload)
+    for r in records:                                                 # 1) upsert merged real-model records
+        db.execute(
+            f"INSERT INTO host_status({','.join(up_cols)}, is_query, deleted_at) "
+            f"VALUES({','.join('?' * len(up_cols))}, 0, NULL) "
+            f"ON CONFLICT(host, model) DO UPDATE SET {set_clause}, is_query=0, deleted_at=NULL",
+            tuple(r[ri[c]] for c in up_cols))
+    n_soft = 0
+    for host, model in db.execute("SELECT host, model FROM working WHERE is_query=1").fetchall():
+        if (host, model) in merged_keys:
+            continue                                                  # self-resolved to a real model — keep it live
+        cur = db.execute(                                             # 2) soft-delete the genuine query rows
+            "UPDATE host_status SET deleted_at=?, is_query=1 "
+            "WHERE host=? AND model=? AND deleted_at IS NULL", (now, host, model))
+        n_soft += cur.rowcount
     db.execute("COMMIT")
-    print(f"promoted: host_status is now {len(new_rows)} rows "
-          f"({len(merged_rows)} merged real-model records + {len(carried)} carried-forward), "
-          f"was {old_count}. Backup: {bak}. {skipped_groups} group(s) left un-merged (over {MERGE_MAX}-row cap).")
+    live = db.execute(f"SELECT COUNT(*) FROM host_status WHERE {_LIVE_REAL}").fetchone()[0]
+    print("promoted (host_status rebuilt in place — nothing dropped):")
+    print(f"  {len(records)} merged real-model records upserted (is_query=0)")
+    print(f"  {n_soft} legacy query rows soft-deleted (deleted_at stamped, rows kept)")
+    print(f"  host_status now has {live} live real-model rows; backup table: {bak}")
+    print(f"  {conflicts} conflicting-state merges (best kept); {skipped_groups} group(s) refused (>{MERGE_MAX} rows)")
     return 0
 
 
@@ -2234,11 +2256,29 @@ def _get_db():
                      # winner's arrival cancels it before a good/bad verdict lands.
                      "race_won INTEGER NOT NULL DEFAULT 0",
                      "race_lost INTEGER NOT NULL DEFAULT 0",
-                     "last_race TEXT"):
+                     "last_race TEXT",
+                     # is_query: 1 = this row is keyed by a synthetic model QUERY, not a
+                     # real resolved model. New writes are resolved-keyed, so they default
+                     # to 0; only the reputation-cleanup workbench ever sets 1 (on the
+                     # legacy rows it soft-deletes). Host PRIORITIZATION reads only is_query=0.
+                     "is_query INTEGER NOT NULL DEFAULT 0",
+                     # Soft delete: a non-NULL deleted_at means the row is retired but KEPT
+                     # for recovery/audit; every prioritization read filters deleted_at IS NULL.
+                     "deleted_at TEXT",
+                     # When the row was first created. SQLite forbids a CURRENT_TIMESTAMP
+                     # default on ADD COLUMN, so the column is plain and an INSERT trigger
+                     # (below) stamps it; pre-existing rows stay NULL.
+                     "created_at TEXT"):
             try:
                 _status_db.execute(f"ALTER TABLE host_status ADD COLUMN {_col}")
             except sqlite3.OperationalError:
                 pass    # already there
+        # Emulate a created_at default: stamp it on INSERT when the caller didn't set it.
+        # Fires only on real inserts, so an ON CONFLICT DO UPDATE keeps the original value.
+        _status_db.execute(
+            "CREATE TRIGGER IF NOT EXISTS host_status_created_at AFTER INSERT ON host_status "
+            "WHEN NEW.created_at IS NULL BEGIN "
+            "UPDATE host_status SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE rowid=NEW.rowid; END")
         # smoke_ok recorded a PASS, but a pass is no longer evidence of a real host
         # (honeypots pass the quick test), so it's dead data — drop it. SQLite >= 3.35;
         # on an older build the DROP no-ops and the dead column stays, harmless.
@@ -2353,16 +2393,21 @@ def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+# Host PRIORITIZATION only ever considers REAL-model rows that are live: is_query=0
+# (never a synthetic query pattern) and deleted_at IS NULL (not soft-deleted).
+_LIVE_REAL = "is_query=0 AND deleted_at IS NULL"
+
+
 def _state_of(host, model):
     row = _get_db().execute(
-        "SELECT state FROM host_status WHERE host=? AND model=?",
+        f"SELECT state FROM host_status WHERE host=? AND model=? AND {_LIVE_REAL}",
         (host, model)).fetchone()
     return row[0] if row else None
 
 
 def _keys_with_state(state):
     return {f"{h} {m}" for h, m in _get_db().execute(
-        "SELECT host, model FROM host_status WHERE state=?", (state,)).fetchall()}
+        f"SELECT host, model FROM host_status WHERE state=? AND {_LIVE_REAL}", (state,)).fetchall()}
 
 
 def load_bad():
@@ -2607,7 +2652,7 @@ def node_survey_for(host, capability, ttl=NODE_SURVEY_TTL):
 
 def load_unreachable():
     return {h for (h,) in _get_db().execute(
-        "SELECT host FROM host_status WHERE model=? AND state='bad'",
+        f"SELECT host FROM host_status WHERE model=? AND state='bad' AND {_LIVE_REAL}",
         (UNREACHABLE_KEY,)).fetchall()}
 
 
