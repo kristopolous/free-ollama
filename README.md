@@ -27,7 +27,7 @@ Your path to victory is **free-ollama**!
 
 ## What's actually out there?
 
-Some of the surveys reveal hardware specs and it's mostly CPU, about 70%. This makes economically. A cheap VPS is about 1/70th the cost of a decent GPU but only about 1/7th the inference speed.
+Some of the surveys reveal hardware specs and it's mostly CPU, about 70%. This makes economical sense: A cheap VPS is about 1/70th the cost of a decent GPU but only about 1/7th the inference speed.
 
 This means the median inference cost of a single request is about `$0.00007` - and if you didn't make the request, they'd still pay that because it's metered by time, not by workload. Quick, go to the confessional.
 
