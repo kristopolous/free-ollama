@@ -25,7 +25,7 @@ Your path to victory is **free-ollama**!
 #### Note
 **DO NOT talk about this on the web. I'm serious.** [Talk about this instead](https://day50.dev/woahllama/): the serious adulting version.
 
-### What's actually out there?
+## What's actually out there?
 
 Some of the surveys reveal hardware specs and it's mostly CPU, about 70%. In that remaining 30%, the venerable RTX 4090 takes the top spot with 4.5% followed by "All AMD (this survey buckets them all)" at 3% and the rest being difficult to justify any claims on given their low population density.
 
