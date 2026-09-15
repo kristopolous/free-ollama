@@ -2551,6 +2551,14 @@ if(window.ResizeObserver&&window.MutationObserver){
 // the server's host-diagnostic marker; sending it as a message asks dyva which
 // host/model it *would* use instead of running a completion
 var DYVA_INFO_TAG='__dyva_info__';
+// The user-facing command that produced an __dyva_info__ turn: '__dyva_info__' ->
+// '/info', '__dyva_info__:test' -> '/test', ':test-all' -> '/test-all'.
+function _infoCmdLabel(content){
+  var c=String(content||''),i=c.indexOf(DYVA_INFO_TAG);
+  if(i<0)return '/info';
+  var rest=c.slice(i+DYVA_INFO_TAG.length);   // ':test', ':test-all', or ''
+  return '/'+(rest.charAt(0)===':'?rest.slice(1):'info');
+}
 var currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:'',messages:[],documents:[]};
 // Lazy chat storage. The sidebar holds only a lightweight index of
 // {id,title,createdAt}; a chat's messages are fetched on open and saved
@@ -2868,7 +2876,32 @@ function buildSendMessages(chat){
       .replace(/^\[(?:Generated image|Edited image|Video|Audio clip|Image fetched)[^\]]*\]\s*$/gm,'')
       .replace(/\n{3,}/g,'\n\n').trim();
   }
-  var msgs=(chat.messages||[]).map(function(m){
+  // Drop /info and /test turns from the model's context. Each is a user turn
+  // whose content is the literal __dyva_info__ tag, immediately followed by the
+  // routing report (an assistant note). They're diagnostics ABOUT the routing,
+  // not part of the conversation — replaying them just feeds the model our
+  // internal tag and a JSON host report. Positional so it also cleans chats that
+  // were saved before this fix.
+  function _dropInfoTurns(list){
+    var out=[],skipReport=false;
+    for(var i=0;i<list.length;i++){
+      var m=list[i];
+      var isInfoUser=m.role==='user'&&m.content&&String(m.content).indexOf(DYVA_INFO_TAG)>=0;
+      // Keep the info command ONLY when it's the last message — that's the live
+      // /info or /test request being sent right now, and the server reads the tag
+      // off the last message. Every EARLIER info turn (and its report) is dropped.
+      if(isInfoUser&&i===list.length-1){out.push(m);continue;}
+      if(isInfoUser){skipReport=true;continue;}
+      if(skipReport&&m.role==='assistant'&&m._meta&&m._meta.note!==undefined){
+        skipReport=false;  // that was the report note
+        continue;
+      }
+      skipReport=false;
+      out.push(m);
+    }
+    return out;
+  }
+  var msgs=_dropInfoTurns(chat.messages||[]).map(function(m){
       var content=(m.role==='assistant')?_stripMediaMd(m.content):m.content;
       var tc=m.tool_calls||(m._meta&&m._meta.toolcalls);
       // keep a tool-call turn even when its visible content is empty (the calls
@@ -3051,6 +3084,12 @@ function makeSpeakBtn(getText,msgEl){
   return b;
 }
 function addMsg(role,text,index){
+  // A /info or /test command turn carries the internal __dyva_info__ tag, not
+  // something the user "said" — render it as a system note (the routing report
+  // note follows it), never a raw "You" bubble showing the tag.
+  if(role==='user'&&text&&String(text).indexOf(DYVA_INFO_TAG)>=0){
+    addNote('','`'+_infoCmdLabel(text)+'`');return;
+  }
   var d=document.createElement('div');d.className='msg '+role;
   var r=document.createElement('div');r.className='role';
   var lbl=document.createElement('span');lbl.className='role-label';lbl.textContent=role==='user'?'You':'Assistant';

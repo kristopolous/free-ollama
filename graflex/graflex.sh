@@ -15,7 +15,7 @@ source .env
 case "$SERVICE" in
   all)
 
-    for i in ollama vllm lmstudio ollama-shodan llama.cpp comfyui a1111 gradio; do
+    for i in ollama vllm lmstudio fooocus ollama-shodan llama.cpp comfyui a1111 gradio; do
       $CMD $i ${EXTRA_ARGS[@]}
       echo ">>   "$?
       [[ $? ]] || sleep 7200
@@ -162,6 +162,11 @@ ENDL
     COUNTRIES="US,CN,TR,KR,RU,TH,RO,TW,DE,HK,JP,BR,VN,CA,FR,ES,IN,SG,CL,IT,NL,GB"
     ;;
 
+  fooocus)
+    COUNTRIES='CN'
+    SERVERS='uvicorn,nginx'
+    ;;
+
   gradio)
     QUERY='icon_hash=="55115683"'
     SITE=fofa
@@ -183,7 +188,7 @@ ENDL
     ;;
 
   *)
-    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|comfyui|a1111|vllm|llama.cpp|lmstudio|lmstudio-zoomeye|gradio|combine]" >&2
+    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|fooocus|comfyui|a1111|vllm|llama.cpp|lmstudio|lmstudio-zoomeye|gradio|combine]" >&2
     exit 1
     ;;
 esac

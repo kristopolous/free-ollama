@@ -703,7 +703,7 @@ var pictionary = {
     function: {
       name: 'draw_svg',
       description: 'Submit your Pictionary drawing as one complete inline <svg> element '
-        + '(with a viewBox; no text labels, external images, scripts or fonts).',
+        + '(with a viewBox; no external images, scripts or fonts).',
       parameters: { type: 'object', properties: {
         svg: { type: 'string', description: 'The complete <svg>...</svg> markup for the drawing.' },
         part: { type: 'string', enum: ['object', 'activity', 'full'],
@@ -735,7 +735,7 @@ var pictionary = {
           + 'OBJECT (what to draw): "' + st.secret.thing + '". ACTIVITY (what it is doing): "' + st.secret.activity
           + '". So draw "' + st.secret.full + '". The guesser does NOT know it — do NOT write any of those words '
           + '(or letters spelling them) in the image. Submit your drawing by calling the draw_svg tool with ONE '
-          + 'complete, self-contained <svg> element (viewBox; no external images/scripts/fonts; no text labels). '
+          + 'complete, self-contained <svg> element (viewBox; no external images/scripts/fonts). '
           + 'If the request asks you to draw ONLY the object or ONLY the activity, set the tool\'s "part" to '
           + '"object" or "activity" and draw just that part. If you cannot call the tool, reply with ONLY the raw '
           + '<svg> element and nothing else.'},
