@@ -23,13 +23,16 @@ case "$SERVICE" in
     exit 0
     ;;
 
-  combine)
+  post)
     DATE=$(date +%Y%m%d)
     COMBINED_JSON=$(jq -s 'add' ~/.cache/free-ollama/*-working.json)
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > $_SERVER_PATH"
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > ${_SERVER_PATH%.json}-$DATE.json"
-    source .venv/bin/activate
+    exit
+    ;;
 
+  enrich)
+    source .venv/bin/activate
     for i in ~/.cache/free-ollama/*-notworking.json; do
       MALLOC_ARENA_MAX=2 python3 -OO ./graflex.py -a enrich "$i" host
     done
