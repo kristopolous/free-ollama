@@ -31,7 +31,7 @@ case "$SERVICE" in
     source .venv/bin/activate
 
     for i in ~/.cache/free-ollama/*-notworking.json; do
-      ./graflex.py -a enrich "$i" host
+      MALLOC_ARENA_MAX=2 python3 -OO ./graflex.py -a enrich "$i" host
     done
 
     jq -s 'add' ~/.cache/free-ollama/*-notworking.json > ~/.cache/free-ollama/notworking-consolidated.json
@@ -205,8 +205,7 @@ query=()
 svc_args=( --service "$SERVICE" )
 [[ "$SERVICE" == "gradio" ]] && svc_args=()
 
-set -x
-exec ./graflex.py \
+MALLOC_ARENA_MAX=2 exec python3 -OO ./graflex.py \
       --action "fetch-check" \
       --countries "$COUNTRIES" \
       "${EXTRA_ARGS[@]}" "${fid[@]}" \
