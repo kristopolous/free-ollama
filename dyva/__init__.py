@@ -4078,12 +4078,33 @@ _OLLAMA_ONLY = ("options", "keep_alive", "format", "template", "context", "raw",
 _DYVA_INTERNAL = ("dyva_agent", "spread", "scratch", "agent_name")
 
 
+def _oai_data_url(b64):
+    """A bare Ollama-style base64 image -> an OpenAI data: URL. The mime is sniffed
+    from the base64 header (OpenAI needs one declared; Ollama images carry none)."""
+    h = (b64 or "")[:16]
+    if h.startswith("iVBORw0KGgo"):   mime = "image/png"
+    elif h.startswith("/9j/"):        mime = "image/jpeg"
+    elif h.startswith("R0lGOD"):      mime = "image/gif"
+    elif h.startswith("UklGR"):       mime = "image/webp"
+    else:                             mime = "image/jpeg"
+    return f"data:{mime};base64,{b64}"
+
+
 def _messages_openai(messages):
     """Reshape ollama-style tool history into what strict OpenAI hosts (e.g. LM
     Studio) require: assistant tool_calls need an `id`, `type:"function"`, and
     STRING `arguments`; each following `tool` message needs a `tool_call_id`
     matching one. Our agentic loop / native history carry none of that, so an
-    un-reshaped payload gets "Invalid 'messages'". Non-destructive (copies)."""
+    un-reshaped payload gets "Invalid 'messages'".
+
+    Images: the Ollama shape carries a message's images in a bare `images:[b64]`
+    field, which an OpenAI host does NOT read as vision — it leaks into the prompt
+    as text (a screenshot can tokenize to hundreds of thousands of tokens). So a
+    message with images is rewritten to OpenAI multimodal content — a text part
+    plus one `image_url` part per image — and the raw `images` field is dropped.
+    OpenAI image parts are only valid on user/system messages, so a tool/assistant
+    message's images are dropped rather than misplaced (the vision path delivers
+    them on a user message). Non-destructive (copies)."""
     if not isinstance(messages, list):
         return messages
     out = []
@@ -4133,6 +4154,26 @@ def _messages_openai(messages):
             out.append(dict(m, content=""))
         else:
             out.append(m)
+    # Images pass: translate any message's bare `images` into OpenAI content parts
+    # and strip the raw field so nothing leaks to the host as text.
+    for i, m in enumerate(out):
+        if not (isinstance(m, dict) and m.get("images")):
+            continue
+        mm = {k: v for k, v in m.items() if k != "images"}
+        # OpenAI image parts belong on user/system messages only; elsewhere just
+        # drop the images (the vision path puts them on a user message).
+        if m.get("role") in ("user", "system"):
+            parts = []
+            c = m.get("content")
+            if isinstance(c, list):
+                parts = list(c)
+            elif c:
+                parts = [{"type": "text", "text": c}]
+            for b64 in (m.get("images") or []):
+                if b64:
+                    parts.append({"type": "image_url", "image_url": {"url": _oai_data_url(b64)}})
+            mm["content"] = parts if parts else ""
+        out[i] = mm
     return out
 
 

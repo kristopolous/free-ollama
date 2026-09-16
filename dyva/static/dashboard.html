@@ -4177,20 +4177,17 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       var tc=toolCalls[i]||{},fn=tc.function||{};
       var args={};
       try{args=typeof fn.arguments==='string'?JSON.parse(fn.arguments||'{}'):(fn.arguments||{})}catch(e){}
-      // Soft docs gate (every tool): don't nag the model to read docs up front —
-      // let it just try. Only when a call is INVALID (a required arg missing) do we
-      // hand back the tool's full docs so its retry can succeed. A VALID guess runs
-      // untaxed. Gated tools additionally carry a token here (and a gated call that
-      // already has the right token runs straight through).
-      var _gated=GATED_TOOLS[fn.name];
-      var _hasTok=_gated&&String(args.token||'')===TOOL_TOKENS[fn.name];
-      if(!_hasTok&&!_argsValidFor(fn.name,args)){
+      // Soft docs approach (every tool): ship terse tools and let the model just
+      // GUESS the call. Only when a call is INVALID (a required arg missing) do we
+      // hand back the tool's full docs so its retry can succeed. A valid guess runs
+      // untaxed. No token ceremony — the model mostly gets it right, and the token
+      // wasn't worth the context budget.
+      if(!_argsValidFor(fn.name,args)){
         var _gt=TOOL_DEFS[fn.name]||{};
-        var _dl=['To run '+fn.name+', use the docs below, then call '+fn.name+' again'+(_gated?' including "token"':'')+'.','',(_gt.name||fn.name)+': '+(_gt.description||'')];
+        var _dl=['To run '+fn.name+', use the docs below, then call '+fn.name+' again.','',(_gt.name||fn.name)+': '+(_gt.description||'')];
         _docParamLines(_gt.parameters).forEach(function(l){_dl.push(l)});
-        if(_gated)_dl.push('- token (required) [string]: pass the exact value below.','','token: '+TOOL_TOKENS[fn.name]);
-        // No `md`: this is an internal retry aid (the docs, plus a token for gated
-        // tools) — only the model sees it; don't surface it as a user-facing note.
+        // No `md`: this is an internal retry aid (the docs) — only the model sees
+        // it; don't surface it as a user-facing note.
         results.push({text:_dl.join('\n')});
         continue;
       }
@@ -4587,10 +4584,6 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         }else{
           var _lines=[_t.name+': '+_t.description];
           _docParamLines(_t.parameters).forEach(function(l){_lines.push(l)});
-          if(GATED_TOOLS[args.tool]){
-            _lines.push('- token (required) [string]: pass the exact value below.','',
-                        'token: '+TOOL_TOKENS[args.tool]);
-          }
           results.push({text:_lines.join('\n'),md:'help '+String(args.tool)});
         }
       }else if(fn.name==='spawn_agents'){
@@ -4669,10 +4662,45 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         setStatus(dverb+' \u201c'+String(args.name||args.title||'file')+'\u201d\u2026');
         var dr=applyDocOp(chatId,fn.name,args);
         results.push({text:dr.text,md:dr.md});
+      }else if(fn.name==='get_asset'){
+        setStatus('looking…');
+        var ga=assetFind(currentChat,args.name);
+        if(!ga){results.push({text:'No asset named "'+String(args.name||'')+'". Call list_assets for the exact names.'});}
+        else if(ga.kind!=='image'){results.push({text:'"'+ga.name+'" is a '+ga.kind+', not an image — get_asset can only show images.'});}
+        else{
+          try{
+            var gab=await _blobToScaledB64(await assetBlob(currentChat,ga),1024,0.72);
+            if(!gab)throw new Error('empty image');
+            results.push({text:'Shown below: "'+ga.name+'". Look at the image, then answer.',image:gab,md:'`get_asset` '+escHtml(ga.name)});
+          }catch(ge){results.push({text:'Could not show "'+ga.name+'": '+ge.message});}
+        }
+      }else if(fn.name==='get_screenshot'){
+        setStatus('rendering…');
+        var _sd=currentDocs();
+        var sdoc=args.name?(findDoc(_sd,args.name)||_sd.filter(function(d){return d.title===args.name})[0]):(findDoc(_sd,activeDocId)||_sd[_sd.length-1]);
+        if(!sdoc){results.push({text:'There is no document to screenshot. Write one first with write_file.'});}
+        else{
+          try{
+            var spng=await _htmlToPngB64(docViewState(sdoc).content);
+            results.push({text:'Shown below: a screenshot of "'+sdoc.title+'" as it renders (static layout; page scripts are not run). Look at it, then answer.',image:spng,md:'`get_screenshot` '+escHtml(sdoc.title)});
+          }catch(se){results.push({text:'Could not screenshot "'+sdoc.title+'": '+se.message});}
+        }
       }else results.push({text:'There is no tool named "'+fn.name+'". Use one of the tools available in this chat.'});
     }
     msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
-    results.forEach(function(res){msgs.push({role:'tool',content:res.text,_meta:{hidden:true}})});
+    var _visImgs=[];
+    results.forEach(function(res){
+      msgs.push({role:'tool',content:res.text,_meta:{hidden:true}});
+      if(res.image)_visImgs.push(res.image);
+    });
+    // Vision tools (get_asset/get_screenshot) return an image for the model to see.
+    // Deliver it on a USER message, not the tool result: OpenAI image parts are
+    // valid only on user/system messages (dyva converts `images` -> image_url for
+    // OpenAI hosts), and Ollama accepts images on a user message too — so this is
+    // the one carrier that works in BOTH dialects. Requires a vision-capable model.
+    if(_visImgs.length){
+      msgs.push({role:'user',content:'(image'+(_visImgs.length>1?'s':'')+' from the tool above — look at '+(_visImgs.length>1?'them':'it')+')',images:_visImgs,_meta:{hidden:true}});
+    }
     if(inView())saveCurrentChat();
     var _tclite=(toolCalls||[]).map(function(tc){
       var fn=(tc&&tc.function)||{};
@@ -5080,6 +5108,63 @@ async function assetBlob(chat,a){
   }
   throw new Error('the file for '+a.name+' is no longer in this conversation');
 }
+// An image Blob -> downscaled, JPEG-compressed base64 (no data: prefix), the shape
+// a message's `images` array wants. Cap the long side + compress: the raw stored
+// image can be multi-megabyte, and a host tokenizes that base64 as hundreds of
+// thousands of tokens — enough to exceed every context window.
+function _blobToScaledB64(blob,maxDim,q){
+  return new Promise(function(resolve,reject){
+    var url=URL.createObjectURL(blob),img=new Image();
+    img.onload=function(){
+      try{
+        var w=img.naturalWidth||img.width||maxDim,h=img.naturalHeight||img.height||maxDim;
+        var scale=Math.min(1,maxDim/Math.max(w,h));
+        var cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));
+        var c=document.createElement('canvas');c.width=cw;c.height=ch;
+        var ctx=c.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,cw,ch);ctx.drawImage(img,0,0,cw,ch);
+        var durl=c.toDataURL('image/jpeg',q);
+        URL.revokeObjectURL(url);
+        resolve(durl.slice(durl.indexOf('base64,')+7));
+      }catch(e){URL.revokeObjectURL(url);reject(new Error('could not process the image (it may be cross-origin)'));}
+    };
+    img.onerror=function(){URL.revokeObjectURL(url);reject(new Error('could not decode the image'));};
+    img.src=url;
+  });
+}
+// Rasterize a document's HTML to a PNG (bare base64) with NO library and NO server:
+// embed the markup in an SVG <foreignObject>, load that SVG as an image, and paint
+// it onto a canvas. A fancy built-in trick with real limits — the page's scripts do
+// NOT run (so it's the static layout, not a live canvas game), the markup must be
+// well-formed enough for the SVG parser, and a cross-origin image inside it taints
+// the canvas so the export throws. All three surface as a clear tool message.
+function _htmlToPngB64(html){
+  return new Promise(function(resolve,reject){
+    var W=960,H=720;
+    var body=String(html||'').replace(/<script[\s\S]*?<\/script>/gi,'');   // inert anyway; drop so the SVG parses
+    var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'">'
+      +'<foreignObject width="100%" height="100%">'
+      +'<div xmlns="http://www.w3.org/1999/xhtml" style="background:#fff;color:#000;width:'+W+'px;height:'+H+'px;overflow:hidden">'
+      +body+'</div></foreignObject></svg>';
+    var img=new Image();
+    img.onload=function(){
+      try{
+        // Downscale + JPEG so the attached image stays small (a full-size PNG here
+        // was ~2MB, which a host tokenizes as HUNDREDS OF THOUSANDS of tokens and
+        // blows past every context window). Cap the long side and compress.
+        var maxDim=900,q=0.7,scale=Math.min(1,maxDim/Math.max(W,H));
+        var cw=Math.max(1,Math.round(W*scale)),ch=Math.max(1,Math.round(H*scale));
+        var c=document.createElement('canvas');c.width=cw;c.height=ch;
+        var ctx=c.getContext('2d');
+        ctx.fillStyle='#fff';ctx.fillRect(0,0,cw,ch);
+        ctx.drawImage(img,0,0,cw,ch);
+        var durl=c.toDataURL('image/jpeg',q);
+        resolve(durl.slice(durl.indexOf('base64,')+7));
+      }catch(e){reject(new Error('the document uses cross-origin images or markup the built-in capture cannot rasterize'));}
+    };
+    img.onerror=function(){reject(new Error('the document markup is not well-formed enough to render as an image'));};
+    img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+  });
+}
 // Images can show themselves; a clip or a video gets a glyph rather than a
 // broken <img>, since their URLs are not images.
 var _ASSET_GLYPH={audio:'\u266a',video:'\u25b6',file:'\u25a6',web:'\ud83c\udf10'};
@@ -5397,25 +5482,30 @@ function anyToolsOn(){return !toolsOff&&(imageOn||docsOn||speechOn||videoOn||web
 // Full docs live on the tool defs; read_docs serves them on demand so the tool
 // list sent every turn can carry only a terse one-liner per tool. TOOL_DEFS maps
 // name -> the full function object (kept intact); buildTools terses a COPY.
+// Vision: let the model actually SEE something. get_asset shows a picture in the
+// conversation; get_screenshot shows what the side-panel document looks like when
+// rendered. Both attach an image to the model's next turn — so they only help when
+// this chat runs on a vision-capable model.
+var GET_ASSET_TOOL={type:'function',function:{name:'get_asset',description:'Look at an image in this conversation. Pass an asset name (from list_assets, or one you made with generate_image/edit_image) and the picture is shown to you so you can see, describe or judge it. Images only. Requires a vision-capable model to actually see it.',parameters:{type:'object',properties:{name:{type:'string',description:'The image asset to view, e.g. "beautiful_garden.jpg". Names come from list_assets; do not invent them.'}},required:['name']}}};
+var GET_SCREENSHOT_TOOL={type:'function',function:{name:'get_screenshot',description:'See what the document you are working on looks like rendered. Takes a picture of the current side-panel document and shows it to you so you can check its layout and design. Captures static appearance only (page scripts are not run). Requires a vision-capable model to actually see it.',parameters:{type:'object',properties:{name:{type:'string',description:'Optional: which document to capture, by title. Omit to capture the one currently open.'}}}}};
 var _ALL_TOOL_DEFS=[IMG_TOOL,EDIT_TOOL,VIDEO_TOOL,ASK_TOOL,SPEECH_TOOL,WEB_TOOL,
-                    SPAWN_TOOL,CALC_TOOL,LIST_ASSETS_TOOL,SEARCH_MODELS_TOOL].concat(DOC_TOOLS);
+                    SPAWN_TOOL,CALC_TOOL,LIST_ASSETS_TOOL,SEARCH_MODELS_TOOL,
+                    GET_ASSET_TOOL,GET_SCREENSHOT_TOOL].concat(DOC_TOOLS);
 var TOOL_DEFS={};_ALL_TOOL_DEFS.forEach(function(t){if(t&&t.function)TOOL_DEFS[t.function.name]=t.function});
-// Tools gated behind read_docs: a REQUIRED `token` the model can only learn from
-// read_docs, so a small model can't guess a valid call — a wrong token bounces
-// back the docs + the token, so the retry succeeds. Per-session random so it
-// can't be memorised or hallucinated. Keep to tools where detail/cost matters.
-var GATED_TOOLS={generate_image:1,edit_image:1,generate_video:1,generate_speech:1,spawn_agents:1};
-var TOOL_TOKENS={};Object.keys(GATED_TOOLS).forEach(function(n){TOOL_TOKENS[n]='tok_'+Math.random().toString(36).slice(2,9)});
-// A gated call is "valid" (the model figured the tool out on its own) when every
-// REAL required arg is present — read from the untouched TOOL_DEFS, since the
-// terse schema only advertises `token`. The soft gate lets a valid guess run and
-// only bounces the docs for an invalid one. token is the gate's synthetic param,
-// never a real requirement.
+// The heavy tools: shipped with a BLANKED parameter schema (just the name + terse
+// description) to keep the biggest schemas off every turn's wire. The model guesses
+// the call; a wrong (invalid) call bounces the full docs back so the retry succeeds.
+// No token gate — the ceremony wasn't worth the context, and models mostly get
+// these right on the first guess.
+var TERSE_TOOLS={generate_image:1,edit_image:1,generate_video:1,generate_speech:1,spawn_agents:1};
+// A call is "valid" (the model figured the tool out on its own) when every REAL
+// required arg is present — read from the untouched TOOL_DEFS, since a terse tool's
+// wire schema hides its params. A valid guess runs; an invalid one bounces the docs.
 function _argsValidFor(name,args){
   var def=TOOL_DEFS[name],p=def&&def.parameters;if(!p)return true;
   var req=p.required||[];args=args||{};
   for(var i=0;i<req.length;i++){
-    var k=req[i];if(k==='token')continue;
+    var k=req[i];
     var v=args[k];
     if(v===undefined||v===null||(typeof v==='string'&&v.trim()===''))return false;
   }
@@ -5447,15 +5537,12 @@ function _terseDesc(name,full){
 function _terseTool(tool){
   if(!tool||!tool.function||tool.function.name==='help')return tool;
   var f=tool.function,name=f.name,params=f.parameters;
-  if(GATED_TOOLS[name]){
-    // A gated tool can't succeed without read_docs, which hands over BOTH the
-    // real parameter schema and the token. So don't ship the full params every
-    // turn — advertise only the token gate; the rest comes from read_docs. This
-    // is the bulk of the tools-schema weight, since the gated tools (image/edit/
-    // video/speech/spawn) carry the longest parameter descriptions.
-    params={type:'object',
-      properties:{token:{type:'string',description:'Required. The token from help "'+name+'".'}},
-      required:['token']};
+  if(TERSE_TOOLS[name]){
+    // Ship NO parameters for these heavy tools — the model guesses the call from
+    // the name + terse description, and a wrong guess bounces the full docs (via
+    // the invalid-args check in the tool loop, or an explicit help call). Keeps the
+    // longest parameter schemas (image/edit/video/speech/spawn) off every turn.
+    params={type:'object',properties:{}};
   }
   return {type:'function',function:{name:name,description:_terseDesc(name,f.description),parameters:params}};
 }
@@ -5470,10 +5557,10 @@ function buildTools(){
   if(speechOn)t.push(SPEECH_TOOL);
   if(webOn)t.push(WEB_TOOL);
   if(agentsOn)t.push(SPAWN_TOOL);
-  if(docsOn)t=t.concat(DOC_TOOLS);
+  if(docsOn){t=t.concat(DOC_TOOLS);t.push(GET_SCREENSHOT_TOOL);}   // see the rendered document
   // No toggle of its own: it is the index for whatever media tools are on,
   // and useless without them.
-  if(imageOn||videoOn||speechOn||webOn)t.push(LIST_ASSETS_TOOL);
+  if(imageOn||videoOn||speechOn||webOn){t.push(LIST_ASSETS_TOOL);t.push(GET_ASSET_TOOL);}   // list, then look
   if(imageOn||videoOn||speechOn)t.push(SEARCH_MODELS_TOOL);
   if(t.length)t.push(CALC_TOOL);   // exact math, useful alongside anything
   // terse the opt-in tools (COPIES — TOOL_DEFS keeps the full text) and add
