@@ -169,6 +169,11 @@ CONTINUATION_HEDGE = 3600
 STICKY_TTL = 2 * 3600   # 2 hours
 MIN_COUNT = 0   # hide models served by fewer than this many hosts (0/1 = show all)
 EXPLORE_MODE = False   # route UNKNOWN/unvisited hosts first to map more of the pool (slower)
+# Clouds (enrichment `provider` labels, lowercased) the operator has chosen to
+# NEVER touch — "cloudskipper". A skipped cloud's hosts are removed from the
+# candidate list in find_servers, so dyva never even TCP-connects to them (the
+# soft-ban tripwire fires on the connect itself, not just a completed request).
+CLOUD_SKIP = set()
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
                 # settings & sources requires it (localhost always exempt).
@@ -342,7 +347,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -366,6 +371,8 @@ def load_settings():
         EXPLORE_MODE = s["explore"]
     if "model_list" in s:
         MODEL_LIST = parse_model_list(s["model_list"])
+    if isinstance(s.get("cloudskip"), list):
+        CLOUD_SKIP = {x.lower() for x in s["cloudskip"] if isinstance(x, str) and x.strip()}
 
 
 def save_settings(extra=None):
@@ -382,7 +389,8 @@ def save_settings(extra=None):
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                  "hedge_delay": HEDGE_DELAY,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
-                 "admin_pw": ADMIN_PW, "model_list": MODEL_LIST})
+                 "admin_pw": ADMIN_PW, "model_list": MODEL_LIST,
+                 "cloudskip": sorted(CLOUD_SKIP)})
     if isinstance(extra, dict):
         data.update(extra)
     try:
@@ -3417,6 +3425,12 @@ def _find_servers_raw(sub, caps=None):
     for s in servers:
         if s.get("service") in ("comfyui", "a1111"):
             continue
+        # Cloudskipper: never route to (nor even connect to) hosts on a cloud the
+        # operator has opted out of — the enrichment `provider` label, lowercased.
+        # Dropped here so the host never enters any race and dyva never TCP-connects
+        # to it. Unknown-provider hosts are never skipped (only known matches).
+        if CLOUD_SKIP and (s.get("provider") or "").lower() in CLOUD_SKIP:
+            continue
         models = s.get("models", [])
         ms = [m for m in models if match_model(m, sub)]
         if not ms:
@@ -6232,6 +6246,7 @@ async def handle_settings_get(request):
                               "hedge_delay": HEDGE_DELAY,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
+                              "cloudskip": sorted(CLOUD_SKIP),
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources()})
@@ -6247,7 +6262,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -6276,6 +6291,8 @@ async def handle_settings_post(request):
         _LOCAL = body["local"]
     if isinstance(body.get("explore"), bool):
         EXPLORE_MODE = body["explore"]
+    if isinstance(body.get("cloudskip"), list):
+        CLOUD_SKIP = {x.lower() for x in body["cloudskip"] if isinstance(x, str) and x.strip()}
     if "model_list" in body:
         MODEL_LIST = parse_model_list(body["model_list"])
     # admin_pw: only when the key is present. A non-empty value sets/changes the
@@ -6299,6 +6316,7 @@ async def handle_settings_post(request):
                               "hedge_delay": HEDGE_DELAY,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
+                              "cloudskip": sorted(CLOUD_SKIP),
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources(),

@@ -622,6 +622,9 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .login-row input[type=password]{flex:1;max-width:280px;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-3);font-size:var(--fs-lg)}
 .setting-help{color:var(--text-dim);font-size:var(--fs-xs);margin-top:var(--sp-1);line-height:var(--line-body)}
 .setting-help code{background:var(--bg-inset);padding:.05em .3em;border-radius:var(--r-sm);font-size:var(--fs-2xs)}
+.cloudskip-list{display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-5);margin-top:var(--sp-3)}
+.cloudskip-item{display:flex;align-items:center;gap:.35em;font-size:var(--fs-md);color:var(--text);cursor:pointer}
+.cloudskip-item .cloudskip-n{color:var(--text-muted);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}
 .setting-sources{margin-bottom:var(--sp-6)}
 .src-head{display:flex;align-items:center;gap:var(--sp-3);position:relative}
 .src-head .setting-name{font-size:var(--fs-lg)}
@@ -1373,6 +1376,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <input type="file" id="mlFile" accept=".txt,.list,.text,text/plain" style="display:none">
 <label class="setting"><span class="setting-text"><span class="setting-name">Localhost only</span><small class="setting-help">Restrict inference endpoints to localhost only (a remote host that reaches this port can't chat or generate). Equivalent to the <code>./dyva -l</code> flag; saved here it persists across restarts.</small></span><input type="checkbox" id="setLocal"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Explore mode</span><small class="setting-help">Discover more of the unknown network: route hosts we haven't visited (unknown state) to the front of the line, ahead of known-good ones. Deliberately slower — a request may probe cold hosts first — but it maps out the pool. Off by default. <b>Caution:</b> the unvisited frontier is where the canary honeypots live, and poking a burst of fresh IPs is exactly what trips Cloudflare/WAF reputation — so this raises the chance of a soft IP ban on your egress. Use it for deliberate survey passes, not routine routing.</small></span><input type="checkbox" id="setExplore" onchange="updateExploreLogo()"></label>
+<div class="setting"><span class="setting-text"><span class="setting-name">Cloudskipper</span><small class="setting-help">Never route to — or even connect to — hosts on the ticked clouds. The soft-ban tripwire can fire on the TCP connection itself, so a skipped cloud's hosts are dropped from every request <b>before any connection is made</b>. Clouds are identified by enrichment; the list below is the ones most represented in the current survey. Applies to every source and is always in effect, independent of Explore mode.</small><div id="cloudSkipList" class="cloudskip-list"></div></span></div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><template id="setAdminPwTpl"><input type="text" id="adminPwUserDecoy" name="username" class="admin-pw-decoy" placeholder="username" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" tabindex="-1" aria-hidden="true"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></span></label>
 <div class="setting-sources">
 <div class="src-head"><span class="setting-name">Additional sources</span><button type="button" id="srcHelpBtn" class="src-help-btn" title="Format &amp; examples">?</button>
@@ -7606,6 +7610,30 @@ function updateExploreLogo(){
   img.src=on?'explore.avif':'dyva.avif';
   img.title=on?'explore mode':'';
 }
+// Cloudskipper: render a checkbox per cloud, driven by the live survey so the
+// list tracks what's actually out there. Top ~8 providers by host count from
+// /geo-summary, plus any already-selected cloud that has dropped out of the top
+// 8 (so it stays visible and un-tickable). `selected` is the persisted skip list.
+var _cloudSkipSel=[];
+function renderCloudSkip(selected){
+  if(selected!==undefined)_cloudSkipSel=(selected||[]).slice();
+  var box=document.getElementById('cloudSkipList');if(!box)return;
+  fetch('geo-summary',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
+    var provs=(d&&d.providers)||{};
+    var top=Object.keys(provs).sort(function(a,b){return provs[b]-provs[a]}).slice(0,8);
+    _cloudSkipSel.forEach(function(p){if(top.indexOf(p)<0)top.push(p)});   // keep selected-but-rare visible
+    var sel={};_cloudSkipSel.forEach(function(p){sel[p]=1});
+    box.innerHTML=top.map(function(p){
+      return '<label class="cloudskip-item"><input type="checkbox" class="cloudskip-cb" value="'+escHtml(p)+'"'
+        +(sel[p]?' checked':'')+'> '+escHtml(p)
+        +' <span class="cloudskip-n">'+(provs[p]||0)+'</span></label>';
+    }).join('')||'<span class="hd-dim">no cloud data yet</span>';
+  }).catch(function(){});
+}
+function _collectCloudSkip(){
+  return Array.prototype.map.call(document.querySelectorAll('#cloudSkipList .cloudskip-cb:checked'),
+                                  function(cb){return cb.value});
+}
 function populateSettings(s){
   showSettingsLocked(false);
   document.getElementById('setWorkers').value=s.workers;
@@ -7616,6 +7644,7 @@ function populateSettings(s){
   document.getElementById('setLocal').checked=!!s.local;
   document.getElementById('setExplore').checked=!!s.explore;
   updateExploreLogo();
+  renderCloudSkip(s.cloudskip||[]);
   setPwState(!!s.admin_pw_set);
   document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
   document.getElementById('srcError').textContent='';
@@ -7704,7 +7733,8 @@ function saveSettings(){
     min_count:parseInt(document.getElementById('setMinCount').value,10),
     model_list:_modelList,
     local:document.getElementById('setLocal').checked,
-    explore:document.getElementById('setExplore').checked
+    explore:document.getElementById('setExplore').checked,
+    cloudskip:_collectCloudSkip()
   };
   if(isNaN(body.workers)||body.workers<1)delete body.workers;
   if(isNaN(body.timeout)||body.timeout<1)delete body.timeout;
@@ -7734,6 +7764,7 @@ function saveSettings(){
       setModelList(s.model_list||[],false);
       document.getElementById('setLocal').checked=!!s.local;
       document.getElementById('setExplore').checked=!!s.explore;
+      renderCloudSkip(s.cloudskip||[]);
       setPwState(!!s.admin_pw_set);
       document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
       st.style.color='var(--ok)';st.textContent=s.refreshed?'saved · sources re-pulled':'saved';setTimeout(function(){st.textContent=''},3000);
