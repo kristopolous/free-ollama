@@ -592,7 +592,6 @@ var pictionary = {
     st.focus = '';   // 'object'/'activity' when the current drawing is an isolated part
     st.budget = PICT_ROUND_POINTS;   // points left this round; wrong guess −2, yes/no question −1
     st.roundStart = Date.now();   // cosmetic per-round timer origin
-    st._svgTool = ''; st._svgPart = '';   // draw_svg tool output for the current drawer turn
     st.turns = 0;
     st.drawings.push({ marker: true, round: st.round, secret: st.secret.full });   // round divider in the reel
   },
@@ -697,30 +696,9 @@ var pictionary = {
       + (st.hint ? '<div class="hint">↳ ' + esc(st.hint) + '</div>' : '');
     var reel = el.querySelector('.reel'); if(reel) reel.scrollTop = atBottom ? reel.scrollHeight : prevTop;
   },
-  tools: null,   // set per-turn: only the DRAW phase offers draw_svg (below)
-  _drawTools: [{
-    type: 'function',
-    function: {
-      name: 'draw_svg',
-      description: 'Submit your Pictionary drawing as one complete inline <svg> element '
-        + '(with a viewBox; no external images, scripts or fonts).',
-      parameters: { type: 'object', properties: {
-        svg: { type: 'string', description: 'The complete <svg>...</svg> markup for the drawing.' },
-        part: { type: 'string', enum: ['object', 'activity', 'full'],
-                description: 'Draw only the object, only the activity, or the full scene (default full).' }
-      }, required: ['svg'] }
-    }
-  }],
+  tools: null,   // Pictionary offers no tools — the artist replies with a raw inline
+                 // <svg>, which streams and paints live (more fun than a tool call).
   runTool: function(name, argsRaw, st){
-    var a = {}; try{ a = (typeof argsRaw === 'string') ? JSON.parse(argsRaw) : (argsRaw || {}); }catch(e){}
-    // weak models sometimes double-encode the whole arg object as a JSON string
-    if(typeof a === 'string'){ try{ a = JSON.parse(a); }catch(e){ a = { svg: a }; } }
-    if(name === 'draw_svg'){
-      st._svgTool = String((a && a.svg) || '');
-      st._svgPart = String((a && a.part) || '').toLowerCase();
-      st._stopAsk = true;   // the drawing concludes this ask — don't re-prompt
-      return 'ok';
-    }
     st._stopAsk = false; return 'unknown tool: ' + name;
   },
   turn: function(st){
@@ -728,17 +706,16 @@ var pictionary = {
       // A full <svg> is a LONG output; dyva sizes num_ctx from the (tiny) prompt, so
       // without this the drawing overruns the window and the stream cuts before
       // </svg> — a guaranteed truncation. Ask for real output room (both dialects).
-      return { player: 0, think: false, tools: pictionary._drawTools,
+      return { player: 0, think: false,
         options: { num_ctx: 8192, num_predict: -1 }, max_tokens: 4096, messages: [
         {role:'system', content:'You are the ARTIST in a COLLABORATIVE game of Pictionary — you and the guesser '
           + 'are on the SAME team and you WANT them to get it. The secret is a SUBJECT doing an ACTIVITY. '
           + 'OBJECT (what to draw): "' + st.secret.thing + '". ACTIVITY (what it is doing): "' + st.secret.activity
           + '". So draw "' + st.secret.full + '". The guesser does NOT know it — do NOT write any of those words '
-          + '(or letters spelling them) in the image. Submit your drawing by calling the draw_svg tool with ONE '
-          + 'complete, self-contained <svg> element (viewBox; no external images/scripts/fonts). '
-          + 'If the request asks you to draw ONLY the object or ONLY the activity, set the tool\'s "part" to '
-          + '"object" or "activity" and draw just that part. If you cannot call the tool, reply with ONLY the raw '
-          + '<svg> element and nothing else.'},
+          + '(or letters spelling them) in the image. Reply with ONE complete, self-contained <svg> element and '
+          + 'NOTHING else — no explanation, no reasoning, no markdown fence, no code block. Begin your reply with '
+          + '"<svg" immediately (viewBox; no external images/scripts/fonts) so the drawing streams as you make it. '
+          + 'If asked to draw ONLY the object or ONLY the activity, draw just that part.'},
         {role:'user', content: st.feedback || 'Draw it.'}
       ]};
     }
@@ -827,9 +804,10 @@ var pictionary = {
       if(oWrong !== aWrong){
         var isolate = oWrong ? 'object' : 'activity';
         st.phase = 'draw';
+        st.focus = isolate;   // the GAME decides the isolated part (no tool to echo it back)
         st.feedback = 'The guesser has the ' + (oWrong ? 'ACTIVITY' : 'OBJECT') + ' but NOT the '
-          + isolate.toUpperCase() + '. Draw ONLY the ' + isolate + ' — call draw_svg with part="' + isolate + '" '
-          + 'and an <svg> of just the ' + (oWrong ? 'subject ("' + st.secret.thing + '")' : 'activity ("' + st.secret.activity + '")') + ', clearly.';
+          + isolate.toUpperCase() + '. Draw ONLY the ' + isolate + ' — reply with a raw <svg> of just the '
+          + (oWrong ? 'subject ("' + st.secret.thing + '")' : 'activity ("' + st.secret.activity + '")') + ', clearly.';
         return {note: 'judge: ' + st.verdict + ' — forcing an isolated ' + isolate + ' drawing'};
       }
       st.phase = 'guess';
@@ -845,12 +823,11 @@ var pictionary = {
       return {note: 'artist answered "' + yn + '" — ' + st.budget + ' pts left'};
     }
     if(player === 0){                                    // artist produced an SVG (draw_svg tool, or raw text)
-      // Look wherever the SVG landed: the draw_svg tool arg, the content, or — for a
-      // reasoning model that ignored "no thinking" — inside the thinking tokens.
-      // extractSvg only returns a CLOSED <svg>…</svg>; a raw tool-arg can be a
-      // truncated "<svg…" with no closing tag, so validate completeness explicitly.
-      var svg = st._svgTool || extractSvg(text) || extractSvg(res && res.thinking);
-      var part = st._svgPart; st._svgTool = ''; st._svgPart = '';   // consume; don't leak into the next turn
+      // The artist replies with a raw inline <svg> (it streams and paints live).
+      // Look in the content, or — for a reasoning model that narrated first — inside
+      // the thinking tokens. extractSvg only returns a CLOSED <svg>…</svg>, so a
+      // reply that rambled and got cut off before </svg> is caught as truncated below.
+      var svg = extractSvg(text) || extractSvg(res && res.thinking);
       if(!svg || !/<\/svg>/i.test(svg)){
         var raw = String(svg || '') + ' ' + String((res && (res.content || res.thinking)) || '');
         var truncated = (res && res.doneReason === 'length') || (/<svg/i.test(raw) && !/<\/svg>/i.test(raw));
@@ -864,7 +841,7 @@ var pictionary = {
       svg = stripText(svg);   // never let a written-in label reach the guesser
       try{ st.png = (await rasterize(svg)).split(',')[1]; }   // strip data: prefix for ollama
       catch(e){ st.feedback = 'That drawing did not render — draw a simpler, valid <svg>.'; return {note:'render failed — redraw'}; }
-      st.focus = (part === 'object' || part === 'activity') ? part : '';   // isolated part vs full scene
+      // st.focus is set by the game: the isolate decision (above) or '' for a full draw.
       st.drawings.push({ svg: svg, host: (res && res.host) || '', round: st.round });   // kept across all rounds
       st.phase = 'guess'; st.feedback = ''; st.guessesSinceDraw = 0;   // fresh picture — guess cap resets
       return {note: 'drew' + (st.focus ? ' (' + st.focus + ' only)' : '') + ' (' + svg.length + ' chars)'};
@@ -878,7 +855,7 @@ var pictionary = {
       return {note: 'see options — vocabulary revealed (0 pts)'};
     }
     if(/(draw again|another drawing|more drawing|redraw|draw it again)/.test(low) && !/guess\s*[:\-]/i.test(body)){   // FREE: artist redraws
-      st.phase = 'draw'; st.feedback = 'The guesser asked for another drawing — draw the same secret again, clearer.';
+      st.phase = 'draw'; st.focus = ''; st.feedback = 'The guesser asked for another drawing — draw the same secret again, clearer.';
       pictionary._say(st, '🤷 draw again', 'hint');
       return {note: 'draw againn — 0 pts'};
     }
