@@ -830,13 +830,20 @@ def hosts_cli(argv):
     # --hosts <state> <key> del
     cleared = 0
     for key in resolved:
-        cur = db.execute("DELETE FROM host_status WHERE state=? AND model=?", (state, key))
+        # Soft delete (stamp deleted_at), never a hard DELETE: the row is retired
+        # — dropped from every _LIVE_REAL prioritization/display read — but KEPT
+        # for recovery/audit. Scoped to _LIVE_REAL so it clears exactly the rows
+        # this command just listed (is_query=0, not already deleted).
+        cur = db.execute(
+            f"UPDATE host_status SET deleted_at=? WHERE state=? AND model=? AND {_LIVE_REAL}",
+            (_now_iso(), state, key))
         cleared += cur.rowcount
         print(f"cleared {cur.rowcount} '{state}' mark{'' if cur.rowcount == 1 else 's'} "
               f"for {_key_label(key)}")
     db.commit()
     if cleared:
-        print("\nThose hosts are now unranked and will be retried on the next request.")
+        print("\nThose hosts are now unranked and will be retried on the next request "
+              "(soft-deleted — recoverable).")
     return 0
 
 
@@ -1150,6 +1157,28 @@ async def _unregister_worker(wid, ok=None):
     w["ok"] = bool(ok)
     w["phase"] = None
     w["stop"] = lambda: None
+    # The job has transitioned to completion: write its worker-job record ONCE,
+    # now that the real token count (ctoks, set by account_tokens) is known. The
+    # race entries were accumulated across every round in _race_hosts.
+    if w.get("race") is not None and not w.get("_job_logged"):
+        w["_job_logged"] = True
+        _write_worker_job({
+            "model_query": w.get("model_query"),
+            "label": w.get("model"),
+            "start_time": w.get("started"),
+            "end_time": w["done"],
+            "candidates": w.get("race_cand"),
+            "tried": w.get("race_tried"),
+            "won": w["ok"],
+            "outcome": "completed" if w["ok"] else "failed",
+            "req_caps": w.get("req_caps"),
+            "tools_offered": bool(w.get("tools_offered")),
+            "prompt_tokens": w.get("ptoks"),
+            "completion_tokens": w.get("ctoks"),
+            "num_ctx": w.get("num_ctx"),
+            "tally": dict(w.get("race_tally") or {}),
+            "race": w.get("race"),
+        })
     _trim_done_workers()
     await _broadcast_workers()
 
@@ -2579,12 +2608,6 @@ def force_bad(host, model, reason=None):
     db.commit()
 
 
-def clear_bad_state():
-    db = _get_db()
-    db.execute("DELETE FROM host_status WHERE state='bad'")
-    db.commit()
-
-
 def mark_unreachable(host):
     """Record a host as unreachable at the connection level (dead for all
     models). Recorded once per host, not per model, so it isn't re-probed for
@@ -3810,7 +3833,6 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     # builds its record and appends in one synchronous step (no await between),
     # so asyncio can't interleave two appends.
     race_log = []
-    race_start = time.time()
 
     async def worker():
         nonlocal tried
@@ -3978,20 +4000,24 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
+        # Stash this race's per-host log onto the worker rather than writing a
+        # record here. A record is written ONCE, when the worker COMPLETES (in
+        # _unregister_worker) — so it's a record of the whole JOB (all continuation
+        # rounds, plus the real token count), not a mid-job status update. At
+        # race-resolution a streaming chat has only reached first-line accept, long
+        # before any tokens exist, which is why logging here showed 0 tokens.
+        w = _workers.get(wwid)
+        if w is not None:
+            w.setdefault("race", []).extend(race_log)
+            w.setdefault("model_query", key)
+            if w.get("race_cand") is None:
+                w["race_cand"] = len(entries)
+            w["race_tried"] = (w.get("race_tried") or 0) + tried
+            _t = w.get("race_tally") or collections.Counter()
+            _t.update(tally)
+            w["race_tally"] = _t
         if job_wid is None:
             await _unregister_worker(wwid)
-        _write_worker_job({
-            "model_query": key,
-            "label": label or key,
-            "start_time": race_start,
-            "end_time": time.time(),
-            "candidates": len(entries),
-            "tried": tried,
-            "stopped": stopped,
-            "won": bool(race_log) and any(r.get("outcome") == V_ACCEPTED for r in race_log),
-            "tally": dict(tally),
-            "race": race_log,
-        })
 
     return result, stopped, tried, tally
 
@@ -4655,6 +4681,18 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         eff = TIER_GOOD if (prio == TIER_LAST and load > 0) else prio
         return (eff, load)
     servers = sorted(servers, key=_order_key)   # stable: recency order survives ties
+    # Tag the worker with WHAT this request was routing for — the capability set
+    # from needs_caps (vision / tools / audio / completion) and whether tools were
+    # offered this turn — so the job record says what we were looking for. That's
+    # the context for diagnosing a capability-specific route (e.g. a vision- or
+    # tool-model pick) that then misbehaves.
+    if job_wid is not None:
+        _w = _workers.get(job_wid)
+        if _w is not None:
+            if caps:
+                _w["req_caps"] = sorted(caps)
+            if (payload or {}).get("tools"):
+                _w["tools_offered"] = True
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
         key_of=lambda it: it[2][0],   # reputation keyed by the RESOLVED model (ms[0]), not the query
@@ -6482,20 +6520,6 @@ async def handle_v1_models(request):
         "object": "list",
         "data": out,
     })
-
-
-async def handle_clear_bad(request):
-    """
-    Clear bad hosts list
-    ---
-    tags: [Admin]
-    summary: Clear all failed host+model pairs and redirect to dashboard
-    responses:
-      '302':
-        description: Redirect to dashboard
-    """
-    clear_bad_state()
-    raise web.HTTPFound("/")
 
 
 async def handle_next_host(request):
@@ -13603,7 +13627,6 @@ def make_app():
     swagger.add_post("/settings/import", handle_settings_import)
     swagger.add_get("/dashboard/server-count", handle_server_count)
     swagger.add_get("/v1/models", handle_v1_models)
-    swagger.add_get("/clear-bad", handle_clear_bad)
     swagger.add_get("/next-host", handle_next_host)
     swagger.add_get("/skip-good", handle_skip_good)
     swagger.add_get("/workers", handle_workers)
