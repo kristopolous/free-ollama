@@ -28,7 +28,7 @@ Your path to victory is **free-ollama**!
 * Dyva's architecture draws a hard line at incurring any *additional* costs. That's strictly not allowed - only unused time on idle machines.
 * Graflex surveys can be reconstructed but the output of them is kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. I'm happy to share it for legitimate research purposes. You can find me.
 * The built-in sources are still about 2,500 servers so it's not nothing....
-* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as cloudflare. The public surveys have honeypots with tripwires that get the srcaddr (you) put in some temporary ban pool with an expiry. There's a clever way of toggling around source lists that can avoid this but the halftime of a host is about 4 days so the list staleness happens quickly.   
+* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as cloudflare. The public surveys have honeypots with tripwires that get the srcaddr (you) put in some temporary ban pool with an expiry. There's a clever way of toggling around source lists that can avoid this but the halftime of a host is about 4 days so the list staleness happens quickly and the honeypots get cycled.  
   
 ## What's actually out there?
 
