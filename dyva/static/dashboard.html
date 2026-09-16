@@ -6028,6 +6028,28 @@ function _injectMermaid(html){
     +'<scr'+'ipt>try{mermaid.initialize({startOnLoad:true,securityLevel:"strict",theme:"default"});}catch(e){}</scr'+'ipt>\n';
   return /<\/body>/i.test(s)?s.replace(/<\/body>/i,inject+'</body>'):(s+inject);
 }
+// The preview iframe is sandboxed WITHOUT allow-same-origin (an opaque origin, so
+// model-generated HTML can't touch the dashboard's storage, cookies, or DOM). But
+// in an opaque origin, merely READING window.localStorage throws a SecurityError —
+// which kills any page that saves a high score / setting / game state at its first
+// line. Give the page an in-memory localStorage + sessionStorage so that code runs
+// (non-persistent, fine for a preview) WITHOUT weakening the sandbox. Injected as
+// the first thing in <head> so it's in place before the page's own scripts run.
+// Script tags built by concatenation so no literal closing-script token appears in
+// this file (it would end the dashboard's own inline script here).
+function _injectStorageShim(html){
+  var s=String(html||'');
+  var shim='<scr'+'ipt>(function(){try{window.localStorage.getItem("_");return;}catch(e){}'
+    +'function mk(){var m={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null;},'
+    +'setItem:function(k,v){m[k]=String(v);},removeItem:function(k){delete m[k];},clear:function(){m={};},'
+    +'key:function(i){return Object.keys(m)[i]||null;},get length(){return Object.keys(m).length;}};}'
+    +'try{Object.defineProperty(window,"localStorage",{value:mk(),configurable:true});}catch(e){}'
+    +'try{Object.defineProperty(window,"sessionStorage",{value:mk(),configurable:true});}catch(e){}'
+    +'})();</scr'+'ipt>';
+  if(/<head[^>]*>/i.test(s))return s.replace(/<head[^>]*>/i,function(m){return m+shim;});
+  if(/<html[^>]*>/i.test(s))return s.replace(/<html[^>]*>/i,function(m){return m+shim;});
+  return shim+s;
+}
 function renderDocPanel(streaming){
   if(currentChat&&!currentChat._vrb){rebuildDocVersions(currentChat);currentChat._vrb=1;}
   var docs=currentDocs();
@@ -6068,7 +6090,7 @@ function renderDocPanel(streaming){
     // origin: no reach into this document, its storage, or its cookies
     fr.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-popups');
     fr.setAttribute('referrerpolicy','no-referrer');
-    fr.srcdoc=_injectMermaid(_resolveAssetAttrs(content));
+    fr.srcdoc=_injectMermaid(_injectStorageShim(_resolveAssetAttrs(content)));
     body.innerHTML='';
     body.appendChild(fr);
     return;
