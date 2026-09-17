@@ -29,7 +29,7 @@ Your path to victory is **free-ollama**!
 * The largest collection of hosts, done through the [graflex surveys](https://github.com/kristopolous/free-ollama/tree/main/graflex) are kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. You can reconstruct them with the tool. I'm happy to share it for legitimate research purposes. You can find me.
 * The built-in sources are still about 1,500 servers so it's not nothing...
 * I've been looking for open lists that are still being updated and will integrate them when I find them
-* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as cloudflare. This includes IoT networks, imdb, huggingface, cloud storage, all kinds of stuff... even banks. The public surveys have honeypots with tripwires that get the srcaddr (you) put in some temporary ban pool with an expiry. There's a clever way of toggling around source lists that can avoid this but the half-life of a host is about 4 days so the list staleness happens quickly and the honeypots get cycled.  
+* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as cloudflare. This includes IoT networks, imdb, huggingface, cloud storage, all kinds of stuff... even banks. The public surveys have honeypots with tripwires that get the srcaddr (you) put in some temporary ban pool with an expiry. most of them are on AWS And AWS GPU rates are atrociously high so there isn't much good stuff there. So in the settings you can block out AWS and other cloud providers and this mostly works...
   
 ## What's actually out there?
 
