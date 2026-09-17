@@ -204,6 +204,32 @@ EXPLORE_MODE = False   # route UNKNOWN/unvisited hosts first to map more of the 
 # candidate list in find_servers, so dyva never even TCP-connects to them (the
 # soft-ban tripwire fires on the connect itself, not just a completed request).
 CLOUD_SKIP = set()
+# A secret URL prefix to mount everything under (deterrence-by-obscurity: a reverse
+# proxy fronting an unguessable path is far harder for a :11434 / /v1/models scanner
+# to stumble onto than the default root). "" = mount at root (the default). Set via
+# the --base flag or the base_path setting (--base wins); EVERY route — dashboard,
+# /v1/*, /api/*, /docs, static, /demos — moves under it, e.g. /goodies/v1/models.
+BASE_PATH = ""
+
+
+def _normalize_base(s):
+    """Normalize a base path: one leading '/', no trailing '/', safe chars only.
+    Empty/degenerate -> '' (mount at root). aiohttp's subapp prefix must not end in
+    '/', and a stray character voids the whole thing rather than mounting somewhere
+    unexpected."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if not s.startswith("/"):
+        s = "/" + s
+    s = re.sub(r"/+", "/", s).rstrip("/")
+    if not re.fullmatch(r"(/[A-Za-z0-9_.\-]+)+", s or ""):
+        return ""
+    if any(seg in (".", "..") for seg in s.strip("/").split("/")):
+        return ""    # no '.'/'..' segments — a prefix, not a path traversal
+    return s
+
+
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
                 # settings & sources requires it (localhost always exempt).
@@ -377,7 +403,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -403,6 +429,8 @@ def load_settings():
         MODEL_LIST = parse_model_list(s["model_list"])
     if isinstance(s.get("cloudskip"), list):
         CLOUD_SKIP = {x.lower() for x in s["cloudskip"] if isinstance(x, str) and x.strip()}
+    if isinstance(s.get("base_path"), str):
+        BASE_PATH = _normalize_base(s["base_path"])
 
 
 def save_settings(extra=None):
@@ -420,7 +448,7 @@ def save_settings(extra=None):
                  "hedge_delay": HEDGE_DELAY,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST,
-                 "cloudskip": sorted(CLOUD_SKIP)})
+                 "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
     if isinstance(extra, dict):
         data.update(extra)
     try:
@@ -5996,6 +6024,7 @@ async def handle_settings_get(request):
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
+                              "base_path": BASE_PATH,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources()})
@@ -6011,7 +6040,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -6042,6 +6071,10 @@ async def handle_settings_post(request):
         EXPLORE_MODE = body["explore"]
     if isinstance(body.get("cloudskip"), list):
         CLOUD_SKIP = {x.lower() for x in body["cloudskip"] if isinstance(x, str) and x.strip()}
+    if isinstance(body.get("base_path"), str):
+        # Persisted for the NEXT start — the route mount is built at boot, so a live
+        # change can't move the running routes (same as changing the listen port).
+        BASE_PATH = _normalize_base(body["base_path"])
     if "model_list" in body:
         MODEL_LIST = parse_model_list(body["model_list"])
     # admin_pw: only when the key is present. A non-empty value sets/changes the
@@ -6066,6 +6099,7 @@ async def handle_settings_post(request):
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
+                              "base_path": BASE_PATH,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources(),
@@ -6317,7 +6351,7 @@ async def handle_next_host(request):
 
     accept = request.headers.get("Accept", "")
     if "application/json" not in accept:
-        raise web.HTTPFound("/")
+        raise web.HTTPFound(".")
 
     to_host = to_model = None
     for _prio, host, ms in find_servers(model):
@@ -6362,7 +6396,7 @@ async def handle_skip_good(request):
 
     force_bad(host, model, reason="manual mark-bad")
 
-    raise web.HTTPFound("/")
+    raise web.HTTPFound(".")
 
 
 async def handle_workers(request):
@@ -13479,7 +13513,21 @@ def make_app():
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)
 
-    return app
+    if not BASE_PATH:
+        return app
+    # Mount every route under the secret prefix by nesting the whole app as a subapp:
+    # a request to /goodies/v1/models routes to the subapp's /v1/models, and the
+    # dashboard (subapp "/") serves at /goodies/. on_startup/on_shutdown propagate to
+    # the subapp, and handlers read request.app (the subapp), so session/semaphore are
+    # unchanged. Bare /goodies (no trailing slash) wouldn't match the subapp's "/", so
+    # redirect it to /goodies/ — RELATIVE, so a reverse-proxy path prefix is preserved.
+    outer = web.Application(client_max_size=128 * 1024 * 1024)
+    _seg = BASE_PATH.rsplit("/", 1)[-1] + "/"    # "goodies/"
+    async def _base_redirect(request):
+        raise web.HTTPFound(_seg)
+    outer.router.add_get(BASE_PATH, _base_redirect)
+    outer.add_subapp(BASE_PATH, app)
+    return outer
 
 def banner():
     global VERSION
@@ -13497,11 +13545,12 @@ def banner():
 """)
 
 def main():
-    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY
+    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY, BASE_PATH
 
     parser = argparse.ArgumentParser(description="dumpster-dyva - Like the Ollama :cloud models, but you don't pay.")
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
+    parser.add_argument("--base",           type=str, default=None, help="secret URL prefix to mount everything under, e.g. /goodies -> /goodies/v1/models (overrides the base_path setting; default: none)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
     parser.add_argument("-c", "--config",   type=str, default="", metavar="DIR", help="data/cache directory (default: ~/.cache/free-ollama). Override it to run more than one dyva on a box.")
     parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache (and cleanse fake/junk hosts), optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
@@ -13554,6 +13603,10 @@ def main():
     load_settings()   # persisted dashboard settings override the CLI defaults
     if args.local:       # an explicit -l flag always wins over saved settings
         _LOCAL = True
+    if args.base is not None:   # --base always wins over the saved base_path
+        BASE_PATH = _normalize_base(args.base)
+    if BASE_PATH:
+        log.info(f"Mounting all routes under base path {BASE_PATH!r} (e.g. {BASE_PATH}/v1/models)")
     log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, MIN_COUNT={MIN_COUNT}, LOCAL={_LOCAL}")
 
     app = make_app()
