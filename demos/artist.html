@@ -43,11 +43,13 @@
 
 <div class="controls">
   <label>dyva URL<input id="base" placeholder="http://localhost:11435"></label>
-  <label>model query<input id="model" value="*/vision" placeholder="e.g. qwen*/vision"></label>
+  <label>model query<input id="model" value="qwen3" placeholder="e.g. qwen3 or qwen*/vision"></label>
   <label>prompt<input id="prompt" value="a snake" placeholder="draw a…"></label>
   <label>rounds<input id="rounds" type="number" value="7" min="1" max="20"></label>
   <label class="chk" title="ON: keep the whole conversation each round, so context (num_ctx) grows — a context-window-extension test. OFF: each round re-sends only the last SVG+image — a repeated-routing test.">
     <input id="grow" type="checkbox"> grow context</label>
+  <label class="chk" title="OFF: send think:false so the model skips reasoning and streams the &lt;svg&gt; straight away (cleaner live draw). ON: allow reasoning tokens first.">
+    <input id="think" type="checkbox" checked> thinking</label>
   <button id="go">Draw</button>
   <button id="stop" class="stop" hidden>Stop</button>
 </div>
@@ -84,6 +86,21 @@ function apiBase(){ return (baseEl.value || '').trim().replace(/\/+$/,''); }
 function extractSvg(text){
   var m = String(text||'').match(/<svg[\s\S]*?<\/svg>/i);
   return m ? m[0] : null;
+}
+
+// A renderable snapshot of the SVG streamed SO FAR, so the drawing paints live as
+// it builds (the same trick the Pictionary demo uses) instead of showing raw text.
+// The <svg> may be in the content, or — for a reasoning model that draws in its
+// thinking — in the thinking tokens. Pull from "<svg" onward and close the root so
+// a mid-stream partial still paints; '' before any <svg> has appeared.
+function partialSvg(content, thinking){
+  var s = String(content || '');
+  if(!/<svg/i.test(s) && thinking) s = String(thinking);
+  var i = s.search(/<svg/i);
+  if(i < 0) return '';
+  s = s.slice(i);
+  if(!/<\/svg>/i.test(s)) s += '</svg>';   // close the root so a partial paints
+  return s;
 }
 
 // Rasterize an SVG string to a PNG data URL on a white ground (vision models read
@@ -135,10 +152,10 @@ function addCard(n){
 // onEvent reports the phase so the UI can distinguish routing vs cold-start vs
 // thinking vs drawing: fires once when the response headers arrive (a host was
 // picked = routing done), then on every chunk with the accumulated thinking/content.
-async function ask(model, messages, onEvent){
+async function ask(model, messages, think, onEvent){
   var r = await fetch(apiBase()+'/api/chat', {
     method:'POST', headers:{'Content-Type':'application/json'}, signal: ac.signal,
-    body: JSON.stringify({ model: model, messages: messages, stream: true })
+    body: JSON.stringify({ model: model, messages: messages, stream: true, think: think })
   });
   var host = r.headers.get('X-Dyva-Host') || '';
   var model_used = r.headers.get('X-Dyva-Model') || '';
@@ -183,6 +200,7 @@ async function run(){
   // grow OFF -> each round re-sends only the previous SVG + its raster
   //             (repeated-routing test; context stays small).
   var grow = document.getElementById('grow').checked;
+  var think = document.getElementById('think').checked;
 
   ac = new AbortController();
   gallery.innerHTML = '';
@@ -220,19 +238,19 @@ async function run(){
         ];
       }
 
-      // stream the raw SVG into the card so it's clear data is flowing, then swap
-      // to the rendered graphic when it's complete.
+      // Paint the SVG live as it streams (Pictionary-style), so you watch the
+      // drawing build up. Before any <svg> has arrived, show routing/thinking status.
       card.className = 'card streaming';
       var _art = card.querySelector('.art');
-      var pre = document.createElement('pre'); pre.className = 'streamraw';
-      _art.innerHTML = ''; _art.appendChild(pre);
-      pre.textContent = '⟲ routing…';
-      var res = await ask(model, messages, function(ev){
-        var t;
-        if(ev.content)       t = ev.content;                              // drawing the SVG
-        else if(ev.thinking) t = '💭 thinking…\n\n' + ev.thinking;         // reasoning tokens
-        else t = ev.host ? ('◉ connected → '+ev.host+'\n\nwaiting for the first token — the model may be cold-loading…')
-                         : '⟲ routing…';                                  // still picking a host
+      _art.innerHTML = '<pre class="streamraw">⟲ routing…</pre>';
+      var res = await ask(model, messages, think, function(ev){
+        var live = partialSvg(ev.content, ev.thinking);
+        if(live){ _art.innerHTML = live; return; }   // the drawing paints as it streams
+        var t = ev.thinking ? ('💭 thinking…\n\n' + ev.thinking)
+              : ev.host ? ('◉ connected → '+ev.host+'\n\nwaiting for the first token — the model may be cold-loading…')
+              : '⟲ routing…';
+        var pre = _art.querySelector('pre.streamraw');
+        if(!pre){ _art.innerHTML = '<pre class="streamraw"></pre>'; pre = _art.querySelector('pre.streamraw'); }
         pre.textContent = t.slice(-6000); pre.scrollTop = pre.scrollHeight;
       });
       var svg = extractSvg(res.content);
