@@ -16,6 +16,7 @@ import os
 import random
 import re
 import shutil
+import ssl
 import subprocess
 import traceback
 import sys
@@ -66,6 +67,35 @@ logging.basicConfig(
 for _handler in logging.getLogger().handlers:
     _handler.setFormatter(ApacheStyleFormatter(LOG_FORMAT))
 log = logging.getLogger("dumpster-dyva")
+
+
+def _permissive_ssl():
+    """A maximally-lenient client TLS context for reaching EXPOSED hosts. dyva talks
+    to servers other people left open: self-signed / expired / hostname-mismatched
+    certs, and old TLS with weak ciphers or small keys are the norm. We are surveying
+    what is there and proxying to it, not protecting a secret on the wire — so accept
+    ANY certificate (no verify, no hostname check) and the WIDEST handshake (legacy
+    renegotiation, low cipher security level, old protocol versions). Not just
+    `ssl=False`: that skips the cert but still fails the handshake on those servers."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    for _apply in (
+        lambda: setattr(ctx, "minimum_version", ssl.TLSVersion.MINIMUM_SUPPORTED),
+        lambda: ctx.set_ciphers("DEFAULT@SECLEVEL=0"),   # weak keys/ciphers (small DH, SHA1, RC4…)
+        lambda: ctx.__setattr__("options", ctx.options | ssl.OP_LEGACY_SERVER_CONNECT),  # pre-RFC5746 servers
+    ):
+        try:
+            _apply()
+        except Exception:
+            pass   # best-effort: an option the build/version lacks just stays default
+    return ctx
+
+
+# One shared context for every outbound request (the connector reuses it). See
+# _permissive_ssl: certs and handshake strictness are deliberately ignored for the
+# exposed-host survey.
+INSECURE_SSL = _permissive_ssl()
 log.setLevel(getattr(logging, LOGLEVEL, logging.INFO))
 
 access_logger = logging.getLogger("aiohttp.access")
@@ -1966,17 +1996,19 @@ def _get_db():
                      "race_lost INTEGER NOT NULL DEFAULT 0",
                      "last_race TEXT",
                      # is_query: 1 = this row is keyed by a synthetic model QUERY, not a
-                     # real resolved model. New writes are resolved-keyed, so they default
-                     # to 0; only the reputation-cleanup workbench ever sets 1 (on the
-                     # legacy rows it soft-deletes). Host PRIORITIZATION reads only is_query=0.
+                     # real resolved model. New writes are resolved-keyed (default 0);
+                     # nothing writes 1 anymore (the migration that set it has been
+                     # removed), but pre-existing 1 rows may linger. Host PRIORITIZATION
+                     # reads only is_query=0.
                      "is_query INTEGER NOT NULL DEFAULT 0",
                      # Soft delete: a non-NULL deleted_at means the row is retired but KEPT
                      # for recovery/audit; every prioritization read filters deleted_at IS NULL.
                      "deleted_at TEXT",
-                     # When the row was first created. SQLite forbids a CURRENT_TIMESTAMP
-                     # default on ADD COLUMN, so the column is plain and an INSERT trigger
-                     # (below) stamps it; pre-existing rows stay NULL.
-                     "created_at TEXT"):
+                     # When the row was first created / last written. SQLite forbids a
+                     # CURRENT_TIMESTAMP default on ADD COLUMN, so both columns are plain and
+                     # triggers (below) stamp them; pre-existing rows stay NULL until touched.
+                     "created_at TEXT",
+                     "updated_at TEXT"):
             try:
                 _status_db.execute(f"ALTER TABLE host_status ADD COLUMN {_col}")
             except sqlite3.OperationalError:
@@ -1987,6 +2019,20 @@ def _get_db():
             "CREATE TRIGGER IF NOT EXISTS host_status_created_at AFTER INSERT ON host_status "
             "WHEN NEW.created_at IS NULL BEGIN "
             "UPDATE host_status SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE rowid=NEW.rowid; END")
+        # updated_at = the time of the LAST write. Stamped on INSERT (so a fresh row
+        # has one) and re-stamped on every UPDATE. The AFTER UPDATE trigger's inner
+        # UPDATE does NOT re-fire it because SQLite's recursive_triggers pragma is OFF
+        # by default (dyva never turns it on) — a trigger's own writes don't cascade.
+        # The WHEN guard (fire only when the caller didn't set updated_at itself) is
+        # the documented idiom on top of that.
+        _status_db.execute(
+            "CREATE TRIGGER IF NOT EXISTS host_status_updated_at_ins AFTER INSERT ON host_status "
+            "WHEN NEW.updated_at IS NULL BEGIN "
+            "UPDATE host_status SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE rowid=NEW.rowid; END")
+        _status_db.execute(
+            "CREATE TRIGGER IF NOT EXISTS host_status_updated_at AFTER UPDATE ON host_status "
+            "WHEN NEW.updated_at IS OLD.updated_at BEGIN "
+            "UPDATE host_status SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE rowid=NEW.rowid; END")
         # smoke_ok recorded a PASS, but a pass is no longer evidence of a real host
         # (honeypots pass the quick test), so it's dead data — drop it. SQLite >= 3.35;
         # on an older build the DROP no-ops and the dead column stays, harmless.
@@ -13311,7 +13357,7 @@ def make_app():
             # and times out (mass "TimeoutError" while the hosts are reachable by
             # hand). App-level concurrency (the semaphore + hedged race) bounds the
             # real fan-out, so the connector must not be the bottleneck.
-            connector=aiohttp.TCPConnector(ssl=False, keepalive_timeout=120, limit=0),
+            connector=aiohttp.TCPConnector(ssl=INSECURE_SSL, keepalive_timeout=120, limit=0),
             timeout=aiohttp.ClientTimeout(total=None),
         )
         app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)

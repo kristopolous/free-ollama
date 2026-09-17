@@ -8,6 +8,7 @@ import os
 import random
 import re
 import socket
+import ssl
 import sys
 import tempfile
 import time
@@ -20,6 +21,30 @@ except ImportError:
     aiohttp = None
 
 log = logging.getLogger("graflex")
+
+
+def _permissive_ssl():
+    """A maximally-lenient client TLS context for CHECKING exposed hosts: they run
+    self-signed / expired / mismatched certs and old TLS with weak ciphers/keys, so
+    accept ANY cert (no verify, no hostname check) and the WIDEST handshake (legacy
+    renegotiation, low cipher security level, old protocol versions). Not just
+    `ssl=False` — that skips the cert but still fails the handshake on such servers."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    for _apply in (
+        lambda: setattr(ctx, "minimum_version", ssl.TLSVersion.MINIMUM_SUPPORTED),
+        lambda: ctx.set_ciphers("DEFAULT@SECLEVEL=0"),
+        lambda: ctx.__setattr__("options", ctx.options | ssl.OP_LEGACY_SERVER_CONNECT),
+    ):
+        try:
+            _apply()
+        except Exception:
+            pass
+    return ctx
+
+
+INSECURE_SSL = _permissive_ssl()
 
 CACHE_DIR = os.path.expanduser("~/.cache/free-ollama")
 # geo/provider fields carried across record rebuilds (see geoip.GEO_FIELDS)
@@ -2084,7 +2109,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
             log.info(f"Checked: {completed} | Runtime: {_fmt_duration(elapsed)} | Remaining: {len(to_check) - completed} | ETA: {_fmt_duration(eta)}")
         return ok
 
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
         session = client
         tasks = [check_one(entry) for entry in to_check]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2256,7 +2281,7 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
             reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
             return ("dead", entry, reason)
 
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
         done = await asyncio.gather(*[probe(e) for e in working], return_exceptions=True)
 
     kept = []
