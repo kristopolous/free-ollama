@@ -204,11 +204,11 @@ EXPLORE_MODE = False   # route UNKNOWN/unvisited hosts first to map more of the 
 # candidate list in find_servers, so dyva never even TCP-connects to them (the
 # soft-ban tripwire fires on the connect itself, not just a completed request).
 CLOUD_SKIP = set()
-# A secret URL prefix to mount everything under (deterrence-by-obscurity: a reverse
-# proxy fronting an unguessable path is far harder for a :11434 / /v1/models scanner
-# to stumble onto than the default root). "" = mount at root (the default). Set via
-# the --base flag or the base_path setting (--base wins); EVERY route — dashboard,
-# /v1/*, /api/*, /docs, static, /demos — moves under it, e.g. /goodies/v1/models.
+# The secret URL path to serve dyva under, changing its whole route schema
+# (deterrence-by-obscurity: a scanner hitting the default /v1/models, /api/tags,
+# etc. finds nothing). "" = served at the root (the default). Set via the --base
+# flag or the base_path setting (--base wins); EVERY route — dashboard, /v1/*,
+# /api/*, /docs, static, /demos — moves under it, e.g. /some-path/v1/models.
 BASE_PATH = ""
 
 
@@ -13515,14 +13515,15 @@ def make_app():
 
     if not BASE_PATH:
         return app
-    # Mount every route under the secret prefix by nesting the whole app as a subapp:
-    # a request to /goodies/v1/models routes to the subapp's /v1/models, and the
-    # dashboard (subapp "/") serves at /goodies/. on_startup/on_shutdown propagate to
+    # Mount every route under the secret path by nesting the whole app as a subapp:
+    # a request to /some-path/v1/models routes to the subapp's /v1/models, and the
+    # dashboard (subapp "/") serves at /some-path/. on_startup/on_shutdown propagate to
     # the subapp, and handlers read request.app (the subapp), so session/semaphore are
-    # unchanged. Bare /goodies (no trailing slash) wouldn't match the subapp's "/", so
-    # redirect it to /goodies/ — RELATIVE, so a reverse-proxy path prefix is preserved.
+    # unchanged. Bare /some-path (no trailing slash) wouldn't match the subapp's "/",
+    # so redirect it to /some-path/ — RELATIVE, so it also survives a front proxy that
+    # adds its own path prefix.
     outer = web.Application(client_max_size=128 * 1024 * 1024)
-    _seg = BASE_PATH.rsplit("/", 1)[-1] + "/"    # "goodies/"
+    _seg = BASE_PATH.rsplit("/", 1)[-1] + "/"    # last segment + "/", e.g. "some-path/"
     async def _base_redirect(request):
         raise web.HTTPFound(_seg)
     outer.router.add_get(BASE_PATH, _base_redirect)
@@ -13550,7 +13551,7 @@ def main():
     parser = argparse.ArgumentParser(description="dumpster-dyva - Like the Ollama :cloud models, but you don't pay.")
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
-    parser.add_argument("--base",           type=str, default=None, help="secret URL prefix to mount everything under, e.g. /goodies -> /goodies/v1/models (overrides the base_path setting; default: none)")
+    parser.add_argument("--base",           type=str, default=None, help="secret URL path to serve dyva under, e.g. /some-path -> /some-path/v1/models (overrides the base_path setting; default: served at root)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
     parser.add_argument("-c", "--config",   type=str, default="", metavar="DIR", help="data/cache directory (default: ~/.cache/free-ollama). Override it to run more than one dyva on a box.")
     parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache (and cleanse fake/junk hosts), optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
