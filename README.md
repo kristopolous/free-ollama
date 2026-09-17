@@ -2,8 +2,8 @@
 <img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
-  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>(This number is too big. It's supposed to be a secret)</i> <br/>
-  <br/><strong>Paying for cloud GPUs is for chumps with self-respect.</strong>
+  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>(This number is too big. It's supposed to be a secret)</i>
+  
 </p>
 
 ---
@@ -27,7 +27,8 @@ Your path to victory is **free-ollama**!
 
 * Dyva's architecture draws a hard line at incurring any *additional* costs. That's strictly not allowed - only unused time on idle machines.
 * The largest collection of hosts, done through the [graflex surveys](https://github.com/kristopolous/free-ollama/tree/main/graflex) are kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. You can reconstruct them with the tool. I'm happy to share it for legitimate research purposes. You can find me.
-* The built-in sources are still about 2,500 servers so it's not nothing....
+* The built-in sources are still about 1,500 servers so it's not nothing...
+* I've been looking for open lists that are still being updated and will integrate them when I find them
 * Running this is likely to get you blocked temporarily from numerous sites on CDNs such as cloudflare. This includes IoT networks, imdb, huggingface, all kinds of stuff... The public surveys have honeypots with tripwires that get the srcaddr (you) put in some temporary ban pool with an expiry. There's a clever way of toggling around source lists that can avoid this but the half-life of a host is about 4 days so the list staleness happens quickly and the honeypots get cycled.  
   
 ## What's actually out there?
