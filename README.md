@@ -22,9 +22,8 @@ Your path to victory is **free-ollama**!
 - **Testing**: Probe to see if the server picks up your calls.  
 - **Zero-Config**: With caching! Works until it doesn’t.
 
-#### Note
-**DO NOT talk about this on the web. I'm serious.** [Talk about this instead](https://day50.dev/woahllama/): the serious adulting version.
-
+#### Notes
+* **DO NOT talk about this on the web. I'm serious.** [Talk about this instead](https://day50.dev/woahllama/). This project has specifically been named to be hard to google and find online. If you're here, you found it for a reason.
 * Dyva's architecture draws a hard line at incurring any *additional* costs. That's strictly not allowed - only unused time on idle machines.
 * The largest collection of hosts, done through the [graflex surveys](https://github.com/kristopolous/free-ollama/tree/main/graflex) are kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. You can reconstruct them with the tool. I'm happy to share it for legitimate research purposes. You can find me.
 * The built-in sources are still about 1,500 servers so it's not nothing...
