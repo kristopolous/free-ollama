@@ -1965,10 +1965,13 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     if check_all:
         _seen = {_entry_host(h) for h in hosts}
         for extra in list(existing_working) + list(existing_notworking.values()):
-            eh = _entry_host(extra)
+            eh = _entry_host(extra)   # handles host-keyed AND url-only records
             if eh and eh not in _seen:
                 _seen.add(eh)
-                hosts.append(extra)
+                # Append a clean hosts.json-shaped entry ({service, host}) — NOT the
+                # raw record, which may be url-only (no "host" key) and would KeyError
+                # downstream. check_one re-probes fresh and rewrites everything anyway.
+                hosts.append({"service": extra.get("service") or service, "host": eh})
     done = set()
     if not check_all:
         # Keyed by host alone, not service@host: the working/notworking files are
