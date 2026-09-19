@@ -4,7 +4,7 @@ Discover public internet hosts via search-engine scraping (FOFA or Shodan) witho
 
 This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json) but there is no output included by default.
 
-Fair warning, running all the probes takes about 4 days. Days with a d. 
+Fair warning, running all the probes takes about 4-10 days. Days with a d. First run takes longer than subsequent runs because we assume once a host is dead, it's dead (although you *can* rescan everything ... it's mostly a waste of time)
 
 Speedup is possible with multiple accounts and probably proxying through an ip pool but the main governor here is the 3k/daily limit per account.
 
