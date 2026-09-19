@@ -5136,6 +5136,13 @@ async def _run_info_test(session, model_in, tools=None):
             ok, _detail = await _quick_probe(session, host, model, model_in, tools)
         if ok and not found:
             found.update({"host": _norm_host(host), "model": model, "service": service_of(host)})
+            # Make the verified host STICKY so the operator's next real request lands
+            # here (TIER_LAST) instead of re-racing the pool — where a fast honeypot
+            # can beat the good machine we just found. Found only fires for the first
+            # passer (single-thread, no await between the check and this), so exactly
+            # one host is stuck. (:test-all deliberately doesn't do this — it probes
+            # many and there's no single winner to pin.)
+            set_last(model_in, host, model)
     tasks = [asyncio.ensure_future(probe(h, m)) for h, m in candidates]
     try:
         for fut in asyncio.as_completed(tasks):
