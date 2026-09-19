@@ -7135,7 +7135,13 @@ async def handle_chat_job_submit(request):
     # it exactly as _proxy_chat's streamed info reply would.
     if _has_info_tag(body):
         session = request.app["session"]
-        model0 = model.split("/")[0] if "/" in model else model
+        # Use the FULL model name. '/' is no longer a query separator (the fallback
+        # delimiter is ',' now, precisely so slash-bearing names like
+        # "prism-ml/bonsai-27b" survive intact) — splitting on '/' here truncated
+        # "prism-ml/Ternary-Bonsai-27B-gguf" to "prism-ml", so /test, /next and /info
+        # operated on a DIFFERENT key than the real chat request. That's why a host
+        # verified by /test never became the sticky the next generation actually used.
+        model0 = model
         if _info_wants_test_all(body):
             # stream the sweep into the job buffer as a background task, so the
             # dashboard sees each host's result as it's probed (not all at the end).
