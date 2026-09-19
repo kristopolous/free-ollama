@@ -1957,6 +1957,18 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
     else:
         existing_notworking = {}
+    # check-all = EVERY ip we've ever seen, INCLUDING ones previously concluded bad.
+    # hosts.json is only the latest fetch's discovery; a host that failed before and
+    # wasn't re-discovered has dropped out of it. So union the working + notworking
+    # hosts into the sweep (deduped) — their records already carry "host"/"service",
+    # so they re-probe as-is. `done` stays empty below, so all of them get checked.
+    if check_all:
+        _seen = {_entry_host(h) for h in hosts}
+        for extra in list(existing_working) + list(existing_notworking.values()):
+            eh = _entry_host(extra)
+            if eh and eh not in _seen:
+                _seen.add(eh)
+                hosts.append(extra)
     done = set()
     if not check_all:
         # Keyed by host alone, not service@host: the working/notworking files are

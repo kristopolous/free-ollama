@@ -84,6 +84,17 @@ baseEl.value = (function(){
 function setStatus(t){ statusEl.textContent = t; }
 function apiBase(){ return (baseEl.value || '').trim().replace(/\/+$/,''); }
 function extractSvg(text){ var m = String(text||'').match(/<svg[\s\S]*?<\/svg>/i); return m ? m[0] : null; }
+// A renderable snapshot of the SVG streamed SO FAR, so the drawing paints live as
+// it builds (like the Pictionary demo) instead of showing raw text. Pull from
+// "<svg" onward and close the root so a mid-stream partial still paints; '' before
+// any <svg> has appeared.
+function partialSvg(text){
+  var s = String(text||''); var i = s.search(/<svg/i);
+  if(i < 0) return '';
+  s = s.slice(i);
+  if(!/<\/svg>/i.test(s)) s += '</svg>';
+  return s;
+}
 
 var SYSTEM = 'You are an expert SVG illustrator. Reply with exactly ONE complete, '
   + 'self-contained <svg> element (include a viewBox; no external images, scripts, or fonts) '
@@ -158,11 +169,16 @@ async function paint(p, prompt){
   // show the raw SVG streaming in, so it's clear data is flowing; swap to the
   // rendered graphic once it's complete.
   p.el.className = 'piece streaming';
-  var pre = document.createElement('pre'); pre.className = 'streamraw';
-  p.art.innerHTML = ''; p.art.appendChild(pre);
+  p.art.innerHTML = '<pre class="streamraw">…</pre>';
   try{
     var res = await ask(model, messages, function(txt){
-      pre.textContent = txt.slice(-6000);     // tail only, keep the DOM light
+      // Paint the SVG live as it streams; before any <svg> arrives, show the raw
+      // text tail so it's clear data is flowing.
+      var live = partialSvg(txt);
+      if(live){ p.art.innerHTML = live; return; }
+      var pre = p.art.querySelector('pre.streamraw');
+      if(!pre){ p.art.innerHTML = '<pre class="streamraw"></pre>'; pre = p.art.querySelector('pre.streamraw'); }
+      pre.textContent = txt.slice(-6000);      // tail only, keep the DOM light
       pre.scrollTop = pre.scrollHeight;
     });
     p.by.textContent = (res.used||model).split('/').pop() + (res.host ? ' · '+res.host : '');

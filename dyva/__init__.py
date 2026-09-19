@@ -122,6 +122,12 @@ STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
 # connection level is dead for every model, so it must not be re-probed
 # per-model). \x00 can't occur in a real canon'd model name.
 UNREACHABLE_KEY = "\x00unreachable"
+# sentinel "model" for a host-wide HONEYPOT mark: a machine that answered the smoke
+# test with a KNOWN-garbage honeypot response is a honeypot for EVERY model it
+# claims (the canned reply is machine-level), so condemn the whole host. Same
+# host-wide-exclusion path as UNREACHABLE_KEY; kept as a DISTINCT sentinel so the
+# provenance ("excluded: honeypot" vs "unreachable") survives. Additive/reversible.
+HONEYPOT_KEY = "\x00honeypot"
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 # Append-only provenance log of dyva's OWN runtime probes — "what WE tested a host
@@ -960,6 +966,41 @@ BALLOON_TEST = "rs0"
 QUICK_TEST_TAG = "__dyva_info__:test"
 QUICK_TEST_PROMPT = "What color is #000000? one word answer, this is a test"
 QUICK_TEST_PASS_RE = re.compile(r"\b(black|white|blue|red|green|gr[ae]y)\b", re.I)
+
+# Known-honeypot smoke responses (data-driven, dyva/honeypot-responses.json). A
+# smoke FAIL whose text matches one of these is a CONCLUSIVE honeypot — condemn the
+# whole machine. A fail that matches nothing becomes a 'maybe' (recorded only), so
+# the response can be inspected and the list grown. Data, not code — reload-safe.
+HONEYPOT_FILE = os.path.join(os.path.dirname(__file__), "honeypot-responses.json")
+_honeypot_res = None
+
+
+def _load_honeypot_res():
+    """Compile the honeypot-response regexes once. Missing/broken file -> empty
+    list (fail OPEN: no host is ever mis-condemned because the classifier failed to
+    load; unmatched fails just fall through to 'maybe')."""
+    global _honeypot_res
+    if _honeypot_res is not None:
+        return _honeypot_res
+    out = []
+    try:
+        with open(HONEYPOT_FILE, encoding="utf-8") as f:
+            for p in (json.load(f).get("patterns") or []):
+                try:
+                    out.append(re.compile(p, re.I))
+                except re.error as e:
+                    log.warning(f"honeypot-responses: bad pattern {p!r}: {e}")
+    except Exception as e:
+        log.warning(f"honeypot-responses: failed to load {HONEYPOT_FILE}: {e}")
+    _honeypot_res = out
+    return out
+
+
+def honeypot_detect(text):
+    """True iff `text` matches a KNOWN honeypot response — i.e. a conclusive,
+    condemn-the-machine garbage reply, not just any wrong smoke answer."""
+    t = str(text or "")
+    return any(rx.search(t) for rx in _load_honeypot_res())
 
 _status_db = None
 _servers_cache = None
@@ -2367,6 +2408,44 @@ def mark_unreachable(host):
     db.commit()
 
 
+def mark_honeypot(host, reason=None):
+    """Condemn a whole MACHINE as a honeypot: it answered the smoke probe with a
+    known-garbage response, which is machine-level, so exclude it for EVERY model.
+    Additive — writes a host-wide HONEYPOT_KEY sentinel row (find_servers drops it
+    the same way it drops UNREACHABLE_KEY hosts); the per-(host,model) rows, smoke
+    history and backups are untouched, and the mark is reversible (clear the row).
+    `reason` keeps the raw response as provenance."""
+    reason = (" ".join(str(reason).split())[:500] or None) if reason else None
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak,last_fail,last_fail_reason)"
+        " VALUES(?,?, 'bad', NULL, 0, ?, ?)"
+        " ON CONFLICT(host,model) DO UPDATE SET state='bad',"
+        " last_fail=excluded.last_fail, last_fail_reason=excluded.last_fail_reason",
+        (host, HONEYPOT_KEY, _now_iso(), reason))
+    db.commit()
+
+
+def mark_maybe(host, model, reason=None):
+    """Record a smoke FAIL that is NOT a known-honeypot garbage response as 'maybe'.
+    Data capture only — NO routing effect yet (find_servers doesn't recognize the
+    'maybe' state, so it routes like unknown; the whole point is to SEE these
+    responses before deciding). Additive and non-destructive: stores the raw reply
+    as provenance and only labels a row that has no definitive verdict — an existing
+    'good'/'bad' state is left intact (so it can't downgrade a known host)."""
+    model = canon_pattern(model)
+    reason = (" ".join(str(reason).split())[:500] or None) if reason else None
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_fail,last_fail_reason)"
+        " VALUES(?,?, 'maybe', ?, ?)"
+        " ON CONFLICT(host,model) DO UPDATE SET"
+        "   state=CASE WHEN host_status.state IN ('good','bad') THEN host_status.state ELSE 'maybe' END,"
+        "   last_fail=excluded.last_fail, last_fail_reason=excluded.last_fail_reason",
+        (host, model, _now_iso(), reason))
+    db.commit()
+
+
 NODE_SURVEY_TTL = 24 * 3600
 
 
@@ -2427,9 +2506,13 @@ def node_survey_for(host, capability, ttl=NODE_SURVEY_TTL):
 
 
 def load_unreachable():
+    # Host-wide exclusion set: hosts carrying EITHER host-wide-bad sentinel —
+    # UNREACHABLE_KEY (dead socket) or HONEYPOT_KEY (conclusive honeypot). Kept as
+    # distinct rows for provenance; unioned here because both mean "drop the whole
+    # machine for every model."
     return {h for (h,) in _get_db().execute(
-        f"SELECT host FROM host_status WHERE model=? AND state='bad' AND {_LIVE_REAL}",
-        (UNREACHABLE_KEY,)).fetchall()}
+        f"SELECT host FROM host_status WHERE model IN (?,?) AND state='bad' AND {_LIVE_REAL}",
+        (UNREACHABLE_KEY, HONEYPOT_KEY)).fetchall()}
 
 
 def load_last():
@@ -5223,14 +5306,26 @@ async def _quick_probe(session, host, full, model_in, tools=None):
             f"quick test: {host} for {model_in} - error: {data['error']}", duration=dur, wid=wid)
         return False, f"error: {str(data['error'])[:80]}"
     if not _quick_test_answer_ok(content):
-        # Stored reason is JUST what the host sent — the actual survey signal. Our
-        # "smoke: canned/parroted answer:" label is constant (already implied by
-        # fail_smoke=1), so it encodes zero survey bits; drop it and keep the response.
-        force_bad(host, full, reason=shown)
-        mark_smoke(host, full, failed=True)   # conclusive: answered with a canned/fake response
-        log.warning(f"quick test FAIL {host} ({full}): {shown!r}")
-        await broadcast_activity(host, model_in, "failed",
-            f"quick test: {host} for {model_in} - (parroted/empty): {shown!r}", duration=dur, wid=wid)
+        # A smoke fail is not automatically a honeypot. Classify the response:
+        if honeypot_detect(content):
+            # KNOWN-garbage honeypot reply — conclusive, and machine-level (the canned
+            # line has nothing to do with the model), so condemn the whole HOST. Keep
+            # the per-model record too (force_bad + mark_smoke) as provenance of which
+            # model was probed; the raw reply is stored as the reason on both.
+            force_bad(host, full, reason=shown)
+            mark_smoke(host, full, failed=True)
+            mark_honeypot(host, reason=shown)   # host-wide: drop the machine for every model
+            log.warning(f"quick test HONEYPOT (machine flagged) {host} ({full}): {shown!r}")
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - HONEYPOT, machine flagged: {shown!r}", duration=dur, wid=wid)
+            return False, f"{shown}"
+        # Failed, but NOT a recognized garbage reply (empty, gibberish, an off answer).
+        # Record it as 'maybe' — data capture ONLY, no routing effect yet — so we can
+        # SEE these replies and grow the classifier before deciding what they mean.
+        mark_maybe(host, full, reason=shown)
+        log.info(f"quick test MAYBE (recorded, no routing effect) {host} ({full}): {shown!r}")
+        await broadcast_activity(host, model_in, "warming",
+            f"quick test: {host} for {model_in} - unrecognized fail (maybe): {shown!r}", duration=dur, wid=wid)
         return False, f"{shown}"
     # It answered "black" (the #000000 probe discriminates — honeypots emit canned
     # filler, not "black"). We don't store a "passed" flag; we just update our LAST
