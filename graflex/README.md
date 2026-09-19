@@ -8,7 +8,9 @@ Fair warning, running all the probes takes about 4-10 days. Days with a d. First
 
 Speedup is possible with multiple accounts and probably proxying through an ip pool but the main governor here is the 3k/daily limit per account.
 
-Graflex is a fast track to get you blocked from places like Cloudflare and Huggingface. There's trap servers that will report your ip if you doorknock them and I haven't found a way of quarantining them yet. caveat emptor and all that fluff
+Graflex is a fast track to get you soft-blocked from places like Cloudflare and Huggingface. There's trap servers that will report your ip if you doorknock them and I haven't found a way of quarantining them yet. 
+
+The dyva runtime does this by allowing you to just completely block out entire clouds. That I guess is possible to do in graflex but as of now, the pipelines are intentionally completely separated. I'll have to think about that. 
 
 ## Setup
 
