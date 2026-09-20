@@ -4218,6 +4218,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
     oai = speaks_openai(host)
     resp, ep = None, endpoint
     tried = []   # per-dialect outcome (status + body peek), surfaced if BOTH miss
+    _think_dropped = False   # one-shot: retry a host once without `think` if it 400s
     for attempt_oai in (oai, not oai):
         ep = (("/v1/completions" if endpoint == "/api/generate"
                else "/v1/chat/completions") if attempt_oai else endpoint)
@@ -4268,6 +4269,28 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
                      f"after {time.time()-_t0:.1f}s")
             raise
         log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s")
+        # A model that doesn't support the `think` field 400s ("... does not support
+        # thinking"). That's a capability mismatch, not a bad host — and EVERY host
+        # serving this model would reject it identically, so failing over would sink
+        # the whole race. If we sent think and got a 400, drop `think` and retry this
+        # same host ONCE. (Only the Ollama-native path carries `think`; openai_payload
+        # already strips it for the OpenAI dialect.)
+        if resp.status == 400 and p.get("think") and not _think_dropped:
+            _think_dropped = True
+            with contextlib.suppress(Exception):
+                await resp.release()
+            p = {k: v for k, v in p.items() if k != "think"}
+            log.info(f"[{rid}] {host}{ep} 400 with think:true — retrying without think")
+            _t0 = time.time()
+            try:
+                resp = await session.post(
+                    f"{host}{ep}", json=p,
+                    timeout=aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT))
+            except Exception as e:
+                log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
+                         f"after {time.time()-_t0:.1f}s")
+                raise
+            log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s (no think)")
         if resp.status not in (404, 405, 501):
             return resp, attempt_oai, ep, None
         st = resp.status
