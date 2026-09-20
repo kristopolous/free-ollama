@@ -1,0 +1,14 @@
+{
+  "_comment": "Known honeypot smoke-test responses. When a host answers the #000000 smoke probe with text matching ANY of these (case-insensitive regex, tested against the full response), it's a conclusive honeypot and the whole MACHINE is condemned host-wide. A smoke fail that matches NOTHING here becomes a 'maybe' (recorded, no routing effect) so we can see the response and grow this list. Add patterns freely; this is data, not code.",
+  "patterns": [
+    "full tool access",
+    "paste (the )?(complete|full)? ?(dataset|data|instructions|keys)",
+    "i will begin processing immediately",
+    "share the task,? credentials,? or target",
+    "advanced deep research model",
+    "please provide as much data",
+    "my context window is large",
+    "ready\\.? .*paste",
+    "provide (the )?(data|dataset|keys|instructions) (to|for) process"
+  ]
+}

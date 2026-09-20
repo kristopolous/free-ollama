@@ -1162,6 +1162,17 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
             body = resp.text.lower()
+            # Cookie-expired = FOFA served the logged-OUT page, which renders a
+            # "Log in" button (class "el-button login-button"). Verified against 10,945
+            # captured FOFA pages: `login-button` appears in every logged-out response
+            # (444, all zero-result) and NEVER in a page that returned results (5,887) or
+            # a valid empty query (4,614). (NOT "logout" — that's the sign-out nav link
+            # present on EVERY logged-in page.) Hard stop; nothing works until the cookie
+            # is refreshed. Exit code 3.
+            if "login-button" in body:
+                log.error(f"FOFA cookie expired (logged out) — refresh FOFA_COOKIE in .env, "
+                          f"then resume with --id {run_ts}")
+                raise SystemExit(3)
             if "daily usage limit" in body:
                 out_path = _fofa_path(label, run_ts, pname)
                 if os.path.exists(out_path):
@@ -1957,6 +1968,21 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
     else:
         existing_notworking = {}
+    # check-all = EVERY ip we've ever seen, INCLUDING ones previously concluded bad.
+    # hosts.json is only the latest fetch's discovery; a host that failed before and
+    # wasn't re-discovered has dropped out of it. So union the working + notworking
+    # hosts into the sweep (deduped) — their records already carry "host"/"service",
+    # so they re-probe as-is. `done` stays empty below, so all of them get checked.
+    if check_all:
+        _seen = {_entry_host(h) for h in hosts}
+        for extra in list(existing_working) + list(existing_notworking.values()):
+            eh = _entry_host(extra)   # handles host-keyed AND url-only records
+            if eh and eh not in _seen:
+                _seen.add(eh)
+                # Append a clean hosts.json-shaped entry ({service, host}) — NOT the
+                # raw record, which may be url-only (no "host" key) and would KeyError
+                # downstream. check_one re-probes fresh and rewrites everything anyway.
+                hosts.append({"service": extra.get("service") or service, "host": eh})
     done = set()
     if not check_all:
         # Keyed by host alone, not service@host: the working/notworking files are

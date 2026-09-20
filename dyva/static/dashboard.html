@@ -1363,6 +1363,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Hedge delay (s)</span><small class="setting-help">How long the last-good host gets to respond before the rest of the pool is raced alongside it. Whoever answers first wins. 0 races everything at once. Keeps a dead-but-connected favourite from stalling the whole request.</small></span><input type="number" id="setHedge" min="0" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Base path</span><small class="setting-help">Serve dyva under a secret URL path instead of the root. A path like <code>/some-path</code> moves the dashboard to <code>/some-path/</code> and the API to <code>/some-path/v1/models</code> — deterrence by obscurity: a scanner hitting the default paths (<code>/v1/models</code>, <code>/api/tags</code>) finds nothing. Blank = served at the root. <b>Takes effect on restart</b> (like the listen port); the <code>--base</code> flag overrides this.</small></span><input type="text" id="setBasePath" placeholder="/some-path" spellcheck="false" autocomplete="off"></label>
 <div class="setting">
 <span class="setting-text"><span class="setting-name">Model list override</span>
 <small class="setting-help">Advertise a fixed list of model names from <code>/api/tags</code> and <code>/v1/models</code> instead of the discovered catalog, for tools that make you pick one specific model id. Every dyva model name is a routing pattern, so one entry like <code>qwen3</code> covers every <code>qwen3:*</code> variant on every host. Upload a plain text file, one name per line; blank lines and <code>#comments</code> are ignored. <b>Clear</b> turns the override back off and goes back to advertising the real catalog. Names no host currently serves stay listed (count 0) so the menu can't shift under a tool that pinned one. <b>Minimum model count</b> doesn't apply to an explicit list.</small>
@@ -4395,8 +4396,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
               if(!pv.ok)break;
               var jv2=await pv.json();
               if(jv2.status==='completed'||jv2.status==='failed'){done=jv2;break}
-              setStatus((jv2.phase||jv2.status||'working')+'\u2026 '
-                        +Math.round((Date.now()-vt0)/1000)+'s');
+              // Surface the server's higher-fidelity progress: elapsed_s (total, from
+              // job creation) and phase_age_s (secs since the host last reported
+              // progress) \u2014 a growing "no update" hint is the stalled-vs-slow tell.
+              var _el=(jv2.elapsed_s!=null?Math.round(jv2.elapsed_s):Math.round((Date.now()-vt0)/1000));
+              var _stale=(jv2.phase_age_s!=null&&jv2.phase_age_s>20)?' \u00b7 no update '+Math.round(jv2.phase_age_s)+'s':'';
+              setStatus((jv2.phase||jv2.status||'working')+'\u2026 '+_el+'s'+_stale);
             }
             if(done&&done.status==='completed'){
               var vurl='v1/videos/'+encodeURIComponent(vjob.id)+'/content';
@@ -7749,6 +7754,7 @@ function populateSettings(s){
   document.getElementById('setTimeout').value=s.timeout;
   document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   document.getElementById('setMinCount').value=s.min_count;
+  document.getElementById('setBasePath').value=s.base_path||'';
   setModelList(s.model_list||[],false);
   document.getElementById('setLocal').checked=!!s.local;
   document.getElementById('setExplore').checked=!!s.explore;
@@ -7840,6 +7846,7 @@ function saveSettings(){
     timeout:parseInt(document.getElementById('setTimeout').value,10),
     hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
+    base_path:document.getElementById('setBasePath').value,
     model_list:_modelList,
     local:document.getElementById('setLocal').checked,
     explore:document.getElementById('setExplore').checked,
@@ -7870,6 +7877,7 @@ function saveSettings(){
       document.getElementById('setTimeout').value=s.timeout;
       document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
       document.getElementById('setMinCount').value=s.min_count;
+  document.getElementById('setBasePath').value=s.base_path||'';
       setModelList(s.model_list||[],false);
       document.getElementById('setLocal').checked=!!s.local;
       document.getElementById('setExplore').checked=!!s.explore;

@@ -122,6 +122,12 @@ STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
 # connection level is dead for every model, so it must not be re-probed
 # per-model). \x00 can't occur in a real canon'd model name.
 UNREACHABLE_KEY = "\x00unreachable"
+# sentinel "model" for a host-wide HONEYPOT mark: a machine that answered the smoke
+# test with a KNOWN-garbage honeypot response is a honeypot for EVERY model it
+# claims (the canned reply is machine-level), so condemn the whole host. Same
+# host-wide-exclusion path as UNREACHABLE_KEY; kept as a DISTINCT sentinel so the
+# provenance ("excluded: honeypot" vs "unreachable") survives. Additive/reversible.
+HONEYPOT_KEY = "\x00honeypot"
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 # Append-only provenance log of dyva's OWN runtime probes — "what WE tested a host
@@ -204,6 +210,32 @@ EXPLORE_MODE = False   # route UNKNOWN/unvisited hosts first to map more of the 
 # candidate list in find_servers, so dyva never even TCP-connects to them (the
 # soft-ban tripwire fires on the connect itself, not just a completed request).
 CLOUD_SKIP = set()
+# The secret URL path to serve dyva under, changing its whole route schema
+# (deterrence-by-obscurity: a scanner hitting the default /v1/models, /api/tags,
+# etc. finds nothing). "" = served at the root (the default). Set via the --base
+# flag or the base_path setting (--base wins); EVERY route — dashboard, /v1/*,
+# /api/*, /docs, static, /demos — moves under it, e.g. /some-path/v1/models.
+BASE_PATH = ""
+
+
+def _normalize_base(s):
+    """Normalize a base path: one leading '/', no trailing '/', safe chars only.
+    Empty/degenerate -> '' (mount at root). aiohttp's subapp prefix must not end in
+    '/', and a stray character voids the whole thing rather than mounting somewhere
+    unexpected."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if not s.startswith("/"):
+        s = "/" + s
+    s = re.sub(r"/+", "/", s).rstrip("/")
+    if not re.fullmatch(r"(/[A-Za-z0-9_.\-]+)+", s or ""):
+        return ""
+    if any(seg in (".", "..") for seg in s.strip("/").split("/")):
+        return ""    # no '.'/'..' segments — a prefix, not a path traversal
+    return s
+
+
 MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
                 # settings & sources requires it (localhost always exempt).
@@ -377,7 +409,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -403,6 +435,8 @@ def load_settings():
         MODEL_LIST = parse_model_list(s["model_list"])
     if isinstance(s.get("cloudskip"), list):
         CLOUD_SKIP = {x.lower() for x in s["cloudskip"] if isinstance(x, str) and x.strip()}
+    if isinstance(s.get("base_path"), str):
+        BASE_PATH = _normalize_base(s["base_path"])
 
 
 def save_settings(extra=None):
@@ -420,7 +454,7 @@ def save_settings(extra=None):
                  "hedge_delay": HEDGE_DELAY,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST,
-                 "cloudskip": sorted(CLOUD_SKIP)})
+                 "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
     if isinstance(extra, dict):
         data.update(extra)
     try:
@@ -932,6 +966,41 @@ BALLOON_TEST = "rs0"
 QUICK_TEST_TAG = "__dyva_info__:test"
 QUICK_TEST_PROMPT = "What color is #000000? one word answer, this is a test"
 QUICK_TEST_PASS_RE = re.compile(r"\b(black|white|blue|red|green|gr[ae]y)\b", re.I)
+
+# Known-honeypot smoke responses (data-driven, dyva/honeypot-responses.json). A
+# smoke FAIL whose text matches one of these is a CONCLUSIVE honeypot — condemn the
+# whole machine. A fail that matches nothing becomes a 'maybe' (recorded only), so
+# the response can be inspected and the list grown. Data, not code — reload-safe.
+HONEYPOT_FILE = os.path.join(os.path.dirname(__file__), "honeypot-responses.json")
+_honeypot_res = None
+
+
+def _load_honeypot_res():
+    """Compile the honeypot-response regexes once. Missing/broken file -> empty
+    list (fail OPEN: no host is ever mis-condemned because the classifier failed to
+    load; unmatched fails just fall through to 'maybe')."""
+    global _honeypot_res
+    if _honeypot_res is not None:
+        return _honeypot_res
+    out = []
+    try:
+        with open(HONEYPOT_FILE, encoding="utf-8") as f:
+            for p in (json.load(f).get("patterns") or []):
+                try:
+                    out.append(re.compile(p, re.I))
+                except re.error as e:
+                    log.warning(f"honeypot-responses: bad pattern {p!r}: {e}")
+    except Exception as e:
+        log.warning(f"honeypot-responses: failed to load {HONEYPOT_FILE}: {e}")
+    _honeypot_res = out
+    return out
+
+
+def honeypot_detect(text):
+    """True iff `text` matches a KNOWN honeypot response — i.e. a conclusive,
+    condemn-the-machine garbage reply, not just any wrong smoke answer."""
+    t = str(text or "")
+    return any(rx.search(t) for rx in _load_honeypot_res())
 
 _status_db = None
 _servers_cache = None
@@ -2339,6 +2408,44 @@ def mark_unreachable(host):
     db.commit()
 
 
+def mark_honeypot(host, reason=None):
+    """Condemn a whole MACHINE as a honeypot: it answered the smoke probe with a
+    known-garbage response, which is machine-level, so exclude it for EVERY model.
+    Additive — writes a host-wide HONEYPOT_KEY sentinel row (find_servers drops it
+    the same way it drops UNREACHABLE_KEY hosts); the per-(host,model) rows, smoke
+    history and backups are untouched, and the mark is reversible (clear the row).
+    `reason` keeps the raw response as provenance."""
+    reason = (" ".join(str(reason).split())[:500] or None) if reason else None
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_good,failure_streak,last_fail,last_fail_reason)"
+        " VALUES(?,?, 'bad', NULL, 0, ?, ?)"
+        " ON CONFLICT(host,model) DO UPDATE SET state='bad',"
+        " last_fail=excluded.last_fail, last_fail_reason=excluded.last_fail_reason",
+        (host, HONEYPOT_KEY, _now_iso(), reason))
+    db.commit()
+
+
+def mark_maybe(host, model, reason=None):
+    """Record a smoke FAIL that is NOT a known-honeypot garbage response as 'maybe'.
+    Data capture only — NO routing effect yet (find_servers doesn't recognize the
+    'maybe' state, so it routes like unknown; the whole point is to SEE these
+    responses before deciding). Additive and non-destructive: stores the raw reply
+    as provenance and only labels a row that has no definitive verdict — an existing
+    'good'/'bad' state is left intact (so it can't downgrade a known host)."""
+    model = canon_pattern(model)
+    reason = (" ".join(str(reason).split())[:500] or None) if reason else None
+    db = _get_db()
+    db.execute(
+        "INSERT INTO host_status(host,model,state,last_fail,last_fail_reason)"
+        " VALUES(?,?, 'maybe', ?, ?)"
+        " ON CONFLICT(host,model) DO UPDATE SET"
+        "   state=CASE WHEN host_status.state IN ('good','bad') THEN host_status.state ELSE 'maybe' END,"
+        "   last_fail=excluded.last_fail, last_fail_reason=excluded.last_fail_reason",
+        (host, model, _now_iso(), reason))
+    db.commit()
+
+
 NODE_SURVEY_TTL = 24 * 3600
 
 
@@ -2399,9 +2506,13 @@ def node_survey_for(host, capability, ttl=NODE_SURVEY_TTL):
 
 
 def load_unreachable():
+    # Host-wide exclusion set: hosts carrying EITHER host-wide-bad sentinel —
+    # UNREACHABLE_KEY (dead socket) or HONEYPOT_KEY (conclusive honeypot). Kept as
+    # distinct rows for provenance; unioned here because both mean "drop the whole
+    # machine for every model."
     return {h for (h,) in _get_db().execute(
-        f"SELECT host FROM host_status WHERE model=? AND state='bad' AND {_LIVE_REAL}",
-        (UNREACHABLE_KEY,)).fetchall()}
+        f"SELECT host FROM host_status WHERE model IN (?,?) AND state='bad' AND {_LIVE_REAL}",
+        (UNREACHABLE_KEY, HONEYPOT_KEY)).fetchall()}
 
 
 def load_last():
@@ -4107,6 +4218,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
     oai = speaks_openai(host)
     resp, ep = None, endpoint
     tried = []   # per-dialect outcome (status + body peek), surfaced if BOTH miss
+    _think_dropped = False   # one-shot: retry a host once without `think` if it 400s
     for attempt_oai in (oai, not oai):
         ep = (("/v1/completions" if endpoint == "/api/generate"
                else "/v1/chat/completions") if attempt_oai else endpoint)
@@ -4157,6 +4269,28 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
                      f"after {time.time()-_t0:.1f}s")
             raise
         log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s")
+        # A model that doesn't support the `think` field 400s ("... does not support
+        # thinking"). That's a capability mismatch, not a bad host — and EVERY host
+        # serving this model would reject it identically, so failing over would sink
+        # the whole race. If we sent think and got a 400, drop `think` and retry this
+        # same host ONCE. (Only the Ollama-native path carries `think`; openai_payload
+        # already strips it for the OpenAI dialect.)
+        if resp.status == 400 and p.get("think") and not _think_dropped:
+            _think_dropped = True
+            with contextlib.suppress(Exception):
+                await resp.release()
+            p = {k: v for k, v in p.items() if k != "think"}
+            log.info(f"[{rid}] {host}{ep} 400 with think:true — retrying without think")
+            _t0 = time.time()
+            try:
+                resp = await session.post(
+                    f"{host}{ep}", json=p,
+                    timeout=aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT))
+            except Exception as e:
+                log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
+                         f"after {time.time()-_t0:.1f}s")
+                raise
+            log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s (no think)")
         if resp.status not in (404, 405, 501):
             return resp, attempt_oai, ep, None
         st = resp.status
@@ -5108,6 +5242,13 @@ async def _run_info_test(session, model_in, tools=None):
             ok, _detail = await _quick_probe(session, host, model, model_in, tools)
         if ok and not found:
             found.update({"host": _norm_host(host), "model": model, "service": service_of(host)})
+            # Make the verified host STICKY so the operator's next real request lands
+            # here (TIER_LAST) instead of re-racing the pool — where a fast honeypot
+            # can beat the good machine we just found. Found only fires for the first
+            # passer (single-thread, no await between the check and this), so exactly
+            # one host is stuck. (:test-all deliberately doesn't do this — it probes
+            # many and there's no single winner to pin.)
+            set_last(model_in, host, model)
     tasks = [asyncio.ensure_future(probe(h, m)) for h, m in candidates]
     try:
         for fut in asyncio.as_completed(tasks):
@@ -5188,14 +5329,26 @@ async def _quick_probe(session, host, full, model_in, tools=None):
             f"quick test: {host} for {model_in} - error: {data['error']}", duration=dur, wid=wid)
         return False, f"error: {str(data['error'])[:80]}"
     if not _quick_test_answer_ok(content):
-        # Stored reason is JUST what the host sent — the actual survey signal. Our
-        # "smoke: canned/parroted answer:" label is constant (already implied by
-        # fail_smoke=1), so it encodes zero survey bits; drop it and keep the response.
-        force_bad(host, full, reason=shown)
-        mark_smoke(host, full, failed=True)   # conclusive: answered with a canned/fake response
-        log.warning(f"quick test FAIL {host} ({full}): {shown!r}")
-        await broadcast_activity(host, model_in, "failed",
-            f"quick test: {host} for {model_in} - (parroted/empty): {shown!r}", duration=dur, wid=wid)
+        # A smoke fail is not automatically a honeypot. Classify the response:
+        if honeypot_detect(content):
+            # KNOWN-garbage honeypot reply — conclusive, and machine-level (the canned
+            # line has nothing to do with the model), so condemn the whole HOST. Keep
+            # the per-model record too (force_bad + mark_smoke) as provenance of which
+            # model was probed; the raw reply is stored as the reason on both.
+            force_bad(host, full, reason=shown)
+            mark_smoke(host, full, failed=True)
+            mark_honeypot(host, reason=shown)   # host-wide: drop the machine for every model
+            log.warning(f"quick test HONEYPOT (machine flagged) {host} ({full}): {shown!r}")
+            await broadcast_activity(host, model_in, "failed",
+                f"quick test: {host} for {model_in} - HONEYPOT, machine flagged: {shown!r}", duration=dur, wid=wid)
+            return False, f"{shown}"
+        # Failed, but NOT a recognized garbage reply (empty, gibberish, an off answer).
+        # Record it as 'maybe' — data capture ONLY, no routing effect yet — so we can
+        # SEE these replies and grow the classifier before deciding what they mean.
+        mark_maybe(host, full, reason=shown)
+        log.info(f"quick test MAYBE (recorded, no routing effect) {host} ({full}): {shown!r}")
+        await broadcast_activity(host, model_in, "warming",
+            f"quick test: {host} for {model_in} - unrecognized fail (maybe): {shown!r}", duration=dur, wid=wid)
         return False, f"{shown}"
     # It answered "black" (the #000000 probe discriminates — honeypots emit canned
     # filler, not "black"). We don't store a "passed" flag; we just update our LAST
@@ -5996,6 +6149,7 @@ async def handle_settings_get(request):
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
+                              "base_path": BASE_PATH,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources()})
@@ -6011,7 +6165,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -6042,6 +6196,10 @@ async def handle_settings_post(request):
         EXPLORE_MODE = body["explore"]
     if isinstance(body.get("cloudskip"), list):
         CLOUD_SKIP = {x.lower() for x in body["cloudskip"] if isinstance(x, str) and x.strip()}
+    if isinstance(body.get("base_path"), str):
+        # Persisted for the NEXT start — the route mount is built at boot, so a live
+        # change can't move the running routes (same as changing the listen port).
+        BASE_PATH = _normalize_base(body["base_path"])
     if "model_list" in body:
         MODEL_LIST = parse_model_list(body["model_list"])
     # admin_pw: only when the key is present. A non-empty value sets/changes the
@@ -6066,6 +6224,7 @@ async def handle_settings_post(request):
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
+                              "base_path": BASE_PATH,
                               "admin_pw_set": bool(ADMIN_PW),
                               "model_list": MODEL_LIST,
                               "admin": True, "sources": _stored_sources(),
@@ -6317,7 +6476,7 @@ async def handle_next_host(request):
 
     accept = request.headers.get("Accept", "")
     if "application/json" not in accept:
-        raise web.HTTPFound("/")
+        raise web.HTTPFound(".")
 
     to_host = to_model = None
     for _prio, host, ms in find_servers(model):
@@ -6362,7 +6521,7 @@ async def handle_skip_good(request):
 
     force_bad(host, model, reason="manual mark-bad")
 
-    raise web.HTTPFound("/")
+    raise web.HTTPFound(".")
 
 
 async def handle_workers(request):
@@ -7094,7 +7253,13 @@ async def handle_chat_job_submit(request):
     # it exactly as _proxy_chat's streamed info reply would.
     if _has_info_tag(body):
         session = request.app["session"]
-        model0 = model.split("/")[0] if "/" in model else model
+        # Use the FULL model name. '/' is no longer a query separator (the fallback
+        # delimiter is ',' now, precisely so slash-bearing names like
+        # "prism-ml/bonsai-27b" survive intact) — splitting on '/' here truncated
+        # "prism-ml/Ternary-Bonsai-27B-gguf" to "prism-ml", so /test, /next and /info
+        # operated on a DIFFERENT key than the real chat request. That's why a host
+        # verified by /test never became the sticky the next generation actually used.
+        model0 = model
         if _info_wants_test_all(body):
             # stream the sweep into the job buffer as a background task, so the
             # dashboard sees each host's result as it's probed (not all at the end).
@@ -10293,14 +10458,38 @@ async def _run_video_job(session, jid):
         return accepted((host, prompt_id, plan))
 
     tried_hosts, bad_models = set(), set()
+    fell_back = False
+    def _try_fallback():
+        # The requested model couldn't be built/rendered on ANY matching host (e.g.
+        # a model dyva has no workflow for, like ltx-2.5). Rather than fail, render
+        # on ANY supported video model so the user still gets a video — clear the
+        # model filter and re-race the FULL video pool. One-shot. The completed job's
+        # `model` records what actually rendered, and `requested_model` what was asked.
+        nonlocal fell_back, hosts, tried_hosts, bad_models
+        if fell_back or not job.get("model_filter"):
+            return False
+        fell_back = True
+        job["requested_model"] = job.get("model_filter")
+        job["model_filter"] = None
+        job["exclude_models"] = []
+        hosts = _find_video_hosts()
+        tried_hosts = set()
+        bad_models = set()
+        log.info(f"video {jid}: '{job.get('requested_model')}' unbuildable on all matching "
+                 f"hosts — falling back to any supported video model ({len(hosts)} hosts)")
+        return True
     for _round in range(EDIT_RENDER_ATTEMPTS):
         pool = [h for h in hosts if h not in tried_hosts]
         if not pool:
+            if _try_fallback():
+                continue
             break
         job["exclude_models"] = sorted(bad_models)
         result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey,
                                                             job_wid=job_wid)
         if not result or stopped:
+            if not stopped and _try_fallback():   # no host could serve the requested model
+                continue
             break
         host, prompt_id, plan = result
         tried_hosts.add(host)
@@ -10314,8 +10503,16 @@ async def _run_video_job(session, jid):
         _set_worker_phase(job_wid, "rendering")
         def _phase(w):
             _set_worker_phase(job_wid, w)
-            job["phase"] = w      # so the polling client can show it too
+            prev = job.get("phase")
+            job["phase"] = w          # so the polling client can show it too
+            job["phase_at"] = time.time()   # FRESHNESS: refreshed every poll even when the
+                                            # phase string is unchanged, so a slow-but-alive
+                                            # render (phase_at keeps advancing) is distinguishable
+                                            # from a stalled/dead poll (phase_at goes stale).
             _video_job_save()
+            if w != prev:                   # log only on change, not every 15s poll
+                _el = int(time.time() - (job.get("created") or time.time()))
+                log.info(f"video {job.get('id')}: {w}  ({_el}s elapsed) on {host}")
         # The race's own skip only reaches the (already-finished) submit phase.
         # Rendering is the long part, so install a skip that abandons *this*
         # render and lets the loop re-race the remaining hosts — the host is
@@ -11504,10 +11701,19 @@ async def handle_videos_get(request):
         "model": job["model"],
         "host": job.get("host"),
         "service": service_of(job.get("host") or "") if job.get("host") else "",
-        # where the host says the job actually is: "queued #3", "rendering"
+        # where the host says the job actually is: "queued #3", "running"
         "phase": job.get("phase"),
         "polling_url": f"/v1/videos/{jid}",
     }
+    # Higher-fidelity progress so slow-but-alive is distinguishable from stalled:
+    #   elapsed_s   — total time since the job was created
+    #   phase_age_s — seconds since the host last reported progress (small & steady
+    #                 while rendering; grows without bound if the poll has died)
+    now = time.time()
+    if job.get("created"):
+        out["elapsed_s"] = round(now - job["created"], 1)
+    if job.get("phase_at"):
+        out["phase_age_s"] = round(now - job["phase_at"], 1)
     if job["status"] == "completed":
         out["unsigned_urls"] = job.get("unsigned_urls") or []
     if job["status"] == "failed":
@@ -13479,7 +13685,22 @@ def make_app():
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app.router.add_static("/", static_dir, show_index=False)
 
-    return app
+    if not BASE_PATH:
+        return app
+    # Mount every route under the secret path by nesting the whole app as a subapp:
+    # a request to /some-path/v1/models routes to the subapp's /v1/models, and the
+    # dashboard (subapp "/") serves at /some-path/. on_startup/on_shutdown propagate to
+    # the subapp, and handlers read request.app (the subapp), so session/semaphore are
+    # unchanged. Bare /some-path (no trailing slash) wouldn't match the subapp's "/",
+    # so redirect it to /some-path/ — RELATIVE, so it also survives a front proxy that
+    # adds its own path prefix.
+    outer = web.Application(client_max_size=128 * 1024 * 1024)
+    _seg = BASE_PATH.rsplit("/", 1)[-1] + "/"    # last segment + "/", e.g. "some-path/"
+    async def _base_redirect(request):
+        raise web.HTTPFound(_seg)
+    outer.router.add_get(BASE_PATH, _base_redirect)
+    outer.add_subapp(BASE_PATH, app)
+    return outer
 
 def banner():
     global VERSION
@@ -13497,11 +13718,12 @@ def banner():
 """)
 
 def main():
-    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY
+    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY, BASE_PATH
 
     parser = argparse.ArgumentParser(description="dumpster-dyva - Like the Ollama :cloud models, but you don't pay.")
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
     parser.add_argument("-u", "--host",     type=str, default="", help="host address to bind to (default: all interfaces)")
+    parser.add_argument("--base",           type=str, default=None, help="secret URL path to serve dyva under, e.g. /some-path -> /some-path/v1/models (overrides the base_path setting; default: served at root)")
     parser.add_argument("-t", "--timeout",  type=int, default=30, help="request timeout in seconds (default: 30)")
     parser.add_argument("-c", "--config",   type=str, default="", metavar="DIR", help="data/cache directory (default: ~/.cache/free-ollama). Override it to run more than one dyva on a box.")
     parser.add_argument("-r", "--refresh", nargs="?", const=True, default=False, metavar="SOURCE", help="refresh cache (and cleanse fake/junk hosts), optionally limited to one source name (e.g. graflex, forrany, spider, happyshua)")
@@ -13554,6 +13776,10 @@ def main():
     load_settings()   # persisted dashboard settings override the CLI defaults
     if args.local:       # an explicit -l flag always wins over saved settings
         _LOCAL = True
+    if args.base is not None:   # --base always wins over the saved base_path
+        BASE_PATH = _normalize_base(args.base)
+    if BASE_PATH:
+        log.info(f"Mounting all routes under base path {BASE_PATH!r} (e.g. {BASE_PATH}/v1/models)")
     log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, MIN_COUNT={MIN_COUNT}, LOCAL={_LOCAL}")
 
     app = make_app()
