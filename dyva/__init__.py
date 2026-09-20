@@ -10479,8 +10479,16 @@ async def _run_video_job(session, jid):
         _set_worker_phase(job_wid, "rendering")
         def _phase(w):
             _set_worker_phase(job_wid, w)
-            job["phase"] = w      # so the polling client can show it too
+            prev = job.get("phase")
+            job["phase"] = w          # so the polling client can show it too
+            job["phase_at"] = time.time()   # FRESHNESS: refreshed every poll even when the
+                                            # phase string is unchanged, so a slow-but-alive
+                                            # render (phase_at keeps advancing) is distinguishable
+                                            # from a stalled/dead poll (phase_at goes stale).
             _video_job_save()
+            if w != prev:                   # log only on change, not every 15s poll
+                _el = int(time.time() - (job.get("created") or time.time()))
+                log.info(f"video {job.get('id')}: {w}  ({_el}s elapsed) on {host}")
         # The race's own skip only reaches the (already-finished) submit phase.
         # Rendering is the long part, so install a skip that abandons *this*
         # render and lets the loop re-race the remaining hosts — the host is
@@ -11669,10 +11677,19 @@ async def handle_videos_get(request):
         "model": job["model"],
         "host": job.get("host"),
         "service": service_of(job.get("host") or "") if job.get("host") else "",
-        # where the host says the job actually is: "queued #3", "rendering"
+        # where the host says the job actually is: "queued #3", "running"
         "phase": job.get("phase"),
         "polling_url": f"/v1/videos/{jid}",
     }
+    # Higher-fidelity progress so slow-but-alive is distinguishable from stalled:
+    #   elapsed_s   — total time since the job was created
+    #   phase_age_s — seconds since the host last reported progress (small & steady
+    #                 while rendering; grows without bound if the poll has died)
+    now = time.time()
+    if job.get("created"):
+        out["elapsed_s"] = round(now - job["created"], 1)
+    if job.get("phase_at"):
+        out["phase_age_s"] = round(now - job["phase_at"], 1)
     if job["status"] == "completed":
         out["unsigned_urls"] = job.get("unsigned_urls") or []
     if job["status"] == "failed":

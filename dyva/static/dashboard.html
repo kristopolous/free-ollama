@@ -4396,8 +4396,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
               if(!pv.ok)break;
               var jv2=await pv.json();
               if(jv2.status==='completed'||jv2.status==='failed'){done=jv2;break}
-              setStatus((jv2.phase||jv2.status||'working')+'\u2026 '
-                        +Math.round((Date.now()-vt0)/1000)+'s');
+              // Surface the server's higher-fidelity progress: elapsed_s (total, from
+              // job creation) and phase_age_s (secs since the host last reported
+              // progress) \u2014 a growing "no update" hint is the stalled-vs-slow tell.
+              var _el=(jv2.elapsed_s!=null?Math.round(jv2.elapsed_s):Math.round((Date.now()-vt0)/1000));
+              var _stale=(jv2.phase_age_s!=null&&jv2.phase_age_s>20)?' \u00b7 no update '+Math.round(jv2.phase_age_s)+'s':'';
+              setStatus((jv2.phase||jv2.status||'working')+'\u2026 '+_el+'s'+_stale);
             }
             if(done&&done.status==='completed'){
               var vurl='v1/videos/'+encodeURIComponent(vjob.id)+'/content';
