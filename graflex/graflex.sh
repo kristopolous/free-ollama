@@ -17,8 +17,11 @@ case "$SERVICE" in
 
     for i in ollama vllm lmstudio fooocus ollama-shodan llama.cpp comfyui a1111 gradio; do
       $CMD $i ${EXTRA_ARGS[@]}
-      echo ">>   "$?
-      [[ $? ]] || sleep 7200
+      last_res="$?"
+      echo ">>   "$last_res
+      [[ "$last_res" == "2" ]] && sleep 7200
+      # only if it's the last in the list and 0 
+      [[ "$i" == "gradio" && "$last_res" == "0" ]] && break
     done
     exit 0
     ;;
