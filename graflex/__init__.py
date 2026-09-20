@@ -2027,7 +2027,19 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         _save_json_atomic(working_file, existing_working)
         return
 
-    log.info(f"check: {len(to_check)} to check ({len(done)} already done)")
+    # Report the FULL pool, not just the remainder — otherwise "64 to check" reads as
+    # "that's all there is" when the pool was 968 and 904 were skipped as
+    # already-tried-THIS-session (a resumed -i run) or already-done. Make the total and
+    # the skip legible so a small "to check" on a resume isn't mistaken for a bug.
+    _pool = len(hosts)
+    _skipped = _pool - len(to_check)
+    _why = []
+    if done:
+        _why.append(f"{len(done)} already recorded")
+    if session and _skipped - len(done) > 0:
+        _why.append(f"{_skipped - len(done)} already tried this session (resume -i {session})")
+    log.info(f"check{'-all' if check_all else ''}: {len(to_check)} to check of {_pool} in pool"
+             + (f" ({'; '.join(_why)})" if _why else ""))
     await _check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working)
 
 
