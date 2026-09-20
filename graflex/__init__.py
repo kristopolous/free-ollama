@@ -1162,6 +1162,17 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
             body = resp.text.lower()
+            # Cookie-expired = FOFA served the logged-OUT page, which renders a
+            # "Log in" button (class "el-button login-button"). Verified against 10,945
+            # captured FOFA pages: `login-button` appears in every logged-out response
+            # (444, all zero-result) and NEVER in a page that returned results (5,887) or
+            # a valid empty query (4,614). (NOT "logout" — that's the sign-out nav link
+            # present on EVERY logged-in page.) Hard stop; nothing works until the cookie
+            # is refreshed. Exit code 3.
+            if "login-button" in body:
+                log.error(f"FOFA cookie expired (logged out) — refresh FOFA_COOKIE in .env, "
+                          f"then resume with --id {run_ts}")
+                raise SystemExit(3)
             if "daily usage limit" in body:
                 out_path = _fofa_path(label, run_ts, pname)
                 if os.path.exists(out_path):

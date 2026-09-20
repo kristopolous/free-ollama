@@ -10458,14 +10458,38 @@ async def _run_video_job(session, jid):
         return accepted((host, prompt_id, plan))
 
     tried_hosts, bad_models = set(), set()
+    fell_back = False
+    def _try_fallback():
+        # The requested model couldn't be built/rendered on ANY matching host (e.g.
+        # a model dyva has no workflow for, like ltx-2.5). Rather than fail, render
+        # on ANY supported video model so the user still gets a video — clear the
+        # model filter and re-race the FULL video pool. One-shot. The completed job's
+        # `model` records what actually rendered, and `requested_model` what was asked.
+        nonlocal fell_back, hosts, tried_hosts, bad_models
+        if fell_back or not job.get("model_filter"):
+            return False
+        fell_back = True
+        job["requested_model"] = job.get("model_filter")
+        job["model_filter"] = None
+        job["exclude_models"] = []
+        hosts = _find_video_hosts()
+        tried_hosts = set()
+        bad_models = set()
+        log.info(f"video {jid}: '{job.get('requested_model')}' unbuildable on all matching "
+                 f"hosts — falling back to any supported video model ({len(hosts)} hosts)")
+        return True
     for _round in range(EDIT_RENDER_ATTEMPTS):
         pool = [h for h in hosts if h not in tried_hosts]
         if not pool:
+            if _try_fallback():
+                continue
             break
         job["exclude_models"] = sorted(bad_models)
         result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey,
                                                             job_wid=job_wid)
         if not result or stopped:
+            if not stopped and _try_fallback():   # no host could serve the requested model
+                continue
             break
         host, prompt_id, plan = result
         tried_hosts.add(host)
