@@ -3,7 +3,8 @@
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
   <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>(This number is too big. It's supposed to be a secret)</i>
-  
+  <br/><br/><b>Try it now</b><br/>
+  <code>uvx dyva</code><br/>
 </p>
 
 ---
