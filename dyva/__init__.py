@@ -1542,6 +1542,40 @@ def _is_junk_model(m):
     return bool(_JUNK_MODEL_RE.search(str(m)))
 
 
+# NSFW image-checkpoint name signals (dyva/nsfw-models.json). A LABEL, not a gate:
+# its only routing effect is AUTO-PICK — a request that names no model prefers a
+# non-NSFW checkpoint, so "a cute puppy" doesn't land on a model that emits a nude
+# regardless of the prompt. An explicitly-named model is always honored.
+NSFW_FILE = os.path.join(os.path.dirname(__file__), "nsfw-models.json")
+_nsfw_res = None
+
+
+def _load_nsfw_res():
+    global _nsfw_res
+    if _nsfw_res is not None:
+        return _nsfw_res
+    out = []
+    try:
+        with open(NSFW_FILE, encoding="utf-8") as f:
+            for p in (json.load(f).get("patterns") or []):
+                try:
+                    out.append(re.compile(p, re.I))
+                except re.error as e:
+                    log.warning(f"nsfw-models: bad pattern {p!r}: {e}")
+    except Exception as e:
+        log.warning(f"nsfw-models: failed to load {NSFW_FILE}: {e}")
+    _nsfw_res = out
+    return out
+
+
+def is_nsfw_model(name):
+    """True if the checkpoint NAME signals an NSFW-leaning model (base filename,
+    case-insensitive). Just a label — used to avoid auto-picking one for a request
+    that didn't ask for it."""
+    n = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return any(rx.search(n) for rx in _load_nsfw_res())
+
+
 # The cleanse reasons a model entry can carry, and their CLI aliases. This is a
 # MODEL cleanse (not host cleanse): hosts stay, only fake/ransomware/proxy model
 # ENTRIES are expunged. Runs on dyva's MERGED multi-source pool (not per-source
@@ -6012,8 +6046,11 @@ async def handle_dashboard_models(request):
     out = []
     for m, a in agg.items():
         c = gb.get(canon_pattern(m), {})
-        out.append({"id": m, "count": a["count"], "image": a["image"],
-                    "good": c.get("good", 0), "bad": c.get("bad", 0)})
+        _row = {"id": m, "count": a["count"], "image": a["image"],
+                "good": c.get("good", 0), "bad": c.get("bad", 0)}
+        if a["image"] and is_nsfw_model(m):   # label image checkpoints only
+            _row["nsfw"] = True
+        out.append(_row)
     # ship the survey's per-model sizes so the client filter understands ">10gb",
     # and the release-date lookup so it understands ">2026-02" (fuzzy-matched
     # client-side, same as the server does for routing).
@@ -8783,7 +8820,12 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
             ckpt = next(
                 (c for c in checkpoints if model_query_match(c, model_filter)), None)
         elif checkpoints:
-            ckpt = checkpoints[0]
+            # Auto-pick (no model named): prefer a non-NSFW checkpoint so a plain
+            # request ("a cute puppy") doesn't land on an NSFW-tuned model that emits
+            # a nude regardless of the prompt. Fall back to whatever the host has if
+            # every option is NSFW. (An explicitly-named model takes the branch above
+            # and is always honored.)
+            ckpt = next((c for c in checkpoints if not is_nsfw_model(c)), checkpoints[0])
     except Exception:
         return None
 

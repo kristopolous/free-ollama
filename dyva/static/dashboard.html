@@ -215,6 +215,7 @@ body.chat{height:100vh;height:100dvh}
 .done-line{color:var(--text-faint);font-style:italic}
 .model-item{padding:var(--sp-2) 0;border-bottom:1px solid var(--border);font-size:var(--fs-md);display:flex;justify-content:space-between}
 .model-item:last-child{border:none}
+.nsfw-badge{display:inline-block;font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);border:1px solid var(--border);border-radius:var(--r-sm);padding:0 .3em;vertical-align:middle}
 .model-name{font-family:var(--font-mono);font-size:var(--fs-sm);max-width:85%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-count{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap}
 /* Model coverage bar: working/failing/untested, muted pastels (not a christmas tree) */
@@ -506,6 +507,13 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .input-tools button.active{color:var(--accent-bright);background:var(--accent-bg-active)}
 .input-row button svg{width:1.1em;height:1.1em}
 .attach-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin-bottom:.5em}
+.queued-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin:.1em 0}
+.queued-row .queued-head{font-size:var(--fs-2xs);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-right:.2em}
+.queued-chip{display:inline-flex;align-items:center;gap:.4em;max-width:22rem;background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:.25em .5em;font-size:var(--fs-sm);color:var(--text)}
+.queued-chip .queued-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.queued-chip button{background:none;border:0;color:var(--text-muted);cursor:pointer;padding:0;font-size:1.1em;line-height:1}
+.queued-chip button:hover{color:var(--err)}
+.queued-clear{background:none;border:0;color:var(--text-muted);cursor:pointer;font-size:var(--fs-2xs);text-decoration:underline}
 .vision-toggle{display:flex;align-items:center;gap:var(--sp-2);font-size:var(--fs-xs);color:var(--text-muted);cursor:pointer;white-space:nowrap;padding:0 var(--sp-2)}
 .vision-toggle input{width:auto;margin:0;accent-color:var(--accent);cursor:pointer}
 .vision-toggle:hover{color:var(--text-2)}
@@ -1057,6 +1065,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 </div>
 <div class="attach-row" id="chatAttachments" style="display:none"></div>
+<div class="queued-row" id="queuedMsgs" style="display:none"></div>
 <div class="input-row">
 <div class="slash-pop" id="slashPop" style="display:none"></div>
 <textarea id="chatInput" placeholder="Message... (Enter to send, Shift+Enter for newline, /help for commands)"></textarea>
@@ -1789,7 +1798,11 @@ function makeModelBar(mid){
   segs.forEach(function(s,i){if(w[i]>0){var el=document.createElement('i');el.className=s[0];el.style.width=w[i]+'px';bar.appendChild(el);}});
   return bar;
 }
-function makeModelRow(mid){var d=document.createElement('div');d.className='model-item';d.setAttribute('data-name',mid);d.title=mid;var n=document.createElement('span');n.className='model-name';n.textContent=mid;d.appendChild(n);d.appendChild(makeModelBar(mid));return d}
+function makeModelRow(mid){var d=document.createElement('div');d.className='model-item';d.setAttribute('data-name',mid);d.title=mid;var n=document.createElement('span');n.className='model-name';n.textContent=mid;
+  // NSFW label (image checkpoints only): informational, and a heads-up that dyva
+  // won't auto-pick this for a plain request (name a model to use it anyway).
+  if((modelAgg[mid]||{}).nsfw){var b=document.createElement('span');b.className='nsfw-badge';b.textContent='nsfw';b.title='NSFW-leaning — not auto-picked for a plain request; name it explicitly to use it';n.appendChild(document.createTextNode(' '));n.appendChild(b);}
+  d.appendChild(n);d.appendChild(makeModelBar(mid));return d}
 // Sort cardinality: good + maybe_good + unknown, EXCLUDING failed/bad hosts — a model
 // served only by dead hosts shouldn't rank above a live one on raw host count.
 function modelRank(mid){
@@ -1932,7 +1945,7 @@ function renderModels(models){
   modelAgg={};imageModels={};
   models.forEach(function(m){
     var id=m.id||'';if(!id)return;
-    modelAgg[id]={count:m.count||0,good:m.good||0,bad:m.bad||0};
+    modelAgg[id]={count:m.count||0,good:m.good||0,bad:m.bad||0,nsfw:!!m.nsfw};
     if(m.image||_isImageModelName(id)){imageModels[id]=1;var t=id.indexOf(' [');if(t>=0)imageModels[id.slice(0,t)]=1}
   });
   var ids=Object.keys(modelAgg).filter(function(id){return id.length&&!/[:-]cloud/.test(id)});
@@ -3629,7 +3642,7 @@ function setAssistantLabel(el,host,fmodel,tps,service){
     el._curlHost=host;el._curlModel=fmodel;el._curlSvc=service;
   }
 }
-function newChat(){_stickBottom=true;saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[],documents:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
+function newChat(){_stickBottom=true;saveCurrentChat();currentChat={id:Date.now(),createdAt:Date.now(),title:'',model:document.getElementById('chatModel').value.trim(),messages:[],documents:[]};renderMessages();renderSidebar();activeStatus=null;refreshSendButton();renderQueue();activeDocId=null;hideDocPanel();refreshDocUI();location.hash='chat';}
 function loadChatById(id){
   closeChatDrawer();
   // Already viewing this chat (e.g. the hashchange fired by saveCurrentChat
@@ -3658,6 +3671,7 @@ function afterLoadChat(id){
   activeStatus=null;
   reattachGen(String(id));   // if this chat is still generating, show it live again
   refreshSendButton();
+  renderQueue();             // show this chat's queued (steering) messages, if any
   activeDocId=null;
   if(currentDocs().length&&_docPanelWanted)openDoc(currentDocs()[currentDocs().length-1].id);
   else hideDocPanel();
@@ -4067,9 +4081,55 @@ function pushHist(t){
   if(promptHist.length>200)promptHist.shift();
   promptHistIdx=-1;
 }
+// Queued messages: while a conversation is generating (or in a tool loop / thinking),
+// the composer can't send — instead the text is QUEUED. The queue is surfaced to the
+// model at the next tool-result boundary (runToolRound), and flushed as the next user
+// turn if the generation ends with no tool call. Per-chat, in-memory (steering input,
+// not conversation history until it's actually delivered).
+var _queued={};   // chatId -> [text, ...]
+function queuePush(chatId,text){
+  (_queued[chatId]=_queued[chatId]||[]).push(text);
+  renderQueue();
+}
+function queueRemove(chatId,i){
+  var q=_queued[chatId]; if(!q)return;
+  q.splice(i,1); if(!q.length)delete _queued[chatId];
+  renderQueue();
+}
+function queueClear(chatId){ delete _queued[chatId]; renderQueue(); }
+function renderQueue(){
+  var el=document.getElementById('queuedMsgs'); if(!el)return;
+  var q=(currentChat&&_queued[currentChat.id])||[];
+  if(!q.length){el.style.display='none';el.innerHTML='';return;}
+  var html='<span class="queued-head">queued</span>';
+  q.forEach(function(t,i){
+    html+='<span class="queued-chip"><span class="queued-text" title="'+escHtml(t)+'">'+escHtml(t)+'</span>'
+        + '<button type="button" title="remove" onclick="queueRemove(currentChat.id,'+i+')">×</button></span>';
+  });
+  html+='<button type="button" class="queued-clear" onclick="queueClear(currentChat.id)">clear</button>';
+  el.innerHTML=html; el.style.display='';
+}
+// Flush the queue as ONE new user turn — used when a generation ends with no tool call
+// (there was no tool result to append to). Combined into a single turn so N queued
+// lines don't fire N separate generations.
+function flushQueuedAsSend(chatId){
+  var q=_queued[chatId]; if(!q||!q.length)return false;
+  if(genOf(chatId))return false;                 // still/again generating — leave queued
+  if(!currentChat||String(currentChat.id)!==String(chatId))return false;  // only the in-view chat
+  delete _queued[chatId]; renderQueue();
+  document.getElementById('chatInput').value=q.join('\n\n');
+  sendChat();
+  return true;
+}
 async function sendChat(){
   hideSlashPop(false);
-  if(genOf(currentChat.id))return;   // this conversation is already generating
+  if(genOf(currentChat.id)){
+    // Already generating — queue the message instead of dropping it. It reaches the
+    // model at the next tool-result boundary, or as the next turn when this one ends.
+    var _qt=document.getElementById('chatInput').value.trim();
+    if(_qt){ queuePush(currentChat.id,_qt); document.getElementById('chatInput').value=''; }
+    return;
+  }
   var model=document.getElementById('chatModel').value.trim();
   var input=document.getElementById('chatInput');
   var text=input.value.trim();
@@ -4124,6 +4184,13 @@ async function sendChat(){
 // recolor one file. Give the loop real room; the soft docs-gate, the hedge, and the
 // per-round cost still bound it in practice.
 var TOOL_LOOP_MAX=24;
+// Max tool calls dispatched in ONE turn. A stuck/looping model can stream THOUSANDS
+// of tool calls in a single turn (observed: 2,171 and 7,627 empty generate_image
+// calls, each at its own index — a runaway generation). Dispatching them all fires
+// thousands of ops and feeds back thousands of near-identical results, exploding
+// context and spiralling into a loop. Cap it: run the first N, and hand back ONE
+// corrective note instead of N bounces.
+var TOOL_CALLS_MAX=24;
 async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,existingJob){
   chatId=String(chatId);
   depth=depth||0;
@@ -4173,6 +4240,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       scrollChat();
     }
     var results=[],urls=[];
+    // Runaway guard: cap the tool calls dispatched this turn (see TOOL_CALLS_MAX).
+    var _tcOverflow=0;
+    if(toolCalls.length>TOOL_CALLS_MAX){
+      _tcOverflow=toolCalls.length-TOOL_CALLS_MAX;
+      toolCalls=toolCalls.slice(0,TOOL_CALLS_MAX);
+    }
     for(var i=0;i<toolCalls.length;i++){
       if(ac.signal.aborted)return;
       var tc=toolCalls[i]||{},fn=tc.function||{};
@@ -4692,6 +4765,23 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
         }
       }else results.push({text:'There is no tool named "'+fn.name+'". Use one of the tools available in this chat.'});
     }
+    // Runaway guard: if the model spammed more tool calls than the cap, tell it ONCE
+    // (not N bounces) so it corrects instead of spiralling.
+    if(_tcOverflow){
+      results.push({text:'You emitted '+(_tcOverflow+TOOL_CALLS_MAX)+' tool calls in a single turn — only the first '+TOOL_CALLS_MAX+' were run. Call at most a few tools per turn.'});
+    }
+    // Steering: if the user queued messages while this was working, surface them by
+    // APPENDING to the last tool result — the model sees the new input at this boundary
+    // and can adjust. Appended (not a separate message) to keep the tool-call/result
+    // pairing valid for strict OpenAI hosts. Consume the queue.
+    var _q=_queued[chatId]||[];
+    if(_q.length&&results.length){
+      var _last=results[results.length-1];
+      _last.text=(_last.text||'')+'\n\n[The user sent '+(_q.length>1?_q.length+' messages':'a message')
+              +' while you were working — take '+(_q.length>1?'them':'it')+' into account:\n'
+              +_q.map(function(m,i){return (i+1)+') '+m}).join('\n')+']';
+      delete _queued[chatId]; if(inView())renderQueue();
+    }
     msgs.push({role:'assistant',content:full,tool_calls:toolCalls,_meta:{hidden:true}});
     var _visImgs=[];
     results.forEach(function(res){
@@ -4894,6 +4984,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       if(gens[chatId]===gen)delete gens[chatId];
       try{sessionStorage.removeItem('dyva_own')}catch(e){}
       if(inView())refreshSendButton();
+      // Generation ended with no tool call, so nothing consumed the queue at a
+      // tool-result boundary — flush any queued messages as the next user turn.
+      if((_queued[chatId]||[]).length)setTimeout(function(){flushQueuedAsSend(chatId)},0);
     }
   }
 }
