@@ -8633,6 +8633,19 @@ async def comfy_submit(session, host, workflow, timeout=None):
         raise ComfyError(str(e) or type(e).__name__)
     prompt_id = (data or {}).get("prompt_id")
     if not prompt_id:
+        # Some hosts answer /prompt with HTTP 200 but an ERROR envelope instead of a
+        # prompt_id — most commonly an auth gate, e.g. {"code":401,"error":"token
+        # mismatch"}. Surface the REAL reason (not a bare "no prompt_id"), and treat an
+        # auth refusal as STRUCTURAL (ComfyUnsuitable) — it will never work for us
+        # without credentials, so don't keep re-racing it. (auth-required = a pass.)
+        if isinstance(data, dict):
+            reason = str(data.get("error") or data.get("message") or data.get("code") or "").strip()
+            code = data.get("code")
+            if reason or code is not None:
+                detail = reason or f"code {code}"
+                if code in (401, 403) or re.search(r"token|auth|unauthor|forbidden|credential|api.?key", reason, re.I):
+                    raise ComfyUnsuitable(f"prompt rejected (auth): {detail}")
+                raise ComfyError(f"prompt rejected: {detail}")
         raise ComfyError("no prompt_id")
     return prompt_id
 
@@ -13129,7 +13142,26 @@ def _wire_node(info, cls, node_id, graph, links, overrides=None):
         if "default" in attrs:
             inputs[name] = attrs["default"]
         elif isinstance(typ, list) and typ:
-            inputs[name] = typ[0]
+            inputs[name] = typ[0]                       # old-style enum: entry[0] IS the option list
+        elif typ == "COMBO" and isinstance(attrs.get("options"), list) and attrs["options"]:
+            # newer ComfyUI declares a dropdown as ["COMBO", {"options": [...]}] — the
+            # options live in attrs, not entry[0]. Missing this left the field blank and
+            # the host rejected it ("value_not_in_list"). Pick the first valid option.
+            inputs[name] = attrs["options"][0]
+        else:
+            # A REQUIRED input with no default and no enum (e.g. AceStep1.5's
+            # `keyscale`/`timesignature` STRING fields) was being DROPPED, so the host
+            # rejected the graph with required_input_missing. Every required input must
+            # be present — fill a type-appropriate benign fallback so the graph always
+            # validates. (The model uses its own default behaviour for a blank field.)
+            if typ == "INT":
+                inputs[name] = int(attrs.get("default", attrs.get("min", 0)) or 0)
+            elif typ == "FLOAT":
+                inputs[name] = float(attrs.get("default", attrs.get("min", 0)) or 0)
+            elif typ == "BOOLEAN":
+                inputs[name] = bool(attrs.get("default", False))
+            else:
+                inputs[name] = ""                       # STRING and anything else
     graph[node_id] = {"class_type": cls, "inputs": inputs}
     return graph[node_id]
 
