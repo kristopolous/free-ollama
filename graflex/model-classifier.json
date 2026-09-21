@@ -9,7 +9,8 @@
     "(?i)text_encoders?/"
   ],
   "image_edit": [
-    "(?i)flux[-_. ]?2"
+    "(?i)flux[-_. ]?2",
+    "(?i)qwen[-_. ]?image[-_. ]?2[._-]?1(?![0-9])"
   ],
   "edit": [
     "(?i)(kontext|qwen[-_ ]?rapid|qwen[-_ ]?image[-_ ]?edit|edit)",
