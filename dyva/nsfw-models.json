@@ -1,0 +1,24 @@
+{
+  "_comment": "Name signals for NSFW-leaning image checkpoints. This is a LABEL, not a content gate — no judgment. Its ONLY effect on routing is AUTO-PICK: when a request does not name a model, dyva prefers a non-NSFW checkpoint, so 'a cute puppy' doesn't land on a model that emits a nude almost regardless of the prompt. An explicitly-named model is ALWAYS honored (want NSFW? name one). Case-insensitive regex matched against the checkpoint's base filename. Curate freely — the mechanism is the point, the list is tunable.",
+  "patterns": [
+    "nsfw",
+    "porn",
+    "hentai",
+    "lewd",
+    "erotic",
+    "\\bxxx\\b",
+    "rule34",
+    "\\br34\\b",
+    "uncensored",
+    "pony",
+    "urpm",
+    "autismmix",
+    "wai[-_]?nsfw",
+    "hassaku",
+    "cyberrealistic[-_ ]?pony",
+    "pornmaster",
+    "realistic[-_ ]?porn",
+    "ntrmix",
+    "babes"
+  ]
+}
