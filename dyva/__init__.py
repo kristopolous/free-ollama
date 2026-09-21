@@ -181,11 +181,13 @@ TPS_CEILING = 5000
 # rates — whether the host buffered-then-bursted, reported a bogus eval_duration,
 # or is fake. Below this, we simply don't state a tps.
 MIN_TPS_WINDOW = 0.25
-# After the first token, a live stream keeps sending — so any gap longer than this
-# (seconds) is a stalled connection, not slow generation. A per-read watchdog, reset
-# each line, fires on that silence and we fail over. Deliberately AFTER first token
-# only: time-to-first-token (cold starts) stays bounded by the race/hedge, not this.
-STREAM_STALL = 60
+# After the first token, a live stream keeps sending — so a long enough gap with NO
+# data is a stalled connection, not slow generation, and we fail over. The period is
+# the operator's configurable system TIMEOUT setting (not a separate hardcoded value):
+# a legit slow stretch — notably while the model formulates a tool call — must get the
+# full timeout the operator chose, or a healthy tool-call generation gets killed early.
+# A per-read watchdog reset each line; deliberately AFTER first token only (cold-start
+# time-to-first-token stays bounded by the race/hedge, not this).
 # Hard cap on how many times one streaming answer may be continued across hosts
 # after a mid-stream truncation (a connection drop or a done_reason 'length'
 # window-cut). A generous ceiling that still guarantees the failover loop can't
@@ -4837,9 +4839,9 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
 
         while True:
             # WATCHDOG (after first token): reset every line; a silence longer than
-            # STREAM_STALL raises asyncio.TimeoutError into the handler below and is
+            # the TIMEOUT watchdog raises asyncio.TimeoutError into the handler below and is
             # treated as a mid-stream truncation -> fail over to another host.
-            line = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+            line = await asyncio.wait_for(resp.content.readline(), TIMEOUT)
             if not line:
                 break
             if line == b"\n":
@@ -5057,9 +5059,9 @@ async def _drain_stream(resp, first_line, upstream_openai, model):
             pass
     try:
         while True:
-            # WATCHDOG (after first token): a silence longer than STREAM_STALL means
+            # WATCHDOG (after first token): a silence longer than TIMEOUT means
             # the connection stalled — stop draining and return what we have.
-            raw = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+            raw = await asyncio.wait_for(resp.content.readline(), TIMEOUT)
             if not raw:
                 break
             if raw == b"\n":
@@ -5087,7 +5089,10 @@ async def _drain_stream(resp, first_line, upstream_openai, model):
     if tool_calls:
         msg["tool_calls"] = tool_calls
     data["message"] = msg
-    return data
+    # `complete` = the host actually signalled done. False means it went silent past
+    # TIMEOUT (or dropped) mid-generation — a stall the caller must fail over on,
+    # not a finished answer. (done_obj is only set by a real done chunk.)
+    return data, (done_obj is not None)
 
 
 def chat_fmt(data, model, openai_format):
@@ -5574,9 +5579,24 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     # window would collapse to ~0s and read as millions of tok/s.
                     mark_worker_found(job_wid, host, full)
                     try:
-                        data = await _drain_stream(resp, first_line, _oai, full)
+                        data, complete = await _drain_stream(resp, first_line, _oai, full)
                     finally:
                         await resp.release()
+                    if not complete:
+                        # Streamed some tokens then went silent past TIMEOUT (or
+                        # dropped) before the host signalled done — the same conclusion
+                        # the streaming paths reach: the host stalled. Ding it and fail
+                        # over to another server instead of returning a truncated answer.
+                        record_verdict(host, full, timed_out("stream stalled"))
+                        errors.append(f"{host}: stream stalled")
+                        await broadcast_activity(host, model, "failed",
+                            f"stream stalled: {host} for {model} — no tokens for {TIMEOUT}s",
+                            wid=job_wid)
+                        _servers = [s for s in _servers if s[1] != host]
+                        _set_worker_phase(job_wid, None)
+                        if _servers:
+                            continue                    # re-race the remaining pool
+                        # nothing left to try -> return the partial we have, not a hang
                     if _is_truncated(data, sent_ctx):
                         if _attempt < NUM_CTX_RETRIES and sent_ctx < NUM_CTX_MAX:
                             nctx_pin = min(sent_ctx * 2, NUM_CTX_MAX)
@@ -10197,12 +10217,12 @@ async def _run_chat_job(session, jid):
                         if not done:
                             while True:
                                 # WATCHDOG (after first token): a silence longer than
-                                # STREAM_STALL — or a mid-stream drop — is the host dying;
+                                # a silence past TIMEOUT — or a mid-stream drop — is the host dying;
                                 # flag it and fail over to the next server. Reading with a
                                 # timeout (rather than `async for`) also lets Stop/Skip
                                 # fire during a silent stall instead of blocking forever.
                                 try:
-                                    raw = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+                                    raw = await asyncio.wait_for(resp.content.readline(), TIMEOUT)
                                 except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
                                     ctl["stall"] = True
                                     raise asyncio.CancelledError()
@@ -10235,7 +10255,7 @@ async def _run_chat_job(session, jid):
                             # no em-dash) so last_fail_reason groups cleanly; the feed
                             # line below carries the readable text.
                             record_verdict(host, full, timed_out("stream stalled"))
-                            errors.append(f"{host}: stream stalled — no tokens for {STREAM_STALL}s")
+                            errors.append(f"{host}: stream stalled — no tokens for {TIMEOUT}s")
                             servers = [s for s in servers if s[1] != host]
                             if partial[0].strip():
                                 opayload["messages"] = list(opayload.get("messages") or []) + [
@@ -10308,6 +10328,27 @@ async def _run_chat_job(session, jid):
                             wid=job_wid)
                         _set_worker_phase(job_wid, None)
                         continue         # re-race (the host is fine) with the bigger window
+                    if done_obj[0] is None:
+                        # The stream ENDED with no `done` terminator (and it wasn't a
+                        # context-length truncation, handled above) — the host closed the
+                        # connection mid-generation. That's the INSTANTLY-detectable "it
+                        # was emitting tokens, then died" case: a healthy host always
+                        # sends done, so no timeout wait is needed to conclude it's dead.
+                        # Fail over like a stall — carry the partial, ding the host — so a
+                        # mid-generation block doesn't get returned as a truncated answer.
+                        record_verdict(host, full, timed_out("stream dropped"))
+                        errors.append(f"{host}: stream dropped mid-generation")
+                        await broadcast_activity(host, full, "failed",
+                            f"stream dropped: {host} for {full} — ended with no completion", wid=job_wid)
+                        servers = [s for s in servers if s[1] != host]
+                        if partial[0].strip():
+                            opayload["messages"] = list(opayload.get("messages") or []) + [
+                                {"role": "assistant", "content": partial[0]},
+                                {"role": "user", "content": "Continue your previous answer from "
+                                 "exactly where it was cut off. Do not repeat what you already wrote."},
+                            ]
+                        _set_worker_phase(job_wid, None)
+                        continue         # re-race the remaining hosts
                     status = "ok"
                     # Token accounting for the dashboard's own chat path (this job
                     # runner streams to a buffer, so it never hit the _forward_stream
@@ -13611,11 +13652,26 @@ def make_app():
         app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)
 
     async def on_shutdown(app):
+        # End the SSE activity streams.
         async with _activity_lock:
             for q in _activity_queues:
                 await q.put(None)
             _activity_queues.clear()
-        await app["session"].close()
+        # Fast, clean exit: cancel EVERY outstanding task — chat/video/music job
+        # runners, the test-all sweep, video polls, and any still-open request
+        # streams. Without this their in-flight upstream requests hold the shared
+        # session (and sockets) open, so session.close() and the graceful shutdown
+        # block — which is why quitting took several Ctrl+C. Bounded waits so a
+        # stuck task can't stall the exit either.
+        me = asyncio.current_task()
+        others = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+        for t in others:
+            t.cancel()
+        if others:
+            with contextlib.suppress(Exception):
+                await asyncio.wait(others, timeout=2)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(app["session"].close(), timeout=2)
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
@@ -13836,6 +13892,10 @@ def main():
             app,
             host=args.host or "0.0.0.0",
             port=PORT,
+            # Don't wait out aiohttp's default 60s for lingering connections on quit
+            # — on_shutdown already cancels the background tasks, so a couple seconds
+            # is plenty for a clean exit on the FIRST Ctrl+C.
+            shutdown_timeout=3,
             access_log_format='%t %a "%r" %s %b "%{Referer}i" "%{User-Agent}i"',
             access_log_class=QuietAccessLogger,
             print=lambda *a: None,

@@ -4907,6 +4907,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           if(d.message&&d.message.tool_calls){
             d.message.tool_calls.forEach(function(t){mergeToolCallFragment(toolCalls,t)});
             setStatus('tool: '+(((toolCalls[toolCalls.length-1]||{}).function||{}).name||'')+'\u2026');
+            if(live())_maybeLiveWriteFile(gen,toolCalls);   // stream a write_file into the doc panel as it's written
           }
           if(d.done){
             if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
@@ -4971,10 +4972,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
     }
   }
   finally{
-    if(gen.docIds&&gen.docIds.length){
+    if((gen.docIds&&gen.docIds.length)||gen.wfLiveId){
       var dctx=docCtx(chatId),stuck=false;
       if(dctx){
-        gen.docIds.forEach(function(id){var r=findDoc(dctx.docs,id);if(r&&r.streaming){r.streaming=false;stuck=true}});
+        (gen.docIds||[]).forEach(function(id){var r=findDoc(dctx.docs,id);if(r&&r.streaming){r.streaming=false;stuck=true}});
+        // a write_file preview left streaming (aborted/incomplete tool call) is settled here too
+        if(gen.wfLiveId){var wr=findDoc(dctx.docs,gen.wfLiveId);if(wr&&wr.streaming){wr.streaming=false;stuck=true}}
         if(stuck){dctx.commit();if(dctx.inView)refreshDocUI()}
       }
     }
@@ -5951,6 +5954,7 @@ function applyDocOp(chatId,name,args){
       doc.content=args.append?((doc.content?doc.content+'\n\n':'')+body):body;
       if(args.type)doc.type=(args.type==='code'?'code':'markdown');
       if(args.language)doc.language=String(args.language);
+      doc.streaming=false;   // finalize any live write_file preview of this doc
       doc.updated=Date.now();_docCommitVersion(doc);
       out={text:(args.append?'Appended to':'Overwrote')+' file "'+doc.title+'". It is now '
                 +_docLines(doc.content).length+' lines.',docId:doc.id,md:'Updated **'+doc.title+'**'};
@@ -6123,6 +6127,76 @@ function syncStreamDocs(gen,docs,final){
   if(document.getElementById('docPanel').style.display==='none')return;
   if(touched&&activeDocId!==touched.id){activeDocId=touched.id;renderDocPanel();return}
   renderDocPanel(!settled);
+}
+// ---- write_file LIVE preview -------------------------------------------------
+// A write_file tool call streams its arguments as a partial JSON string (the tool
+// is dispatched only once complete). To let the user SEE the file being written,
+// we pull the fields out of that partial JSON as it grows and render them into the
+// document panel live — the panel opens on the first write_file and fills in.
+// Extract one string field from a possibly-INCOMPLETE JSON object string. Returns
+// {value, closed} — value is JSON-unescaped up to where the stream currently ends
+// (closed=false means the closing quote hasn't arrived yet).
+function _extractJsonStringField(s,field){
+  var re=new RegExp('"'+field+'"\\s*:\\s*"'),m=re.exec(s);
+  if(!m)return null;
+  var i=m.index+m[0].length,out='',closed=false;
+  for(;i<s.length;i++){
+    var c=s[i];
+    if(c==='\\'){
+      var nx=s[i+1];
+      if(nx===undefined)break;                       // partial escape at the very end
+      if(nx==='n')out+='\n';else if(nx==='t')out+='\t';else if(nx==='r')out+='\r';
+      else if(nx==='b')out+='\b';else if(nx==='f')out+='\f';
+      else if(nx==='u'){var hex=s.substr(i+2,4);if(hex.length<4)break;out+=String.fromCharCode(parseInt(hex,16)||0);i+=4;}
+      else out+=nx;                                   // \" \\ \/ and anything else -> literal
+      i++;continue;
+    }
+    if(c==='"'){closed=true;break;}
+    out+=c;
+  }
+  return {value:out,closed:closed};
+}
+// Create/update the live doc for a streaming write_file. Keyed on gen.wfLiveId
+// (NOT gen.docIds, so it can't collide with inline-doc streaming). openDoc on first
+// sight so the panel pops open; applyDocOp finalizes the same doc (by name) later.
+function syncWriteFileLive(gen,spec){
+  if(!gen||!gen.chatId||!spec||!spec.name)return;
+  var ctx=docCtx(gen.chatId);if(!ctx)return;
+  var doc=gen.wfLiveId?findDoc(ctx.docs,gen.wfLiveId):null;
+  if(!doc)doc=findDoc(ctx.docs,spec.name);          // re-writing an existing file live
+  var fresh=false;
+  if(!doc){
+    doc={id:_docId(),title:String(spec.name).slice(0,120),
+         type:(spec.type==='code'?'code':'markdown'),language:spec.language||'',
+         content:spec.content||'',updated:Date.now(),versions:[],streaming:true};
+    ctx.docs.push(doc);fresh=true;
+  }else{
+    if(doc.content===spec.content&&doc.streaming)return;   // nothing new to paint
+    doc.content=spec.content||'';doc.streaming=true;doc.updated=Date.now();
+    if(spec.type)doc.type=(spec.type==='code'?'code':'markdown');
+    if(spec.language)doc.language=spec.language;
+  }
+  gen.wfLiveId=doc.id;
+  if(!ctx.inView)return;
+  var panelClosed=document.getElementById('docPanel').style.display==='none';
+  if(fresh||panelClosed||activeDocId!==doc.id){refreshDocUI();openDoc(doc.id);return;}
+  renderDocPanel(true);
+}
+// Called each streaming chunk: if a write_file tool call is mid-stream, live-render it.
+function _maybeLiveWriteFile(gen,toolCalls){
+  var tc=null;
+  for(var i=toolCalls.length-1;i>=0;i--){
+    if((((toolCalls[i]||{}).function)||{}).name==='write_file'){tc=toolCalls[i];break;}
+  }
+  if(!tc)return;
+  var args=(tc.function||{}).arguments;
+  if(typeof args!=='string')return;                 // already an object (one-shot) — completion path renders it
+  var nameF=_extractJsonStringField(args,'name')||_extractJsonStringField(args,'title');
+  if(!nameF||!nameF.value)return;                    // need a name before we can open the doc
+  var contentF=_extractJsonStringField(args,'content');
+  var typeF=_extractJsonStringField(args,'type'),langF=_extractJsonStringField(args,'language');
+  syncWriteFileLive(gen,{name:nameF.value,type:typeF&&typeF.value,
+                         language:langF&&langF.value,content:contentF?contentF.value:''});
 }
 function syncDocBtn(){
   var btn=document.getElementById('docToggle');
