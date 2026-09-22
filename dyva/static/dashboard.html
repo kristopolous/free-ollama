@@ -381,6 +381,9 @@ input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:var(--border-focus)}
 .filter-row{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3);flex-shrink:0}
 .filter-row #modelFilter{margin-bottom:0;flex:1 1 auto;min-width:0;width:auto}
+.filter-row .mf-wrap{position:relative;flex:1 1 auto;min-width:0}
+.filter-row .mf-wrap #modelFilter{flex:none;width:100%;padding-right:3.6em}
+.mf-installs{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--text-muted);opacity:.7;font-size:var(--fs-sm);font-variant-numeric:tabular-nums;pointer-events:none}
 .use-btn{flex-shrink:0;padding:var(--sp-2) 14px;font-size:var(--fs-sm);background:var(--surface-hover);color:var(--text-2);border:1px solid var(--border-strong)}
 .use-btn:hover{background:var(--accent-bg);color:var(--text)}
 .use-btn:disabled{opacity:.4;background:var(--surface-hover);color:var(--text-dim)}
@@ -966,7 +969,10 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
+<span class="mf-wrap">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, size &gt;10gb, or date &gt;2026-02" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?); a trailing $ anchors the end, so qwen3.8:27b$ excludes -abliterated / quant variants&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;• release date — an operator and YYYY-MM: &gt;2026-02, &lt;2025-01 (the major models; undated ones are hidden by a date filter)&#10;Combine any of them: 'qwen &gt;2026-02 &gt;5gb'. Half-typed size/date fragments are ignored until complete. A model whose size/date isn't known is hidden by that filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<span id="modelInstalls" class="mf-installs" aria-hidden="true"></span>
+</span>
 <button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
 </div>
 <div class="group-row" id="modelGroupCtl">
@@ -1701,19 +1707,31 @@ function fmtCount(n){var v=Number(n);return isFinite(v)?NUM_FMT.format(v):String
 // The tab labels are icons now, so the count carries the meaning: how many
 // models in that pane match the current filter. The words live in title=.
 function updateModelPaneCounts(q){
+  var installs={modelList:0,modelListImage:0};
   [['modelList','cnt-mtext','Text models'],
    ['modelListImage','cnt-mimage','Image models']].forEach(function(t){
     var list=document.getElementById(t[0]);
     if(!list)return;
-    var rows=list.querySelectorAll('.model-item'),hit=0;
+    var rows=list.querySelectorAll('.model-item'),hit=0,inst=0;
     for(var i=0;i<rows.length;i++){
-      if(matchModel(rows[i].getAttribute('data-name'),q||''))hit++;
+      var mid=rows[i].getAttribute('data-name');
+      if(matchModel(mid,q||'')){hit++;inst+=((modelAgg[mid]||{}).count||0);}
     }
+    installs[t[0]]=inst;
     var el=document.getElementById(t[1]);
     if(el)el.textContent=fmtCount(hit);
     var btn=el&&el.parentNode;
     if(btn)btn.title=fmtCount(hit)+' '+t[2].toLowerCase()+(q?' matching \u201c'+q+'\u201d':'');
   });
+  // Installations for the ACTIVE pane, shown grey/right INSIDE the filter input \u2014
+  // the tab count is unique model strings, this is how many host installs those
+  // cover. A host running several matched models is counted once per model, so it
+  // slightly overcounts; exactness (805 vs 809) doesn't matter, it's coverage.
+  var act=document.querySelector('[data-mpane].active');
+  var listId=(act&&act.getAttribute('data-mpane')==='image')?'modelListImage':'modelList';
+  var ov=document.getElementById('modelInstalls');
+  if(ov){var n=installs[listId]||0;ov.textContent=n?fmtCount(n):'';
+    ov.title=n?fmtCount(n)+' installations across the matched models':'';}
 }
 function filterModels(){
   var q=document.getElementById('modelFilter').value.trim();
@@ -1760,6 +1778,7 @@ document.querySelectorAll('[data-mpane]').forEach(function(t){
     var p=t.getAttribute('data-mpane');
     document.querySelectorAll('[data-mpane]').forEach(function(x){x.classList.toggle('active',x===t)});
     ['text','image'].forEach(function(k){document.getElementById('mpane-'+k).style.display=k===p?'':'none'});
+    updateModelPaneCounts(document.getElementById('modelFilter').value.trim());
     try{localStorage.setItem('dyva_modelpane',p)}catch(e){}
   })
 });
@@ -1789,10 +1808,15 @@ function makeModelBar(mid){
   bar.title=g+' working · '+b+' failing · '+u+' untested';
   if(W<=0||total<=0)return bar;
   var segs=[['mb-g',g],['mb-r',b],['mb-u',u]];
-  // proportional widths, min 2px for any nonzero part so a lone failing host is
-  // still a visible sliver; drift from rounding is absorbed by the widest segment
-  // so the parts sum to exactly W.
-  var w=segs.map(function(s){return s[1]>0?Math.max(2,Math.round(s[1]/total*W)):0;});
+  // Split the bar by the sum of the parts ACTUALLY drawn (good+bad+unknown), NOT
+  // by `total`/count. Reputation counts can exceed the live host count (a model
+  // whose current count is 1 may carry 39 good + 24 bad historical (host,model)
+  // rows), and dividing a large part by a near-zero count made a single segment
+  // hundreds of px wide — overflowing the container, since the rounding-drift fix
+  // below only rescues the ONE widest segment. denom = max(total, g+b), so every
+  // share is <=1 and the segments sum to W. min 2px keeps a lone host a sliver.
+  var denom=g+b+u||1;
+  var w=segs.map(function(s){return s[1]>0?Math.max(2,Math.round(s[1]/denom*W)):0;});
   var sum=w[0]+w[1]+w[2],mi=w.indexOf(Math.max(w[0],w[1],w[2]));
   w[mi]+=W-sum;if(w[mi]<0)w[mi]=0;
   segs.forEach(function(s,i){if(w[i]>0){var el=document.createElement('i');el.className=s[0];el.style.width=w[i]+'px';bar.appendChild(el);}});

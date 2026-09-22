@@ -383,17 +383,19 @@
       ],
       "model": "(?i)z[-_. ]?image",
       "clip": [
-        "(?i)qwen[-_. ]?2[-_. ]?5[-_. ]?vl",
+        "(?i)qwen[-_. ]?3[-_. ]?4b",
+        "(?i)qwen[-_. ]?3(?![0-9])",
         "(?i)qwen.*vl"
       ],
       "clip_type": "qwen_image",
       "vae": [
-        "(?i)qwen[-_. ]?image[-_. ]?vae",
+        "(?i)(^|/)ae\\.(safetensors|sft)$",
+        "(?i)z[-_. ]?image.*vae",
         "(?i)qwen.*vae"
       ],
       "cfg": 1.0,
       "steps": 8,
-      "note": "Z-Image (Tongyi). Encode-style via TextEncodeZImageOmni; the image slots are optional, so with zero references it is text-to-image. Clip is Qwen2.5-VL loaded as type 'qwen_image' (inferred — the enum has no z-image type; same encoder backbone as Qwen-Image); VAE is Qwen-Image's. Verified feasible against a real z-image host's /object_info."
+      "note": "Z-Image (Tongyi). Encode-style via TextEncodeZImageOmni; the image slots are optional, so with zero references it is text-to-image. Per the official Comfy-Org template (image_z_image_turbo.json) the three files are diffusion_models/z_image_turbo_bf16.safetensors, text_encoders/qwen_3_4b.safetensors, and vae/ae.safetensors — so clip is qwen_3_4b (NOT Qwen2.5-VL, which was an earlier wrong inference) loaded as type 'qwen_image', and the VAE is the plain ae.safetensors autoencoder (NOT Qwen-Image's). clip/vae fallbacks are kept for hosts that name the files differently."
     },
     {
       "name": "Flux2Klein",

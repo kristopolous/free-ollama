@@ -8984,36 +8984,54 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
 
 
 async def _txt2img_comfyui(session, host, body, model_filter=None):
+    # Report the REAL reason for a failure instead of a bare None — the caller
+    # otherwise flattens every None into a meaningless "no response", hiding
+    # unreachable vs no-HTTP vs a live host that's simply missing a model piece.
     try:
         checkpoints_resp = await session.get(
             _host_url(host, "/models/checkpoints"),
             timeout=aiohttp.ClientTimeout(total=30),
         )
-        if checkpoints_resp.status != 200:
-            await checkpoints_resp.release()
-            return None
-        checkpoints = await checkpoints_resp.json()
+    except asyncio.TimeoutError:
+        raise ComfyUnreachable("unreachable (connect/read timed out)")
+    except Exception as e:
+        raise ComfyUnreachable(
+            "no HTTP response (" + (" ".join(str(e).split())[:80] or type(e).__name__) + ")")
+    if checkpoints_resp.status != 200:
+        st = checkpoints_resp.status
         await checkpoints_resp.release()
-        if not isinstance(checkpoints, list):
-            checkpoints = []
-        # No checkpoints and no model asked for: nothing to guess at. But if a
-        # model *was* named it may be a UNET/encode model (z-image, Flux.2) that
-        # this host has no checkpoint for — fall through to the edit-graph path.
-        if not checkpoints and not model_filter:
-            return None
-        ckpt = None
-        if model_filter:
-            ckpt = next(
-                (c for c in checkpoints if model_query_match(c, model_filter)), None)
-        elif checkpoints:
-            # Auto-pick (no model named): prefer a non-NSFW checkpoint so a plain
-            # request ("a cute puppy") doesn't land on an NSFW-tuned model that emits
-            # a nude regardless of the prompt. Fall back to whatever the host has if
-            # every option is NSFW. (An explicitly-named model takes the branch above
-            # and is always honored.)
-            ckpt = next((c for c in checkpoints if not is_nsfw_model(c)), checkpoints[0])
+        raise ComfyError(f"/models/checkpoints HTTP {st}")
+    try:
+        checkpoints = await checkpoints_resp.json()
     except Exception:
-        return None
+        checkpoints = []
+    finally:
+        with contextlib.suppress(Exception):
+            await checkpoints_resp.release()
+    if not isinstance(checkpoints, list):
+        checkpoints = []
+    # No checkpoints and no model asked for: nothing to guess at. But if a model
+    # *was* named it may be a UNET/encode model (z-image, Flux.2) with no checkpoint
+    # here — fall through to the edit-graph path.
+    if not checkpoints and not model_filter:
+        raise ComfyUnsuitable("no checkpoints and no model specified")
+    ckpt = None
+    if model_filter:
+        ckpt = next(
+            (c for c in checkpoints if model_query_match(c, model_filter)), None)
+    elif checkpoints:
+        # Auto-pick (no model named): prefer a non-NSFW checkpoint so a plain
+        # request ("a cute puppy") doesn't land on an NSFW-tuned model that emits
+        # a nude regardless of the prompt. Fall back to whatever the host has if
+        # every option is NSFW. (An explicitly-named model takes the branch above
+        # and is always honored.)
+        ckpt = next((c for c in checkpoints if not is_nsfw_model(c)), checkpoints[0])
+    # A named DiT/encode family (z-image, Flux.2, Qwen-Image …) can sit in the
+    # host's checkpoints/ folder, but it is NOT an all-in-one checkpoint — driving
+    # it through the plain CheckpointLoaderSimple graph feeds CLIPTextEncode a null
+    # clip. Divert it to the recipe path (separate text encoder + VAE).
+    if ckpt is not None and _is_encode_family_model(ckpt):
+        ckpt = None
 
     prompt_text = body.get("prompt", "")
     negative_prompt = body.get("negative_prompt", "")
@@ -9045,9 +9063,16 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
             info = await comfy_object_info(session, host)
         except Exception:
             info = None
-        plan = _edit_plan(info, model_filter, n_images=0) if info else None
+        reasons = []
+        plan = _edit_plan(info, model_filter, n_images=0, reasons=reasons) if info else None
         if not (plan and model_query_match(plan["model"], model_filter)):
-            return None
+            # Surface WHY: a family whose node is present but is missing an encoder
+            # or VAE recorded a specific reason; otherwise nothing here can render it.
+            if reasons:
+                raise ComfyUnsuitable("; ".join(dict.fromkeys(reasons)))
+            raise ComfyUnsuitable(
+                f"no runnable graph for '{model_filter}'" if model_filter
+                else "nothing renderable on this host")
         eparams = {"width": width, "height": height, "steps": steps,
                    "cfg_scale": cfg, "seed": seed, "sampler_name": sampler,
                    "match_source": False}
@@ -12451,6 +12476,20 @@ def load_edit_families():
     return out
 
 
+def _is_encode_family_model(name):
+    """True if `name` is a known DiT/encode-family model (z-image, Flux.2,
+    Qwen-Image …) per the edit-family model patterns. Such a model needs the
+    recipe graph (a separate text encoder + VAE), NEVER the plain
+    CheckpointLoaderSimple path — even when it is filed under a host's
+    checkpoints/ folder, where its CLIP/VAE are not bundled and the plain graph
+    would feed CLIPTextEncode a null clip."""
+    for fam in load_edit_families():
+        pat = fam.get("model")
+        if pat and re.search(pat, name):
+            return True
+    return False
+
+
 def image_magic(data):
     """The image type from the leading bytes, or None if it isn't an image.
     LoadImage opens the file with PIL, so bytes that aren't a real image come
@@ -12601,7 +12640,7 @@ def _pick(options, *patterns):
     return None
 
 
-def _edit_plan(info, model_filter=None, exclude=(), n_images=0):
+def _edit_plan(info, model_filter=None, exclude=(), n_images=0, reasons=None):
     """Decide how to drive an edit on this host, or None if it can't.
 
     Everything is resolved against the host's live loader enums — those are the
@@ -12668,14 +12707,22 @@ def _edit_plan(info, model_filter=None, exclude=(), n_images=0):
             clip2 = _pick(clips, *_hints(fam.get("clip2"))) if fam.get("clip2") else None
             vae = _pick(vaes, *_hints(fam.get("vae"))) if fam.get("vae") else None
             if fam.get("clip") and not clip1:
+                if reasons is not None:
+                    reasons.append(f"{fam['name']}: has the model but no matching text encoder")
                 continue
             if fam.get("clip2") and not clip2:
+                if reasons is not None:
+                    reasons.append(f"{fam['name']}: has the model but no matching 2nd text encoder")
                 continue
             if fam.get("vae") and not vae:
+                if reasons is not None:
+                    reasons.append(f"{fam['name']}: has the model but no matching VAE")
                 continue
             if fam.get("clip_type"):
                 needed = dual_types if fam.get("clip2") else clip_types
                 if fam["clip_type"] not in needed:
+                    if reasons is not None:
+                        reasons.append(f"{fam['name']}: host CLIPLoader lacks type '{fam['clip_type']}'")
                     continue
 
             loader = {"clip": clip1, "clip2": clip2, "vae": vae,
