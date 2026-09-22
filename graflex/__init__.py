@@ -2551,6 +2551,103 @@ def _consolidate_image_edit(classified):
             classified["edit"].append(m)
 
 
+# The publishable "sample platter": a small stratified draw from THIS box's
+# reachability survey (the per-service working files) so a demo user can point
+# dyva at one file and get media/text generation working without shipping the
+# whole survey. Deliberately the "shitty version": graflex (the probe, in NJ) is
+# isolated from dyva (the router, in LA), so there is NO runtime-reputation cross
+# check — capability comes from the hand-curated classifier, reachability from
+# graflex's own working files. When gossiper bridges the two boxes this can be
+# reputation-informed. Counts are per-bucket (not a flat %), so no capability
+# comes up empty. All tunable.
+SAMPLE_OUT = os.path.join(CACHE_DIR, "graflex-mini.json")
+# bucket -> (services to draw from, how many, the classifier kind for comfyui
+# media buckets — None means "no per-model kind gate for this bucket").
+SAMPLE_BUCKETS = {
+    "text":   (["ollama", "llama.cpp", "vllm", "lmstudio"], 30, None),
+    "image":  (["a1111", "comfyui"], 8, "image"),
+    "edit":   (["comfyui"], 4, "edit"),
+    "video":  (["comfyui"], 8, "video"),
+    "music":  (["comfyui"], 4, "music"),
+    "speech": (["comfyui"], 3, "audio"),
+}
+
+
+def _load_working(svc):
+    """The <svc>-working.json records, or [] if the file is absent/unreadable.
+    READ-ONLY — sample never writes back to a working file."""
+    p = _cache_file(svc, "working")
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        log.warning(f"sample: could not read {p}: {e}")
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _host_media_kinds(rec, compiled):
+    """The set of media CAPABILITY kinds a comfyui host offers, per the
+    hand-curated classifier. Parts (lora / vision-encoder / other / unmatched)
+    are NOT capabilities, so they don't count; image_edit folds into both."""
+    kinds = set()
+    for m in rec.get("models") or []:
+        cat, _ = _classify_model(str(m), compiled)
+        if cat == "image_edit":
+            kinds.update(("image", "edit"))
+        elif cat in ("image", "edit", "video", "music", "audio"):
+            kinds.add(cat)
+    return kinds
+
+
+def _host_can_chat(rec):
+    """True if a text-service host lists at least one non-embedding model — a
+    cheap name-only filter (no cross-check) so a pure-embedding host doesn't get
+    sampled into the text demo where it can't chat."""
+    return any("embed" not in str(m).lower() for m in (rec.get("models") or []))
+
+
+def sample():
+    """Draw the stratified sample platter and write graflex-mini.json, then exit.
+    Read-only over every survey file; the only write is the new output."""
+    import random
+    from datetime import datetime, timezone
+    compiled = _load_classifier()
+    working = {}   # svc -> records, loaded once
+    picked = {}    # host -> record (deduped across buckets)
+    counts = {}
+    for bucket, (services, n, kind) in SAMPLE_BUCKETS.items():
+        pool = {}   # host -> record, unique within this bucket
+        for svc in services:
+            if svc not in working:
+                working[svc] = _load_working(svc)
+            for rec in working[svc]:
+                if bucket == "text":
+                    if not _host_can_chat(rec):
+                        continue
+                elif svc == "comfyui":
+                    if kind not in _host_media_kinds(rec, compiled):
+                        continue
+                # a1111 hosts are all image-gen -> no per-model gate
+                h = rec.get("host") or rec.get("url")
+                if h:
+                    pool.setdefault(h, rec)
+        chosen = random.sample(list(pool.values()), min(n, len(pool)))
+        counts[bucket] = (len(chosen), len(pool))
+        for rec in chosen:
+            h = rec.get("host") or rec.get("url")
+            slot = picked.setdefault(h, dict(rec, buckets=[]))
+            if bucket not in slot["buckets"]:
+                slot["buckets"].append(bucket)
+    out = list(picked.values())
+    _save_json(SAMPLE_OUT, out)
+    summary = ", ".join(f"{b}: {got}/{avail}" for b, (got, avail) in counts.items())
+    log.info(f"sample: {len(out)} unique hosts -> {SAMPLE_OUT} ({summary}) "
+             f"[{datetime.now(timezone.utc).isoformat()}]")
+
+
 def classify(name=None):
     from datetime import datetime, timezone
 
@@ -2843,7 +2940,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "reconstruct", "score-bogus"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "reconstruct", "score-bogus", "sample"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -2878,6 +2975,12 @@ def main():
     if args.action == "score-bogus":
         _all = args.service == "all" or (args.name or "").strip().lower() == "all"
         score_bogus(session=args.session, name=(None if _all else (args.name or args.service)))
+        return
+
+    # sample mines the per-service working files into one small graflex-mini.json
+    # sample platter — no service/name needed, reads across every bucket's services.
+    if args.action == "sample":
+        sample()
         return
 
     if args.query and not args.name:
