@@ -4050,6 +4050,15 @@ def openai_payload(p):
             out[dst] = opts[src]
     if isinstance(out.get("messages"), list):
         out["messages"] = _messages_openai(out["messages"])
+    # OpenAI-compatible hosts OMIT the `usage` block from a STREAMING response unless
+    # the request explicitly asks for it — without this, dyva got no token counts back
+    # from vLLM/LM-Studio/SGLang/llama.cpp streams, so account_tokens recorded ttft but
+    # never tps (only native Ollama hosts, which always report eval_count, got a rate).
+    # Requesting it makes the host emit a final usage chunk we already know how to read.
+    if out.get("stream"):
+        so = dict(out.get("stream_options") or {})
+        so.setdefault("include_usage", True)
+        out["stream_options"] = so
     return out
 
 
@@ -4866,6 +4875,30 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
             except Exception:
                 obj = None
             if obj and obj.get("done"):
+                # OpenAI with stream_options.include_usage streams `usage` in a SEPARATE
+                # chunk AFTER this finish chunk. If the done chunk carried no token counts,
+                # briefly drain the trailing line(s) and merge the usage so account_tokens
+                # can record tps — otherwise OpenAI-dialect hosts log ttft but never a
+                # rate. Accounting-only (not forwarded); bounded/short so a host that
+                # sends nothing more can't stall the client's done.
+                if upstream_openai and obj.get("eval_count") is None:
+                    for _ in range(3):
+                        try:
+                            extra = await asyncio.wait_for(resp.content.readline(), 5)
+                        except Exception:
+                            break
+                        if not extra:
+                            break
+                        extra = extra.rstrip(b"\n\r")
+                        if not extra:
+                            continue
+                        uconv = openai_stream_to_ollama(extra, full)
+                        if uconv and uconv.get("eval_count") is not None:
+                            for _k in ("eval_count", "eval_duration",
+                                       "prompt_eval_count", "prompt_eval_duration"):
+                                if uconv.get(_k) is not None:
+                                    obj[_k] = uconv[_k]
+                            break
                 # account tokens either way — the usage on the done chunk is real
                 await account_tokens(wid, host, full, obj, num_ctx)
                 # done_reason 'length' = the window cut the generation short. It's a
@@ -7078,6 +7111,9 @@ async def handle_api_show(request):
             schema:
               type: object
     """
+    resp = await _check_local(request)
+    if resp:
+        return resp
     model = ""
     ct = request.content_type or ""
     if ct == "application/json" or ct == "application/x-ndjson":
@@ -7112,6 +7148,110 @@ async def handle_api_show(request):
         "capabilities": ["completion", "vision", "audio", "tools", "thinking"],
         "license": license_val,
     })
+
+
+async def _embed_one(session, host, full, text):
+    """Fetch one embedding vector from a single host IN ITS OWN DIALECT. Returns
+    the float list, or None if the host answered but carried no embedding (so the
+    caller fails over to the next host); connection/timeout errors propagate so
+    the caller can fail over on those too."""
+    _to = aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT)
+    if speaks_openai(host):
+        async with session.post(f"{host}/v1/embeddings",
+                                json={"model": full, "input": text}, timeout=_to) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+        arr = data.get("data") or []
+        return arr[0].get("embedding") if arr else None
+    # Ollama: legacy /api/embeddings ({prompt} -> {embedding}) first; a build that
+    # only speaks the newer /api/embed ({input} -> {embeddings:[[...]]}) 404/405s
+    # the legacy path, so fall through to it.
+    async with session.post(f"{host}/api/embeddings",
+                            json={"model": full, "prompt": text}, timeout=_to) as r:
+        if r.status == 200:
+            emb = (await r.json()).get("embedding")
+            if emb:
+                return emb
+        elif r.status not in (404, 405, 501):
+            return None
+    async with session.post(f"{host}/api/embed",
+                            json={"model": full, "input": text}, timeout=_to) as r:
+        if r.status != 200:
+            return None
+        embs = (await r.json()).get("embeddings") or []
+    return embs[0] if embs else None
+
+
+async def handle_api_embeddings(request):
+    """
+    Text embeddings (Ollama /api/embeddings format)
+    ---
+    tags: [Generation]
+    summary: Embed text via a discovered embedding host. Proxies to upstream Ollama/OpenAI servers, failing over across hosts.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              model:
+                type: string
+              prompt:
+                type: string
+    responses:
+      '200':
+        description: Embedding vector as an embedding array
+      '400':
+        description: Invalid request
+      '404':
+        description: No embedding host for this model
+      '502':
+        description: All embedding hosts failed
+    """
+    resp = await _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        return web.json_response(err_obj("invalid JSON"), status=400)
+    model = body.get("model", "")
+    if not model:
+        return web.json_response(err_obj("model is required", "missing_model"), status=400)
+    # Ollama's legacy /api/embeddings takes a single `prompt`; accept `input` (the
+    # /api/embed and OpenAI spelling, list or string) too, first element if a list.
+    text = body.get("prompt")
+    if text is None:
+        text = body.get("input")
+    if isinstance(text, list):
+        text = text[0] if text else ""
+    if not isinstance(text, str) or not text:
+        return web.json_response(err_obj("prompt is required", "missing_prompt"), status=400)
+
+    servers = find_servers(model)
+    if not servers:
+        return web.json_response(
+            err_obj(f"no embedding servers for '{model}'", "model_not_found"), status=404)
+
+    session = request.app["session"]
+    errors = []
+    async with request.app["semaphore"]:
+        for _prio, host, ms in servers[:6]:
+            full = ms[0]
+            try:
+                vec = await _embed_one(session, host, full, text)
+            except Exception as e:
+                errors.append(f"{host}: {' '.join(str(e).split())[:120] or type(e).__name__}")
+                continue
+            if vec:
+                return web.json_response({"embedding": vec})
+            errors.append(f"{host}: no embedding")
+    msg = "all embedding servers failed"
+    if errors:
+        msg += ": " + "; ".join(dict.fromkeys(errors))
+    return web.json_response(err_obj(msg), status=502)
 
 
 async def handle_ollama_stop(request):
@@ -7179,6 +7319,10 @@ async def _check_local(request):
         body = await request.read()
     except Exception:
         body = b""
+    # Log only the HEAD of the probe body. A scanner spraying multi-MB junk (the
+    # OllamaScannerZcode probes hit ~3 MB each) would otherwise balloon this file
+    # without bound — it reached ~15 GB once. Record the TRUE size, write a peek.
+    PEEK = 2048
     try:
         os.makedirs(os.path.dirname(FAILED_PAYLOAD_LOG), exist_ok=True)
         ts = datetime.datetime.now().isoformat(timespec="seconds")
@@ -7187,7 +7331,8 @@ async def _check_local(request):
             f.write("[%s] %s %s %s UA=%r %db\n" %
                     (ts, remote, request.method, request.path_qs, ua, len(body)))
             if body:
-                f.write(body.decode("utf-8", "replace").rstrip() + "\n")
+                head = body[:PEEK].decode("utf-8", "replace").rstrip()
+                f.write(head + (" …[+%db truncated]" % (len(body) - PEEK) if len(body) > PEEK else "") + "\n")
             f.write("\n")
     except Exception:
         pass
@@ -10218,13 +10363,15 @@ async def _run_chat_job(session, jid):
                             round_tcs.extend(tcs)
                         if _m.get("content"):
                             partial[0] += _m["content"]   # for skip-continuation
-                        if obj.get("done"):
-                            # Don't let a bare terminator (OpenAI's `data: [DONE]`, which
-                            # carries no token stats) CLOBBER a real done object that already
-                            # carried eval_count/eval_duration (e.g. llama.cpp's `timings`
-                            # chunk arrives just before [DONE]). Otherwise account_tokens
-                            # gets an empty object and no tps is recorded, even though the
-                            # dashboard already showed it from the earlier chunk.
+                        if obj.get("done") or obj.get("eval_count") is not None:
+                            # Capture the chunk that carries token stats for accounting.
+                            # Two wrinkles this must survive:
+                            #  - a bare terminator (OpenAI's `data: [DONE]`) carries no
+                            #    stats and must NOT clobber a stats-bearing done chunk;
+                            #  - OpenAI with stream_options.include_usage streams `usage`
+                            #    in a SEPARATE chunk AFTER the finish_reason chunk — that
+                            #    chunk isn't `done` but IS where the counts live, so it
+                            #    must be captured too (hence the eval_count condition).
                             prev = done_obj[0]
                             if prev is None or obj.get("eval_count") is not None or prev.get("eval_count") is None:
                                 done_obj[0] = obj
@@ -10260,6 +10407,28 @@ async def _run_chat_job(session, jid):
                                     pending.append(jl + "\n")
                                     await _flush()
                                 if done:
+                                    # OpenAI with include_usage streams `usage` in a
+                                    # SEPARATE chunk AFTER this finish chunk. If the done
+                                    # chunk itself carried no token counts, briefly drain
+                                    # the trailing line(s) so _line_from captures the usage
+                                    # for tps — otherwise OpenAI-dialect hosts record ttft
+                                    # but never a rate. Accounting-only: not appended to
+                                    # the client buffer. Bounded and short so a host that
+                                    # sends nothing more can't stall the finish.
+                                    if oai and (done_obj[0] or {}).get("eval_count") is None:
+                                        for _ in range(3):
+                                            try:
+                                                extra = await asyncio.wait_for(resp.content.readline(), 5)
+                                            except Exception:
+                                                break
+                                            if not extra:
+                                                break
+                                            extra = extra.rstrip(b"\n\r")
+                                            if not extra:
+                                                continue
+                                            _line_from(extra)
+                                            if (done_obj[0] or {}).get("eval_count") is not None:
+                                                break
                                     break
                         await _flush(force=True)
 
@@ -13754,6 +13923,7 @@ def make_app():
     swagger.add_get("/refresh", handle_refresh)
 
     swagger.add_post("/api/show", handle_api_show)
+    swagger.add_post("/api/embeddings", handle_api_embeddings)
     swagger.add_post("/api/stop", handle_ollama_stop)
     swagger.add_post("/api/pull", handle_api_pull)
     swagger.add_post("/api/chat", handle_ollama_chat)
