@@ -7274,18 +7274,23 @@ async function generateMusic(){
   var seed=parseInt(document.getElementById('musSeed').value,10);if(!isNaN(seed)&&seed>=0)body.seed=seed;
   if(_musPoll){clearTimeout(_musPoll);_musPoll=null}
   btn.disabled=true;
-  var st=_mediaStatus(out,'submitting…');
+  out.innerHTML='';
+  // Same snackbar flow as video: progress rides the bottom-center snackbar (a long
+  // render otherwise looks like a hang), results/errors land in the result box.
+  showSnack('submitting…');
+  var st=snackStatus;
+  function musDone(){hideSnack()}
   try{
     var r=await fetch('v1/music',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!r.ok){_mediaError(out,await _errText(r));btn.disabled=false;return}
+    if(!r.ok){_mediaError(out,await _errText(r));musDone();btn.disabled=false;return}
     var job=await r.json();
-    if(!job||!job.id){_mediaError(out,'no job id came back');btn.disabled=false;return}
+    if(!job||!job.id){_mediaError(out,'no job id came back');musDone();btn.disabled=false;return}
     var t0=Date.now();
     (function poll(){
       _musPoll=setTimeout(async function(){
         try{
           var pr=await fetch('v1/music/'+encodeURIComponent(job.id),{cache:'no-store'});
-          if(!pr.ok){_mediaError(out,await _errText(pr));btn.disabled=false;return}
+          if(!pr.ok){_mediaError(out,await _errText(pr));musDone();btn.disabled=false;return}
           var j=await pr.json();
           if(j.status==='completed'){
             out.innerHTML='';
@@ -7296,16 +7301,21 @@ async function generateMusic(){
             out.appendChild(cap);
             var a=document.createElement('a');a.className='dl';a.href=src;a.download='dyva-music.flac';
             a.textContent='download';out.appendChild(a);
-            btn.disabled=false;return;
+            musDone();btn.disabled=false;return;
           }
-          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');btn.disabled=false;return}
-          if(st&&st.parentNode)st.textContent=(j.status||'working')+'… '+Math.round((Date.now()-t0)/1000)+'s'
-            +(j.family?' · '+j.family:'')+(j.host?' on '+j.host:'');
+          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');musDone();btn.disabled=false;return}
+          // `phase` is what the host says ("queued #3" then "running"); a long
+          // render looks like a hang without it — same line the video panel shows.
+          var where=j.phase||j.status||'working';
+          var host=(j.host||'').replace(/^https?:\/\//,'');
+          var mo=(j.model||'').replace(/\\/g,'/').split('/').pop();
+          st.textContent=where+'… '+Math.round((Date.now()-t0)/1000)+'s'
+            +(host?' on '+host:'')+(j.family?' ('+j.family+')':(mo?' ('+mo+')':''));
           poll();
-        }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+        }catch(ex){_mediaError(out,ex.message);musDone();btn.disabled=false}
       },3000);
     })();
-  }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+  }catch(ex){_mediaError(out,ex.message);musDone();btn.disabled=false}
 }
 document.getElementById('musGenerate').addEventListener('click',generateMusic);
 

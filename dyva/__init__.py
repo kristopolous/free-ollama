@@ -3453,7 +3453,15 @@ def _fmt_tool_calls(tcs):
         if isinstance(args, dict):
             args = json.dumps(args)
         out.append({
-            "id": f"call_{int(time.time())}_{i}",
+            # OpenAI's STREAMING format requires an `index` on every tool-call delta:
+            # a single tool call arrives across several SSE chunks (name+id first, then
+            # argument fragments), and the client merges them by this index. Omitting
+            # it left a spec-compliant client unable to reassemble multi-chunk
+            # arguments. Preserve the upstream's index when it carried one.
+            "index": tc.get("index", i),
+            # A stable id likewise lets the client tie the fragments together; keep the
+            # upstream's when present instead of minting a fresh one on every chunk.
+            "id": tc.get("id") or f"call_{int(time.time())}_{i}",
             "type": "function",
             "function": {"name": fn.get("name", ""), "arguments": args},
         })
