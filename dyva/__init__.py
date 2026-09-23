@@ -5815,6 +5815,10 @@ async def handle_dashboard(request):
     html = html.replace("__SERVER_COUNT__", f"{len(servers):,}")
     html = html.replace("__DYVA_VERSION__", VERSION)
     html = html.replace("__HOSTS_LOADED__", _hosts_loaded_str())
+    # Bake the (non-secret) explore-mode flag into the page so the logo reflects it
+    # on load WITHOUT fetching /settings — that endpoint carries secrets and isn't
+    # for every viewer, but explore state isn't sensitive.
+    html = html.replace("__EXPLORE__", "true" if EXPLORE_MODE else "false")
     return web.Response(text=html, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-cache"})
 

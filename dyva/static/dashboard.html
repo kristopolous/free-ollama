@@ -932,7 +932,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <body>
 <div id="snackbar" class="show"><span class="snack-spin"></span><span class="snack-msg">Loading…</span></div>
 <div class="header">
-<img id="logoImg" src="dyva.avif" alt="" width="56" height="56">
+<img id="logoImg" src="dyva.avif" alt="" width="56" height="56" data-explore="__EXPLORE__">
 <div class="header-text">
 <h1>Dumpster Dyva</h1>
 <p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span id="hostsPill" title="servers - loaded at __HOSTS_LOADED__" style="cursor:pointer"> <span id="hostsIcon">💻</span> <span id="serverCount">__SERVER_COUNT__</span> </span>&middot;<span title="version"><a title="guide" href="guide" target="_blank" style="font-weight:normal;cursor:pointer;text-decoration:none"> 📚 </a><a href="https://github.com/kristopolous/free-ollama/tree/main/dyva" title="source code" target="_blank" style="cursor:pointer;text-decoration:none">v__DYVA_VERSION__</a> 
@@ -7938,6 +7938,17 @@ function updateExploreLogo(){
   img.src=on?'explore.avif':'dyva.avif';
   img.title=on?'explore mode':'';
 }
+// On a fresh load the settings JSON (which carries secrets) isn't fetched for
+// every viewer, so seed explore state from the flag baked into the page at serve
+// time — the logo reflects explore mode immediately, before/without opening
+// /settings. A later settings load (admin) re-sets it from the authoritative value.
+(function(){
+  var img=document.getElementById('logoImg'),chk=document.getElementById('setExplore');
+  if(!img||!chk)return;
+  var v=img.dataset.explore;
+  if(v==='true'||v==='false')chk.checked=(v==='true');
+  updateExploreLogo();
+})();
 // Cloudskipper: render a checkbox per cloud, driven by the live survey so the
 // list tracks what's actually out there. Top ~8 providers by host count from
 // /geo-summary, plus any already-selected cloud that has dropped out of the top
