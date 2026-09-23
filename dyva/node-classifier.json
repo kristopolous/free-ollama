@@ -298,6 +298,27 @@
       "ckpt": "(?i)music|song"
     }
   ],
+  "t2i": [
+    {
+      "name": "QwenImage",
+      "model": "(?i)qwen[-_. ]?image(?![-_. ]?edit)(?![-_. ]?2[._-]?1)",
+      "clip": [
+        "(?i)qwen[-_. ]?2[-_. ]?5[-_. ]?vl",
+        "(?i)qwen.*vl"
+      ],
+      "clip_type": "qwen_image",
+      "vae": [
+        "(?i)qwen[-_. ]?image[-_. ]?vae",
+        "(?i)qwen.*image.*vae"
+      ],
+      "loader": "UNETLoader",
+      "latent": "EmptySD3LatentImage",
+      "res": 1024,
+      "cfg": 2.5,
+      "steps": 20,
+      "note": "Base Qwen-Image text-to-image, per the official Comfy-Org template (image_qwen_image_*.json): diffusion_models/qwen_image_fp8_e4m3fn + text_encoders/qwen_2.5_vl_7b_fp8_scaled (CLIPLoader type qwen_image) + vae/qwen_image_vae. It uses the GENERIC CLIPTextEncode node (no distinctive encode node) and a 16-channel EmptySD3LatentImage — so it fits neither the plain-checkpoint path nor _edit_plan, only the t2i-UNET builder. The model regex excludes -edit and -2.1 (those have their own edit families)."
+    }
+  ],
   "edit": [
     {
       "name": "QwenImage21",

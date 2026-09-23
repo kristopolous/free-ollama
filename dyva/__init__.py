@@ -9065,23 +9065,38 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
             info = None
         reasons = []
         plan = _edit_plan(info, model_filter, n_images=0, reasons=reasons) if info else None
-        if not (plan and model_query_match(plan["model"], model_filter)):
-            # Surface WHY: a family whose node is present but is missing an encoder
-            # or VAE recorded a specific reason; otherwise nothing here can render it.
-            if reasons:
-                raise ComfyUnsuitable("; ".join(dict.fromkeys(reasons)))
-            raise ComfyUnsuitable(
-                f"no runnable graph for '{model_filter}'" if model_filter
-                else "nothing renderable on this host")
-        eparams = {"width": width, "height": height, "steps": steps,
-                   "cfg_scale": cfg, "seed": seed, "sampler_name": sampler,
-                   "match_source": False}
-        workflow = _edit_workflow(plan, prompt_text, [], eparams)
+        if plan and model_query_match(plan["model"], model_filter):
+            eparams = {"width": width, "height": height, "steps": steps,
+                       "cfg_scale": cfg, "seed": seed, "sampler_name": sampler,
+                       "match_source": False}
+            workflow = _edit_workflow(plan, prompt_text, [], eparams)
+            resolved = plan["model"]
+        else:
+            # Not a distinctive-node edit model — try the plain UNET t2i families
+            # (base Qwen-Image, flux-dev, SD3.5 …): UNETLoader + a separate CLIP/VAE
+            # + generic CLIPTextEncode, which fit neither the checkpoint path nor
+            # _edit_plan. Family defaults drive cfg/steps/res unless the caller pinned
+            # them, so a null caller value must NOT clobber them.
+            t2i = _t2i_unet_plan(info, model_filter, reasons=reasons) if info else None
+            if not (t2i and model_query_match(t2i["model"], model_filter)):
+                # Surface WHY: a family whose model is present but is missing a piece
+                # recorded a specific reason; else nothing here can render it.
+                if reasons:
+                    raise ComfyUnsuitable("; ".join(dict.fromkeys(reasons)))
+                raise ComfyUnsuitable(
+                    f"no runnable graph for '{model_filter}'" if model_filter
+                    else "nothing renderable on this host")
+            tparams = {"width": body.get("width"), "height": body.get("height"),
+                       "steps": (int(body["steps"]) if body.get("steps") is not None else None),
+                       "cfg_scale": (float(body["cfg_scale"]) if body.get("cfg_scale") is not None else None),
+                       "seed": seed, "sampler_name": body.get("sampler_name")}
+            workflow = _t2i_unet_workflow(t2i, prompt_text, negative_prompt, tparams, info)
+            resolved = t2i["model"]
         prompt_id = await comfy_submit(session, host, workflow)
         raw, _fn = await comfy_collect(session, host, prompt_id, COMFY_IMAGES,
                                        timeout=180, poll=2, view_timeout=30)
         return {"images": [base64.b64encode(raw).decode()],
-                "_dyva_model": plan["model"], "_dyva_seed": seed,
+                "_dyva_model": resolved, "_dyva_seed": seed,
                 "parameters": "{}", "info": json.dumps({"prompt": body})}
 
     # KSampler validates sampler_name/scheduler as EXACT strings against its own
@@ -12488,6 +12503,122 @@ def _is_encode_family_model(name):
         if pat and re.search(pat, name):
             return True
     return False
+
+
+_t2i_families_cache = None
+
+
+def load_t2i_families():
+    """The `t2i` families: UNET-based text-to-image models (base Qwen-Image,
+    flux-dev, SD3.5 …) that load a separate CLIP + VAE and drive the GENERIC
+    CLIPTextEncode node. They fit neither the plain-checkpoint path (not all-in-one)
+    nor _edit_plan (no distinctive encode node), so they get their own builder."""
+    global _t2i_families_cache
+    if _t2i_families_cache is not None:
+        return _t2i_families_cache
+    out = []
+    try:
+        with open(NODE_CLASSIFIER_FILE, encoding="utf-8") as f:
+            out = list(json.load(f).get("t2i") or [])
+    except Exception as e:
+        log.warning(f"node-classifier: failed to load t2i families: {e}")
+    _t2i_families_cache = out
+    return out
+
+
+def _t2i_unet_plan(info, model_filter=None, exclude=(), reasons=None):
+    """Pick a UNET text-to-image model on this host from its loader enums, or None.
+    Resolves the transformer + a separate text encoder + VAE, all against what the
+    host actually lists. When a family matches the requested model but the host
+    lacks a piece, records a specific reason (so the caller can say why, not just
+    'no runnable graph')."""
+    clip_types = _enum_options(info, "CLIPLoader", "type")
+    for fam in load_t2i_families():
+        loader = fam.get("loader", "UNETLoader")
+        if loader not in info:
+            continue
+        field = "ckpt_name" if loader == "CheckpointLoaderSimple" else "unet_name"
+        rx = re.compile(fam["model"])
+        cands = [m for m in _enum_options(info, loader, field)
+                 if rx.search(m) and m not in exclude]
+        if model_filter:
+            cands = [m for m in cands if model_query_match(m, model_filter)]
+        if not cands:
+            continue
+
+        def _why(msg, _f=fam):
+            if reasons is not None:
+                reasons.append(f"{_f['name']}: {msg}")
+
+        latent = fam.get("latent", "EmptyLatentImage")
+        missing = next((n for n in (latent, "CLIPLoader", "CLIPTextEncode",
+                                    "KSampler", "VAEDecode") if n not in info), None)
+        if missing:
+            _why(f"host lacks the {missing} node")
+            continue
+        out_node = comfy_image_out(info)
+        if not out_node:
+            _why("no image output node")
+            continue
+        clip = _pick(_enum_options(info, "CLIPLoader", "clip_name"), *_hints(fam.get("clip")))
+        vae = _pick(_enum_options(info, "VAELoader", "vae_name"), *_hints(fam.get("vae")))
+        if fam.get("clip") and not clip:
+            _why("has the model but no matching text encoder")
+            continue
+        if fam.get("vae") and not vae:
+            _why("has the model but no matching VAE")
+            continue
+        if fam.get("clip_type") and fam["clip_type"] not in clip_types:
+            _why(f"host CLIPLoader lacks type '{fam['clip_type']}'")
+            continue
+        chosen = sorted(cands, key=_match_rank(model_filter))[0]
+        return {"family": fam["name"], "spec": fam, "loader": loader, "model": chosen,
+                "clip": clip, "vae": vae, "clip_type": fam.get("clip_type"),
+                "latent": latent, "out": out_node}
+    return None
+
+
+def _t2i_unet_workflow(plan, prompt_text, negative_prompt, params, info=None):
+    """Build the UNET t2i graph: transformer loader + separate CLIPLoader/VAELoader
+    + generic CLIPTextEncode (+/-) + the family's empty-latent node + KSampler +
+    VAEDecode + image out. Sampling defaults come from the family unless the caller
+    pinned them; sampler/scheduler are snapped onto the host's enums."""
+    fam = plan["spec"]
+    width = int(params.get("width") or fam.get("res") or 1024)
+    height = int(params.get("height") or fam.get("res") or 1024)
+    steps = int(params.get("steps") if params.get("steps") is not None else fam.get("steps", 20))
+    cfg = float(params.get("cfg_scale") if params.get("cfg_scale") is not None else fam.get("cfg", 3.5))
+    seed = params.get("seed", 0)
+    sampler = params.get("sampler_name") or "euler"
+    scheduler = params.get("scheduler") or "simple"
+    if info:
+        sampler = _resolve_combo(_enum_options(info, "KSampler", "sampler_name"), sampler, ["euler"])
+        scheduler = _resolve_combo(_enum_options(info, "KSampler", "scheduler"), scheduler, ["simple", "normal"])
+    loader = plan["loader"]
+    g = {}
+    if loader == "CheckpointLoaderSimple":
+        g["1"] = {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": plan["model"]}}
+    else:
+        g["1"] = {"class_type": "UNETLoader",
+                  "inputs": {"unet_name": plan["model"], "weight_dtype": "default"}}
+    g["2"] = {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": plan["clip"], "type": plan.get("clip_type") or "qwen_image"}}
+    g["3"] = {"class_type": "VAELoader", "inputs": {"vae_name": plan["vae"]}}
+    g["4"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt_text}}
+    g["5"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt or ""}}
+    g["6"] = {"class_type": plan["latent"],
+              "inputs": {"width": width, "height": height, "batch_size": 1}}
+    g["7"] = {"class_type": "KSampler", "inputs": {
+        "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0],
+        "latent_image": ["6", 0], "seed": seed, "steps": steps, "cfg": cfg,
+        "sampler_name": sampler, "scheduler": scheduler, "denoise": 1}}
+    g["8"] = {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}}
+    out_node = plan.get("out") or "SaveImage"
+    g["9"] = ({"class_type": "PreviewImage", "inputs": {"images": ["8", 0]}}
+              if out_node == "PreviewImage" else
+              {"class_type": "SaveImage",
+               "inputs": {"filename_prefix": "dyva_output", "images": ["8", 0]}})
+    return g
 
 
 def image_magic(data):
