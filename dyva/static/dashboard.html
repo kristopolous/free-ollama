@@ -5623,6 +5623,13 @@ var TOOL_DEFS={};_ALL_TOOL_DEFS.forEach(function(t){if(t&&t.function)TOOL_DEFS[t
 // No token gate — the ceremony wasn't worth the context, and models mostly get
 // these right on the first guess.
 var TERSE_TOOLS={generate_image:1,edit_image:1,generate_video:1,generate_speech:1,spawn_agents:1};
+// Terse tools keep their REQUIRED params AND these explicit-selector params — the
+// ones that carry a choice the user MADE and the model cannot guess (a named model
+// like "flux*2", a source image to edit/animate, a named voice). Blanking these
+// meant an explicitly-requested model was silently dropped because the schema had
+// nowhere to put it. Everything else (negative_prompt, aspect, size, seconds, steps)
+// is a defaultable knob and still comes off every turn, discoverable via help.
+var TERSE_KEEP={model:1,image:1,images:1,voice:1};
 // A call is "valid" (the model figured the tool out on its own) when every REAL
 // required arg is present — read from the untouched TOOL_DEFS, since a terse tool's
 // wire schema hides its params. A valid guess runs; an invalid one bounces the docs.
@@ -5663,11 +5670,17 @@ function _terseTool(tool){
   if(!tool||!tool.function||tool.function.name==='help')return tool;
   var f=tool.function,name=f.name,params=f.parameters;
   if(TERSE_TOOLS[name]){
-    // Ship NO parameters for these heavy tools — the model guesses the call from
-    // the name + terse description, and a wrong guess bounces the full docs (via
-    // the invalid-args check in the tool loop, or an explicit help call). Keeps the
-    // longest parameter schemas (image/edit/video/speech/spawn) off every turn.
-    params={type:'object',properties:{}};
+    // Keep the REQUIRED params (with their descriptions) but drop the optional
+    // ones. Blanking EVERYTHING made the model guess {} every single turn and eat
+    // a wasted invalid-args bounce — a loop that got very common on the media
+    // tools. Listing a couple of required fields is cheap; the long optional params
+    // (the big model field, negatives, aspect/size) still come off every turn and
+    // stay discoverable via help / the bounce on a wrong guess.
+    var _full=(params&&params.properties)||{},_req=(params&&params.required)||[],_keep={};
+    Object.keys(_full).forEach(function(k){
+      if(_req.indexOf(k)>=0||TERSE_KEEP[k])_keep[k]=_full[k];
+    });
+    params={type:'object',properties:_keep,required:_req};
   }
   return {type:'function',function:{name:name,description:_terseDesc(name,f.description),parameters:params}};
 }
