@@ -381,6 +381,9 @@ input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:var(--border-focus)}
 .filter-row{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3);flex-shrink:0}
 .filter-row #modelFilter{margin-bottom:0;flex:1 1 auto;min-width:0;width:auto}
+.filter-row .mf-wrap{position:relative;flex:1 1 auto;min-width:0}
+.filter-row .mf-wrap #modelFilter{flex:none;width:100%;padding-right:3.6em}
+.mf-installs{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--text-muted);opacity:.7;font-size:var(--fs-sm);font-variant-numeric:tabular-nums;pointer-events:none}
 .use-btn{flex-shrink:0;padding:var(--sp-2) 14px;font-size:var(--fs-sm);background:var(--surface-hover);color:var(--text-2);border:1px solid var(--border-strong)}
 .use-btn:hover{background:var(--accent-bg);color:var(--text)}
 .use-btn:disabled{opacity:.4;background:var(--surface-hover);color:var(--text-dim)}
@@ -966,7 +969,10 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" class="htab" data-mpane="image" title="Image models">🖼️<span class="htab-count" id="cnt-mimage"></span></button>
 </div>
 <div class="filter-row">
+<span class="mf-wrap">
 <input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, size &gt;10gb, or date &gt;2026-02" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?); a trailing $ anchors the end, so qwen3.8:27b$ excludes -abliterated / quant variants&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;• release date — an operator and YYYY-MM: &gt;2026-02, &lt;2025-01 (the major models; undated ones are hidden by a date filter)&#10;Combine any of them: 'qwen &gt;2026-02 &gt;5gb'. Half-typed size/date fragments are ignored until complete. A model whose size/date isn't known is hidden by that filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<span id="modelInstalls" class="mf-installs" aria-hidden="true"></span>
+</span>
 <button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
 </div>
 <div class="group-row" id="modelGroupCtl">
@@ -1701,19 +1707,31 @@ function fmtCount(n){var v=Number(n);return isFinite(v)?NUM_FMT.format(v):String
 // The tab labels are icons now, so the count carries the meaning: how many
 // models in that pane match the current filter. The words live in title=.
 function updateModelPaneCounts(q){
+  var installs={modelList:0,modelListImage:0};
   [['modelList','cnt-mtext','Text models'],
    ['modelListImage','cnt-mimage','Image models']].forEach(function(t){
     var list=document.getElementById(t[0]);
     if(!list)return;
-    var rows=list.querySelectorAll('.model-item'),hit=0;
+    var rows=list.querySelectorAll('.model-item'),hit=0,inst=0;
     for(var i=0;i<rows.length;i++){
-      if(matchModel(rows[i].getAttribute('data-name'),q||''))hit++;
+      var mid=rows[i].getAttribute('data-name');
+      if(matchModel(mid,q||'')){hit++;inst+=((modelAgg[mid]||{}).count||0);}
     }
+    installs[t[0]]=inst;
     var el=document.getElementById(t[1]);
     if(el)el.textContent=fmtCount(hit);
     var btn=el&&el.parentNode;
     if(btn)btn.title=fmtCount(hit)+' '+t[2].toLowerCase()+(q?' matching \u201c'+q+'\u201d':'');
   });
+  // Installations for the ACTIVE pane, shown grey/right INSIDE the filter input \u2014
+  // the tab count is unique model strings, this is how many host installs those
+  // cover. A host running several matched models is counted once per model, so it
+  // slightly overcounts; exactness (805 vs 809) doesn't matter, it's coverage.
+  var act=document.querySelector('[data-mpane].active');
+  var listId=(act&&act.getAttribute('data-mpane')==='image')?'modelListImage':'modelList';
+  var ov=document.getElementById('modelInstalls');
+  if(ov){var n=installs[listId]||0;ov.textContent=n?fmtCount(n):'';
+    ov.title=n?fmtCount(n)+' installations across the matched models':'';}
 }
 function filterModels(){
   var q=document.getElementById('modelFilter').value.trim();
@@ -1760,6 +1778,7 @@ document.querySelectorAll('[data-mpane]').forEach(function(t){
     var p=t.getAttribute('data-mpane');
     document.querySelectorAll('[data-mpane]').forEach(function(x){x.classList.toggle('active',x===t)});
     ['text','image'].forEach(function(k){document.getElementById('mpane-'+k).style.display=k===p?'':'none'});
+    updateModelPaneCounts(document.getElementById('modelFilter').value.trim());
     try{localStorage.setItem('dyva_modelpane',p)}catch(e){}
   })
 });
@@ -1789,10 +1808,15 @@ function makeModelBar(mid){
   bar.title=g+' working · '+b+' failing · '+u+' untested';
   if(W<=0||total<=0)return bar;
   var segs=[['mb-g',g],['mb-r',b],['mb-u',u]];
-  // proportional widths, min 2px for any nonzero part so a lone failing host is
-  // still a visible sliver; drift from rounding is absorbed by the widest segment
-  // so the parts sum to exactly W.
-  var w=segs.map(function(s){return s[1]>0?Math.max(2,Math.round(s[1]/total*W)):0;});
+  // Split the bar by the sum of the parts ACTUALLY drawn (good+bad+unknown), NOT
+  // by `total`/count. Reputation counts can exceed the live host count (a model
+  // whose current count is 1 may carry 39 good + 24 bad historical (host,model)
+  // rows), and dividing a large part by a near-zero count made a single segment
+  // hundreds of px wide — overflowing the container, since the rounding-drift fix
+  // below only rescues the ONE widest segment. denom = max(total, g+b), so every
+  // share is <=1 and the segments sum to W. min 2px keeps a lone host a sliver.
+  var denom=g+b+u||1;
+  var w=segs.map(function(s){return s[1]>0?Math.max(2,Math.round(s[1]/denom*W)):0;});
   var sum=w[0]+w[1]+w[2],mi=w.indexOf(Math.max(w[0],w[1],w[2]));
   w[mi]+=W-sum;if(w[mi]<0)w[mi]=0;
   segs.forEach(function(s,i){if(w[i]>0){var el=document.createElement('i');el.className=s[0];el.style.width=w[i]+'px';bar.appendChild(el);}});
@@ -4907,6 +4931,7 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           if(d.message&&d.message.tool_calls){
             d.message.tool_calls.forEach(function(t){mergeToolCallFragment(toolCalls,t)});
             setStatus('tool: '+(((toolCalls[toolCalls.length-1]||{}).function||{}).name||'')+'\u2026');
+            if(live())_maybeLiveWriteFile(gen,toolCalls);   // stream a write_file into the doc panel as it's written
           }
           if(d.done){
             if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
@@ -4971,10 +4996,12 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
     }
   }
   finally{
-    if(gen.docIds&&gen.docIds.length){
+    if((gen.docIds&&gen.docIds.length)||gen.wfLiveId){
       var dctx=docCtx(chatId),stuck=false;
       if(dctx){
-        gen.docIds.forEach(function(id){var r=findDoc(dctx.docs,id);if(r&&r.streaming){r.streaming=false;stuck=true}});
+        (gen.docIds||[]).forEach(function(id){var r=findDoc(dctx.docs,id);if(r&&r.streaming){r.streaming=false;stuck=true}});
+        // a write_file preview left streaming (aborted/incomplete tool call) is settled here too
+        if(gen.wfLiveId){var wr=findDoc(dctx.docs,gen.wfLiveId);if(wr&&wr.streaming){wr.streaming=false;stuck=true}}
         if(stuck){dctx.commit();if(dctx.inView)refreshDocUI()}
       }
     }
@@ -5596,6 +5623,13 @@ var TOOL_DEFS={};_ALL_TOOL_DEFS.forEach(function(t){if(t&&t.function)TOOL_DEFS[t
 // No token gate — the ceremony wasn't worth the context, and models mostly get
 // these right on the first guess.
 var TERSE_TOOLS={generate_image:1,edit_image:1,generate_video:1,generate_speech:1,spawn_agents:1};
+// Terse tools keep their REQUIRED params AND these explicit-selector params — the
+// ones that carry a choice the user MADE and the model cannot guess (a named model
+// like "flux*2", a source image to edit/animate, a named voice). Blanking these
+// meant an explicitly-requested model was silently dropped because the schema had
+// nowhere to put it. Everything else (negative_prompt, aspect, size, seconds, steps)
+// is a defaultable knob and still comes off every turn, discoverable via help.
+var TERSE_KEEP={model:1,image:1,images:1,voice:1};
 // A call is "valid" (the model figured the tool out on its own) when every REAL
 // required arg is present — read from the untouched TOOL_DEFS, since a terse tool's
 // wire schema hides its params. A valid guess runs; an invalid one bounces the docs.
@@ -5636,11 +5670,17 @@ function _terseTool(tool){
   if(!tool||!tool.function||tool.function.name==='help')return tool;
   var f=tool.function,name=f.name,params=f.parameters;
   if(TERSE_TOOLS[name]){
-    // Ship NO parameters for these heavy tools — the model guesses the call from
-    // the name + terse description, and a wrong guess bounces the full docs (via
-    // the invalid-args check in the tool loop, or an explicit help call). Keeps the
-    // longest parameter schemas (image/edit/video/speech/spawn) off every turn.
-    params={type:'object',properties:{}};
+    // Keep the REQUIRED params (with their descriptions) but drop the optional
+    // ones. Blanking EVERYTHING made the model guess {} every single turn and eat
+    // a wasted invalid-args bounce — a loop that got very common on the media
+    // tools. Listing a couple of required fields is cheap; the long optional params
+    // (the big model field, negatives, aspect/size) still come off every turn and
+    // stay discoverable via help / the bounce on a wrong guess.
+    var _full=(params&&params.properties)||{},_req=(params&&params.required)||[],_keep={};
+    Object.keys(_full).forEach(function(k){
+      if(_req.indexOf(k)>=0||TERSE_KEEP[k])_keep[k]=_full[k];
+    });
+    params={type:'object',properties:_keep,required:_req};
   }
   return {type:'function',function:{name:name,description:_terseDesc(name,f.description),parameters:params}};
 }
@@ -5951,6 +5991,7 @@ function applyDocOp(chatId,name,args){
       doc.content=args.append?((doc.content?doc.content+'\n\n':'')+body):body;
       if(args.type)doc.type=(args.type==='code'?'code':'markdown');
       if(args.language)doc.language=String(args.language);
+      doc.streaming=false;   // finalize any live write_file preview of this doc
       doc.updated=Date.now();_docCommitVersion(doc);
       out={text:(args.append?'Appended to':'Overwrote')+' file "'+doc.title+'". It is now '
                 +_docLines(doc.content).length+' lines.',docId:doc.id,md:'Updated **'+doc.title+'**'};
@@ -6123,6 +6164,76 @@ function syncStreamDocs(gen,docs,final){
   if(document.getElementById('docPanel').style.display==='none')return;
   if(touched&&activeDocId!==touched.id){activeDocId=touched.id;renderDocPanel();return}
   renderDocPanel(!settled);
+}
+// ---- write_file LIVE preview -------------------------------------------------
+// A write_file tool call streams its arguments as a partial JSON string (the tool
+// is dispatched only once complete). To let the user SEE the file being written,
+// we pull the fields out of that partial JSON as it grows and render them into the
+// document panel live — the panel opens on the first write_file and fills in.
+// Extract one string field from a possibly-INCOMPLETE JSON object string. Returns
+// {value, closed} — value is JSON-unescaped up to where the stream currently ends
+// (closed=false means the closing quote hasn't arrived yet).
+function _extractJsonStringField(s,field){
+  var re=new RegExp('"'+field+'"\\s*:\\s*"'),m=re.exec(s);
+  if(!m)return null;
+  var i=m.index+m[0].length,out='',closed=false;
+  for(;i<s.length;i++){
+    var c=s[i];
+    if(c==='\\'){
+      var nx=s[i+1];
+      if(nx===undefined)break;                       // partial escape at the very end
+      if(nx==='n')out+='\n';else if(nx==='t')out+='\t';else if(nx==='r')out+='\r';
+      else if(nx==='b')out+='\b';else if(nx==='f')out+='\f';
+      else if(nx==='u'){var hex=s.substr(i+2,4);if(hex.length<4)break;out+=String.fromCharCode(parseInt(hex,16)||0);i+=4;}
+      else out+=nx;                                   // \" \\ \/ and anything else -> literal
+      i++;continue;
+    }
+    if(c==='"'){closed=true;break;}
+    out+=c;
+  }
+  return {value:out,closed:closed};
+}
+// Create/update the live doc for a streaming write_file. Keyed on gen.wfLiveId
+// (NOT gen.docIds, so it can't collide with inline-doc streaming). openDoc on first
+// sight so the panel pops open; applyDocOp finalizes the same doc (by name) later.
+function syncWriteFileLive(gen,spec){
+  if(!gen||!gen.chatId||!spec||!spec.name)return;
+  var ctx=docCtx(gen.chatId);if(!ctx)return;
+  var doc=gen.wfLiveId?findDoc(ctx.docs,gen.wfLiveId):null;
+  if(!doc)doc=findDoc(ctx.docs,spec.name);          // re-writing an existing file live
+  var fresh=false;
+  if(!doc){
+    doc={id:_docId(),title:String(spec.name).slice(0,120),
+         type:(spec.type==='code'?'code':'markdown'),language:spec.language||'',
+         content:spec.content||'',updated:Date.now(),versions:[],streaming:true};
+    ctx.docs.push(doc);fresh=true;
+  }else{
+    if(doc.content===spec.content&&doc.streaming)return;   // nothing new to paint
+    doc.content=spec.content||'';doc.streaming=true;doc.updated=Date.now();
+    if(spec.type)doc.type=(spec.type==='code'?'code':'markdown');
+    if(spec.language)doc.language=spec.language;
+  }
+  gen.wfLiveId=doc.id;
+  if(!ctx.inView)return;
+  var panelClosed=document.getElementById('docPanel').style.display==='none';
+  if(fresh||panelClosed||activeDocId!==doc.id){refreshDocUI();openDoc(doc.id);return;}
+  renderDocPanel(true);
+}
+// Called each streaming chunk: if a write_file tool call is mid-stream, live-render it.
+function _maybeLiveWriteFile(gen,toolCalls){
+  var tc=null;
+  for(var i=toolCalls.length-1;i>=0;i--){
+    if((((toolCalls[i]||{}).function)||{}).name==='write_file'){tc=toolCalls[i];break;}
+  }
+  if(!tc)return;
+  var args=(tc.function||{}).arguments;
+  if(typeof args!=='string')return;                 // already an object (one-shot) — completion path renders it
+  var nameF=_extractJsonStringField(args,'name')||_extractJsonStringField(args,'title');
+  if(!nameF||!nameF.value)return;                    // need a name before we can open the doc
+  var contentF=_extractJsonStringField(args,'content');
+  var typeF=_extractJsonStringField(args,'type'),langF=_extractJsonStringField(args,'language');
+  syncWriteFileLive(gen,{name:nameF.value,type:typeF&&typeF.value,
+                         language:langF&&langF.value,content:contentF?contentF.value:''});
 }
 function syncDocBtn(){
   var btn=document.getElementById('docToggle');
@@ -7200,18 +7311,23 @@ async function generateMusic(){
   var seed=parseInt(document.getElementById('musSeed').value,10);if(!isNaN(seed)&&seed>=0)body.seed=seed;
   if(_musPoll){clearTimeout(_musPoll);_musPoll=null}
   btn.disabled=true;
-  var st=_mediaStatus(out,'submitting…');
+  out.innerHTML='';
+  // Same snackbar flow as video: progress rides the bottom-center snackbar (a long
+  // render otherwise looks like a hang), results/errors land in the result box.
+  showSnack('submitting…');
+  var st=snackStatus;
+  function musDone(){hideSnack()}
   try{
     var r=await fetch('v1/music',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!r.ok){_mediaError(out,await _errText(r));btn.disabled=false;return}
+    if(!r.ok){_mediaError(out,await _errText(r));musDone();btn.disabled=false;return}
     var job=await r.json();
-    if(!job||!job.id){_mediaError(out,'no job id came back');btn.disabled=false;return}
+    if(!job||!job.id){_mediaError(out,'no job id came back');musDone();btn.disabled=false;return}
     var t0=Date.now();
     (function poll(){
       _musPoll=setTimeout(async function(){
         try{
           var pr=await fetch('v1/music/'+encodeURIComponent(job.id),{cache:'no-store'});
-          if(!pr.ok){_mediaError(out,await _errText(pr));btn.disabled=false;return}
+          if(!pr.ok){_mediaError(out,await _errText(pr));musDone();btn.disabled=false;return}
           var j=await pr.json();
           if(j.status==='completed'){
             out.innerHTML='';
@@ -7222,16 +7338,21 @@ async function generateMusic(){
             out.appendChild(cap);
             var a=document.createElement('a');a.className='dl';a.href=src;a.download='dyva-music.flac';
             a.textContent='download';out.appendChild(a);
-            btn.disabled=false;return;
+            musDone();btn.disabled=false;return;
           }
-          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');btn.disabled=false;return}
-          if(st&&st.parentNode)st.textContent=(j.status||'working')+'… '+Math.round((Date.now()-t0)/1000)+'s'
-            +(j.family?' · '+j.family:'')+(j.host?' on '+j.host:'');
+          if(j.status==='failed'){_mediaError(out,j.error||'generation failed');musDone();btn.disabled=false;return}
+          // `phase` is what the host says ("queued #3" then "running"); a long
+          // render looks like a hang without it — same line the video panel shows.
+          var where=j.phase||j.status||'working';
+          var host=(j.host||'').replace(/^https?:\/\//,'');
+          var mo=(j.model||'').replace(/\\/g,'/').split('/').pop();
+          st.textContent=where+'… '+Math.round((Date.now()-t0)/1000)+'s'
+            +(host?' on '+host:'')+(j.family?' ('+j.family+')':(mo?' ('+mo+')':''));
           poll();
-        }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+        }catch(ex){_mediaError(out,ex.message);musDone();btn.disabled=false}
       },3000);
     })();
-  }catch(ex){_mediaError(out,ex.message);btn.disabled=false}
+  }catch(ex){_mediaError(out,ex.message);musDone();btn.disabled=false}
 }
 document.getElementById('musGenerate').addEventListener('click',generateMusic);
 

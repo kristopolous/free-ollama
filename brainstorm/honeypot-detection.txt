@@ -1,0 +1,185 @@
+================================================================================
+HONEYPOT / BOGUS-HOST DETECTION  (design + validation, 2026-09-12)
+================================================================================
+
+Problem: ~65% of the surveyed pool is honeypot clones (450/688 hosts in one
+session). The cheap behavioural smoke test (the "what color is the sky -> blue"
+quick probe) is DEFEATED in the wild — honeypots now pass it — so a smoke PASS can
+no longer mean "good" (see the "smoke pass = unknown" change in dyva). We need
+signals that survive an adapting adversary.
+
+Core principle (why most tests fail): CONSTRUCTIVE SYMMETRY. Any machine you build
+to CONSTRUCT a discriminating question, the adversary builds an equally complex
+machine to ANSWER it. You don't win a construction arms race. The escape is
+INFORMATION DESTRUCTION (a test that deletes information) and NEGATIVE testing
+(assert bogus, never assert good), because those aren't symmetric.
+
+Two complementary signals. Neither needs a correct answer; neither is gameable
+without actually running a real model.
+
+--------------------------------------------------------------------------------
+SIGNAL A — TIMESTAMP FINGERPRINT  (structural; BUILT, see graflex score-bogus)
+--------------------------------------------------------------------------------
+A cloned honeypot disk image carries the SAME (model, nanosecond timestamp) across
+every host it's deployed on; a real host pulls independently and gets its own
+modified_at (ollama) / created (openai). So an identical nanosecond timestamp
+shared across many hosts = one cloned image, not independent deployments.
+
+Validated by clustering graflex check snapshots: 6 fingerprints were each shared by
+209-243 of 688 hosts, then a cliff to 3. codellama:13b (226 hosts) and openchat:7b
+(211) were 100% a SINGLE timestamp — zero real variation. Real hosts have singleton
+timestamps. Confirmed list seeded in graflex/bogus-fingerprints.json.
+
+Built: graflex/bogus-fingerprints.json + scorer + `-a score-bogus` (report, or
+`apply` to stamp an additive per-host `bogus_score` onto the working file; never
+drops a host). Cheap, offline, reconstitutable (edit file, re-run). Routing
+consumes it bogus-score-ascending (0 first) — a DEPRIORITIZE, not a ban.
+
+Caveat (see "per-host vs per-(host,model)" below): the fingerprint is really a
+(host, model) fact, and it CAN false-positive on a model a host serves for real.
+
+--------------------------------------------------------------------------------
+SIGNAL B — NONSENSE -> CANNED-RESPONSE NEGATIVE TEST  (behavioural; PLANNED)
+--------------------------------------------------------------------------------
+Send syntactically-valid NONSENSE built from dictionary words ("what cat is a
+flower?", "what clock is a calorie?"). The inversion: don't test for the RIGHT
+answer (needs ground truth, ambiguous, hard to parse) — test for a CANNED answer
+(a trivial lookup). Nonsense maximises the fake's fall-through to its fixed
+fallback, because there is nothing for it to pattern-match. A real LLM has no
+"unrecognised input" branch; it just sense-makes, producing novel, varied text.
+
+Negative-only verdict: response is canned (in the confirmed table) OR opens with a
+confirmed canned string  -> BOGUS. Anything else -> "no state known" (NEVER
+"good"). It cannot false-whitelist, so it cannot poison the pool. Consistent with
+the whole philosophy: assert bogus, leave real hosts unknown.
+
+Two ways to catch canned, use both:
+  - Exact confirmed table: match known honeypot fallback strings. EXACT confirmed
+    strings only, never generic openers — real models also say "That's an
+    interesting question..." / "I'm sorry, but...", so a loose table false-flags
+    real hosts. (Same exact-denylist-never-pattern rule as the fingerprints.)
+  - Response INVARIANCE (table-free): send 2-3 DIFFERENT nonsense prompts; a real
+    LLM riffs differently each time, a fake that repeats its finite phrase-bag shows
+    high cross-response similarity = canned. Catches NOVEL fallbacks the table misses.
+
+CAVEAT — this whole test is EASILY DEFEATED, so it is NOT adaptation-proof (an
+earlier draft wrongly called it that). It is negative-only: it flags only CANNED
+(repeated / known-string) output. A fake doesn't have to sense-make — it only has
+to NOT repeat, which is nearly free: a unigram/frequency random-word generator, a
+Markov chain, a tiny throwaway model, or echoing the nonsense back reworded all
+produce varied output that beats both the table (no known strings) and invariance
+(different every time). Such a fake lands in "unknown", never "bad". So Signal B is
+a TRIPWIRE for today's lazy fixed-canned fakes, the same class as the smoke test —
+NOT a durable defense. Producing varied plausible text is cheap; a behavioural probe
+only checks a surface property (answer X / don't repeat) that the fake clears without
+being a real model. Behavioural "is this a real LLM" detection is a losing arms race.
+
+SPEED: stream the response and SPLIT EARLY — you only need ~10-15 words to tell
+canned from real, no reason to wait out a real model's paragraph. Measured: a
+canned host returns its fallback in ~0.5s (it's a template, no inference); a real
+model took ~7s to produce 15 words. Latency is itself a weak bonus signal.
+
+VENN VALIDATION (2026-09-12, live sample, single table probe, 15-word cutoff):
+  known-bad (fingerprinted): 40 sampled, 22 responded -> 15 canned (68%), 7 varied
+  clean (no fingerprint):    40 sampled, 16 responded -> 0 canned (0%),   16 varied
+  => ZERO false positives on clean hosts; 68% of responding known-bad caught by
+     the seed TABLE alone. The 32% "varied" known-bad are two kinds, both fine:
+     (a) novel canned fallbacks not yet in the table -> the INVARIANCE check would
+         catch these table-free (the lever to raise 68%);
+     (b) genuine hybrids — a real model served under a fingerprinted name (the
+         9ol.es llama3 case) -> correctly NOT flagged.
+  Decision rule this supports: fingerprint AND canned = high-confidence bogus;
+  fingerprint AND varied = real model on a sketchy host, don't condemn it
+  (the per-(host,model) arbitration).
+
+INVARIANCE VALIDATION (2026-09-12, 2-probe similarity, difflib ratio):
+  Similarity cleanly separates real from canned, no middle ground (threshold ~0.6):
+    real models  -> two different nonsense prompts give sim ~0.24-0.42
+    canned hosts -> byte-identical responses, sim = 1.0
+  Empirically grounded threshold (real ~0.3, canned 1.0), not guessed.
+
+  CORRECTION (an earlier draft here claimed the fingerprint "under-covers" and that
+  8/12 fingerprint-negative hosts were canned — THAT WAS WRONG, an empty-string
+  artifact: sim('','')=1.0 counted empty/refusing hosts as "canned"). Re-run with
+  empties excluded: of 70 fingerprint-NEGATIVE hosts, 42 no-response, 21 empty/
+  refusing, and 5 responded non-empty twice — ALL 5 were REAL (sim 0.24-0.42,
+  genuine sense-making), ZERO canned. So:
+    - canned-soup <=> fingerprinted. Every canned host actually observed (9ol.es
+      codellama, the table-canned known-bad) was in the fingerprint set; the
+      fingerprint-negatives that respond are real models, the rest are dead/empty.
+    - The FINGERPRINT CATCHES BASICALLY ALL OF IT. Coverage also plateaus at ~55%
+      across every cluster threshold (>=2 .. >=50) — the 6 big clusters already hold
+      the whole clone farm, there's no long tail to mop up; the other ~20% are
+      all-unique-timestamp (real) hosts.
+  => Fingerprint-only is sufficient. The behavioural test (below) is NOT needed now
+     and stays PARKED. Build it only if the dumb fingerprint fails in practice — the
+     concrete trigger being a bogus_score-0 host that keeps returning canned soup
+     (a sophisticated honeypot using per-host unique timestamps). Not observed yet.
+  Artifact to remember for any future run: EMPTY responses give spurious sim 1.0 —
+  treat empty as its own bucket (dead/refusing), never as canned.
+
+Graceful degradation: a fake emitting VARIED RANDOM text (not a fixed canned
+string) slips past both into "unknown" — but that's the safe failure (never marked
+good), and producing varied sense-making-looking text without a model is the
+expensive thing we're forcing.
+
+Validation (real data, 2026-09-12):
+  - Real models, even tiny, give varied non-canned responses -> correctly "unknown":
+      llama3.2:1b  "What clock is a calorie?" -> a genuine explanation.
+      qwen2.5:1.5b "What cat is a flower?"   -> a genuine (and WRONG, hallucinated)
+        riff. Being wrong is fine: we check canned-ness, not truth, so a
+        hallucinating real model is NOT false-failed. This is exactly why a
+        correctness test fails and this one doesn't.
+  - Fingerprinted bogus host 9ol.es:11434, model codellama:13b, same nonsense ->
+      unmistakable canned phrase-soup: "Is there anything else I can help you
+      with?", "Let me think about this carefully.", "from a practical standpoint,
+      there are multiple approaches you could take.", plus it echoes dyva's own
+      "Continue your previous answer from exactly..." nudge back inside the filler.
+      A template engine, not a model. Low-entropy -> invariance nails it; phrases
+      above are confirmed table seeds.
+
+--------------------------------------------------------------------------------
+HOW THE SIGNALS COMBINE — the escalation ladder
+--------------------------------------------------------------------------------
+  1. FINGERPRINT (built, primary): cheap, structural, zero queries, already-pulled
+     data. Currently a clean break — canned <=> fingerprinted.
+  2. SMOKE TEST (built, cheap behavioural): one-word factual probe, "what color is
+     #000000?" -> the answer must contain "black" (NO fallback — the answer is
+     deterministic, so unlike the ambiguous "first president" there's no real model
+     to cull; a short canned ack like "Request accepted." that slipped the old
+     1-3-word fallback now FAILS). Was "sky -> blue" before. A PASS no longer confers
+     "good" (honeypots can pass a stale/known question); "good" comes only from
+     genuine inference success. A FAIL is load-bearing (force_bad + fail_smoke=1).
+     DEFEATABLE by hardcoding the one answer — a TRIPWIRE, not a defense; rotating
+     the question (blue->black->...) just restarts the clock.
+  3. DIFFUSIVE (nonsense/canned) TEST (designed, PARKED — and worth little): the SAME
+     tripwire class as the smoke test, NOT an adaptation-proof arbiter. A frequency
+     random-word generator / Markov / input-echo beats it (see Signal B CAVEAT) by
+     producing varied output that escapes to "unknown". It might catch fixed-canned
+     fakes the smoke test's single question misses, but that's marginal — a varying
+     fake walks past it. Don't build it expecting a defense. Both behavioural tiers
+     are disposable tripwires; the FINGERPRINT is the only structural signal with
+     teeth (and even it only catches CLONES — a lone host with unique timestamps AND
+     varied output beats everything, but that's high-effort, low-yield per box).
+
+--------------------------------------------------------------------------------
+OPEN: PER-HOST vs PER-(HOST, MODEL)  (revisit — new evidence)
+--------------------------------------------------------------------------------
+Earlier call was "bogus_score is per HOST." But 9ol.es:11434 serves a FAKE
+codellama:13b (template soup) AND a REAL llama3:latest (genuine, varied, even
+self-correcting) at the SAME host. A purely per-host bogus score would deprioritise
+the working llama3 along with the fake codellama.
+
+Survey snapshots: of 253 hosts carrying fake codellama:13b, 148 also carry
+fake-timestamp llama3, 105 have no llama3, and ZERO carry a distinct-timestamp
+(plausibly real) llama3. So 9ol.es's real llama3 either carries the fake
+fingerprint yet answers for real (a fingerprint FALSE-POSITIVE the behavioural test
+rescues) or is outside the survey. Either way:
+  -> Do NOT hard-ban a host on the fingerprint alone.
+  -> The behavioural test is inherently per-(host, model) and should be allowed to
+     rescue a real model on an otherwise-fingerprinted host.
+  -> Decide: keep a per-host suspicion score (a host in the clone network is
+     sketchy overall — maybe its "real" model is a proxy) but let the behavioural
+     verdict override per-(host, model); or move bogus scoring to per-(host, model)
+     outright. Leaning: fingerprint flags per-(host, model), behavioural arbitrates
+     per-(host, model), host-level is at most a soft tiebreaker.

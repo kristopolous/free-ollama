@@ -181,11 +181,13 @@ TPS_CEILING = 5000
 # rates — whether the host buffered-then-bursted, reported a bogus eval_duration,
 # or is fake. Below this, we simply don't state a tps.
 MIN_TPS_WINDOW = 0.25
-# After the first token, a live stream keeps sending — so any gap longer than this
-# (seconds) is a stalled connection, not slow generation. A per-read watchdog, reset
-# each line, fires on that silence and we fail over. Deliberately AFTER first token
-# only: time-to-first-token (cold starts) stays bounded by the race/hedge, not this.
-STREAM_STALL = 60
+# After the first token, a live stream keeps sending — so a long enough gap with NO
+# data is a stalled connection, not slow generation, and we fail over. The period is
+# the operator's configurable system TIMEOUT setting (not a separate hardcoded value):
+# a legit slow stretch — notably while the model formulates a tool call — must get the
+# full timeout the operator chose, or a healthy tool-call generation gets killed early.
+# A per-read watchdog reset each line; deliberately AFTER first token only (cold-start
+# time-to-first-token stays bounded by the race/hedge, not this).
 # Hard cap on how many times one streaming answer may be continued across hosts
 # after a mid-stream truncation (a connection drop or a done_reason 'length'
 # window-cut). A generous ceiling that still guarantees the failover loop can't
@@ -3451,7 +3453,15 @@ def _fmt_tool_calls(tcs):
         if isinstance(args, dict):
             args = json.dumps(args)
         out.append({
-            "id": f"call_{int(time.time())}_{i}",
+            # OpenAI's STREAMING format requires an `index` on every tool-call delta:
+            # a single tool call arrives across several SSE chunks (name+id first, then
+            # argument fragments), and the client merges them by this index. Omitting
+            # it left a spec-compliant client unable to reassemble multi-chunk
+            # arguments. Preserve the upstream's index when it carried one.
+            "index": tc.get("index", i),
+            # A stable id likewise lets the client tie the fragments together; keep the
+            # upstream's when present instead of minting a fresh one on every chunk.
+            "id": tc.get("id") or f"call_{int(time.time())}_{i}",
             "type": "function",
             "function": {"name": fn.get("name", ""), "arguments": args},
         })
@@ -4040,6 +4050,15 @@ def openai_payload(p):
             out[dst] = opts[src]
     if isinstance(out.get("messages"), list):
         out["messages"] = _messages_openai(out["messages"])
+    # OpenAI-compatible hosts OMIT the `usage` block from a STREAMING response unless
+    # the request explicitly asks for it — without this, dyva got no token counts back
+    # from vLLM/LM-Studio/SGLang/llama.cpp streams, so account_tokens recorded ttft but
+    # never tps (only native Ollama hosts, which always report eval_count, got a rate).
+    # Requesting it makes the host emit a final usage chunk we already know how to read.
+    if out.get("stream"):
+        so = dict(out.get("stream_options") or {})
+        so.setdefault("include_usage", True)
+        out["stream_options"] = so
     return out
 
 
@@ -4837,9 +4856,9 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
 
         while True:
             # WATCHDOG (after first token): reset every line; a silence longer than
-            # STREAM_STALL raises asyncio.TimeoutError into the handler below and is
+            # the TIMEOUT watchdog raises asyncio.TimeoutError into the handler below and is
             # treated as a mid-stream truncation -> fail over to another host.
-            line = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+            line = await asyncio.wait_for(resp.content.readline(), TIMEOUT)
             if not line:
                 break
             if line == b"\n":
@@ -4856,6 +4875,30 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
             except Exception:
                 obj = None
             if obj and obj.get("done"):
+                # OpenAI with stream_options.include_usage streams `usage` in a SEPARATE
+                # chunk AFTER this finish chunk. If the done chunk carried no token counts,
+                # briefly drain the trailing line(s) and merge the usage so account_tokens
+                # can record tps — otherwise OpenAI-dialect hosts log ttft but never a
+                # rate. Accounting-only (not forwarded); bounded/short so a host that
+                # sends nothing more can't stall the client's done.
+                if upstream_openai and obj.get("eval_count") is None:
+                    for _ in range(3):
+                        try:
+                            extra = await asyncio.wait_for(resp.content.readline(), 5)
+                        except Exception:
+                            break
+                        if not extra:
+                            break
+                        extra = extra.rstrip(b"\n\r")
+                        if not extra:
+                            continue
+                        uconv = openai_stream_to_ollama(extra, full)
+                        if uconv and uconv.get("eval_count") is not None:
+                            for _k in ("eval_count", "eval_duration",
+                                       "prompt_eval_count", "prompt_eval_duration"):
+                                if uconv.get(_k) is not None:
+                                    obj[_k] = uconv[_k]
+                            break
                 # account tokens either way — the usage on the done chunk is real
                 await account_tokens(wid, host, full, obj, num_ctx)
                 # done_reason 'length' = the window cut the generation short. It's a
@@ -5057,9 +5100,9 @@ async def _drain_stream(resp, first_line, upstream_openai, model):
             pass
     try:
         while True:
-            # WATCHDOG (after first token): a silence longer than STREAM_STALL means
+            # WATCHDOG (after first token): a silence longer than TIMEOUT means
             # the connection stalled — stop draining and return what we have.
-            raw = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+            raw = await asyncio.wait_for(resp.content.readline(), TIMEOUT)
             if not raw:
                 break
             if raw == b"\n":
@@ -5087,7 +5130,10 @@ async def _drain_stream(resp, first_line, upstream_openai, model):
     if tool_calls:
         msg["tool_calls"] = tool_calls
     data["message"] = msg
-    return data
+    # `complete` = the host actually signalled done. False means it went silent past
+    # TIMEOUT (or dropped) mid-generation — a stall the caller must fail over on,
+    # not a finished answer. (done_obj is only set by a real done chunk.)
+    return data, (done_obj is not None)
 
 
 def chat_fmt(data, model, openai_format):
@@ -5574,9 +5620,24 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                     # window would collapse to ~0s and read as millions of tok/s.
                     mark_worker_found(job_wid, host, full)
                     try:
-                        data = await _drain_stream(resp, first_line, _oai, full)
+                        data, complete = await _drain_stream(resp, first_line, _oai, full)
                     finally:
                         await resp.release()
+                    if not complete:
+                        # Streamed some tokens then went silent past TIMEOUT (or
+                        # dropped) before the host signalled done — the same conclusion
+                        # the streaming paths reach: the host stalled. Ding it and fail
+                        # over to another server instead of returning a truncated answer.
+                        record_verdict(host, full, timed_out("stream stalled"))
+                        errors.append(f"{host}: stream stalled")
+                        await broadcast_activity(host, model, "failed",
+                            f"stream stalled: {host} for {model} — no tokens for {TIMEOUT}s",
+                            wid=job_wid)
+                        _servers = [s for s in _servers if s[1] != host]
+                        _set_worker_phase(job_wid, None)
+                        if _servers:
+                            continue                    # re-race the remaining pool
+                        # nothing left to try -> return the partial we have, not a hang
                     if _is_truncated(data, sent_ctx):
                         if _attempt < NUM_CTX_RETRIES and sent_ctx < NUM_CTX_MAX:
                             nctx_pin = min(sent_ctx * 2, NUM_CTX_MAX)
@@ -7050,6 +7111,9 @@ async def handle_api_show(request):
             schema:
               type: object
     """
+    resp = await _check_local(request)
+    if resp:
+        return resp
     model = ""
     ct = request.content_type or ""
     if ct == "application/json" or ct == "application/x-ndjson":
@@ -7084,6 +7148,110 @@ async def handle_api_show(request):
         "capabilities": ["completion", "vision", "audio", "tools", "thinking"],
         "license": license_val,
     })
+
+
+async def _embed_one(session, host, full, text):
+    """Fetch one embedding vector from a single host IN ITS OWN DIALECT. Returns
+    the float list, or None if the host answered but carried no embedding (so the
+    caller fails over to the next host); connection/timeout errors propagate so
+    the caller can fail over on those too."""
+    _to = aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT)
+    if speaks_openai(host):
+        async with session.post(f"{host}/v1/embeddings",
+                                json={"model": full, "input": text}, timeout=_to) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+        arr = data.get("data") or []
+        return arr[0].get("embedding") if arr else None
+    # Ollama: legacy /api/embeddings ({prompt} -> {embedding}) first; a build that
+    # only speaks the newer /api/embed ({input} -> {embeddings:[[...]]}) 404/405s
+    # the legacy path, so fall through to it.
+    async with session.post(f"{host}/api/embeddings",
+                            json={"model": full, "prompt": text}, timeout=_to) as r:
+        if r.status == 200:
+            emb = (await r.json()).get("embedding")
+            if emb:
+                return emb
+        elif r.status not in (404, 405, 501):
+            return None
+    async with session.post(f"{host}/api/embed",
+                            json={"model": full, "input": text}, timeout=_to) as r:
+        if r.status != 200:
+            return None
+        embs = (await r.json()).get("embeddings") or []
+    return embs[0] if embs else None
+
+
+async def handle_api_embeddings(request):
+    """
+    Text embeddings (Ollama /api/embeddings format)
+    ---
+    tags: [Generation]
+    summary: Embed text via a discovered embedding host. Proxies to upstream Ollama/OpenAI servers, failing over across hosts.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              model:
+                type: string
+              prompt:
+                type: string
+    responses:
+      '200':
+        description: Embedding vector as an embedding array
+      '400':
+        description: Invalid request
+      '404':
+        description: No embedding host for this model
+      '502':
+        description: All embedding hosts failed
+    """
+    resp = await _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        return web.json_response(err_obj("invalid JSON"), status=400)
+    model = body.get("model", "")
+    if not model:
+        return web.json_response(err_obj("model is required", "missing_model"), status=400)
+    # Ollama's legacy /api/embeddings takes a single `prompt`; accept `input` (the
+    # /api/embed and OpenAI spelling, list or string) too, first element if a list.
+    text = body.get("prompt")
+    if text is None:
+        text = body.get("input")
+    if isinstance(text, list):
+        text = text[0] if text else ""
+    if not isinstance(text, str) or not text:
+        return web.json_response(err_obj("prompt is required", "missing_prompt"), status=400)
+
+    servers = find_servers(model)
+    if not servers:
+        return web.json_response(
+            err_obj(f"no embedding servers for '{model}'", "model_not_found"), status=404)
+
+    session = request.app["session"]
+    errors = []
+    async with request.app["semaphore"]:
+        for _prio, host, ms in servers[:6]:
+            full = ms[0]
+            try:
+                vec = await _embed_one(session, host, full, text)
+            except Exception as e:
+                errors.append(f"{host}: {' '.join(str(e).split())[:120] or type(e).__name__}")
+                continue
+            if vec:
+                return web.json_response({"embedding": vec})
+            errors.append(f"{host}: no embedding")
+    msg = "all embedding servers failed"
+    if errors:
+        msg += ": " + "; ".join(dict.fromkeys(errors))
+    return web.json_response(err_obj(msg), status=502)
 
 
 async def handle_ollama_stop(request):
@@ -7151,6 +7319,10 @@ async def _check_local(request):
         body = await request.read()
     except Exception:
         body = b""
+    # Log only the HEAD of the probe body. A scanner spraying multi-MB junk (the
+    # OllamaScannerZcode probes hit ~3 MB each) would otherwise balloon this file
+    # without bound — it reached ~15 GB once. Record the TRUE size, write a peek.
+    PEEK = 2048
     try:
         os.makedirs(os.path.dirname(FAILED_PAYLOAD_LOG), exist_ok=True)
         ts = datetime.datetime.now().isoformat(timespec="seconds")
@@ -7159,7 +7331,8 @@ async def _check_local(request):
             f.write("[%s] %s %s %s UA=%r %db\n" %
                     (ts, remote, request.method, request.path_qs, ua, len(body)))
             if body:
-                f.write(body.decode("utf-8", "replace").rstrip() + "\n")
+                head = body[:PEEK].decode("utf-8", "replace").rstrip()
+                f.write(head + (" …[+%db truncated]" % (len(body) - PEEK) if len(body) > PEEK else "") + "\n")
             f.write("\n")
     except Exception:
         pass
@@ -8613,6 +8786,19 @@ async def comfy_submit(session, host, workflow, timeout=None):
         raise ComfyError(str(e) or type(e).__name__)
     prompt_id = (data or {}).get("prompt_id")
     if not prompt_id:
+        # Some hosts answer /prompt with HTTP 200 but an ERROR envelope instead of a
+        # prompt_id — most commonly an auth gate, e.g. {"code":401,"error":"token
+        # mismatch"}. Surface the REAL reason (not a bare "no prompt_id"), and treat an
+        # auth refusal as STRUCTURAL (ComfyUnsuitable) — it will never work for us
+        # without credentials, so don't keep re-racing it. (auth-required = a pass.)
+        if isinstance(data, dict):
+            reason = str(data.get("error") or data.get("message") or data.get("code") or "").strip()
+            code = data.get("code")
+            if reason or code is not None:
+                detail = reason or f"code {code}"
+                if code in (401, 403) or re.search(r"token|auth|unauthor|forbidden|credential|api.?key", reason, re.I):
+                    raise ComfyUnsuitable(f"prompt rejected (auth): {detail}")
+                raise ComfyError(f"prompt rejected: {detail}")
         raise ComfyError("no prompt_id")
     return prompt_id
 
@@ -8798,36 +8984,54 @@ async def comfy_collect(session, host, prompt_id, kinds, timeout=180,
 
 
 async def _txt2img_comfyui(session, host, body, model_filter=None):
+    # Report the REAL reason for a failure instead of a bare None — the caller
+    # otherwise flattens every None into a meaningless "no response", hiding
+    # unreachable vs no-HTTP vs a live host that's simply missing a model piece.
     try:
         checkpoints_resp = await session.get(
             _host_url(host, "/models/checkpoints"),
             timeout=aiohttp.ClientTimeout(total=30),
         )
-        if checkpoints_resp.status != 200:
-            await checkpoints_resp.release()
-            return None
-        checkpoints = await checkpoints_resp.json()
+    except asyncio.TimeoutError:
+        raise ComfyUnreachable("unreachable (connect/read timed out)")
+    except Exception as e:
+        raise ComfyUnreachable(
+            "no HTTP response (" + (" ".join(str(e).split())[:80] or type(e).__name__) + ")")
+    if checkpoints_resp.status != 200:
+        st = checkpoints_resp.status
         await checkpoints_resp.release()
-        if not isinstance(checkpoints, list):
-            checkpoints = []
-        # No checkpoints and no model asked for: nothing to guess at. But if a
-        # model *was* named it may be a UNET/encode model (z-image, Flux.2) that
-        # this host has no checkpoint for — fall through to the edit-graph path.
-        if not checkpoints and not model_filter:
-            return None
-        ckpt = None
-        if model_filter:
-            ckpt = next(
-                (c for c in checkpoints if model_query_match(c, model_filter)), None)
-        elif checkpoints:
-            # Auto-pick (no model named): prefer a non-NSFW checkpoint so a plain
-            # request ("a cute puppy") doesn't land on an NSFW-tuned model that emits
-            # a nude regardless of the prompt. Fall back to whatever the host has if
-            # every option is NSFW. (An explicitly-named model takes the branch above
-            # and is always honored.)
-            ckpt = next((c for c in checkpoints if not is_nsfw_model(c)), checkpoints[0])
+        raise ComfyError(f"/models/checkpoints HTTP {st}")
+    try:
+        checkpoints = await checkpoints_resp.json()
     except Exception:
-        return None
+        checkpoints = []
+    finally:
+        with contextlib.suppress(Exception):
+            await checkpoints_resp.release()
+    if not isinstance(checkpoints, list):
+        checkpoints = []
+    # No checkpoints and no model asked for: nothing to guess at. But if a model
+    # *was* named it may be a UNET/encode model (z-image, Flux.2) with no checkpoint
+    # here — fall through to the edit-graph path.
+    if not checkpoints and not model_filter:
+        raise ComfyUnsuitable("no checkpoints and no model specified")
+    ckpt = None
+    if model_filter:
+        ckpt = next(
+            (c for c in checkpoints if model_query_match(c, model_filter)), None)
+    elif checkpoints:
+        # Auto-pick (no model named): prefer a non-NSFW checkpoint so a plain
+        # request ("a cute puppy") doesn't land on an NSFW-tuned model that emits
+        # a nude regardless of the prompt. Fall back to whatever the host has if
+        # every option is NSFW. (An explicitly-named model takes the branch above
+        # and is always honored.)
+        ckpt = next((c for c in checkpoints if not is_nsfw_model(c)), checkpoints[0])
+    # A named DiT/encode family (z-image, Flux.2, Qwen-Image …) can sit in the
+    # host's checkpoints/ folder, but it is NOT an all-in-one checkpoint — driving
+    # it through the plain CheckpointLoaderSimple graph feeds CLIPTextEncode a null
+    # clip. Divert it to the recipe path (separate text encoder + VAE).
+    if ckpt is not None and _is_encode_family_model(ckpt):
+        ckpt = None
 
     prompt_text = body.get("prompt", "")
     negative_prompt = body.get("negative_prompt", "")
@@ -8859,9 +9063,16 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
             info = await comfy_object_info(session, host)
         except Exception:
             info = None
-        plan = _edit_plan(info, model_filter, n_images=0) if info else None
+        reasons = []
+        plan = _edit_plan(info, model_filter, n_images=0, reasons=reasons) if info else None
         if not (plan and model_query_match(plan["model"], model_filter)):
-            return None
+            # Surface WHY: a family whose node is present but is missing an encoder
+            # or VAE recorded a specific reason; otherwise nothing here can render it.
+            if reasons:
+                raise ComfyUnsuitable("; ".join(dict.fromkeys(reasons)))
+            raise ComfyUnsuitable(
+                f"no runnable graph for '{model_filter}'" if model_filter
+                else "nothing renderable on this host")
         eparams = {"width": width, "height": height, "steps": steps,
                    "cfg_scale": cfg, "seed": seed, "sampler_name": sampler,
                    "match_source": False}
@@ -10177,13 +10388,15 @@ async def _run_chat_job(session, jid):
                             round_tcs.extend(tcs)
                         if _m.get("content"):
                             partial[0] += _m["content"]   # for skip-continuation
-                        if obj.get("done"):
-                            # Don't let a bare terminator (OpenAI's `data: [DONE]`, which
-                            # carries no token stats) CLOBBER a real done object that already
-                            # carried eval_count/eval_duration (e.g. llama.cpp's `timings`
-                            # chunk arrives just before [DONE]). Otherwise account_tokens
-                            # gets an empty object and no tps is recorded, even though the
-                            # dashboard already showed it from the earlier chunk.
+                        if obj.get("done") or obj.get("eval_count") is not None:
+                            # Capture the chunk that carries token stats for accounting.
+                            # Two wrinkles this must survive:
+                            #  - a bare terminator (OpenAI's `data: [DONE]`) carries no
+                            #    stats and must NOT clobber a stats-bearing done chunk;
+                            #  - OpenAI with stream_options.include_usage streams `usage`
+                            #    in a SEPARATE chunk AFTER the finish_reason chunk — that
+                            #    chunk isn't `done` but IS where the counts live, so it
+                            #    must be captured too (hence the eval_count condition).
                             prev = done_obj[0]
                             if prev is None or obj.get("eval_count") is not None or prev.get("eval_count") is None:
                                 done_obj[0] = obj
@@ -10197,12 +10410,12 @@ async def _run_chat_job(session, jid):
                         if not done:
                             while True:
                                 # WATCHDOG (after first token): a silence longer than
-                                # STREAM_STALL — or a mid-stream drop — is the host dying;
+                                # a silence past TIMEOUT — or a mid-stream drop — is the host dying;
                                 # flag it and fail over to the next server. Reading with a
                                 # timeout (rather than `async for`) also lets Stop/Skip
                                 # fire during a silent stall instead of blocking forever.
                                 try:
-                                    raw = await asyncio.wait_for(resp.content.readline(), STREAM_STALL)
+                                    raw = await asyncio.wait_for(resp.content.readline(), TIMEOUT)
                                 except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
                                     ctl["stall"] = True
                                     raise asyncio.CancelledError()
@@ -10219,6 +10432,28 @@ async def _run_chat_job(session, jid):
                                     pending.append(jl + "\n")
                                     await _flush()
                                 if done:
+                                    # OpenAI with include_usage streams `usage` in a
+                                    # SEPARATE chunk AFTER this finish chunk. If the done
+                                    # chunk itself carried no token counts, briefly drain
+                                    # the trailing line(s) so _line_from captures the usage
+                                    # for tps — otherwise OpenAI-dialect hosts record ttft
+                                    # but never a rate. Accounting-only: not appended to
+                                    # the client buffer. Bounded and short so a host that
+                                    # sends nothing more can't stall the finish.
+                                    if oai and (done_obj[0] or {}).get("eval_count") is None:
+                                        for _ in range(3):
+                                            try:
+                                                extra = await asyncio.wait_for(resp.content.readline(), 5)
+                                            except Exception:
+                                                break
+                                            if not extra:
+                                                break
+                                            extra = extra.rstrip(b"\n\r")
+                                            if not extra:
+                                                continue
+                                            _line_from(extra)
+                                            if (done_obj[0] or {}).get("eval_count") is not None:
+                                                break
                                     break
                         await _flush(force=True)
 
@@ -10235,7 +10470,7 @@ async def _run_chat_job(session, jid):
                             # no em-dash) so last_fail_reason groups cleanly; the feed
                             # line below carries the readable text.
                             record_verdict(host, full, timed_out("stream stalled"))
-                            errors.append(f"{host}: stream stalled — no tokens for {STREAM_STALL}s")
+                            errors.append(f"{host}: stream stalled — no tokens for {TIMEOUT}s")
                             servers = [s for s in servers if s[1] != host]
                             if partial[0].strip():
                                 opayload["messages"] = list(opayload.get("messages") or []) + [
@@ -10308,6 +10543,27 @@ async def _run_chat_job(session, jid):
                             wid=job_wid)
                         _set_worker_phase(job_wid, None)
                         continue         # re-race (the host is fine) with the bigger window
+                    if done_obj[0] is None:
+                        # The stream ENDED with no `done` terminator (and it wasn't a
+                        # context-length truncation, handled above) — the host closed the
+                        # connection mid-generation. That's the INSTANTLY-detectable "it
+                        # was emitting tokens, then died" case: a healthy host always
+                        # sends done, so no timeout wait is needed to conclude it's dead.
+                        # Fail over like a stall — carry the partial, ding the host — so a
+                        # mid-generation block doesn't get returned as a truncated answer.
+                        record_verdict(host, full, timed_out("stream dropped"))
+                        errors.append(f"{host}: stream dropped mid-generation")
+                        await broadcast_activity(host, full, "failed",
+                            f"stream dropped: {host} for {full} — ended with no completion", wid=job_wid)
+                        servers = [s for s in servers if s[1] != host]
+                        if partial[0].strip():
+                            opayload["messages"] = list(opayload.get("messages") or []) + [
+                                {"role": "assistant", "content": partial[0]},
+                                {"role": "user", "content": "Continue your previous answer from "
+                                 "exactly where it was cut off. Do not repeat what you already wrote."},
+                            ]
+                        _set_worker_phase(job_wid, None)
+                        continue         # re-race the remaining hosts
                     status = "ok"
                     # Token accounting for the dashboard's own chat path (this job
                     # runner streams to a buffer, so it never hit the _forward_stream
@@ -12220,6 +12476,20 @@ def load_edit_families():
     return out
 
 
+def _is_encode_family_model(name):
+    """True if `name` is a known DiT/encode-family model (z-image, Flux.2,
+    Qwen-Image …) per the edit-family model patterns. Such a model needs the
+    recipe graph (a separate text encoder + VAE), NEVER the plain
+    CheckpointLoaderSimple path — even when it is filed under a host's
+    checkpoints/ folder, where its CLIP/VAE are not bundled and the plain graph
+    would feed CLIPTextEncode a null clip."""
+    for fam in load_edit_families():
+        pat = fam.get("model")
+        if pat and re.search(pat, name):
+            return True
+    return False
+
+
 def image_magic(data):
     """The image type from the leading bytes, or None if it isn't an image.
     LoadImage opens the file with PIL, so bytes that aren't a real image come
@@ -12370,7 +12640,7 @@ def _pick(options, *patterns):
     return None
 
 
-def _edit_plan(info, model_filter=None, exclude=(), n_images=0):
+def _edit_plan(info, model_filter=None, exclude=(), n_images=0, reasons=None):
     """Decide how to drive an edit on this host, or None if it can't.
 
     Everything is resolved against the host's live loader enums — those are the
@@ -12437,14 +12707,22 @@ def _edit_plan(info, model_filter=None, exclude=(), n_images=0):
             clip2 = _pick(clips, *_hints(fam.get("clip2"))) if fam.get("clip2") else None
             vae = _pick(vaes, *_hints(fam.get("vae"))) if fam.get("vae") else None
             if fam.get("clip") and not clip1:
+                if reasons is not None:
+                    reasons.append(f"{fam['name']}: has the model but no matching text encoder")
                 continue
             if fam.get("clip2") and not clip2:
+                if reasons is not None:
+                    reasons.append(f"{fam['name']}: has the model but no matching 2nd text encoder")
                 continue
             if fam.get("vae") and not vae:
+                if reasons is not None:
+                    reasons.append(f"{fam['name']}: has the model but no matching VAE")
                 continue
             if fam.get("clip_type"):
                 needed = dual_types if fam.get("clip2") else clip_types
                 if fam["clip_type"] not in needed:
+                    if reasons is not None:
+                        reasons.append(f"{fam['name']}: host CLIPLoader lacks type '{fam['clip_type']}'")
                     continue
 
             loader = {"clip": clip1, "clip2": clip2, "vae": vae,
@@ -13088,7 +13366,26 @@ def _wire_node(info, cls, node_id, graph, links, overrides=None):
         if "default" in attrs:
             inputs[name] = attrs["default"]
         elif isinstance(typ, list) and typ:
-            inputs[name] = typ[0]
+            inputs[name] = typ[0]                       # old-style enum: entry[0] IS the option list
+        elif typ == "COMBO" and isinstance(attrs.get("options"), list) and attrs["options"]:
+            # newer ComfyUI declares a dropdown as ["COMBO", {"options": [...]}] — the
+            # options live in attrs, not entry[0]. Missing this left the field blank and
+            # the host rejected it ("value_not_in_list"). Pick the first valid option.
+            inputs[name] = attrs["options"][0]
+        else:
+            # A REQUIRED input with no default and no enum (e.g. AceStep1.5's
+            # `keyscale`/`timesignature` STRING fields) was being DROPPED, so the host
+            # rejected the graph with required_input_missing. Every required input must
+            # be present — fill a type-appropriate benign fallback so the graph always
+            # validates. (The model uses its own default behaviour for a blank field.)
+            if typ == "INT":
+                inputs[name] = int(attrs.get("default", attrs.get("min", 0)) or 0)
+            elif typ == "FLOAT":
+                inputs[name] = float(attrs.get("default", attrs.get("min", 0)) or 0)
+            elif typ == "BOOLEAN":
+                inputs[name] = bool(attrs.get("default", False))
+            else:
+                inputs[name] = ""                       # STRING and anything else
     graph[node_id] = {"class_type": cls, "inputs": inputs}
     return graph[node_id]
 
@@ -13611,11 +13908,26 @@ def make_app():
         app["semaphore"] = asyncio.Semaphore(WORKER_COUNT)
 
     async def on_shutdown(app):
+        # End the SSE activity streams.
         async with _activity_lock:
             for q in _activity_queues:
                 await q.put(None)
             _activity_queues.clear()
-        await app["session"].close()
+        # Fast, clean exit: cancel EVERY outstanding task — chat/video/music job
+        # runners, the test-all sweep, video polls, and any still-open request
+        # streams. Without this their in-flight upstream requests hold the shared
+        # session (and sockets) open, so session.close() and the graceful shutdown
+        # block — which is why quitting took several Ctrl+C. Bounded waits so a
+        # stuck task can't stall the exit either.
+        me = asyncio.current_task()
+        others = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+        for t in others:
+            t.cancel()
+        if others:
+            with contextlib.suppress(Exception):
+                await asyncio.wait(others, timeout=2)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(app["session"].close(), timeout=2)
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
@@ -13658,6 +13970,7 @@ def make_app():
     swagger.add_get("/refresh", handle_refresh)
 
     swagger.add_post("/api/show", handle_api_show)
+    swagger.add_post("/api/embeddings", handle_api_embeddings)
     swagger.add_post("/api/stop", handle_ollama_stop)
     swagger.add_post("/api/pull", handle_api_pull)
     swagger.add_post("/api/chat", handle_ollama_chat)
@@ -13836,6 +14149,10 @@ def main():
             app,
             host=args.host or "0.0.0.0",
             port=PORT,
+            # Don't wait out aiohttp's default 60s for lingering connections on quit
+            # — on_shutdown already cancels the background tasks, so a couple seconds
+            # is plenty for a clean exit on the FIRST Ctrl+C.
+            shutdown_timeout=3,
             access_log_format='%t %a "%r" %s %b "%{Referer}i" "%{User-Agent}i"',
             access_log_class=QuietAccessLogger,
             print=lambda *a: None,

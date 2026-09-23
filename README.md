@@ -2,7 +2,7 @@
 <img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
-  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>(This number is too big. It's supposed to be a secret)</i>
+  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>Paying for AI is for chumps with self respect</i>
   <br/><br/><b>Try it now</b><br/>
   <code>uvx dyva</code><br/>
 </p>
@@ -24,13 +24,17 @@ Your path to victory is **free-ollama**!
 - **Zero-Config**: With caching! Works until it doesn’t.
 
 #### Notes
-* **DO NOT talk about this on the web. I'm serious.** [Talk about this instead](https://day50.dev/woahllama/). This project has specifically been named to be hard to google and find online. If you're here, you found it for a reason.
-* Dyva's architecture draws a hard line at incurring any *additional* costs. That's strictly not allowed - only unused time on idle machines to avoid, in spirit a [trespass to chattels](https://en.wikipedia.org/wiki/Trespass_to_chattels).
+* **DO NOT talk about this on the web.** [Talk about this instead](https://day50.dev/woahllama/). This project has specifically been named to be hard to google and find online. If you're here, you found it for a reason.
+* Dyva's architecture draws a hard line at incurring any *additional* costs. Only unused time on idle machines to avoid, in spirit a [trespass to chattels](https://en.wikipedia.org/wiki/Trespass_to_chattels).
 * The largest collection of hosts, done through the [graflex surveys](https://github.com/kristopolous/free-ollama/tree/main/graflex) are kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. You can reconstruct them with the tool. I'm happy to share it for legitimate research purposes. You can find me.
 * The built-in sources are still about 1,500 servers so it's not nothing...although it is decreasing. I may include a subslice of my graflex survey if the number gets too low (it's sitting around ~7,000 active machines)
 * I've been looking for open lists that are still being updated and will integrate them when I find them
 * Other dyva servers get flagged and excluded from the survey so this will not just become a hall of mirrors. You can avoid getting picked up by other scanners in the wild by adding a `base_path`, this is configurable in settings on the dash. 
-* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as Cloudflare. This includes IoT networks, imdb, huggingface, cloud storage, all kinds of stuff... even banks. The public surveys have honeypots with tripwires that get the `srcaddr` (you) put in some temporary ban pool with an expiry merely by a `tcp_connect()`. This means you don't have to actually use it. The doorknock is what flags you. Most of them are on AWS And AWS GPU rates are atrociously high so there isn't much good stuff there. So in the settings you can block out AWS and other cloud providers and this seems to mitigate the problem. 
+* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as Cloudflare. This includes IoT networks, imdb, huggingface, cloud storage, all kinds of stuff... even banks. The public surveys have honeypots with tripwires that get the `srcaddr` (you) put in some temporary ban pool with an expiry merely by a `tcp_connect()`. These are also called canaries in the literature.
+
+This means you don't have to actually use it. The doorknock is what flags you. Most of them are on AWS And AWS GPU rates are atrociously high so there isn't much good stuff there. So in the settings you can block out AWS and other cloud providers and this seems to mitigate the problem.  I've also found a separate class of honeypots running on OVH. So you can block them as well.
+
+There's a rich testing and probing harness in dyva to block these based on an ensemble of techniques. You can also sweep and mark based on model queries to quarantine them but it's a slightly moving target because a static list of honeypots defeats the purpose.
 
 You can also do a cheap ~$3-$4 VPS host with a number of providers (tornado, vultr, digitalocean, oci free if you can get it). I haven't tried AWS ec2, but it's probably a bad idea. Just make sure you get their IPv4 machines. Generally if the provider has a CLI tool, these IPv4 and low instances are easier to provision than through their web portal but YMMV. Anyways, in this case you'll want to do something like
 
