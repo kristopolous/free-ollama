@@ -2296,6 +2296,37 @@ def load_race_times():
     return out
 
 
+# STRUCTURAL failure signatures: the host lists the model but can NEVER run it, so
+# the (host, model) pair is a permanent dead end — distinct from a transient failure
+# (timeout, reset, 503 busy, "loading model") that may work next time. Conservative
+# on purpose: only signatures that mean "this file can't run here" (an ollama build
+# too old for the arch, a missing/corrupt blob, a model the host doesn't actually
+# have). NOT the lmstudio "failed to load model" (can be transient OOM) and NOT
+# "does not support thinking" (retried without think). Tune as new ones show up.
+_STRUCTURAL_FAIL_RE = re.compile(
+    r"unknown renderer"
+    r"|unable to load model"
+    r"|no such model"
+    r"|model [\"'].{0,80}?[\"'] not found"
+    r"|does not exist",
+    re.I)
+
+
+def load_incompatible():
+    """{f'{host} {model}'} pairs whose recorded failure is STRUCTURAL (see
+    _STRUCTURAL_FAIL_RE). find_servers HARD-EXCLUDES these — they never work, so
+    they must not be candidates at all, not even a bad-tier last resort that gets
+    re-raced every request (and, in Explore, re-tried as if unmapped). A host that
+    later succeeds flips out of state='bad' and is re-included automatically."""
+    out = set()
+    for h, m, r in _get_db().execute(
+            f"SELECT host, model, last_fail_reason FROM host_status "
+            f"WHERE state='bad' AND last_fail_reason IS NOT NULL AND {_LIVE_REAL}").fetchall():
+        if r and _STRUCTURAL_FAIL_RE.search(r):
+            out.add(f"{h} {m}")
+    return out
+
+
 def add_good(host, model):
     """Successful inference: host is good, stamp last_good, reset failure_streak.
     Also clears any host-wide unreachable mark, since the host clearly answered."""
@@ -3168,7 +3199,7 @@ def _known_capable(host, model, caps):
 TIER_EXPLORE, TIER_LAST, TIER_GOOD, TIER_MAYBE, TIER_UNKNOWN, TIER_BAD = -4, -3, -2, -1, 0, 1
 
 
-def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False):
+def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False, raced=False):
     if unreachable:
         return TIER_BAD
     if is_last:
@@ -3179,10 +3210,16 @@ def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False):
         return TIER_MAYBE
     if in_bad:
         return TIER_BAD
-    # A genuine unknown (no mark at all). Explore mode pushes these to the FRONT
-    # so the router spends its attempts discovering unmapped hosts — deliberately
-    # slower, but it's how the unknown pool gets characterized.
-    return TIER_EXPLORE if EXPLORE_MODE else TIER_UNKNOWN
+    # A genuine unknown (no good/maybe/bad mark). Explore fronts it ONLY if we have
+    # NEVER raced it — that unmapped frontier is the entire point of Explore mode. A
+    # host we've already raced (it carries a last_race stamp, e.g. a no-verdict
+    # timeout) is, by definition, explored: it drops to the normal unknown tier
+    # (below good/maybe), so Explore stops re-grinding the same visited-but-unproven
+    # hosts every pass and falls back to known-good ones once the frontier is
+    # exhausted. Without this, "explore" degrades into re-calling the same bunk pool.
+    if EXPLORE_MODE and not raced:
+        return TIER_EXPLORE
+    return TIER_UNKNOWN
 
 
 def capability_tier(host, key, marks, last_host, extra_bad=False):
@@ -3291,6 +3328,9 @@ def _find_servers_raw(sub, caps=None):
     # Explore de-prioritizes hosts dyva has already raced (incl. no-verdict
     # timeouts) so they aren't re-fronted forever; only needed in Explore.
     race_times = load_race_times() if EXPLORE_MODE else {}
+    # (host, model) pairs that failed STRUCTURALLY (can never run this model) —
+    # hard-excluded from candidates below, in every mode.
+    incompatible = load_incompatible()
     # For "any" (empty sub) queries, collapse each host's per-model marks into a
     # single best-first state so the host inherits everything dyva knows about it.
     host_state = None
@@ -3329,6 +3369,15 @@ def _find_servers_raw(sub, caps=None):
         if any(re.search(r"[:-]cloud", m) for m in ms) and not re.search(r"[:-]cloud", sub):
             continue
         host = s.get("server", "")
+        # Drop (host, model) pairs that failed STRUCTURALLY (old-ollama "unknown
+        # renderer", missing/corrupt blob, model-not-found): they never work, so
+        # they must not be candidates at all — not a bad-tier last resort re-raced
+        # every request, and not an Explore "unmapped" re-try. Transient-bad pairs
+        # are untouched (still retryable, just tier-last).
+        if incompatible:
+            ms = [m for m in ms if f"{host} {canon_pattern(m)}" not in incompatible]
+            if not ms:
+                continue
         if caps:
             caps_map = (knowns.get(host) or {}).get("models", {})
             known = [(m, caps_map[m]) for m in ms if caps_map.get(m)]
@@ -3364,7 +3413,8 @@ def _find_servers_raw(sub, caps=None):
                  if v.get("host") == host),
                 None)
         is_last = _last is not None and host == _last[0]
-        prio = host_tier(is_last, in_good, in_maybe, in_bad, host in unreachable)
+        prio = host_tier(is_last, in_good, in_maybe, in_bad, host in unreachable,
+                         raced=(host in race_times))
         # Within the UNKNOWN tier only, try the most-recently-checked hosts
         # first (recently reachable => likelier still up). Other tiers keep
         # their existing order via a constant secondary key (stable sort).
