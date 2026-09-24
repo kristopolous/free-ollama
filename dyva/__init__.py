@@ -2281,6 +2281,21 @@ def load_maybe():
     return _keys_with_state("maybe_good")
 
 
+def load_race_times():
+    """{host: most-recent last_race iso} across all models — the last time dyva
+    itself raced/visited the host (stamped by record_race, even without a good/bad
+    verdict, e.g. a no-answer timeout). Explore uses it to de-prioritize hosts it
+    has already touched so a slow host isn't re-fronted as unmapped and made to
+    time out over and over."""
+    out = {}
+    for h, lr in _get_db().execute(
+            f"SELECT host, MAX(last_race) FROM host_status "
+            f"WHERE last_race IS NOT NULL AND {_LIVE_REAL} GROUP BY host").fetchall():
+        if lr:
+            out[h] = lr
+    return out
+
+
 def add_good(host, model):
     """Successful inference: host is good, stamp last_good, reset failure_streak.
     Also clears any host-wide unreachable mark, since the host clearly answered."""
@@ -3187,20 +3202,28 @@ def load_marks():
     return load_good(), load_maybe(), load_bad(), load_unreachable()
 
 
-def _checked_rank(s, explore=False):
+def _checked_rank(s, explore=False, last_race=None):
     """Sort key within the unknown tier. Normally: most-recently-checked first
     (recently reachable => likelier still up), no/invalid timestamp to the back.
     In Explore mode the goal is the opposite — reach unmapped ground — so a
-    never-checked host sorts to the FRONT and, among checked ones, the oldest
-    (least-recently-visited) goes first."""
-    ck = s.get("checked")
-    if not ck:
-        return float("-inf") if explore else float("inf")
-    try:
-        ts = datetime.datetime.fromisoformat(ck).timestamp()
-        return ts if explore else -ts
-    except Exception:
-        return float("-inf") if explore else float("inf")
+    never-VISITED host sorts to the FRONT and, among visited ones, the oldest
+    (least-recently-visited) goes first. In Explore, "visited" folds in dyva's own
+    `last_race` (the last time we raced the host, stamped even on a no-verdict
+    timeout) on top of the survey `checked` time — so a host we already probed that
+    just timed out is no longer treated as unmapped and re-fronted forever. Normal
+    routing is unchanged (survey `checked` only)."""
+    def _ts(v):
+        if not v:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(v).timestamp()
+        except Exception:
+            return None
+    ck = _ts(s.get("checked"))
+    if explore:
+        seen = max([t for t in (ck, _ts(last_race)) if t is not None], default=None)
+        return seen if seen is not None else float("-inf")
+    return -ck if ck is not None else float("inf")
 
 
 def find_servers(sub, caps=None):
@@ -3265,6 +3288,9 @@ def _find_servers_raw(sub, caps=None):
     good = load_good()
     maybe = load_maybe()
     unreachable = load_unreachable()
+    # Explore de-prioritizes hosts dyva has already raced (incl. no-verdict
+    # timeouts) so they aren't re-fronted forever; only needed in Explore.
+    race_times = load_race_times() if EXPLORE_MODE else {}
     # For "any" (empty sub) queries, collapse each host's per-model marks into a
     # single best-first state so the host inherits everything dyva knows about it.
     host_state = None
@@ -3342,7 +3368,7 @@ def _find_servers_raw(sub, caps=None):
         # Within the UNKNOWN tier only, try the most-recently-checked hosts
         # first (recently reachable => likelier still up). Other tiers keep
         # their existing order via a constant secondary key (stable sort).
-        crank = _checked_rank(s, EXPLORE_MODE) if prio in (TIER_UNKNOWN, TIER_EXPLORE) else 0
+        crank = _checked_rank(s, EXPLORE_MODE, race_times.get(host)) if prio in (TIER_UNKNOWN, TIER_EXPLORE) else 0
         matched.append((prio, crank, host, ms))
     matched.sort(key=lambda x: (x[0], x[1]))
     return [(p, h, m) for p, c, h, m in matched]
@@ -4461,8 +4487,12 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             if isinstance(e, asyncio.TimeoutError):
                 # Connected but too slow (cold start / slow inference). It's alive,
                 # not dead — so DON'T penalise it (a slow cold host is often fast
-                # once warm). Skip records nothing; the race already moved on.
+                # once warm): no bad mark. But DO record that we visited it, via a
+                # race stamp (last_race, state stays 'unknown'), so Explore stops
+                # re-fronting it as unmapped and racking up repeat timeouts.
                 msg = f"too slow — connected, no answer in {dur:.0f}s"
+                with contextlib.suppress(Exception):
+                    record_race(host, model, won=False)
                 await broadcast_activity(host, model, "warming",
                     f"slow: {host} for {model} - {msg}", duration=dur, wid=wid)
                 return skip(msg)
