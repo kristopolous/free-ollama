@@ -7856,6 +7856,7 @@ async def handle_sd_models(request):
         fam, takes_sampler = _image_family(row["id"])
         row["family"] = fam
         row["sampler"] = takes_sampler    # False => flow/DiT family, sampler dropdown is inert
+        row["nsfw"] = is_nsfw_model(row["id"])   # so the UI can hide NSFW models by default
     return web.json_response({
         "object": "list",
         "data": sorted(seen.values(), key=lambda x: -x["count"]),
@@ -9119,12 +9120,20 @@ async def _txt2img_comfyui(session, host, body, model_filter=None):
         ckpt = next(
             (c for c in checkpoints if model_query_match(c, model_filter)), None)
     elif checkpoints:
-        # Auto-pick (no model named): prefer a non-NSFW checkpoint so a plain
-        # request ("a cute puppy") doesn't land on an NSFW-tuned model that emits
-        # a nude regardless of the prompt. Fall back to whatever the host has if
-        # every option is NSFW. (An explicitly-named model takes the branch above
-        # and is always honored.)
-        ckpt = next((c for c in checkpoints if not is_nsfw_model(c)), checkpoints[0])
+        # Auto-pick (no model named): use a non-NSFW checkpoint so a plain request
+        # ("a cute puppy") doesn't land on an NSFW-tuned model that emits a nude
+        # regardless of the prompt. If EVERY checkpoint here is NSFW, only fall back
+        # to one when the caller opted in (allow_nsfw, the dashboard's "use NSFW
+        # models" box) — otherwise DECLINE this host so routing fails over to one
+        # with a safe model, instead of silently returning a nude. (An explicitly-
+        # named model takes the branch above and is always honored.)
+        nonnsfw = [c for c in checkpoints if not is_nsfw_model(c)]
+        if nonnsfw:
+            ckpt = nonnsfw[0]
+        elif body.get("allow_nsfw"):
+            ckpt = checkpoints[0]
+        else:
+            raise ComfyUnsuitable("host has only NSFW checkpoints — skipped for a non-NSFW request (tick 'use NSFW models' to allow)")
     # A named DiT/encode family (z-image, Flux.2, Qwen-Image …) can sit in the
     # host's checkpoints/ folder, but it is NOT an all-in-one checkpoint — driving
     # it through the plain CheckpointLoaderSimple graph feeds CLIPTextEncode a null

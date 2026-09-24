@@ -377,6 +377,10 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 .worker-flag[disabled]:hover{background:transparent;border-color:var(--border);color:var(--text-2)}
 
 label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-2)}
+.lbl-row{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);margin-bottom:var(--sp-2)}
+.lbl-row label{margin-bottom:0}
+.nsfw-toggle{display:inline-flex;align-items:center;gap:.35em;font-size:var(--fs-xs);color:var(--text-muted);cursor:pointer;white-space:nowrap}
+.nsfw-toggle input{width:auto;margin:0;accent-color:var(--accent);cursor:pointer}
 input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-3) 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--field-bg);color:var(--text);font-size:var(--fs-md);outline:none;font-family:var(--font-mono)}
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:var(--border-focus)}
 .filter-row{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3);flex-shrink:0}
@@ -1112,7 +1116,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 <div class="img-params">
 <div class="field generate-only">
-<label for="sdModel">Image model</label>
+<div class="lbl-row"><label for="sdModel">Image model</label><label class="nsfw-toggle" for="imgNsfw" title="Show NSFW-leaning image models in the list. Off by default."><input type="checkbox" id="imgNsfw"> use NSFW models</label></div>
 <input id="sdModel" type="text" list="sdModels" placeholder="type or select an image model..." autocomplete="off">
 <datalist id="sdModels"></datalist>
 </div>
@@ -6656,25 +6660,37 @@ function loadEditModels(){
 // which already merges both. (The server-injected __SD_MODELS__ datalist was
 // a1111-only, which is why z-image/krea couldn't be picked.) Each row carries
 // whether its family uses a user-selectable sampler.
-var _imageModelsLoaded=false,_imgSamplerByModel={};
+var _imageModelsLoaded=false,_imgSamplerByModel={},_imgRows=[];
 function loadImageModels(){
   if(_imageModelsLoaded)return;_imageModelsLoaded=true;
   fetch('sdapi/v1/sd-models',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
-    var dl=document.getElementById('sdModels'),rows=j.data||[];
-    dl.innerHTML='';_imgSamplerByModel={};
-    rows.forEach(function(o){
-      var opt=document.createElement('option');
-      opt.value=o.id;
-      opt.label=(o.family?o.family+' \u00b7 ':'')+o.count+' host'+(o.count===1?'':'s');
-      dl.appendChild(opt);
-      _imgSamplerByModel[o.id]=(o.sampler!==false);
-    });
-    document.getElementById('sdModel').placeholder=rows.length
-      ? rows.length+' image models \u2014 blank auto-picks'
-      : 'no image models found';
-    updateSamplerState();
+    _imgRows=j.data||[];
+    renderImageModels();
   }).catch(function(){_imageModelsLoaded=false;});
 }
+// Populate the model list, hiding NSFW-leaning models unless the "NSFW models"
+// checkbox is on (off by default \u2014 a plain request shouldn't be offered them).
+function renderImageModels(){
+  var dl=document.getElementById('sdModels');if(!dl)return;
+  var allowNsfw=!!(document.getElementById('imgNsfw')||{}).checked;
+  var rows=_imgRows.filter(function(o){return allowNsfw||!o.nsfw;});
+  dl.innerHTML='';_imgSamplerByModel={};
+  rows.forEach(function(o){
+    var opt=document.createElement('option');
+    opt.value=o.id;
+    // Lead the shown text with the model NAME (not a bare family/host label) so a
+    // search like "real" surfaces the matching names \u2014 a name-less label made the
+    // model name invisible in the suggestion list.
+    opt.label=o.id+'  \u00b7  '+o.count+' host'+(o.count===1?'':'s')+(o.family?'  \u00b7  '+o.family:'');
+    dl.appendChild(opt);
+    _imgSamplerByModel[o.id]=(o.sampler!==false);
+  });
+  document.getElementById('sdModel').placeholder=rows.length
+    ? rows.length+' image models \u2014 blank auto-picks'
+    : (_imgRows.length?'no models shown \u2014 tick NSFW models to include them':'no image models found');
+  updateSamplerState();
+}
+(function(){var c=document.getElementById('imgNsfw');if(c)c.addEventListener('change',renderImageModels);})();
 // A flow/DiT model (flux, krea, z-image, qwen-image, sd3...) has dyva choose the
 // sampler from its recipe, so the A1111 sampler dropdown does nothing \u2014 grey it
 // out. Classic SD keeps it. Only disable when we KNOW the selected model is a
@@ -6848,6 +6864,7 @@ async function generateImage(){
     cfg_scale:parseFloat(document.getElementById('imgCfg').value)||7,
     batch_size:1,
     sampler_name:document.getElementById('imgSampler').value,
+    allow_nsfw:!!(document.getElementById('imgNsfw')||{}).checked,
   };
   btn.disabled=true;
   result.innerHTML='';
