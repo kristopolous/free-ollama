@@ -2281,18 +2281,19 @@ def load_maybe():
     return _keys_with_state("maybe_good")
 
 
-def load_race_times():
-    """{host: most-recent last_race iso} across all models — the last time dyva
-    itself raced/visited the host (stamped by record_race, even without a good/bad
-    verdict, e.g. a no-answer timeout). Explore uses it to de-prioritize hosts it
-    has already touched so a slow host isn't re-fronted as unmapped and made to
-    time out over and over."""
+def load_race_stats():
+    """{host: (race_won, race_lost, last_race)} aggregated across all models — how
+    dyva has actually raced each host. Drives Explore's tier cascade:
+      * never appeared at all           -> a truly-unmapped frontier host
+      * raced but race_won==0, no verdict -> a LOSER: only ever out-raced/cancelled
+                                             by a faster peer, so NEVER fairly evaluated
+      * won a race or has a verdict       -> characterized
+    last_race is the LRU key that cycles each tier so no host is re-hammered."""
     out = {}
-    for h, lr in _get_db().execute(
-            f"SELECT host, MAX(last_race) FROM host_status "
-            f"WHERE last_race IS NOT NULL AND {_LIVE_REAL} GROUP BY host").fetchall():
-        if lr:
-            out[h] = lr
+    for h, w, l, lr in _get_db().execute(
+            f"SELECT host, SUM(race_won), SUM(race_lost), MAX(last_race) "
+            f"FROM host_status WHERE {_LIVE_REAL} GROUP BY host").fetchall():
+        out[h] = (w or 0, l or 0, lr)
     return out
 
 
@@ -3194,12 +3195,17 @@ def _known_capable(host, model, caps):
 # model name. last/good/maybe deliberately outrank a stale bad mark, so a host
 # with one transient failure isn't buried behind the unreachable junk; a host
 # dead at the connection level drops to the bad tier for everything at once.
-# TIER_EXPLORE outranks everything: in Explore mode an unknown/unvisited host is
-# what we most want to try (to map the pool), so it sorts ahead of last/good.
-TIER_EXPLORE, TIER_LAST, TIER_GOOD, TIER_MAYBE, TIER_UNKNOWN, TIER_BAD = -4, -3, -2, -1, 0, 1
+# Normal routing tiers, best first. In Explore mode, find_servers PREPENDS two tiers
+# AHEAD of these — TIER_EXPLORE_NEW (never-raced: the unmapped frontier) and
+# TIER_EXPLORE_LOSER (raced but never won and no verdict: only ever out-raced, so
+# never fairly evaluated). Keeping good/sticky in the NORMAL tiers, BEHIND those two,
+# is exactly what lets the frontier and losers race among themselves and actually WIN
+# (get characterized) instead of a fast sticky preempting them forever.
+TIER_EXPLORE_NEW, TIER_EXPLORE_LOSER = -6, -5
+TIER_LAST, TIER_GOOD, TIER_MAYBE, TIER_UNKNOWN, TIER_BAD = -3, -2, -1, 0, 1
 
 
-def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False, raced=False):
+def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False):
     if unreachable:
         return TIER_BAD
     if is_last:
@@ -3210,15 +3216,6 @@ def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False, raced=False
         return TIER_MAYBE
     if in_bad:
         return TIER_BAD
-    # A genuine unknown (no good/maybe/bad mark). Explore fronts it ONLY if we have
-    # NEVER raced it — that unmapped frontier is the entire point of Explore mode. A
-    # host we've already raced (it carries a last_race stamp, e.g. a no-verdict
-    # timeout) is, by definition, explored: it drops to the normal unknown tier
-    # (below good/maybe), so Explore stops re-grinding the same visited-but-unproven
-    # hosts every pass and falls back to known-good ones once the frontier is
-    # exhausted. Without this, "explore" degrades into re-calling the same bunk pool.
-    if EXPLORE_MODE and not raced:
-        return TIER_EXPLORE
     return TIER_UNKNOWN
 
 
@@ -3239,28 +3236,30 @@ def load_marks():
     return load_good(), load_maybe(), load_bad(), load_unreachable()
 
 
-def _checked_rank(s, explore=False, last_race=None):
-    """Sort key within the unknown tier. Normally: most-recently-checked first
-    (recently reachable => likelier still up), no/invalid timestamp to the back.
-    In Explore mode the goal is the opposite — reach unmapped ground — so a
-    never-VISITED host sorts to the FRONT and, among visited ones, the oldest
-    (least-recently-visited) goes first. In Explore, "visited" folds in dyva's own
-    `last_race` (the last time we raced the host, stamped even on a no-verdict
-    timeout) on top of the survey `checked` time — so a host we already probed that
-    just timed out is no longer treated as unmapped and re-fronted forever. Normal
-    routing is unchanged (survey `checked` only)."""
-    def _ts(v):
-        if not v:
-            return None
-        try:
-            return datetime.datetime.fromisoformat(v).timestamp()
-        except Exception:
-            return None
-    ck = _ts(s.get("checked"))
-    if explore:
-        seen = max([t for t in (ck, _ts(last_race)) if t is not None], default=None)
-        return seen if seen is not None else float("-inf")
-    return -ck if ck is not None else float("inf")
+def _checked_rank(s):
+    """Sort key within the NORMAL unknown tier: most-recently-checked first (recently
+    reachable => likelier still up), no/invalid timestamp to the back. (Explore uses
+    its own _lru_rank cascade instead — see find_servers.)"""
+    ck = s.get("checked")
+    if not ck:
+        return float("inf")
+    try:
+        return -datetime.datetime.fromisoformat(ck).timestamp()
+    except Exception:
+        return float("inf")
+
+
+def _lru_rank(ts):
+    """Least-recently-used sort key for Explore's tiers: a host with no timestamp
+    (never touched) sorts FIRST, then oldest-first. This cycles each Explore tier so
+    the router keeps reaching for the host it has gone longest without trying, rather
+    than re-hammering the same few."""
+    if not ts:
+        return float("-inf")
+    try:
+        return datetime.datetime.fromisoformat(ts).timestamp()
+    except Exception:
+        return float("-inf")
 
 
 def find_servers(sub, caps=None):
@@ -3327,7 +3326,7 @@ def _find_servers_raw(sub, caps=None):
     unreachable = load_unreachable()
     # Explore de-prioritizes hosts dyva has already raced (incl. no-verdict
     # timeouts) so they aren't re-fronted forever; only needed in Explore.
-    race_times = load_race_times() if EXPLORE_MODE else {}
+    race_stats = load_race_stats() if EXPLORE_MODE else {}
     # (host, model) pairs that failed STRUCTURALLY (can never run this model) —
     # hard-excluded from candidates below, in every mode.
     incompatible = load_incompatible()
@@ -3413,12 +3412,28 @@ def _find_servers_raw(sub, caps=None):
                  if v.get("host") == host),
                 None)
         is_last = _last is not None and host == _last[0]
-        prio = host_tier(is_last, in_good, in_maybe, in_bad, host in unreachable,
-                         raced=(host in race_times))
-        # Within the UNKNOWN tier only, try the most-recently-checked hosts
-        # first (recently reachable => likelier still up). Other tiers keep
-        # their existing order via a constant secondary key (stable sort).
-        crank = _checked_rank(s, EXPLORE_MODE, race_times.get(host)) if prio in (TIER_UNKNOWN, TIER_EXPLORE) else 0
+        prio = host_tier(is_last, in_good, in_maybe, in_bad, host in unreachable)
+        if EXPLORE_MODE:
+            # Explore cascade (perpetual, LRU-cycled): race the never-raced frontier
+            # first, then LOSERS (raced but never won and no verdict — only ever
+            # out-raced/cancelled, so never fairly evaluated), and only then the
+            # normal tiers (good/sticky/…). Putting the frontier and losers AHEAD of
+            # good is what lets them race among themselves and actually win — instead
+            # of the fast sticky preempting them every time. Each tier is ordered LRU
+            # so the pool cycles and nothing is re-hammered. Connections stay bounded
+            # by the per-attempt timeout (no run-to-completion, no side-channel probe).
+            won, lost, lr = race_stats.get(host, (0, 0, None))
+            if not (in_good or in_maybe or in_bad or won > 0 or host in unreachable):
+                if lost == 0 and lr is None:
+                    prio, crank = TIER_EXPLORE_NEW, _lru_rank(s.get("checked"))
+                else:
+                    prio, crank = TIER_EXPLORE_LOSER, _lru_rank(lr)
+            else:
+                crank = _lru_rank(lr)   # characterized: cycle by least-recently-raced
+        else:
+            # Within the normal UNKNOWN tier, most-recently-checked first; other tiers
+            # keep their order via a constant secondary key (stable sort).
+            crank = _checked_rank(s) if prio == TIER_UNKNOWN else 0
         matched.append((prio, crank, host, ms))
     matched.sort(key=lambda x: (x[0], x[1]))
     return [(p, h, m) for p, c, h, m in matched]
