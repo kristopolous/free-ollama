@@ -53,6 +53,9 @@ graflex -s vllm -a fetch-check
 # LM Studio hosts (default response body on port 1234)
 graflex -s lmstudio -a fetch-check
 
+# ds4 hosts (antirez's DeepSeek server; "unknown endpoint" body, US/CN)
+graflex -s ds4 -a fetch-check
+
 # Custom FOFA query — saves results to ollama-hosts.json
 graflex -q 'body="ollama"' -a fetch -n ollama -p 11434
 
@@ -149,7 +152,7 @@ host tagged `site: "zoomeye"`). Notes:
 `graflex.sh` wraps the fetch command with curated defaults per service:
 
 ```bash
-# Fetch hosts for ollama (or comfyui / a1111 / vllm / llama.cpp / lmstudio / gradio)
+# Fetch hosts for ollama (or comfyui / a1111 / vllm / llama.cpp / lmstudio / ds4 / gradio)
 ./graflex.sh ollama
 ```
 
@@ -166,6 +169,7 @@ Sources at `graflex/graflex.sh`. Fair warning: fetching the ollama takes about 1
 | `llama.cpp` | 8080 | `/v1/models` |
 | `vllm` | 8000 | `/v1/models` |
 | `lmstudio` | 1234 | `/v1/models` |
+| `ds4` | 8080 | `/v1/models` |
 
 ## Named queries
 
@@ -262,6 +266,12 @@ For `lmstudio`, FOFA discovers candidates by matching LM Studio's default
 response body (`Unexpected endpoint or method. (GET /)`) on port 1234. Each
 candidate is then probed at `/v1/models`, which returns loaded models in the
 same OpenAI-compatible format (`data[].id`) as `llama.cpp` and `vllm`.
+
+For `ds4` (antirez's DeepSeek-serving inference server; models report
+`owned_by: "ds4.c"`), FOFA discovers candidates by matching the exact error body
+its root/unknown paths return — `{"error":{"message":"unknown endpoint",...}}` —
+on port 8080, US/CN only (few in the wild). Each candidate is probed at
+`/v1/models`, returning models in the same OpenAI format (`data[].id`).
 
 For `llama.cpp`, hosts are also probed at `/props`; a `401` means the instance
 is locked down with an API key and is rejected (`auth required`).
@@ -389,7 +399,7 @@ the live, volatile thing (what node classes exist) to submit time.
 
 | Flag | Description |
 |------|-------------|
-| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`, `lmstudio`) |
+| `-s`, `--service` | Service to search for (`a1111`, `comfyui`, `ollama`, `llama.cpp`, `vllm`, `lmstudio`, `ds4`) |
 | `-a`, `--action` | Action: `fetch`, `check`, `check-new`, `check-all`, `check-working`, `reconstruct`, `fetch-check`, or `classify` |
 | `-d`, `--dry` | Print what would be done without making requests |
 | `--curlify` | Print curl command instead of executing (useful for debugging requests) |

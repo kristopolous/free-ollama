@@ -310,7 +310,7 @@ SERVICE_CONFIG = {
         # this exact error body, which is the FOFA fingerprint, while /v1/models
         # lists the real models (e.g. deepseek-v4-flash) and /v1/chat/completions
         # serves them. Few in the wild; US/CN only per the user.
-        "port": 8081,
+        "port": 8080,
         "fofa_query": "'{\"error\":{\"message\":\"unknown endpoint\",\"type\":\"invalid_request_error\"}}'",
         "countries": "US,CN",
         "check_path": "/v1/models",
