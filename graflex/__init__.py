@@ -1087,7 +1087,23 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 else:
                     data = await resp.json()
                     await resp.release()
-                    models = _filter_models(data if isinstance(data, list) else [])
+                    _save_check_snapshot(host, port, data)
+                    if isinstance(data, dict) and isinstance(data.get("data"), list):
+                        # OpenAI /v1/models shape: {"data":[{"id":...}, ...]}. The ds4
+                        # backend and any future OpenAI-dialect service land here
+                        # (data[].id), so a real model list isn't read as "0 models".
+                        seen = set()
+                        names = []
+                        for m in data["data"]:
+                            if isinstance(m, dict) and m.get("id") and m["id"] not in seen:
+                                seen.add(m["id"])
+                                names.append(m["id"])
+                        models = _filter_models(names)
+                    else:
+                        models = _filter_models(data if isinstance(data, list) else [])
+                    if not models:
+                        last_error = {"error": "no real models"}
+                        break
                     return {
                         "service": service,
                         "url": base_url,
