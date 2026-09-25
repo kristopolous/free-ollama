@@ -696,6 +696,32 @@ def _is_offline_error(exc):
     return type(exc).__name__ == "NameResolutionError" or _is_offline_msg(str(exc))
 
 
+async def _comfyui_folders_direct(session, base_url, folders, timeout=TIMEOUT):
+    """Fallback for comfyui hosts whose /models category index is unavailable (older
+    or locked ComfyUI): probe the named model folders DIRECTLY — their per-folder
+    endpoints answer even when /models doesn't — and return category-prefixed model
+    files (e.g. 'diffusion_models/flux1-dev.safetensors'), matching the tree's shape.
+    Best-effort: a folder that errors or doesn't return a list is skipped."""
+    out = []
+    for folder in folders:
+        try:
+            resp = await asyncio.wait_for(
+                session.get(f"{base_url}models/{folder}", allow_redirects=False),
+                timeout=timeout)
+            if resp.status != 200:
+                await resp.release()
+                continue
+            got = await resp.json()
+            await resp.release()
+        except Exception:
+            continue
+        if isinstance(got, list):
+            for m in got:
+                if isinstance(m, str) and m.lower().endswith(MODEL_EXTS):
+                    out.append(f"{folder}/" + m.replace("\\", "/"))
+    return out
+
+
 async def _comfyui_model_tree(session, base_url, timeout=TIMEOUT, workers=8):
     """Traverse /models -> /models/<category> and return entries prefixed with
     their category, e.g. 'checkpoints/majic_v7_sd15.safetensors'. Nested
@@ -976,10 +1002,8 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         result["version"] = version
                     return result
                 elif service == "comfyui":
-                    data = await resp.json()
+                    data = await resp.json()   # /models/checkpoints (the check_path)
                     await resp.release()
-                    raw = data if isinstance(data, list) else []
-                    models = _filter_models([m for m in raw if isinstance(m, str) and m.lower().endswith(MODEL_EXTS)])
                     tree = await _comfyui_model_tree(session, base_url, timeout=timeout)
                     if tree:
                         models = _filter_models(tree)
@@ -991,6 +1015,17 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                             "checked": datetime.now(timezone.utc).isoformat(),
                         }
                     else:
+                        # /models category index unavailable (older/locked ComfyUI).
+                        # Don't settle for checkpoints/ alone — most gen models live in
+                        # diffusion_models/ or unet/ (flux, qwen-image, z-image, wan), so
+                        # a checkpoints-only read reported "0 models" for ~60% of hosts.
+                        # Enumerate those folders directly; category-prefixed like the tree.
+                        found = ["checkpoints/" + str(m).replace("\\", "/")
+                                 for m in (data if isinstance(data, list) else [])
+                                 if isinstance(m, str) and m.lower().endswith(MODEL_EXTS)]
+                        found += await _comfyui_folders_direct(
+                            session, base_url, ("diffusion_models", "unet"), timeout=timeout)
+                        models = _filter_models(found)
                         result = {
                             "service": service,
                             "url": base_url,
