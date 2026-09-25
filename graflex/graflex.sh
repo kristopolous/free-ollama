@@ -15,7 +15,7 @@ source .env
 case "$SERVICE" in
   all)
 
-    for i in ollama vllm lmstudio fooocus ollama-shodan llama.cpp comfyui a1111 gradio; do
+    for i in ollama ds4 vllm lmstudio fooocus ollama-shodan llama.cpp comfyui a1111 gradio; do
       $CMD $i ${EXTRA_ARGS[@]}
       last_res="$?"
       echo ">>   "$last_res
@@ -171,6 +171,9 @@ ENDL
   fooocus)
     COUNTRIES='CN'
     SERVERS='uvicorn,nginx'
+    ;;
+
+  ds4)
     ;;
 
   gradio)
