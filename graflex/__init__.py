@@ -2310,9 +2310,14 @@ async def _is_honeypot(session, host, timeout):
         return False
 
 
-async def _check_working(service, name=None, check_timeout=60, workers=10, session=None):
+async def _check_working(service, name=None, check_timeout=60, workers=10, session=None,
+                         only_zero=False):
     """Re-survey the currently-working hosts: refresh their model list (people
-    keep downloading new models) and prune hosts that no longer respond."""
+    keep downloading new models) and prune hosts that no longer respond.
+
+    only_zero (check-zero): re-probe ONLY the hosts recorded with 0 models — to
+    correct erroneous zeros after a discovery fix — while preserving every
+    non-empty host untouched."""
     from datetime import datetime, timezone
 
     global _RUN_TS
@@ -2333,10 +2338,25 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
         log.warning(f"check-working: no working {service or '?'} hosts to rescan")
         return
 
+    # check-zero: re-probe ONLY the 0-model hosts (correcting erroneous zeros after a
+    # discovery fix). Every non-empty host is moved to `preserved` and written back
+    # untouched — never dropped.
+    zero_nonempty = []
+    if only_zero:
+        zeros = []
+        for w in working:
+            (zeros if not (w.get("models") or {}) else zero_nonempty).append(w)
+        log.info(f"check-zero: {len(zeros)} of {len(working)} hosts have 0 models — "
+                 f"re-checking those, preserving {len(zero_nonempty)} non-empty")
+        working = zeros
+        if not working:
+            log.info("check-zero: no 0-model hosts to re-check; pool left intact")
+            return
+
     # Resume: hosts already snapshotted THIS session aren't re-probed — but they
     # are still working hosts, so they must be PRESERVED in the pool, not dropped.
     # Writing back only the rescanned subset is exactly what nuked 4408 -> 11.
-    preserved = []
+    preserved = list(zero_nonempty)
     if session:
         to_scan = []
         for w in working:
@@ -2454,8 +2474,9 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
              f"pool now {len(out)}")
 
 
-def check_working(service, name=None, check_timeout=60, workers=10, session=None):
-    asyncio.run(_check_working(service, name, check_timeout, workers, session))
+def check_working(service, name=None, check_timeout=60, workers=10, session=None,
+                  only_zero=False):
+    asyncio.run(_check_working(service, name, check_timeout, workers, session, only_zero))
 
 
 def reconstruct(name=None, session=None):
@@ -3002,7 +3023,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "fetch-check", "classify", "enrich", "survey", "reconstruct", "score-bogus", "sample"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "check-zero", "fetch-check", "classify", "enrich", "survey", "reconstruct", "score-bogus", "sample"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -3085,22 +3106,26 @@ def main():
                         session=args.session)
         return
 
-    if args.action == "check-working":
-        log.info("--- check-working ---")
+    if args.action in ("check-working", "check-zero"):
+        only_zero = args.action == "check-zero"
+        label = args.action
+        log.info(f"--- {label} ---")
         # "-s all" re-surveys every service in turn — each has its own working
         # file, so this is just the single-service pass run once per service.
+        # check-zero re-probes only that file's 0-model hosts (correcting erroneous
+        # zeros, e.g. after the comfyui folder-discovery fix), preserving the rest.
         services = pipe_services
         try:
             for svc in services:
                 if all_services:
-                    log.info(f"--- check-working: {svc} ---")
+                    log.info(f"--- {label}: {svc} ---")
                 check_working(service=svc, name=(None if all_services else args.name),
                               check_timeout=args.check_timeout, workers=args.workers,
-                              session=args.session)
+                              session=args.session, only_zero=only_zero)
         except KeyboardInterrupt:
             base = f"graflex -s {args.service}" if args.service else f"graflex -n {args.name or 'image-gen'}"
             ts = _RUN_TS or args.session
-            hint = f"{base} -a check-working{f' -i {ts}' if ts else ''}"
+            hint = f"{base} -a {label}{f' -i {ts}' if ts else ''}"
             log.warning(f"\ninterrupted — tag snapshots are saved; resume with: {hint}")
             sys.exit(130)
         return
