@@ -1361,6 +1361,23 @@ def _parse_shodan_html(html_path, service):
     with open(html_path, encoding="utf-8", errors="replace") as f:
         content = f.read()
 
+    # A results page carries result rows; an `alert-error` block is not emitted over
+    # the wire unless an ACTUAL error occurred (invalid/expired key -> logged out,
+    # rate limit, changed markup, ...). We key on that container rather than a "Log
+    # in"/account string, which is unreliable — it can be present in the HTML and
+    # merely hidden by CSS. Stop HARD with exit code 3 (the same code graflex.sh
+    # catches for the FOFA logged-out stop) and point the operator at the captured
+    # page. When the known logged-out message is present we name it; otherwise it's
+    # a new/unknown failure mode worth inspecting. (If `alert-error` ever turns up as
+    # an inert template fragment on a real results page, we'll find out and refine.)
+    if "alert-error" in content:
+        if "create a Shodan account" in content:
+            why = "logged out — invalid or expired Shodan key/session"
+        else:
+            why = "Shodan returned an error page (rate limit? changed markup?)"
+        log.error(f"Shodan: {why}. No results parsed — inspect the captured page: {html_path}")
+        raise SystemExit(3)
+
     hrefs = []
     for tag in re.findall(r"<a\b[^>]*>", content):
         if 'rel="noopener noreferrer nofollow"' not in tag:
