@@ -8659,6 +8659,10 @@ async def handle_txt2img(request):
                             f"failure: {host} for {activity_label} - rendered {got}, not {model_filter}", wid=wid)
                         return unsuitable(f"wrong model: {got}")
                     data["_dyva_model"] = _resolve_sd_model(data, body)  # the actual model
+                    # Stamp the RESOLVED model on the worker (not just the query),
+                    # same as comfy_attempt — so the record shows what actually
+                    # rendered, not the sentinel/query it was routed on.
+                    mark_worker_found(job_wid, host, data["_dyva_model"])
                     await broadcast_activity(host, activity_label, "connected",
                         f"success: {host} for {activity_label}", duration=time.time() - t0, wid=wid,
                         rmodel=data["_dyva_model"])
@@ -13871,7 +13875,7 @@ async def _run_music_job(session, jid):
             job["family"] = fam["name"]
             job["model"] = model_ref
             _music_job_save()
-            await broadcast_activity(host, label, "trying", label)
+            await broadcast_activity(host, label, "trying", label, rmodel=model_ref)
             try:
                 pid = await comfy_submit(session, host, graph)
             except ComfyError as e:
@@ -13882,7 +13886,7 @@ async def _run_music_job(session, jid):
                 continue
             job["comfyui_prompt_id"] = pid
             _music_job_save()
-            async with _waiting_worker(label, host, "composing"):
+            async with _waiting_worker(label, host, "composing", model=model_ref):
                 content, filename = await _poll_comfy_audio(session, host, pid)
             os.makedirs(MUSIC_JOBS_DIR, exist_ok=True)
             content_path = os.path.join(MUSIC_JOBS_DIR, f"{jid}.bin")
@@ -13894,7 +13898,8 @@ async def _run_music_job(session, jid):
             job["unsigned_urls"] = [f"/v1/music/{jid}/content"]
             add_good(host, MUSIC_KEY)
             set_last(MUSIC_KEY, host, model_ref)
-            await broadcast_activity(host, label, "done", label, duration=time.time() - t0)
+            await broadcast_activity(host, label, "done", label, duration=time.time() - t0,
+                                     rmodel=model_ref)
             _music_job_save()
             return
         raise _MusicError("; ".join(errors) if errors else "no music-capable host answered")
@@ -14336,7 +14341,11 @@ def main():
                              "that mark, and '--hosts bad __tts__ del' to clear them")
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
+    parser.add_argument("--virgin", action="store_true", help=argparse.SUPPRESS)  # say it out loud
     args = parser.parse_args()
+    if args.virgin:
+        print("🤷 Made by Chris McKenzie")
+        return
     if args.config:      # repoint every store BEFORE any command/server touches disk
         _apply_cache_dir(args.config)
     PORT = args.port     # so early ops (e.g. --cleanse apply's reload poke) target the right port
