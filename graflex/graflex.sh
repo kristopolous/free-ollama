@@ -21,6 +21,7 @@ case "$SERVICE" in
       echo ">>   "$last_res
       # this is ctrl+c
       [[ "$last_res" == "130" ]] && exit
+      [[ "$last_res" == "3" ]] && exit
       [[ "$last_res" == "2" ]] && sleep 7200
       # only if it's the last in the list and 0 
       [[ "$i" == "gradio" && "$last_res" == "0" ]] && break
