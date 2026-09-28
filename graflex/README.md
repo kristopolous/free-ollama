@@ -35,6 +35,13 @@ SHODAN_KEY='polito="3edd633c..."'
 # EXPIRES, so refresh it when zoomeye starts failing. The JWT inside it (token=…)
 # is reused automatically for the Cube-Authorization header.
 ZOOMEYE_COOKIE='__jsluid_s=...; sessionid=...; token=...; ...'
+
+# Required for -t censys — platform.censys.io session cookie (the whole Cookie
+# header). Censys fronts the search API with Cloudflare, and the clearance is
+# bound to the IP that solved the challenge, so this MUST be generated on THIS
+# machine's egress IP (load platform.censys.io in a browser here, copy the request
+# Cookie). It EXPIRES; when a run stops with "Cloudflare challenge", regenerate it.
+CENSYS_COOKIE='cf_clearance=...; __cf_bm=...; csrf_v2=...; ...'
 ```
 
 ## Usage
@@ -106,6 +113,11 @@ graflex -t shodan -q '"ollama is running"' -n ollama-shodan \
 # ZoomEye site — scrapes zoomeye.ai's JSON API into the same ollama pool
 graflex -t zoomeye -s ollama -n ollama --dry     # print the queries + URL first
 graflex -t zoomeye -s ollama -n ollama -c 'CN,US,FR,DE,...'
+
+# Censys site — replays platform.censys.io's search API into the same ollama pool
+graflex -t censys -s ollama -n ollama --dry      # print the query + URL first
+graflex -t censys -s ollama -n ollama            # uses the built-in "ollama is running"
+graflex -t censys -q '(("ollama is running") and host.services.software.vendor = "ollama") or web.software.vendor = "ollama"' -n ollama
 ```
 
 ## Shodan site
@@ -146,6 +158,33 @@ host tagged `site: "zoomeye"`). Notes:
   explicit `--query`. Country codes are ISO alpha-2 (`GB`, not `UK`).
 - Run it by hand (`graflex.sh ollama-zoomeye`); it's kept out of the daily `all`
   loop because the cookie expires, unlike the stable Shodan key.
+
+## Censys site
+
+`-t censys` replays platform.censys.io's search API (`/api/search.data`) and folds
+the results into the SAME pool as FOFA/Shodan/ZoomEye (each host tagged `site:
+"censys"`). It surfaces hosts that don't appear in the other sources. Notes:
+
+- Query syntax is Censys': `"ollama is running"`, `host.services.port = "11434"`,
+  `host.services.software.vendor = "ollama"`, `web.software.vendor = "ollama"`,
+  combined with `and`/`or` and parentheses. A service may carry a **list** of
+  queries; the run iterates them all in one session, deduping into the pool.
+- **The response is deduped/obfuscated** (a Remix turbo-stream reference pool), but
+  it is fully structural — we rehydrate the pool and read the fixed path
+  `data.results.hits[*].web.web.{hostname, port}`. No regex scraping. Because that
+  schema can change without notice, the parser **stops hard (exit 3)** if it can't
+  reach the hits or a populated result yields nothing — a loud failure over silent
+  garbage. Raw JSON is saved under `/tmp/graflex/<session>/censys/`.
+- The page size is generous, so there is **no pagination** — widen coverage by
+  iterating queries, not paging.
+- Auth is `CENSYS_COOKIE` (`.env`) — the whole browser Cookie header. Censys fronts
+  the endpoint with **Cloudflare**, and the clearance is bound to the IP that solved
+  the challenge, so the cookie **must be generated on this machine's egress IP** and
+  it **expires**. If a run stops with "Cloudflare challenge / non-JSON response
+  (exit 3)", regenerate `CENSYS_COOKIE` here. Once it passes the challenge once,
+  further queries in the same session are not re-gated.
+- `ollama` has a built-in censys query (`"ollama is running"`); other services need
+  an explicit `--query`.
 
 ## Shell script
 

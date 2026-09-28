@@ -244,6 +244,20 @@ def _zoomeye_cookie():
     # exported yet — a module-level `os.getenv` would capture "" and never see it.
     return os.getenv("ZOOMEYE_COOKIE", "")
 
+
+# Censys platform search (JSON API behind Cloudflare). The session cookie is a
+# SECRET — read only from the environment (CENSYS_COOKIE in .env), never hard-coded
+# or committed. It must be human-generated on THIS machine's egress IP: Cloudflare
+# binds the clearance to the IP that solved the challenge, so a cookie made
+# elsewhere gets bounced. Once it has passed the challenge once, further search.data
+# requests on that session are NOT re-gated, so a run can iterate several queries.
+CENSYS_API = "https://platform.censys.io/api/search.data"
+
+
+def _censys_cookie():
+    # Read at CALL time (see _zoomeye_cookie), for the same load_dotenv() ordering.
+    return os.getenv("CENSYS_COOKIE", "")
+
 # run_ts of the most recent fetch session, so ctrl+c in main() can suggest
 # the exact -i value to resume with
 _RUN_TS = None
@@ -286,6 +300,7 @@ SERVICE_CONFIG = {
         "fofa_query": ['app="ollama"', 'body="ollama is running"'],
         "shodan_query": '"ollama is running"',
         "zoomeye_query": 'app="ollama"',
+        "censys_query": '"ollama is running"',
         "check_path": "/api/tags",
     },
     "llama.cpp": {
@@ -1411,6 +1426,208 @@ def _parse_shodan_html(html_path, service):
     return hosts
 
 
+def _rehydrate_censys_pool(pool):
+    """Rehydrate Censys' turbo-stream-style reference pool into a plain object.
+
+    The platform.censys.io search response is a single FLAT array that acts as a
+    dedup pool. Index 0 is the root. An object is encoded as {"_<keyIdx>": <valIdx>,
+    ...}: the key NAME lives at pool[keyIdx] and the value at pool[valIdx]. A bare int
+    anywhere else is likewise an index into the pool; a negative index is a
+    turbo-stream sentinel (undefined / a hole) that we resolve to None. Shared refs
+    mean the graph can revisit a node, so we carry a `seen` set to guard cycles.
+
+    This lets us extract by STRUCTURE (dereference, then walk the known path) instead
+    of scraping scalars by regex/adjacency — the dedup interleaving makes the raw
+    array unaddressable, but once rehydrated it is an ordinary nested object."""
+    n = len(pool)
+
+    def rez(idx, seen):
+        if not isinstance(idx, int) or isinstance(idx, bool):
+            return idx
+        if idx < 0 or idx >= n:
+            return None  # sentinel / out of range
+        if idx in seen:
+            return None  # cycle guard
+        seen = seen | {idx}
+        v = pool[idx]
+        if isinstance(v, dict):
+            out = {}
+            for k, vi in v.items():
+                if isinstance(k, str) and k[:1] == "_" and k[1:].lstrip("-").isdigit():
+                    key = rez(int(k[1:]), seen)
+                    out[key if isinstance(key, str) else str(key)] = rez(vi, seen)
+                else:
+                    out[k] = rez(vi, seen)
+            return out
+        if isinstance(v, list):
+            return [rez(e, seen) for e in v]
+        return v
+
+    return rez(0, set())
+
+
+def _parse_censys_json(path, service):
+    """Extract host:port pairs from a platform.censys.io search response.
+
+    We rehydrate the reference pool (see _rehydrate_censys_pool) and then walk the
+    exact structural path a search result takes:
+
+        <route>.data.results.hits[*].web.web.{hostname, port}
+
+    The route key mirrors the request's `_routes` param, so we don't hardcode it —
+    we take the single top-level entry. Everything past that is a fixed path, so
+    there is no regex and no adjacency guessing.
+
+    This schema is Censys' and can change WITHOUT NOTICE, so we throw a fit rather
+    than return junk: if we can't reach `results.hits`, or hits are present but none
+    yield a usable web.web.hostname:port, we stop hard with exit code 3 (the same
+    "stop and inspect the captured file" signal graflex.sh catches for the FOFA /
+    Shodan credential stops) and point the operator at the file. A genuinely empty
+    result set (hits == []) is a normal no-match, not a schema break, so it only
+    warns."""
+    global _last_result_file
+    _last_result_file = path
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        try:
+            pool = json.load(f)
+        except ValueError as e:
+            log.error(f"Censys: response at {path} is not JSON ({e}) — inspect the captured file.")
+            raise SystemExit(3)
+
+    if not isinstance(pool, list):
+        log.error(
+            f"Censys: expected a turbo-stream array at {path}, got "
+            f"{type(pool).__name__} — schema changed. Inspect the captured file."
+        )
+        raise SystemExit(3)
+
+    root = _rehydrate_censys_pool(pool)
+
+    def dig(obj, *keys):
+        for k in keys:
+            if not isinstance(obj, dict) or k not in obj:
+                return None
+            obj = obj[k]
+        return obj
+
+    route = next(iter(root.values())) if isinstance(root, dict) and len(root) == 1 else None
+    hits = dig(route, "data", "results", "hits")
+
+    if not isinstance(hits, list):
+        log.error(
+            f"Censys: could not reach data.results.hits in {path} — the response "
+            f"schema changed (Censys ships this without notice). Inspect the file."
+        )
+        raise SystemExit(3)
+
+    seen = set()
+    hosts = []
+    for h in hits:
+        ww = dig(h, "web", "web")
+        if not isinstance(ww, dict):
+            continue
+        host = ww.get("hostname")
+        port = ww.get("port")
+        if not isinstance(host, str) or not host:
+            continue
+        if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
+            continue
+        key = f"{host}:{port}"
+        if key in seen:
+            continue
+        seen.add(key)
+        hosts.append({"service": service, "host": key, "site": "censys"})
+
+    if hits and not hosts:
+        log.error(
+            f"Censys: {len(hits)} hits present but none yielded web.web.hostname:port "
+            f"in {path} — the per-hit schema changed. Inspect the captured file."
+        )
+        raise SystemExit(3)
+
+    if not hosts:
+        log.warning(f"! NO RESULTS from {path}")
+    return hosts
+
+
+def _censys_path(label, run_ts, svc="any"):
+    return os.path.join("/tmp/graflex", run_ts, "censys", f"{svc}-{label}.json")
+
+
+# The Cloudflare "Just a moment..." interstitial (see error.txt) served when the
+# cookie is stale or was minted on a different IP. These strings appear on that
+# challenge page and never in a real JSON result.
+_CENSYS_CHALLENGE_MARKERS = ("just a moment", "challenge-platform", "cf_chl",
+                             "enable javascript and cookies")
+
+
+def _fetch_censys(dry, svc, query, run_ts=None, curlify=False, label="", pname="any"):
+    """Replay one platform.censys.io search.data request with the operator's cookie
+    and hand the response to _parse_censys_json. Returns the host list, [] for
+    dry/curlify, or None on a transient soft failure (rate limit / network).
+
+    Censys fronts the endpoint with Cloudflare. A stale cookie — or one generated on
+    a DIFFERENT egress IP than this machine — gets the CF 'Just a moment...' HTML
+    interstitial instead of JSON; that is credential death, so we capture it and stop
+    HARD with exit code 3 (the same signal graflex.sh catches for the FOFA/Shodan
+    logged-out stops), telling the operator to regenerate CENSYS_COOKIE here."""
+    import requests
+    import curlify as curlify_mod
+    from urllib.parse import urlencode
+    global _last_result_file
+
+    url = f"{CENSYS_API}?" + urlencode({"q": query, "_routes": "routes/api.search"})
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://platform.censys.io/search",
+        "Cookie": _censys_cookie(),
+    }
+
+    if curlify:
+        req = requests.Request("GET", url, headers=headers)
+        log.info(curlify_mod.to_curl(req.prepare()))
+        return []
+    if dry:
+        log.info(f"# query: {query}")
+        log.info(f"# url: GET {url}")
+        return []
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+    except Exception as e:
+        log.error(f"Censys request failed: {e}")
+        return None
+
+    if resp.status_code in (429, 503):
+        log.warning(f"Censys rate limited ({resp.status_code})")
+        return None
+
+    def _capture():
+        tmp_dir = os.path.dirname(_censys_path(label, run_ts, pname))
+        os.makedirs(tmp_dir, exist_ok=True)
+        out = _censys_path(label, run_ts, pname)
+        with open(out, "w", encoding="utf-8", errors="replace") as f:
+            f.write(resp.text)
+        return out
+
+    ctype = resp.headers.get("Content-Type", "").lower()
+    head = resp.text[:4096].lower()
+    if resp.status_code == 403 or "application/json" not in ctype \
+            or any(m in head for m in _CENSYS_CHALLENGE_MARKERS):
+        cap = _capture()
+        log.error(
+            f"Censys: Cloudflare challenge / non-JSON response (HTTP {resp.status_code}) "
+            f"— CENSYS_COOKIE is stale or was generated on a different IP than this "
+            f"machine. Regenerate it on THIS host and retry. Captured: {cap}"
+        )
+        raise SystemExit(3)
+
+    return _parse_censys_json(_capture(), svc)
+
+
 def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label="", pname="any"):
     import requests
     import curlify as curlify_mod
@@ -1819,6 +2036,75 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     remaining = sleep - (time.time() - t_fetched)
                     if remaining > 0:
                         time.sleep(remaining)
+        hosts = pool
+    elif site == "censys":
+        if not _censys_cookie():
+            log.error("CENSYS_COOKIE must be set in .env for --site censys — generate it on THIS machine's egress IP (load platform.censys.io in a browser here and copy the request Cookie). See README.")
+            return []
+        if servers or fids:
+            log.warning("--servers/--fid are ignored with --site censys")
+        from datetime import datetime
+        run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
+        _RUN_TS = run_ts
+        if session:
+            log.info(f"resuming session {run_ts}")
+
+        base = query or (SERVICE_CONFIG.get(service, {}).get("censys_query") if service else None)
+        if not base:
+            log.error(f"no censys query for '{service or name}' — pass --query (Censys syntax, e.g. '\"ollama is running\"')")
+            return []
+        # A service may carry several censys queries (e.g. broad + narrowed); the
+        # cookie isn't re-gated after the first success, so we iterate them all in
+        # one session, deduping into the pool. Page size is generous — no paging.
+        base_queries = list(base) if isinstance(base, list) else [base]
+
+        # Country slicing, like the FOFA scrape: whatever CSV `-c/--countries`
+        # carries (graflex.sh's per-service list) is filled verbatim into the
+        # Censys `host.location.country` field, which wants FULL NAMES ("United
+        # States", "China"), NOT ISO codes. `None` is one broad, unnarrowed pass.
+        # No default list — with no `-c` it's just the broad pass.
+        if isinstance(countries, str):
+            country_list = [None] + [c.strip() for c in countries.split(",") if c.strip()]
+        else:
+            country_list = [None]
+        if shuffle:
+            random.shuffle(country_list)
+
+        # Query cycles innermost (all base queries per country), same as FOFA.
+        combos = [(bq, c) for c in country_list for bq in base_queries]
+        queries = []
+        for bq, c in combos:
+            queries.append(bq if not c else f'({bq}) and host.location.country = "{c}"')
+
+        pool = _load_json(hosts_file)
+        seen = {_entry_host(h) for h in pool}
+        svc = service or name or "unknown"
+        start = time.time()
+        for qi, combined in enumerate(queries):
+            label = _tag(combined)
+            if session and not dry and os.path.exists(_censys_path(label, run_ts, svc)):
+                log.info(f"[{qi+1}/{len(queries)}] cached, skip: {combined}")
+                continue
+            hosts = _fetch_censys(dry, svc, combined, run_ts=run_ts, curlify=curlify, label=label, pname=svc)
+            if curlify or dry or hosts is None:
+                continue
+            fresh, fresh_hosts = 0, []
+            for h in hosts:
+                key = _entry_host(h)
+                if key not in seen:
+                    pool.append(h)
+                    seen.add(key)
+                    fresh += 1
+                    fresh_hosts.append(h)
+            if not dry:
+                _save_json(hosts_file, pool)
+                elapsed = time.time() - start
+                log.info(f"[{qi+1}/{len(queries)}] {len(hosts)} hosts (+{fresh} new) from {combined!r}")
+                log.info(f"  pool: {len(pool)}   lapsed: {_fmt_duration(elapsed)}")
+            if check_batch_fn and fresh_hosts:
+                check_batch_fn(fresh_hosts)
+            if not dry and not curlify and qi + 1 < len(queries):
+                time.sleep(sleep)
         hosts = pool
     else:
         if not FOFA_COOKIE:
@@ -3050,7 +3336,7 @@ def main():
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
     parser.add_argument("-r", "--random", dest="shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
-    parser.add_argument("-t", "--site", choices=["fofa", "shodan", "zoomeye"], default="fofa", help="site to scrape (default: fofa)")
+    parser.add_argument("-t", "--site", choices=["fofa", "shodan", "zoomeye", "censys"], default="fofa", help="site to scrape (default: fofa)")
     parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG) + ["all"],
                         help="service to search for; 'all' runs the action across every service (each gets its own <service>-*.json cache), for automating the full pipeline")
     parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")
