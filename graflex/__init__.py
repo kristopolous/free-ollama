@@ -3475,7 +3475,7 @@ def enrich_file(path, key=None, refresh=False):
 
 # Derived geo enrichment written by `enrich` (geoip.py). Safe to strip because it
 # rebuilds for free with `-a enrich` — removing it is a memory saving, not data loss.
-_GEO_KEYS = ("country", "city", "lat", "lon", "asn", "asn_org", "provider", "geo_checked")
+_GEO_KEYS = ("country", "city", "lat", "lon", "asn", "asn_org", "as_org", "provider", "geo_checked")
 
 
 def strip_geo():
