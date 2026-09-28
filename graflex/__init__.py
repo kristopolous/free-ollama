@@ -1009,13 +1009,22 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                             session.get(f"{base_url}api/version", allow_redirects=False), timeout=timeout
                         )
                         if ver_resp.status == 200:
-                            # If it response, it's ollama
+                            # 200 on /api/version = ollama (sglang doesn't answer it).
                             _service = 'ollama'
-                            ver_data = await ver_resp.json()
-                            version = ver_data.get("version")
+                            # Parse content-type-agnostically: many ollama builds / fronting
+                            # proxies serve /api/version as text/plain, which aiohttp's strict
+                            # resp.json() rejects with ContentTypeError — the same reason the
+                            # gradio path reads text + json.loads. That exception was being
+                            # swallowed here, leaving ~90% of ollama hosts with no version.
+                            raw = await ver_resp.read()
+                            try:
+                                vd = json.loads(raw.decode("utf-8", "replace"), strict=False)
+                                version = vd.get("version") if isinstance(vd, dict) else None
+                            except Exception as e:
+                                log.debug(f"/api/version unparseable {host}:{port}: {type(e).__name__}: {e}: {raw[:80]!r}")
                         await ver_resp.release()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug(f"/api/version failed {host}:{port}: {type(e).__name__}: {e}")
 
                     result = {
                         "service": _service,
