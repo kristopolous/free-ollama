@@ -3696,6 +3696,57 @@ def survey(run_ts=None):
     return data
 
 
+def _install_mem_dump():
+    """Wire SIGUSR1 to dump a memory snapshot of the live process — RSS plus a gc
+    object-count histogram (what types dominate: dicts = the pooled records, etc.),
+    and, if GRAFLEX_TRACEMALLOC=1 was set at startup, the tracemalloc allocation top.
+    Zero standing cost — it only runs when you `kill -USR1 <pid>`. Dumps to
+    /tmp/graflex-mem-<pid>-<hhmmss>.txt and logs the path. Best-effort: silently
+    skips if signals aren't available (e.g. not the main thread)."""
+    import signal
+
+    def _dump(signum, frame):
+        import gc
+        import collections
+        from datetime import datetime as _dt
+        lines = [f"# graflex mem dump pid={os.getpid()} {_dt.now().isoformat()}"]
+        try:
+            with open("/proc/self/status") as f:
+                for ln in f:
+                    if ln.startswith(("VmRSS", "VmHWM", "VmSize")):
+                        lines.append(ln.rstrip())
+        except OSError:
+            pass
+        objs = gc.get_objects()
+        lines.append(f"gc tracked objects: {len(objs)}")
+        for tname, n in collections.Counter(type(o).__name__ for o in objs).most_common(25):
+            lines.append(f"  {n:>10} {tname}")
+        try:
+            import tracemalloc
+            if tracemalloc.is_tracing():
+                cur, peak = tracemalloc.get_traced_memory()
+                lines.append(f"tracemalloc current={cur // 1024} KB peak={peak // 1024} KB — top 20 by line:")
+                for st in tracemalloc.take_snapshot().statistics("lineno")[:20]:
+                    lines.append(f"  {st}")
+        except Exception:
+            pass
+        path = f"/tmp/graflex-mem-{os.getpid()}-{_dt.now():%H%M%S}.txt"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            log.warning(f"memory dump -> {path}")
+        except OSError as e:
+            log.warning(f"memory dump failed: {e}")
+
+    try:
+        signal.signal(signal.SIGUSR1, _dump)
+        if os.getenv("GRAFLEX_TRACEMALLOC") == "1":
+            import tracemalloc
+            tracemalloc.start(25)
+    except (ValueError, OSError, AttributeError):
+        pass  # no SIGUSR1 (Windows) / not main thread — skip quietly
+
+
 def main():
     load_dotenv()
 
@@ -3716,6 +3767,7 @@ def main():
         format="%(message)s",
         stream=sys.stderr,
     )
+    _install_mem_dump()   # kill -USR1 <pid> for a live memory snapshot
 
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
