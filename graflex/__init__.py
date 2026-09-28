@@ -3746,6 +3746,38 @@ def _install_mem_dump():
     except (ValueError, OSError, AttributeError):
         pass  # no SIGUSR1 (Windows) / not main thread — skip quietly
 
+    # Auto-capture the SPIKE: GRAFLEX_MEM_DUMP_MB=400 starts a daemon thread that
+    # polls RSS every few seconds and fires the dump the first time it crosses the
+    # threshold (re-arming once RSS falls 10% back below), so an intermittent OOM
+    # snapshots itself at the peak instead of you trying to time `kill -USR1`.
+    limit_mb = os.getenv("GRAFLEX_MEM_DUMP_MB")
+    if limit_mb and limit_mb.isdigit():
+        import threading
+
+        def _rss_mb():
+            try:
+                with open("/proc/self/status") as f:
+                    for ln in f:
+                        if ln.startswith("VmRSS"):
+                            return int(ln.split()[1]) // 1024
+            except (OSError, ValueError):
+                pass
+            return 0
+
+        def _watch(limit):
+            armed = True
+            while True:
+                rss = _rss_mb()
+                if armed and rss >= limit:
+                    log.warning(f"RSS {rss} MB >= {limit} MB — auto memory dump")
+                    _dump(None, None)
+                    armed = False
+                elif not armed and rss < limit * 0.9:
+                    armed = True
+                time.sleep(3)
+
+        threading.Thread(target=_watch, args=(int(limit_mb),), daemon=True).start()
+
 
 def main():
     load_dotenv()

@@ -1274,6 +1274,11 @@ async def _unregister_worker(wid, ok=None):
         _write_worker_job({
             "model_query": w.get("model_query"),
             "label": w.get("model"),
+            # The model that ACTUALLY ran/rendered — for image/edit/tts/etc. the
+            # routing key is a sentinel or a filter, so `label` isn't the real model;
+            # `rmodel` (stamped by mark_worker_found once a host is chosen) is. Without
+            # it, worker-jobs.jsonl never recorded which model an image was generated with.
+            "rmodel": w.get("rmodel"),
             "start_time": w.get("started"),
             "end_time": w["done"],
             "candidates": w.get("race_cand"),
