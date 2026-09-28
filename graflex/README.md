@@ -12,6 +12,8 @@ Graflex is a fast track to get you soft-blocked from places like Cloudflare and 
 
 The dyva runtime does this by allowing you to just completely block out entire clouds. That I guess is possible to do in graflex but as of now, the pipelines are intentionally completely separated. I'll have to think about that. 
 
+Dyva is designed to run comfortably on a 512MB machine and should occupy about 200MB of RSS which means a cheap $3 or $4/month server can run it without an OOM killer knocking it down.
+
 ## Setup
 
 ```bash
