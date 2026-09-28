@@ -3473,6 +3473,48 @@ def enrich_file(path, key=None, refresh=False):
     return 0
 
 
+# Derived geo enrichment written by `enrich` (geoip.py). Safe to strip because it
+# rebuilds for free with `-a enrich` — removing it is a memory saving, not data loss.
+_GEO_KEYS = ("country", "city", "lat", "lon", "asn", "asn_org", "provider", "geo_checked")
+
+
+def strip_geo():
+    """Remove the derived geo fields from every ~/.cache/free-ollama/*.json to shrink
+    the files (less to load = less memory). Not destructive — geo re-derives in
+    seconds with `-a enrich`. Rewrites each touched file atomically."""
+    import glob
+    total_saved = 0
+    for path in sorted(glob.glob(os.path.join(CACHE_DIR, "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as f:
+                before = f.read()
+            data = json.loads(before)
+        except (ValueError, OSError) as e:
+            log.warning(f"strip: skip {os.path.basename(path)} ({e})")
+            continue
+        if isinstance(data, list):
+            recs = data
+        elif isinstance(data, dict):
+            recs = list(data.values())
+        else:
+            continue
+        hit = 0
+        for r in recs:
+            if isinstance(r, dict):
+                for k in _GEO_KEYS:
+                    if k in r:
+                        del r[k]
+                        hit += 1
+        if not hit:
+            continue
+        saved = len(before) - len(json.dumps(data))
+        total_saved += saved
+        _save_json_atomic(path, data)
+        log.info(f"strip: {os.path.basename(path)}: -{hit} geo fields, ~{saved // 1024} KB")
+    log.info(f"strip: freed ~{total_saved / 1048576:.1f} MB across the cache "
+             f"(rebuild anytime with -a enrich)")
+
+
 def enrich(name=None):
     """Stamp country / ASN / cloud-provider onto a service's working hosts.
 
@@ -3669,7 +3711,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover public image-generation hosts via FOFA")
     parser.add_argument("--ct", "--check-timeout", dest="check_timeout", type=int, default=60, help="per-host check timeout in seconds (default: 60)")
     parser.add_argument("--curlify", action="store_true", help="print curl command instead of executing")
-    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "check-zero", "fetch-check", "classify", "enrich", "survey", "reconstruct", "score-bogus", "sample"], required=True, help="action to perform")
+    parser.add_argument("-a", "--action", choices=["fetch", "check", "check-new", "check-all", "check-working", "check-zero", "fetch-check", "classify", "enrich", "survey", "reconstruct", "score-bogus", "sample", "strip"], required=True, help="action to perform")
     parser.add_argument("-c", "--countries", help="comma-separated country codes to cycle (default: CN,US,CA,JP,KR)")
     parser.add_argument("-d", "--dry", action="store_true", help="report what fetch would do without saving")
     parser.add_argument("-e", "--servers", help="comma-separated server values to cycle (default: uvicorn,nginx)")
@@ -3710,6 +3752,12 @@ def main():
     # sample platter — no service/name needed, reads across every bucket's services.
     if args.action == "sample":
         sample()
+        return
+
+    # strip removes derived geo fields from the cache JSONs to save memory; rebuild
+    # with -a enrich. No service/name needed — it sweeps ~/.cache/free-ollama/*.json.
+    if args.action == "strip":
+        strip_geo()
         return
 
     if args.query and not args.name:
