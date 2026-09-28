@@ -275,9 +275,12 @@ def _censys_ua():
 # plaintext query is base64'd into the request's `search` field (hunter.how's
 # encoding). Response is clean JSON: {"code":200,"data":{"list":[{ip,port,...}]}}.
 HUNTER_API = "https://hunter.how/api/search"
-# Results per request. hunter.how meters queries, so we take one generous page per
-# query rather than paginating (widen coverage by spending another query instead).
-HUNTER_PAGE_SIZE = 100
+# hunter.how's coverage mechanism is PAGINATION (not country fan-out): one query,
+# walked page by page. The API REQUIRES page_size == 10 (a larger value 400s with
+# "The optional range of page size is 10"), so 40 pages = up to 400 results/query.
+# We stop early at the first empty page.
+HUNTER_PAGE_SIZE = 10
+HUNTER_MAX_PAGES = 40
 # Constrain to hosts seen in the last N days (fresher, likelier alive), like ZoomEye.
 HUNTER_WINDOW_DAYS = 30
 
@@ -285,6 +288,14 @@ HUNTER_WINDOW_DAYS = 30
 def _hunter_cookie():
     # Read at CALL time (see _zoomeye_cookie), for the same load_dotenv() ordering.
     return os.getenv("HUNTER_COOKIE", "")
+
+
+def _hunter_auth():
+    # hunter.how's search API also wants an `Authorization` header (a Bearer token);
+    # deeper pages 401 with "coming soon" without it. HUNTER_AUTH is the FULL header
+    # value, copied verbatim from a logged-in request (e.g. "Bearer eyJ..."), so we
+    # never have to guess whether to prepend "Bearer". '' if not set.
+    return os.getenv("HUNTER_AUTH", "").strip()
 
 # run_ts of the most recent fetch session, so ctrl+c in main() can suggest
 # the exact -i value to resume with
@@ -1650,8 +1661,9 @@ def _parse_hunter_json(path, service):
         detail = {k: resp.get(k) for k in ("code", "message", "msg") if k in resp}
         log.error(
             f"hunter.how returned an API error (not results): "
-            f"{json.dumps(detail, ensure_ascii=False)} — likely an invalid/expired "
-            f"HUNTER_COOKIE or a rate/credit limit. Captured: {path}"
+            f"{json.dumps(detail, ensure_ascii=False)}. Read the message above "
+            f"(a bad parameter, an invalid/expired HUNTER_COOKIE, or a rate limit). "
+            f"Captured: {path}"
         )
         raise SystemExit(3)
 
@@ -1723,6 +1735,8 @@ def _fetch_hunter(dry, svc, query, page=1, run_ts=None, curlify=False, label="",
         "Referer": "https://hunter.how/list",
         "Cookie": _hunter_cookie(),
     }
+    if _hunter_auth():
+        headers["Authorization"] = _hunter_auth()
 
     if curlify:
         req = requests.Request("POST", HUNTER_API, headers=headers, json=payload)
@@ -1751,7 +1765,19 @@ def _fetch_hunter(dry, svc, query, page=1, run_ts=None, curlify=False, label="",
         log.warning(f"hunter.how rate limited ({resp.status_code}) — raw response saved: {out_path}")
         return None
 
-    return _parse_hunter_json(out_path, svc)
+    try:
+        return _parse_hunter_json(out_path, svc)
+    except SystemExit:
+        # The API returned an error (or an unexpected shape). Make it ACTIONABLE:
+        # show the EXACT request we sent — the decoded query verbatim, the full JSON
+        # payload (page included), and the exact curl — so it can be reproduced /
+        # diffed, then propagate the stop.
+        log.error(f"  query (decoded, exact):  <<<{query}>>>")
+        log.error(f"  POST {HUNTER_API}")
+        log.error(f"  payload (exact):         {json.dumps(payload, ensure_ascii=False)}")
+        log.error("  exact curl equivalent:\n" + curlify_mod.to_curl(
+            requests.Request("POST", HUNTER_API, headers=headers, json=payload).prepare()))
+        raise
 
 
 # The Cloudflare "Just a moment..." interstitial (see error.txt) served when the
@@ -2350,61 +2376,61 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         if not base:
             log.error(f"no hunter query for '{service or name}' — pass --query (hunter.how syntax, e.g. 'product.name==\"Ollama Server\"')")
             return []
+        # hunter.how's coverage is PAGINATION, not country fan-out: one query, walked
+        # page by page. (Narrow by country if you want with an explicit --query, e.g.
+        # ... and ip.country=="United States".) A service may still carry several base
+        # queries; each is paginated in turn.
         base_queries = list(base) if isinstance(base, list) else [base]
-
-        # Country slicing, deliberate like the Censys scrape (hunter.how meters
-        # queries): the `-c/--countries` CSV is filled verbatim into hunter.how's
-        # `ip.country` field, which wants FULL NAMES ("United States"), NOT ISO
-        # codes. Countries given -> one query per country; none -> a single query.
-        if isinstance(countries, str) and countries.strip():
-            country_list = [c.strip() for c in countries.split(",") if c.strip()]
-        else:
-            country_list = [None]
-        if shuffle:
-            random.shuffle(country_list)
-        combos = [(bq, c) for c in country_list for bq in base_queries]
-        queries = [bq if not c else f'{bq} and ip.country=="{c}"' for bq, c in combos]
-        log.info(f"hunter.how: this run will spend {len(queries)} "
-                 f"quer{'y' if len(queries) == 1 else 'ies'} (metered — spend wisely).")
+        log.info(f"hunter.how: up to {HUNTER_MAX_PAGES} pages/query x {len(base_queries)} "
+                 f"quer{'y' if len(base_queries) == 1 else 'ies'} (stops at the first empty page).")
 
         pool = _load_json(hosts_file)
         seen = {_entry_host(h) for h in pool}
         svc = service or name or "unknown"
         start = time.time()
-        for qi, combined in enumerate(queries):
-            label = _tag(combined)
-            cached = _hunter_path(label, run_ts, svc)
-            if not dry and not curlify and os.path.exists(cached):
-                # Reprocess a stored response from disk instead of re-fetching (spends
-                # a metered query) or skipping; a per-file parse failure is logged with
-                # its path and skipped, never fatal to the batch. (See the Censys loop.)
-                log.info(f"[{qi+1}/{len(queries)}] reprocessing stored response: {cached}")
-                try:
-                    hosts = _parse_hunter_json(cached, svc)
-                except SystemExit as e:
-                    log.error(f"  failed to parse (exit {e.code}); left in place, continuing: {cached}")
-                    continue
-            else:
-                hosts = _fetch_hunter(dry, svc, combined, run_ts=run_ts, curlify=curlify, label=label, pname=svc)
-            if curlify or dry or hosts is None:
-                continue
-            fresh, fresh_hosts = 0, []
-            for h in hosts:
-                key = _entry_host(h)
-                if key not in seen:
-                    pool.append(h)
-                    seen.add(key)
-                    fresh += 1
-                    fresh_hosts.append(h)
-            if not dry:
-                _save_json(hosts_file, pool)
-                elapsed = time.time() - start
-                log.info(f"[{qi+1}/{len(queries)}] {len(hosts)} hosts (+{fresh} new) from {combined!r}")
-                log.info(f"  pool: {len(pool)}   lapsed: {_fmt_duration(elapsed)}")
-            if check_batch_fn and fresh_hosts:
-                check_batch_fn(fresh_hosts)
-            if not dry and not curlify and qi + 1 < len(queries):
-                time.sleep(sleep)
+        for combined in base_queries:
+            for page in range(1, HUNTER_MAX_PAGES + 1):
+                label = f"{_tag(combined)}-p{page}"
+                cached = _hunter_path(label, run_ts, svc)
+                hosts = None
+                reused = False
+                if not dry and not curlify and os.path.exists(cached):
+                    # Reprocess a VALID stored page from disk instead of re-fetching
+                    # (spends a metered query). But a stored ERROR/unparseable page has
+                    # no data to preserve, so fall through and RE-FETCH it rather than
+                    # skip — otherwise a page that errored once (e.g. a since-fixed
+                    # request bug) is lost forever.
+                    log.info(f"[p{page}] reprocessing stored response: {cached}")
+                    try:
+                        hosts = _parse_hunter_json(cached, svc)
+                        reused = True
+                    except SystemExit as e:
+                        log.warning(f"  stored page failed to parse (exit {e.code}); re-fetching: {cached}")
+                if not reused:
+                    hosts = _fetch_hunter(dry, svc, combined, page=page, run_ts=run_ts, curlify=curlify, label=label, pname=svc)
+                if curlify or dry:
+                    break                       # preview one page's query/payload only
+                if hosts is None:
+                    break                       # http error / rate limit -> stop paginating
+                if not hosts:
+                    break                       # empty page -> end of results
+                fresh, fresh_hosts = 0, []
+                for h in hosts:
+                    key = _entry_host(h)
+                    if key not in seen:
+                        pool.append(h)
+                        seen.add(key)
+                        fresh += 1
+                        fresh_hosts.append(h)
+                if not dry:
+                    _save_json(hosts_file, pool)
+                    elapsed = time.time() - start
+                    log.info(f"[p{page}] {len(hosts)} hosts (+{fresh} new) from {combined!r}")
+                    log.info(f"  pool: {len(pool)}   lapsed: {_fmt_duration(elapsed)}")
+                if check_batch_fn and fresh_hosts:
+                    check_batch_fn(fresh_hosts)
+                if not curlify:
+                    time.sleep(sleep)
         hosts = pool
     else:
         if not FOFA_COOKIE:

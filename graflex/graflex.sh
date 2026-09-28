@@ -176,6 +176,12 @@ ENDL
     SERVERS='uvicorn,nginx'
     ;;
 
+  hunter)
+    SITE=hunter
+    SERVICE=ollama
+    PORTS='11434'
+    ;;
+
   censys)
     SITE=censys
     SERVICE=ollama

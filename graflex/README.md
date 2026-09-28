@@ -47,9 +47,12 @@ CENSYS_COOKIE='cf_clearance=...; __cf_bm=...; csrf_v2=...; ...'
 # Optional — defaults to the UA in censys.txt; set it to match your browser.
 CENSYS_UA='Mozilla/5.0 (X11; Linux x86_64) ... Chrome/152.0.0.0 Safari/537.36'
 
-# Required for -t hunter — hunter.how session cookie (the whole Cookie header from a
-# logged-in request). It EXPIRES; refresh it when hunter starts returning code!=200.
+# Required for -t hunter — hunter.how session cookie (the whole Cookie header) AND
+# the Authorization header. Deeper pages 401 with "coming soon" without the bearer.
+# HUNTER_AUTH is the FULL Authorization value copied verbatim (keep the "Bearer ").
+# Both EXPIRE; refresh when hunter starts returning code!=200.
 HUNTER_COOKIE='_ga=...; ack=...; token=...; ...'
+HUNTER_AUTH='Bearer eyJ...'
 ```
 
 ## Usage
@@ -130,8 +133,7 @@ graflex -t censys -q '(("ollama is running") and host.services.software.vendor =
 
 # Hunter site — replays hunter.how's search API into the same ollama pool
 graflex -t hunter -s ollama -n ollama --dry      # print the query + payload first
-graflex -t hunter -s ollama -n ollama            # 1 query: product.name=="Ollama Server"
-graflex -t hunter -s ollama -n ollama -c 'United States,China'   # 2 queries, one per country
+graflex -t hunter -s ollama -n ollama            # product.name=="Ollama Server", paginated
 ```
 
 ## Shodan site
@@ -226,14 +228,22 @@ Unlike Censys the response is clean JSON — `{"code":200,"data":{"list":[{ip,po
   **base64-encoded into the request's `search` field** automatically. The built-in
   `ollama` query is the `product.name` fingerprint (all ports); add
   `and ip.port=="11434"` (via `--query`) to restrict to the default port.
-- **Metered** — a run spends **exactly** the queries you ask for (logged up front),
-  and there is no page-walking (one generous `page_size`); widen coverage by
-  spending another query. Country slicing fills `-c/--countries` into `ip.country`
-  as **full names** (`United States`), one query per country; no `-c` is a single
-  query.
-- A `code` != 200 is an API error (invalid/expired `HUNTER_COOKIE`, rate limit),
-  **not** results — named and stopped hard (exit 3), not mislabeled a schema change.
-- Auth is `HUNTER_COOKIE` (`.env`) — the whole browser Cookie header; it expires.
+- **Coverage is PAGINATION, not country fan-out** — one query, walked page by page
+  up to `HUNTER_MAX_PAGES` (40), stopping at the first empty page. hunter.how
+  **requires `page_size == 10`** (larger 400s with "The optional range of page size
+  is 10"), so a run is up to ~400 results/query. To narrow by country, put it in the
+  `--query` yourself (e.g. `... and ip.country=="United States"`); `-c/--countries`
+  is not used here.
+- On resume, a **valid** stored page is reprocessed from disk (no query spent), but a
+  stored **error/unparseable** page is **re-fetched** (it has no data to preserve) —
+  so a page that errored once, e.g. from a since-fixed request bug, isn't lost.
+- A `code` != 200 is an API error — **not** results — and is stopped hard (exit 3)
+  with the EXACT request logged (decoded query, full payload, and a replayable curl)
+  so it's actionable, not a mystery. A `401 "coming soon"` on page 2+ means the
+  `Authorization` bearer is missing/expired.
+- Auth is **two** values in `.env`: `HUNTER_COOKIE` (the whole Cookie header) and
+  `HUNTER_AUTH` (the full `Authorization` header value, e.g. `Bearer eyJ...`, copied
+  verbatim). Deeper pages 401 without the bearer. Both expire.
 - Raw JSON is saved under `/tmp/graflex/<session>/hunter/`, **always, before
   parsing**. On resume (`-i <session>`) a stored response is **reprocessed from
   disk** (no query spent); a per-file parse failure is logged and skipped, never
