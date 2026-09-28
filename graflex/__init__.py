@@ -1389,8 +1389,10 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
     hosts = _parse_fofa_html(out_path, service)
     if not hosts:
         page = getattr(resp, "text", "")
-        if "no data for past year" not in page.lower():
-            log.warning(f"! no hosts parsed but 'no data for past year' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
+        # FOFA's legit-empty marker is "No data for past <span>" — <span> varies with
+        # the filter_type (year/month/week/day), so match the period generically.
+        if not re.search(r"no data for past \w+", page.lower()):
+            log.warning(f"! no hosts parsed but 'no data for past <period>' not found in page (code={getattr(resp, 'status_code', '?')}, {len(page)}b, {out_path})")
 
     return hosts
 
