@@ -1523,6 +1523,20 @@ def _parse_censys_json(path, service):
         return obj
 
     route = next(iter(root.values())) if isinstance(root, dict) and len(root) == 1 else None
+
+    # Censys returns errors in the SAME envelope with an `error` key instead of
+    # `data` — e.g. `{"error": ["ErrorResponse", {"code": 100001}, 429, "Internal
+    # Server Error"]}`. This is NOT a schema change; it's an API error (a 429 here
+    # means rate-limited / out of the monthly query credits). Name it as such and
+    # stop, rather than mislabeling it a parser failure.
+    if isinstance(route, dict) and "error" in route and "data" not in route:
+        flat = json.dumps(route["error"], ensure_ascii=False)
+        rate = "429" in flat or "rate" in flat.lower() or "credit" in flat.lower() or "100001" in flat
+        why = ("rate-limited / out of monthly query credits (HTTP 429)" if rate
+               else "an API error")
+        log.error(f"Censys returned {why}, not results: {flat}. Captured: {path}")
+        raise SystemExit(3)
+
     hits = dig(route, "data", "results", "hits")
 
     if not isinstance(hits, list):
@@ -1532,28 +1546,51 @@ def _parse_censys_json(path, service):
         )
         raise SystemExit(3)
 
+    # A hit carries results from up to two datasets and one is null depending on
+    # which the query hit: the WEB dataset (web.web.{hostname,port} — one endpoint)
+    # and the HOST dataset (host.host.ip + host.host.services[] — MANY ports on the
+    # box: SSH, MySQL, nginx, ...). For a host hit we must NOT emit every port; we
+    # emit only the service(s) whose software Censys fingerprinted as THIS service
+    # (vendor/product == the service name, e.g. "ollama"), so port 22/3306/etc. on
+    # a matched host never leak into the pool as fake <service> endpoints.
     seen = set()
     hosts = []
-    for h in hits:
-        ww = dig(h, "web", "web")
-        if not isinstance(ww, dict):
-            continue
-        host = ww.get("hostname")
-        port = ww.get("port")
+    svc_l = str(service).lower()
+
+    def emit(host, port):
         if not isinstance(host, str) or not host:
-            continue
+            return
         if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
-            continue
+            return
         key = f"{host}:{port}"
         if key in seen:
-            continue
+            return
         seen.add(key)
         hosts.append({"service": service, "host": key, "site": "censys"})
 
+    def is_svc_software(sw):
+        return isinstance(sw, dict) and svc_l in (
+            str(sw.get("vendor", "")).lower(), str(sw.get("product", "")).lower())
+
+    for h in hits:
+        if not isinstance(h, dict):
+            continue
+        ww = dig(h, "web", "web")
+        if isinstance(ww, dict):
+            emit(ww.get("hostname"), ww.get("port"))
+        hh = dig(h, "host", "host")
+        if isinstance(hh, dict):
+            ip = hh.get("ip")
+            for s in (hh.get("services") or []):
+                if isinstance(s, dict) and any(is_svc_software(sw) for sw in (s.get("software") or [])):
+                    emit(ip, s.get("port"))
+
     if hits and not hosts:
         log.error(
-            f"Censys: {len(hits)} hits present but none yielded web.web.hostname:port "
-            f"in {path} — the per-hit schema changed. Inspect the captured file."
+            f"Censys: {len(hits)} hits present but none yielded a '{service}' endpoint "
+            f"(web.web host:port, or a host.host service fingerprinted as '{service}') "
+            f"in {path} — the per-hit schema changed or the query matched via a field "
+            f"we don't map. Inspect the captured file."
         )
         raise SystemExit(3)
 
@@ -1612,31 +1649,45 @@ def _fetch_censys(dry, svc, query, run_ts=None, curlify=False, label="", pname="
         log.error(f"Censys request failed: {e}")
         return None
 
-    if resp.status_code in (429, 503):
-        log.warning(f"Censys rate limited ({resp.status_code})")
-        return None
+    # Store the raw response FIRST — ALWAYS, before any status/parse branching, so
+    # a body we can't parse (a rate-limit envelope, an error, a changed schema) is
+    # NEVER discarded. These queries cost scarce monthly credits; if it's JSON we
+    # can reprocess it offline. (Same raw dir the other sites use.)
+    tmp_dir = os.path.dirname(_censys_path(label, run_ts, pname))
+    os.makedirs(tmp_dir, exist_ok=True)
+    out_path = _censys_path(label, run_ts, pname)
+    with open(out_path, "w", encoding="utf-8", errors="replace") as f:
+        f.write(resp.text)
 
-    def _capture():
-        tmp_dir = os.path.dirname(_censys_path(label, run_ts, pname))
-        os.makedirs(tmp_dir, exist_ok=True)
-        out = _censys_path(label, run_ts, pname)
-        with open(out, "w", encoding="utf-8", errors="replace") as f:
-            f.write(resp.text)
-        return out
+    if resp.status_code in (429, 503):
+        log.warning(f"Censys rate limited ({resp.status_code}) — raw response saved: {out_path}")
+        return None
 
     ctype = resp.headers.get("Content-Type", "").lower()
     head = resp.text[:4096].lower()
     if resp.status_code == 403 or "application/json" not in ctype \
             or any(m in head for m in _CENSYS_CHALLENGE_MARKERS):
-        cap = _capture()
+        cap = out_path
         log.error(
-            f"Censys: Cloudflare challenge / non-JSON response (HTTP {resp.status_code}) "
-            f"— CENSYS_COOKIE is stale or was generated on a different IP than this "
-            f"machine. Regenerate it on THIS host and retry. Captured: {cap}"
+            f"Censys: Cloudflare challenge / non-JSON response (HTTP {resp.status_code}, "
+            f"Content-Type {resp.headers.get('Content-Type', '?')}). The cf_clearance "
+            f"triple didn't line up — the cookie must be generated on THIS machine's "
+            f"egress IP AND with the same browser whose UA is in CENSYS_UA. Captured: {cap}"
         )
+        # The EXACT bytes we sent, verbatim between <<< >>> (no summarizing, no
+        # truncation) — a failure here is almost always a single byte off (a trailing
+        # space, a smart quote, a stray newline from a bad paste), so show the whole
+        # string and let the operator diff it against the browser. The query is shown
+        # decoded, exactly as the server receives it after URL-decoding.
+        log.error(f"  query  (decoded, as the server sees it): <<<{query}>>>")
+        log.error(f"  User-Agent sent:                         <<<{headers['User-Agent']}>>>")
+        log.error(f"  Cookie sent:                             <<<{headers['Cookie']}>>>")
+        # The exact curl equivalent of what we sent, so it can be replayed / diffed
+        # against the working browser request byte-for-byte.
+        log.error("  exact curl equivalent:\n" + curlify_mod.to_curl(requests.Request("GET", url, headers=headers).prepare()))
         raise SystemExit(3)
 
-    return _parse_censys_json(_capture(), svc)
+    return _parse_censys_json(out_path, svc)
 
 
 def _fetch_shodan(dry, svc, combined, page=1, run_ts=None, curlify=False, label="", pname="any"):

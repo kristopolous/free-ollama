@@ -181,11 +181,16 @@ the results into the SAME pool as FOFA/Shodan/ZoomEye (each host tagged `site:
   `(<query>) and host.location.country = "<name>"` pass per country. With no `-c`
   it's just the broad pass (no default list).
 - **The response is deduped/obfuscated** (a Remix turbo-stream reference pool), but
-  it is fully structural — we rehydrate the pool and read the fixed path
-  `data.results.hits[*].web.web.{hostname, port}`. No regex scraping. Because that
-  schema can change without notice, the parser **stops hard (exit 3)** if it can't
-  reach the hits or a populated result yields nothing — a loud failure over silent
-  garbage. Raw JSON is saved under `/tmp/graflex/<session>/censys/`.
+  it is fully structural — we rehydrate the pool and read `data.results.hits[]`. No
+  regex scraping. A hit carries **two datasets** (one is null depending on the query
+  match): the WEB dataset gives one endpoint at `web.web.{hostname, port}`; the HOST
+  dataset gives `host.host.ip` plus a list of `host.host.services[]` (SSH, MySQL,
+  nginx, ... — many ports on the box). For a host hit we emit **only** the service(s)
+  whose `software[].vendor`/`product` Censys fingerprinted as the service being
+  searched (e.g. `ollama`), so port 22 / 3306 / etc. never leak into the pool as fake
+  endpoints. Because the schema can change without notice, the parser **stops hard
+  (exit 3)** if it can't reach the hits or a populated result yields nothing — a loud
+  failure over silent garbage. Raw JSON is saved under `/tmp/graflex/<session>/censys/`.
 - The page size is generous, so there is **no pagination** — widen coverage by
   iterating queries, not paging.
 - Auth is `CENSYS_COOKIE` (`.env`) — the whole browser Cookie header. Censys fronts
