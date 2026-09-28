@@ -349,6 +349,11 @@ SERVICE_CONFIG = {
         "check_path": "/v1/models",
     },
     "vllm": {
+        # NB: this FOFA body is the GENERIC uvicorn 404, not vllm-specific — so this
+        # bucket is really "any uvicorn-fronted OpenAI inference server" (vllm, but
+        # also mlx_lm.server / MLC-LLM, ktransformers, ...). They can only be told
+        # apart at CHECK time by /v1/models `owned_by` (e.g. "vllm", "MLC-LLM"). To
+        # reach the non-8000 ones, broaden the port sweep in graflex.sh, not here.
         "port": 8000,
         "fofa_query": '{"detail": "Not Found"} && server=="uvicorn"',
         "check_path": "/v1/models",
