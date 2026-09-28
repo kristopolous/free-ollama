@@ -4244,8 +4244,18 @@ def openai_stream_to_ollama(line, model):
         tcs = []
         for t in delta["tool_calls"]:
             fn = (t.get("function") or {})
+            # Keep arguments as the RAW string fragment. In an OpenAI stream each
+            # delta's function.arguments is a partial string ("{", "\"cmd\":\"", "3",
+            # ...) that the client concatenates. Parsing a fragment as JSON here (the
+            # old _maybe_json) coerced any fragment that happened to be a valid JSON
+            # scalar — "3" -> int 3, "6" -> int 6 — which (a) violates OpenAI's
+            # arguments-is-a-string contract, breaking strict clients like goose with
+            # "invalid type: integer, expected a string", and (b) makes fragments
+            # un-concatenable (the earlier {}{}{} bug). The full arguments string is
+            # parsed once, when complete, at the send boundary (_tool_args_obj) — not
+            # per fragment here.
             e = {"function": {"name": fn.get("name"),
-                              "arguments": _maybe_json(fn.get("arguments"))}}
+                              "arguments": fn.get("arguments")}}
             # Preserve the streaming position. OpenAI emits ONE call across several
             # deltas: the first carries index + id + name + the start of arguments,
             # each later delta repeats the same index (with a 0/empty id) and appends
