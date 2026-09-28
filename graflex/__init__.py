@@ -2795,8 +2795,9 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
         ok = False
         async with wlock:
             if honeypot:
-                # No "service": it's implicit in the file name (<service>-notworking.json).
-                nr = {"host": entry["host"], "url": f"http://{entry['host']}",
+                # No "host"/"service": host is the dict key (and in url); service is
+                # implicit in the file name (<service>-notworking.json).
+                nr = {"url": f"http://{entry['host']}",
                       "reason": "honeypot", "result": "honeypot",
                       "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file, silent=True)
@@ -2836,7 +2837,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason or "auth required" in reason) else "unreachable"
-                nr = {"host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
+                nr = {"url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file, silent=True)
                 if not isinstance(notworking, dict):
                     notworking = {}
@@ -3074,8 +3075,8 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
             removed += 1
             if entry:
                 nw = {
-                    # No "service": implicit in the file name (<service>-notworking.json).
-                    "host": entry["host"],
+                    # No "host"/"service": host is the dict key (and in url); service
+                    # is implicit in the file name (<service>-notworking.json).
                     "url": f"http://{entry['host']}",
                     "reason": payload,
                     "result": "unreachable",
@@ -3484,7 +3485,8 @@ def strip_cache():
     rebuild trivially — not data loss:
       - derived geo (country/city/lat/lon/asn/asn_org/as_org/provider/geo_checked),
         which re-derives with `-a enrich`;
-      - `service` in *-notworking.json, which is implicit in the file name.
+      - `service` and `host` in *-notworking.json — service is implicit in the file
+        name, and host is the record's own dict key (and lives in `url`).
     Rewrites each touched file atomically."""
     import glob
     total_saved = 0
@@ -3504,7 +3506,7 @@ def strip_cache():
             continue
         keys = set(_GEO_KEYS)
         if os.path.basename(path).endswith("-notworking.json"):
-            keys.add("service")   # implicit in the file name
+            keys.update(("service", "host"))   # service=file name, host=the dict key/url
         hit = 0
         for r in recs:
             if isinstance(r, dict):
