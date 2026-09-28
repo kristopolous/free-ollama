@@ -1039,11 +1039,15 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                     _save_check_snapshot(host, port, data)
                     items = data.get("data", []) if isinstance(data, dict) else []
                     models = []
+                    owners = set()
                     seen = set()
                     for m in items:
                         if not isinstance(m, dict):
                             continue
                         name = m.get("id", "")
+                        ob = m.get("owned_by")
+                        if isinstance(ob, str) and ob.strip():
+                            owners.add(ob.strip())
                         if name and name not in seen:
                             seen.add(name)
                             models.append(name)
@@ -1058,6 +1062,14 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                         "models": models,
                         "checked": datetime.now(timezone.utc).isoformat(),
                     }
+                    # `vllm` is a catch-all for uvicorn-fronted OpenAI servers; the only
+                    # thing that says WHICH harness a host actually is, is the model
+                    # objects' `owned_by` (vllm, MLC-LLM, ds4.c, ... or anything). Adopt
+                    # it verbatim AS the service so any per-harness difference is
+                    # actionable later — a check-time relabel like ollama -> sglang.
+                    # Catch-all only; explicitly-fetched services keep their identity.
+                    if service == "vllm" and len(owners) == 1:
+                        result["service"] = next(iter(owners))
                     if version:
                         result["version"] = version
                     return result
