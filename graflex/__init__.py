@@ -223,6 +223,11 @@ def _clean_cookie(value):
 
 FOFA_COOKIE = os.getenv("FOFA_COOKIE", "")
 FOFA_WEB = "https://en.fofa.info/result"
+# Appended to the FOFA result URL to bias toward recently-seen (likelier-alive)
+# hosts. Trial — set to "" to back out. It does NOT affect the cache-file label
+# (which is built from the query axes), so a resumed session still skips pages it
+# already fetched under the old, unfiltered URL.
+FOFA_FILTER = "&filter_type=last_month"
 
 SHODAN_KEY = _clean_cookie(os.getenv("SHODAN_KEY", ""))
 SHODAN_WEB = "https://www.shodan.io/search"
@@ -1265,7 +1270,7 @@ def _fetch_web(dry, service, combined, country=None, port=None, server=None, run
     import curlify as curlify_mod
 
     qb64 = base64.b64encode(combined.encode()).decode()
-    url = f"{FOFA_WEB}?qbase64={qb64}"
+    url = f"{FOFA_WEB}?qbase64={qb64}{FOFA_FILTER}"
 
     cookie_header = FOFA_COOKIE
 
