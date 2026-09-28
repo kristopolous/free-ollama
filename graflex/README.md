@@ -169,6 +169,12 @@ the results into the SAME pool as FOFA/Shodan/ZoomEye (each host tagged `site:
   `host.services.software.vendor = "ollama"`, `web.software.vendor = "ollama"`,
   combined with `and`/`or` and parentheses. A service may carry a **list** of
   queries; the run iterates them all in one session, deduping into the pool.
+- **Country slicing works like the FOFA scrape**: whatever `-c/--countries` CSV you
+  pass (graflex.sh's per-service list) is filled verbatim into the Censys
+  `host.location.country` field — which wants **full names** (`United States`,
+  `China`, `Germany`), NOT ISO codes. One broad unnarrowed pass runs first, then one
+  `(<query>) and host.location.country = "<name>"` pass per country. With no `-c`
+  it's just the broad pass (no default list).
 - **The response is deduped/obfuscated** (a Remix turbo-stream reference pool), but
   it is fully structural — we rehydrate the pool and read the fixed path
   `data.results.hits[*].web.web.{hostname, port}`. No regex scraping. Because that
