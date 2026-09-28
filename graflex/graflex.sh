@@ -9,6 +9,7 @@ EXTRA_ARGS=("$@")
 FID=
 SITE=fofa
 SERVERS=
+ACTION=fetch-check
 source .env
 
 
@@ -186,6 +187,7 @@ ENDL
     SITE=censys
     SERVICE=ollama
     COUNTRIES="United States,China,France,Germany,Hong Kong"
+    ACTION=fetch
     PORTS="11434,3000,443,8080,8000"
     ;;
 
@@ -231,7 +233,7 @@ svc_args=( --service "$SERVICE" )
 [[ "$SERVICE" == "gradio" ]] && svc_args=()
 
 MALLOC_ARENA_MAX=2 exec python3 -OO ./graflex.py \
-      --action "fetch-check" \
+      --action "$ACTION" \
       --countries "$COUNTRIES" \
       "${EXTRA_ARGS[@]}" "${fid[@]}" \
       --ports "$PORTS" \
