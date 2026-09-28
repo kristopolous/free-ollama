@@ -269,6 +269,23 @@ CENSYS_UA_DEFAULT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, 
 def _censys_ua():
     return os.getenv("CENSYS_UA", "") or CENSYS_UA_DEFAULT
 
+
+# hunter.how search (POST JSON API). The session cookie is a SECRET, read only from
+# the environment (HUNTER_COOKIE in .env) — never hard-coded or committed. The
+# plaintext query is base64'd into the request's `search` field (hunter.how's
+# encoding). Response is clean JSON: {"code":200,"data":{"list":[{ip,port,...}]}}.
+HUNTER_API = "https://hunter.how/api/search"
+# Results per request. hunter.how meters queries, so we take one generous page per
+# query rather than paginating (widen coverage by spending another query instead).
+HUNTER_PAGE_SIZE = 100
+# Constrain to hosts seen in the last N days (fresher, likelier alive), like ZoomEye.
+HUNTER_WINDOW_DAYS = 30
+
+
+def _hunter_cookie():
+    # Read at CALL time (see _zoomeye_cookie), for the same load_dotenv() ordering.
+    return os.getenv("HUNTER_COOKIE", "")
+
 # run_ts of the most recent fetch session, so ctrl+c in main() can suggest
 # the exact -i value to resume with
 _RUN_TS = None
@@ -312,6 +329,7 @@ SERVICE_CONFIG = {
         "shodan_query": '"ollama is running"',
         "zoomeye_query": 'app="ollama"',
         "censys_query": '"ollama is running"',
+        "hunter_query": 'product.name=="Ollama Server"',
         "check_path": "/api/tags",
     },
     "llama.cpp": {
@@ -1603,6 +1621,139 @@ def _censys_path(label, run_ts, svc="any"):
     return os.path.join("/tmp/graflex", run_ts, "censys", f"{svc}-{label}.json")
 
 
+def _hunter_path(label, run_ts, svc="any"):
+    return os.path.join("/tmp/graflex", run_ts, "hunter", f"{svc}-{label}.json")
+
+
+def _parse_hunter_json(path, service):
+    """Extract ip:port host dicts from a hunter.how /api/search response.
+
+    Shape is clean JSON: {"code":200,"data":{"list":[{"ip":..,"port":..,...}]}}.
+    A `code` != 200 is an API ERROR envelope (invalid/expired cookie, rate limit),
+    NOT results — we name it and stop with exit 3 rather than mislabel it a schema
+    change. Returns the same {service, host, site} shape as the other parsers."""
+    global _last_result_file
+    _last_result_file = path
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        try:
+            resp = json.load(f)
+        except ValueError as e:
+            log.error(f"hunter.how: response at {path} is not JSON ({e}) — inspect the captured file.")
+            raise SystemExit(3)
+
+    if not isinstance(resp, dict):
+        log.error(f"hunter.how: expected a JSON object at {path}, got {type(resp).__name__} — schema changed.")
+        raise SystemExit(3)
+
+    if resp.get("code") != 200:
+        detail = {k: resp.get(k) for k in ("code", "message", "msg") if k in resp}
+        log.error(
+            f"hunter.how returned an API error (not results): "
+            f"{json.dumps(detail, ensure_ascii=False)} — likely an invalid/expired "
+            f"HUNTER_COOKIE or a rate/credit limit. Captured: {path}"
+        )
+        raise SystemExit(3)
+
+    lst = (resp.get("data") or {}).get("list")
+    if not isinstance(lst, list):
+        log.error(f"hunter.how: could not reach data.list in {path} — schema changed. Inspect the file.")
+        raise SystemExit(3)
+
+    seen = set()
+    hosts = []
+    for it in lst:
+        if not isinstance(it, dict):
+            continue
+        ip = it.get("ip")
+        try:
+            port = int(str(it.get("port")))  # hunter.how returns port as a string
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(ip, str) or not ip or not (1 <= port <= 65535):
+            continue
+        key = f"{ip}:{port}"
+        if key in seen:
+            continue
+        seen.add(key)
+        hosts.append({"service": service, "host": key, "site": "hunter"})
+
+    if lst and not hosts:
+        log.error(
+            f"hunter.how: {len(lst)} results present but none yielded ip:port in "
+            f"{path} — the per-result schema changed. Inspect the captured file."
+        )
+        raise SystemExit(3)
+
+    if not hosts:
+        log.warning(f"! NO RESULTS from {path}")
+    return hosts
+
+
+def _fetch_hunter(dry, svc, query, page=1, run_ts=None, curlify=False, label="", pname="any"):
+    """Replay one hunter.how /api/search POST with the operator's cookie and hand
+    the response to _parse_hunter_json. The plaintext query is base64'd into the
+    `search` field (hunter.how's encoding); paging is the `page` payload field.
+    Stores the raw response FIRST, always, so a body we can't parse is never
+    discarded. Returns the host list, [] for dry/curlify, None on a soft failure."""
+    import requests
+    import curlify as curlify_mod
+    import base64
+    from datetime import date, timedelta
+    global _last_result_file
+
+    q_b64 = base64.b64encode(query.encode()).decode().rstrip("=")
+    today = date.today()
+    payload = {
+        "search": q_b64,
+        "start_time": (today - timedelta(days=HUNTER_WINDOW_DAYS)).isoformat(),
+        "end_time": today.isoformat(),
+        "page": page,
+        "page_size": HUNTER_PAGE_SIZE,
+        "is_web": 0,
+        "status_code": None,
+        "syntax_condition": None,
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/json",
+        "Origin": "https://hunter.how",
+        "Referer": "https://hunter.how/list",
+        "Cookie": _hunter_cookie(),
+    }
+
+    if curlify:
+        req = requests.Request("POST", HUNTER_API, headers=headers, json=payload)
+        log.info(curlify_mod.to_curl(req.prepare()))
+        return []
+    if dry:
+        log.info(f"# query: {query}")
+        log.info(f"# POST {HUNTER_API}  search(b64)={q_b64}  page={page} page_size={HUNTER_PAGE_SIZE}")
+        return []
+
+    try:
+        resp = requests.post(HUNTER_API, headers=headers, json=payload, timeout=30)
+    except Exception as e:
+        log.error(f"hunter.how request failed: {e}")
+        return None
+
+    # Store the raw response FIRST, before any status/parse branching (see the
+    # Censys fetch) — never discard a body we couldn't parse.
+    tmp_dir = os.path.dirname(_hunter_path(label, run_ts, pname))
+    os.makedirs(tmp_dir, exist_ok=True)
+    out_path = _hunter_path(label, run_ts, pname)
+    with open(out_path, "w", encoding="utf-8", errors="replace") as f:
+        f.write(resp.text)
+
+    if resp.status_code in (429, 503):
+        log.warning(f"hunter.how rate limited ({resp.status_code}) — raw response saved: {out_path}")
+        return None
+
+    return _parse_hunter_json(out_path, svc)
+
+
 # The Cloudflare "Just a moment..." interstitial (see error.txt) served when the
 # cookie is stale or was minted on a different IP. These strings appear on that
 # challenge page and never in a real JSON result.
@@ -2163,6 +2314,78 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     continue
             else:
                 hosts = _fetch_censys(dry, svc, combined, run_ts=run_ts, curlify=curlify, label=label, pname=svc)
+            if curlify or dry or hosts is None:
+                continue
+            fresh, fresh_hosts = 0, []
+            for h in hosts:
+                key = _entry_host(h)
+                if key not in seen:
+                    pool.append(h)
+                    seen.add(key)
+                    fresh += 1
+                    fresh_hosts.append(h)
+            if not dry:
+                _save_json(hosts_file, pool)
+                elapsed = time.time() - start
+                log.info(f"[{qi+1}/{len(queries)}] {len(hosts)} hosts (+{fresh} new) from {combined!r}")
+                log.info(f"  pool: {len(pool)}   lapsed: {_fmt_duration(elapsed)}")
+            if check_batch_fn and fresh_hosts:
+                check_batch_fn(fresh_hosts)
+            if not dry and not curlify and qi + 1 < len(queries):
+                time.sleep(sleep)
+        hosts = pool
+    elif site == "hunter":
+        if not _hunter_cookie():
+            log.error("HUNTER_COOKIE must be set in .env for --site hunter — copy the Cookie header from a logged-in hunter.how request. See README.")
+            return []
+        if servers or fids:
+            log.warning("--servers/--fid are ignored with --site hunter")
+        from datetime import datetime
+        run_ts = session or datetime.now().strftime("%Y%m%d%H%M%S")
+        _RUN_TS = run_ts
+        if session:
+            log.info(f"resuming session {run_ts}")
+
+        base = query or (SERVICE_CONFIG.get(service, {}).get("hunter_query") if service else None)
+        if not base:
+            log.error(f"no hunter query for '{service or name}' — pass --query (hunter.how syntax, e.g. 'product.name==\"Ollama Server\"')")
+            return []
+        base_queries = list(base) if isinstance(base, list) else [base]
+
+        # Country slicing, deliberate like the Censys scrape (hunter.how meters
+        # queries): the `-c/--countries` CSV is filled verbatim into hunter.how's
+        # `ip.country` field, which wants FULL NAMES ("United States"), NOT ISO
+        # codes. Countries given -> one query per country; none -> a single query.
+        if isinstance(countries, str) and countries.strip():
+            country_list = [c.strip() for c in countries.split(",") if c.strip()]
+        else:
+            country_list = [None]
+        if shuffle:
+            random.shuffle(country_list)
+        combos = [(bq, c) for c in country_list for bq in base_queries]
+        queries = [bq if not c else f'{bq} and ip.country=="{c}"' for bq, c in combos]
+        log.info(f"hunter.how: this run will spend {len(queries)} "
+                 f"quer{'y' if len(queries) == 1 else 'ies'} (metered — spend wisely).")
+
+        pool = _load_json(hosts_file)
+        seen = {_entry_host(h) for h in pool}
+        svc = service or name or "unknown"
+        start = time.time()
+        for qi, combined in enumerate(queries):
+            label = _tag(combined)
+            cached = _hunter_path(label, run_ts, svc)
+            if not dry and not curlify and os.path.exists(cached):
+                # Reprocess a stored response from disk instead of re-fetching (spends
+                # a metered query) or skipping; a per-file parse failure is logged with
+                # its path and skipped, never fatal to the batch. (See the Censys loop.)
+                log.info(f"[{qi+1}/{len(queries)}] reprocessing stored response: {cached}")
+                try:
+                    hosts = _parse_hunter_json(cached, svc)
+                except SystemExit as e:
+                    log.error(f"  failed to parse (exit {e.code}); left in place, continuing: {cached}")
+                    continue
+            else:
+                hosts = _fetch_hunter(dry, svc, combined, run_ts=run_ts, curlify=curlify, label=label, pname=svc)
             if curlify or dry or hosts is None:
                 continue
             fresh, fresh_hosts = 0, []
@@ -3413,7 +3636,7 @@ def main():
     parser.add_argument("-p", "--ports", help="comma-separated port values to cycle")
     parser.add_argument("-q", "--query", help="custom FOFA query (requires --name)")
     parser.add_argument("-r", "--random", dest="shuffle", action="store_true", help="shuffle the ports, servers, countries, and FID lists so the fetch cycles through combinations in random order")
-    parser.add_argument("-t", "--site", choices=["fofa", "shodan", "zoomeye", "censys"], default="fofa", help="site to scrape (default: fofa)")
+    parser.add_argument("-t", "--site", choices=["fofa", "shodan", "zoomeye", "censys", "hunter"], default="fofa", help="site to scrape (default: fofa)")
     parser.add_argument("-s", "--service", choices=list(SERVICE_CONFIG) + ["all"],
                         help="service to search for; 'all' runs the action across every service (each gets its own <service>-*.json cache), for automating the full pipeline")
     parser.add_argument("-w", "--workers", type=int, default=10, help="max parallel check workers (default: 10)")

@@ -46,6 +46,10 @@ CENSYS_COOKIE='cf_clearance=...; __cf_bm=...; csrf_v2=...; ...'
 # exact UA of the browser that generated the cookie or the challenge bounces you.
 # Optional — defaults to the UA in censys.txt; set it to match your browser.
 CENSYS_UA='Mozilla/5.0 (X11; Linux x86_64) ... Chrome/152.0.0.0 Safari/537.36'
+
+# Required for -t hunter — hunter.how session cookie (the whole Cookie header from a
+# logged-in request). It EXPIRES; refresh it when hunter starts returning code!=200.
+HUNTER_COOKIE='_ga=...; ack=...; token=...; ...'
 ```
 
 ## Usage
@@ -123,6 +127,11 @@ graflex -t censys -s ollama -n ollama --dry      # print the query + URL first
 graflex -t censys -s ollama -n ollama            # 1 query: broad "ollama is running"
 graflex -t censys -s ollama -n ollama -c 'United States,China,Germany'   # 3 queries, one per country (FULL names)
 graflex -t censys -q '(("ollama is running") and host.services.software.vendor = "ollama") or web.software.vendor = "ollama"' -n ollama
+
+# Hunter site — replays hunter.how's search API into the same ollama pool
+graflex -t hunter -s ollama -n ollama --dry      # print the query + payload first
+graflex -t hunter -s ollama -n ollama            # 1 query: product.name=="Ollama Server"
+graflex -t hunter -s ollama -n ollama -c 'United States,China'   # 2 queries, one per country
 ```
 
 ## Shodan site
@@ -203,6 +212,32 @@ the results into the SAME pool as FOFA/Shodan/ZoomEye (each host tagged `site:
   further queries in the same session are not re-gated.
 - `ollama` has a built-in censys query (`"ollama is running"`); other services need
   an explicit `--query`.
+
+## Hunter site
+
+`-t hunter` replays hunter.how's search API (`POST /api/search`) and folds the
+results into the SAME pool as the other sites (each host tagged `site: "hunter"`).
+Unlike Censys the response is clean JSON — `{"code":200,"data":{"list":[{ip,port,
+...}]}}` — so extraction is just `data.list[*].{ip, port}`. Notes:
+
+- Query syntax is hunter.how's: `product.name=="Ollama Server"` (its ollama
+  fingerprint), `web.body="ollama is running"`, `ip.port=="11434"`,
+  `ip.country=="United States"`, combined with `and`/`or`. The plaintext query is
+  **base64-encoded into the request's `search` field** automatically. The built-in
+  `ollama` query is the `product.name` fingerprint (all ports); add
+  `and ip.port=="11434"` (via `--query`) to restrict to the default port.
+- **Metered** — a run spends **exactly** the queries you ask for (logged up front),
+  and there is no page-walking (one generous `page_size`); widen coverage by
+  spending another query. Country slicing fills `-c/--countries` into `ip.country`
+  as **full names** (`United States`), one query per country; no `-c` is a single
+  query.
+- A `code` != 200 is an API error (invalid/expired `HUNTER_COOKIE`, rate limit),
+  **not** results — named and stopped hard (exit 3), not mislabeled a schema change.
+- Auth is `HUNTER_COOKIE` (`.env`) — the whole browser Cookie header; it expires.
+- Raw JSON is saved under `/tmp/graflex/<session>/hunter/`, **always, before
+  parsing**. On resume (`-i <session>`) a stored response is **reprocessed from
+  disk** (no query spent); a per-file parse failure is logged and skipped, never
+  fatal to the batch.
 
 ## Shell script
 
