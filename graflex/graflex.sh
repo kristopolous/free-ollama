@@ -176,6 +176,13 @@ ENDL
     SERVERS='uvicorn,nginx'
     ;;
 
+  censys)
+    SITE=censys
+    SERVICE=ollama
+    COUNTRIES="United States,China,France,Germany,Hong Kong"
+    PORTS="11434,3000,443,8080,8000"
+    ;;
+
   ds4)
     ;;
 

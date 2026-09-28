@@ -42,6 +42,10 @@ ZOOMEYE_COOKIE='__jsluid_s=...; sessionid=...; token=...; ...'
 # machine's egress IP (load platform.censys.io in a browser here, copy the request
 # Cookie). It EXPIRES; when a run stops with "Cloudflare challenge", regenerate it.
 CENSYS_COOKIE='cf_clearance=...; __cf_bm=...; csrf_v2=...; ...'
+# Cloudflare also binds the clearance to the User-Agent, so CENSYS_UA MUST be the
+# exact UA of the browser that generated the cookie or the challenge bounces you.
+# Optional — defaults to the UA in censys.txt; set it to match your browser.
+CENSYS_UA='Mozilla/5.0 (X11; Linux x86_64) ... Chrome/152.0.0.0 Safari/537.36'
 ```
 
 ## Usage
@@ -116,7 +120,8 @@ graflex -t zoomeye -s ollama -n ollama -c 'CN,US,FR,DE,...'
 
 # Censys site — replays platform.censys.io's search API into the same ollama pool
 graflex -t censys -s ollama -n ollama --dry      # print the query + URL first
-graflex -t censys -s ollama -n ollama            # uses the built-in "ollama is running"
+graflex -t censys -s ollama -n ollama            # broad "ollama is running" pass
+graflex -t censys -s ollama -n ollama -c 'United States,China,Germany'   # + per-country slices (FULL names)
 graflex -t censys -q '(("ollama is running") and host.services.software.vendor = "ollama") or web.software.vendor = "ollama"' -n ollama
 ```
 

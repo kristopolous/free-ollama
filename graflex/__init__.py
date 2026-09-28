@@ -258,6 +258,17 @@ def _censys_cookie():
     # Read at CALL time (see _zoomeye_cookie), for the same load_dotenv() ordering.
     return os.getenv("CENSYS_COOKIE", "")
 
+
+# Cloudflare binds the cf_clearance to the User-Agent as well as the IP, so the
+# request UA MUST match the browser that generated the cookie or the challenge
+# bounces it. The operator sets CENSYS_UA to their browser's UA alongside the
+# cookie; this default matches the request captured in censys.txt.
+CENSYS_UA_DEFAULT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+
+
+def _censys_ua():
+    return os.getenv("CENSYS_UA", "") or CENSYS_UA_DEFAULT
+
 # run_ts of the most recent fetch session, so ctrl+c in main() can suggest
 # the exact -i value to resume with
 _RUN_TS = None
@@ -1579,7 +1590,7 @@ def _fetch_censys(dry, svc, query, run_ts=None, curlify=False, label="", pname="
 
     url = f"{CENSYS_API}?" + urlencode({"q": query, "_routes": "routes/api.search"})
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "User-Agent": _censys_ua(),
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://platform.censys.io/search",
