@@ -2795,7 +2795,8 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
         ok = False
         async with wlock:
             if honeypot:
-                nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}",
+                # No "service": it's implicit in the file name (<service>-notworking.json).
+                nr = {"host": entry["host"], "url": f"http://{entry['host']}",
                       "reason": "honeypot", "result": "honeypot",
                       "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file, silent=True)
@@ -2835,7 +2836,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
             else:
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason or "auth required" in reason) else "unreachable"
-                nr = {"service": service, "host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
+                nr = {"host": entry["host"], "url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
                 notworking = _load_json(notworking_file, silent=True)
                 if not isinstance(notworking, dict):
                     notworking = {}
@@ -3073,7 +3074,7 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
             removed += 1
             if entry:
                 nw = {
-                    "service": service,
+                    # No "service": implicit in the file name (<service>-notworking.json).
                     "host": entry["host"],
                     "url": f"http://{entry['host']}",
                     "reason": payload,
@@ -3478,10 +3479,13 @@ def enrich_file(path, key=None, refresh=False):
 _GEO_KEYS = ("country", "city", "lat", "lon", "asn", "asn_org", "as_org", "provider", "geo_checked")
 
 
-def strip_geo():
-    """Remove the derived geo fields from every ~/.cache/free-ollama/*.json to shrink
-    the files (less to load = less memory). Not destructive — geo re-derives in
-    seconds with `-a enrich`. Rewrites each touched file atomically."""
+def strip_cache():
+    """Shrink ~/.cache/free-ollama/*.json to save memory by removing fields that
+    rebuild trivially — not data loss:
+      - derived geo (country/city/lat/lon/asn/asn_org/as_org/provider/geo_checked),
+        which re-derives with `-a enrich`;
+      - `service` in *-notworking.json, which is implicit in the file name.
+    Rewrites each touched file atomically."""
     import glob
     total_saved = 0
     for path in sorted(glob.glob(os.path.join(CACHE_DIR, "*.json"))):
@@ -3498,10 +3502,13 @@ def strip_geo():
             recs = list(data.values())
         else:
             continue
+        keys = set(_GEO_KEYS)
+        if os.path.basename(path).endswith("-notworking.json"):
+            keys.add("service")   # implicit in the file name
         hit = 0
         for r in recs:
             if isinstance(r, dict):
-                for k in _GEO_KEYS:
+                for k in keys:
                     if k in r:
                         del r[k]
                         hit += 1
@@ -3510,9 +3517,9 @@ def strip_geo():
         saved = len(before) - len(json.dumps(data))
         total_saved += saved
         _save_json_atomic(path, data)
-        log.info(f"strip: {os.path.basename(path)}: -{hit} geo fields, ~{saved // 1024} KB")
+        log.info(f"strip: {os.path.basename(path)}: -{hit} fields, ~{saved // 1024} KB")
     log.info(f"strip: freed ~{total_saved / 1048576:.1f} MB across the cache "
-             f"(rebuild anytime with -a enrich)")
+             f"(geo rebuilds with -a enrich; notworking service is the file name)")
 
 
 def enrich(name=None):
@@ -3757,7 +3764,7 @@ def main():
     # strip removes derived geo fields from the cache JSONs to save memory; rebuild
     # with -a enrich. No service/name needed — it sweeps ~/.cache/free-ollama/*.json.
     if args.action == "strip":
-        strip_geo()
+        strip_cache()
         return
 
     if args.query and not args.name:
