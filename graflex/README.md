@@ -120,8 +120,8 @@ graflex -t zoomeye -s ollama -n ollama -c 'CN,US,FR,DE,...'
 
 # Censys site — replays platform.censys.io's search API into the same ollama pool
 graflex -t censys -s ollama -n ollama --dry      # print the query + URL first
-graflex -t censys -s ollama -n ollama            # broad "ollama is running" pass
-graflex -t censys -s ollama -n ollama -c 'United States,China,Germany'   # + per-country slices (FULL names)
+graflex -t censys -s ollama -n ollama            # 1 query: broad "ollama is running"
+graflex -t censys -s ollama -n ollama -c 'United States,China,Germany'   # 3 queries, one per country (FULL names)
 graflex -t censys -q '(("ollama is running") and host.services.software.vendor = "ollama") or web.software.vendor = "ollama"' -n ollama
 ```
 
@@ -174,12 +174,14 @@ the results into the SAME pool as FOFA/Shodan/ZoomEye (each host tagged `site:
   `host.services.software.vendor = "ollama"`, `web.software.vendor = "ollama"`,
   combined with `and`/`or` and parentheses. A service may carry a **list** of
   queries; the run iterates them all in one session, deduping into the pool.
-- **Country slicing works like the FOFA scrape**: whatever `-c/--countries` CSV you
-  pass (graflex.sh's per-service list) is filled verbatim into the Censys
-  `host.location.country` field — which wants **full names** (`United States`,
-  `China`, `Germany`), NOT ISO codes. One broad unnarrowed pass runs first, then one
-  `(<query>) and host.location.country = "<name>"` pass per country. With no `-c`
-  it's just the broad pass (no default list).
+- **Censys is credit-metered and the quota is tiny** (as few as ~5 queries/month),
+  so a run spends **exactly** the number of queries you ask for — no automatic extra
+  passes. The run logs that count up front. Country slicing: a `-c/--countries` CSV
+  is filled verbatim into the Censys `host.location.country` field — which wants
+  **full names** (`United States`, `China`, `Germany`), NOT ISO codes — as **one
+  query per country** (`(<query>) and host.location.country = "<name>"`). With no
+  `-c` it's a **single broad query**. There is no page-walking (the page is
+  generous), so widen coverage only by deliberately spending another query.
 - **The response is deduped/obfuscated** (a Remix turbo-stream reference pool), but
   it is fully structural — we rehydrate the pool and read `data.results.hits[]`. No
   regex scraping. A hit carries **two datasets** (one is null depending on the query

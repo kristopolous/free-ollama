@@ -2120,13 +2120,14 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         # one session, deduping into the pool. Page size is generous — no paging.
         base_queries = list(base) if isinstance(base, list) else [base]
 
-        # Country slicing, like the FOFA scrape: whatever CSV `-c/--countries`
-        # carries (graflex.sh's per-service list) is filled verbatim into the
-        # Censys `host.location.country` field, which wants FULL NAMES ("United
-        # States", "China"), NOT ISO codes. `None` is one broad, unnarrowed pass.
-        # No default list — with no `-c` it's just the broad pass.
-        if isinstance(countries, str):
-            country_list = [None] + [c.strip() for c in countries.split(",") if c.strip()]
+        # Censys is CREDIT-METERED and the quota is tiny (as few as ~5 queries a
+        # month), so every query must be deliberate: the count is EXACTLY what was
+        # asked, with no automatic extra passes. Countries given (CSV via
+        # `-c/--countries`) -> one query per country; none -> a single broad query.
+        # Country names are filled verbatim into the Censys `host.location.country`
+        # field, which wants FULL NAMES ("United States", "China"), NOT ISO codes.
+        if isinstance(countries, str) and countries.strip():
+            country_list = [c.strip() for c in countries.split(",") if c.strip()]
         else:
             country_list = [None]
         if shuffle:
@@ -2137,6 +2138,8 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         queries = []
         for bq, c in combos:
             queries.append(bq if not c else f'({bq}) and host.location.country = "{c}"')
+        log.info(f"Censys: this run will spend {len(queries)} "
+                 f"quer{'y' if len(queries) == 1 else 'ies'} (credit-metered — spend wisely).")
 
         pool = _load_json(hosts_file)
         seen = {_entry_host(h) for h in pool}
@@ -2144,10 +2147,22 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
         start = time.time()
         for qi, combined in enumerate(queries):
             label = _tag(combined)
-            if session and not dry and os.path.exists(_censys_path(label, run_ts, svc)):
-                log.info(f"[{qi+1}/{len(queries)}] cached, skip: {combined}")
-                continue
-            hosts = _fetch_censys(dry, svc, combined, run_ts=run_ts, curlify=curlify, label=label, pname=svc)
+            cached = _censys_path(label, run_ts, svc)
+            if not dry and not curlify and os.path.exists(cached):
+                # We already have this query's raw response stored. REPROCESS it from
+                # disk — never re-fetch (that spends a scarce monthly credit) and never
+                # blindly skip: the parser has been buggy, so a file that "errored"
+                # before may parse fine now. A parse failure on ONE stored file must
+                # not abort the batch (else one bad file blocks recovering the rest) —
+                # state the failure with its path and move on.
+                log.info(f"[{qi+1}/{len(queries)}] reprocessing stored response: {cached}")
+                try:
+                    hosts = _parse_censys_json(cached, svc)
+                except SystemExit as e:
+                    log.error(f"  failed to parse (exit {e.code}); left in place, continuing: {cached}")
+                    continue
+            else:
+                hosts = _fetch_censys(dry, svc, combined, run_ts=run_ts, curlify=curlify, label=label, pname=svc)
             if curlify or dry or hosts is None:
                 continue
             fresh, fresh_hosts = 0, []
