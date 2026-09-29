@@ -256,6 +256,36 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .map-meta{font-size:.8rem;color:var(--text-dim)}
 .map-head .map-help{margin-left:auto;flex:0 0 auto;width:22px;height:22px;padding:0;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text-2);font-size:.8rem;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .map-head .map-help:hover{color:var(--text);background:var(--accent-bg)}
+.stats-tot{margin-left:auto;color:var(--text-muted);font-size:var(--fs-md);font-variant-numeric:tabular-nums}
+.stats-h3{margin:var(--sp-4) 0 var(--sp-2);font-size:var(--fs-md);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted)}
+/* Tokens over time — a vertical bar chart, UNDIFFERENTIATED (one bar per day, total
+   tokens, single colour). Model-query stacking is deferred; leave it unlabelled. */
+.stats-chart{margin:2px 0 var(--sp-4)}
+.sc-ymax{font-size:11px;color:var(--text-muted);margin-bottom:4px;font-variant-numeric:tabular-nums}
+.sc-bars{display:flex;align-items:flex-end;gap:3px;height:160px}
+.sc-col{flex:1 1 0;min-width:2px;height:100%;display:flex;align-items:flex-end}
+.sc-col i{display:block;width:100%;min-height:1px;background:var(--accent);border-radius:2px 2px 0 0}
+.sc-col:hover i{background:var(--accent-bright)}
+.sc-x{display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-top:4px}
+/* Model / host lists: bounded, independently-scrollable so a long model list can't
+   push By-host / the map off-screen. overscroll-behavior keeps a flick in the list. */
+.stats-rows{display:flex;flex-direction:column;gap:4px;max-height:30vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding-right:4px}
+.stats-row{display:flex;align-items:center;gap:6px;font-size:var(--fs-md);min-width:0}
+/* name flexes and ellipsis-truncates (so long host domains / model names don't force
+   a horizontal scroll), bar is a fixed narrow gauge, numbers size to their content. */
+.sr-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.sr-bar{flex:0 0 48px;height:10px;background:var(--surface);border-radius:var(--r-md);overflow:hidden}
+.sr-bar i{display:block;height:100%;background:var(--accent)}
+/* Fixed-width right-aligned columns so tokens / tps / reqs line up straight down the
+   list (tabular-nums keeps digits monospaced) instead of snaking with the text. */
+.sr-tok,.sr-tps,.sr-req{text-align:right;white-space:nowrap;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.sr-tok{flex:0 0 56px}
+.sr-tps{flex:0 0 58px}
+.sr-req{flex:0 0 30px}
+.stats-chart .muted,.stats-rows .muted{color:var(--text-muted)}
+/* .card has no margin and the Stats panel stacks two of them (stats + map) as block
+   elements, so they sit flush. Give the map card breathing room below the stats card. */
+#stats>.card+.card{margin-top:24px}
 .map-help-box{position:fixed;inset:0;z-index:220;background:var(--scrim-strong);display:flex;align-items:center;justify-content:center;padding:20px}
 .map-help-box[hidden]{display:none}
 .mhb-card{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);max-width:min(520px,100%);max-height:85vh;overflow:auto;padding:18px 22px}
@@ -958,7 +988,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button class="tab active" data-tab="serverroom">Servers</button>
 <button class="tab" data-tab="chat">Chat</button>
 <button class="tab" data-tab="media">Media</button>
-<button class="tab" data-tab="map">Map</button>
+<button class="tab" data-tab="stats">Stats</button>
 <button class="tab" data-tab="settings">Settings</button>
 </div>
 
@@ -1320,7 +1350,13 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 </div>
 
-<div id="map" class="panel">
+<div id="stats" class="panel">
+<div class="card"><div class="card-inner">
+<div class="map-head"><h2>Usage over time</h2><span id="statsTotals" class="stats-tot"></span></div>
+<div id="statsChart" class="stats-chart"></div>
+<h3 class="stats-h3">By model</h3><div id="statsModels" class="stats-rows"></div>
+<h3 class="stats-h3">By host</h3><div id="statsHosts" class="stats-rows"></div>
+</div></div>
 <div class="card"><div class="card-inner map-inner">
 <div class="map-head"><h2>Host population</h2><button id="mapHelp" class="map-help" title="map syntax" aria-label="map syntax">?</button><div id="mapMode" class="seg"></div></div>
 <div id="mapHelpBox" class="map-help-box" hidden><div class="mhb-card">
@@ -5522,7 +5558,8 @@ var READ_SCRATCH_TOOL={type:'function',function:{name:'read_scratch',description
 function renderAgentsDoc(chatId,log,scratch){
   var ctx=docCtx(chatId);if(!ctx)return;
   var doc=findDoc(ctx.docs,'Sub-agents');
-  if(!doc){doc={id:_docId(),title:'Sub-agents',type:'markdown',language:'',content:'',updated:Date.now(),versions:[]};ctx.docs.push(doc);}
+  var justCreated=false;
+  if(!doc){doc={id:_docId(),title:'Sub-agents',type:'markdown',language:'',content:'',updated:Date.now(),versions:[]};ctx.docs.push(doc);justCreated=true;}
   var parts=(log||[]).map(function(a){
     var head='### '+(a.name||'agent')+' — '+(a.status||'…')
       +(a.host?' · '+String(a.host).replace(/^https?:\/\//,''):'')
@@ -5539,7 +5576,14 @@ function renderAgentsDoc(chatId,log,scratch){
   }
   if(doc.content===md)return;
   doc.content=md;doc.updated=Date.now();_docCommitVersion(doc);ctx.commit();
-  if(ctx.inView){refreshDocUI();openDoc(doc.id);}
+  if(ctx.inView){
+    refreshDocUI();
+    // Reveal it ONCE when the batch first appears, then keep it fresh only while it's
+    // still the doc on screen. Never force it back open after the user dismissed it
+    // (closeDoc -> _docPanelWanted=false) or switched docs — that was the reopen-on-
+    // every-token loop, especially maddening on mobile where closing did nothing.
+    if(_docPanelWanted&&(justCreated||activeDocId===doc.id))openDoc(doc.id);
+  }
 }
 // Run one generation as a server-side JOB to completion and return its text.
 // Reuses the same job transport as the main chat, so each sub-agent survives
@@ -7634,6 +7678,61 @@ function _mapTip(){var t=document.getElementById('mapTip');if(!t){t=document.cre
 function _showTip(html,ev){var t=_mapTip();t.innerHTML=html;t.style.display='block';var x=ev.clientX+14,y=ev.clientY+14;t.style.left=Math.min(x,innerWidth-t.offsetWidth-8)+'px';t.style.top=Math.min(y,innerHeight-t.offsetHeight-8)+'px'}
 function _hideTip(){var t=document.getElementById('mapTip');if(t)t.style.display='none'}
 var _mapData=null,_mapCmp=null,_mapWired=false;
+function _statRows(rows){
+  rows=rows||[];
+  if(!rows.length)return '<div class="muted">—</div>';
+  var max=1;rows.forEach(function(x){max=Math.max(max,(x.up||0)+(x.down||0))});
+  return rows.slice(0,40).map(function(x){
+    var tot=(x.up||0)+(x.down||0);
+    return '<div class="stats-row"><span class="sr-name" title="'+escHtml(x.name)+'">'+escHtml(x.name)+'</span>'
+      +'<span class="sr-bar"><i style="width:'+(100*tot/max).toFixed(1)+'%"></i></span>'
+      +'<span class="sr-tok">'+_kfmt(tot)+'</span>'
+      +'<span class="sr-tps">'+(x.tps?x.tps+'t/s':'')+'</span>'
+      +'<span class="sr-req">'+(x.reqs||0)+'</span></div>';
+  }).join('');
+}
+function renderStats(d){
+  var t=(d&&d.totals)||{};
+  var tot=document.getElementById('statsTotals');
+  if(tot)tot.textContent=_kfmt((t.up||0)+(t.down||0))+' tokens · '+(t.reqs||0)+' reqs';
+  var days=(d&&d.days)||[];
+  var chart=document.getElementById('statsChart');
+  if(chart){
+    if(!days.length){chart.innerHTML='<div class="muted">no usage recorded yet</div>';}
+    else{
+      // Pad to a continuous window of at least 30 days (up to a 1-year ceiling) so a
+      // single day of data isn't one giant rectangle — days with no usage render as a
+      // flat baseline bar. Day strings are UTC (matching the endpoint), so build in UTC.
+      var byDay={};days.forEach(function(x){byDay[x.day]=(x.up||0)+(x.down||0)});
+      function ymd(dt){return dt.toISOString().slice(0,10)}
+      var keys=days.map(function(x){return x.day}).sort();
+      var end=ymd(new Date());
+      if(keys[keys.length-1]>end)end=keys[keys.length-1];
+      var eD=new Date(end+'T00:00:00Z');
+      var sD=new Date(eD);sD.setUTCDate(sD.getUTCDate()-29);var start=ymd(sD);   // 30-day floor
+      if(keys[0]<start)start=keys[0];                                            // extend back to earliest data
+      var capD=new Date(eD);capD.setUTCDate(capD.getUTCDate()-364);              // but no more than ~1 year
+      if(start<ymd(capD))start=ymd(capD);
+      var series=[],max=1;
+      for(var dt=new Date(start+'T00:00:00Z');ymd(dt)<=end;dt.setUTCDate(dt.getUTCDate()+1)){
+        var k=ymd(dt),t=byDay[k]||0;series.push([k,t]);if(t>max)max=t;
+      }
+      var yTop=max*1.25;   // 25% headroom so the tallest bar doesn't slam the ceiling
+      var bars=series.map(function(s){
+        var h=(100*s[1]/yTop).toFixed(1);
+        return '<div class="sc-col" title="'+escHtml(s[0])+' · '+_kfmt(s[1])+' tokens"><i style="height:'+h+'%"></i></div>';
+      }).join('');
+      chart.innerHTML='<div class="sc-ymax">'+_kfmt(yTop)+'</div>'
+        +'<div class="sc-bars">'+bars+'</div>'
+        +'<div class="sc-x"><span>'+escHtml(start)+'</span><span>'+escHtml(end)+'</span></div>';
+    }
+  }
+  var me=document.getElementById('statsModels');if(me)me.innerHTML=_statRows(d&&d.models);
+  var he=document.getElementById('statsHosts');if(he)he.innerHTML=_statRows(d&&d.hosts);
+}
+function loadStats(){
+  fetch('api/stats').then(function(r){return r.json()}).then(renderStats).catch(function(){});
+}
 function openMap(){
   if(!_mapWired){
     _mapWired=true;
@@ -7901,7 +8000,7 @@ function activateTab(name,chatId,pane,mode){
     }
   }
   if(name==='settings'){injectSettingsPwFields();loadSettings();}
-  if(name==='map')openMap();
+  if(name==='stats'){openMap();loadStats();}
   // Lazy-load the image gallery only when its tab is first opened — building a
   // node per image on every page load (even in the Server Room) is wasteful.
   if(name==='media'){
@@ -8215,7 +8314,7 @@ function tabFromHash(){
     var seg=h.slice(6).split('/');
     return{tab:'media',pane:seg[0],mode:seg[1]};
   }
-  if(h==='serverroom'||h==='chat'||h==='media'||h==='map'||h==='settings')return{tab:h};
+  if(h==='serverroom'||h==='chat'||h==='media'||h==='stats'||h==='settings')return{tab:h};
   return{tab:'serverroom'};
 }
 document.querySelectorAll('.tab').forEach(function(t){

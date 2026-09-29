@@ -129,6 +129,10 @@ UNREACHABLE_KEY = "\x00unreachable"
 # provenance ("excluded: honeypot" vs "unreachable") survives. Additive/reversible.
 HONEYPOT_KEY = "\x00honeypot"
 LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
+# Append-only, per-request usage log for the Stats view: one compact line
+# {date(utime), host, model, down, up, tps} per accounted request. Tiny lines,
+# append-forever (aggregated by day at read time in handle_stats).
+STATS_FILE = os.path.join(CACHE_DIR, "stats.jsonl")
 KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
 # Append-only provenance log of dyva's OWN runtime probes — "what WE tested a host
 # for" (the vision balloon, etc.), distinct from the endpoint's /api/tags
@@ -295,7 +299,7 @@ def _apply_cache_dir(path):
     CLASSIFIER_FILE / NODE_CLASSIFIER_FILE are package-relative, not cache-derived,
     so they're intentionally left alone."""
     global CACHE_DIR, CACHE_FILE, NOTWORKING_FILE, BAD_FILE, GOOD_FILE, STATUS_DB
-    global LAST_FILE, KNOWN_FILE, PROBE_FILE, IMG_DIR, AUDIO_DIR, IMG_HISTORY_FILE, THUMB_DIR
+    global LAST_FILE, STATS_FILE, KNOWN_FILE, PROBE_FILE, IMG_DIR, AUDIO_DIR, IMG_HISTORY_FILE, THUMB_DIR
     global CHATS_FILE, CHATS_DB, JOBS_DB, SETTINGS_FILE, VIDEO_JOBS_FILE
     global VIDEO_JOBS_DIR, CLEANSED_FILE, SURVEY_FILE, MUSIC_JOBS_FILE, MUSIC_JOBS_DIR
     CACHE_DIR = os.path.abspath(os.path.expanduser(path))
@@ -305,6 +309,7 @@ def _apply_cache_dir(path):
     GOOD_FILE = os.path.join(CACHE_DIR, "good-hosts.txt")
     STATUS_DB = os.path.join(CACHE_DIR, "host-status.db")
     LAST_FILE = os.path.join(CACHE_DIR, "last-success.json")
+    STATS_FILE = os.path.join(CACHE_DIR, "stats.jsonl")
     KNOWN_FILE = os.path.join(CACHE_DIR, "known-hosts.json")
     PROBE_FILE = os.path.join(CACHE_DIR, "host-probe.json")
     IMG_DIR = os.path.join(CACHE_DIR, "images")
@@ -1397,6 +1402,14 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     p, c = _usage_of(obj)
     if p is None and c is None:
         return
+    # We only CONSTRAIN the window on the Ollama-native dialect (we send options.num_ctx
+    # and the server head-truncates to it). On the OpenAI dialect we send NO num_ctx —
+    # the host uses its own, often larger, window — so comparing the prompt to our auto
+    # cap (NUM_CTX_MAX) falsely flags "truncated ⚠" on a request the host handled whole.
+    # Don't assert a window we didn't set: drop num_ctx so the truncation check + the
+    # (Nk) display only appear where they're authoritative.
+    if speaks_openai(host):
+        num_ctx = None
     mark_worker_tokens(wid, p, c, num_ctx)
     # tokens/second, most-recent (host, model) reading. Prefer the upstream's OWN
     # generation timing when it reports it: Ollama gives eval_count / eval_duration
@@ -1430,6 +1443,10 @@ async def account_tokens(wid, host, model, obj, num_ctx):
                     tps = cand
     if tps is not None:
         record_perf(host, model, tps=tps)
+    # One compact per-request usage line for the Stats view (down/up/tps by host+model
+    # over time). Only accounted requests reach here (tokens present), so failures and
+    # zero-token calls don't pollute the usage numbers.
+    _write_stat(host, model, up=p, down=c, tps=tps)
     # Token counts live on the WORKER CARD, not the activity feed — the feed is for
     # request events (trying / failed / connected), and per-turn token metrics
     # aren't that class of thing. The one exception is a truncation, which is a
@@ -3213,14 +3230,21 @@ TIER_LAST, TIER_GOOD, TIER_MAYBE, TIER_UNKNOWN, TIER_BAD = -3, -2, -1, 0, 1
 def host_tier(is_last, in_good, in_maybe, in_bad, unreachable=False):
     if unreachable:
         return TIER_BAD
+    # A bad host never keeps the sticky top-slot. `is_last` used to be checked first,
+    # so a host that was the last-good sticky AND is now `bad` (a user thumbs-down, a
+    # failing verdict) still got TIER_LAST and was routed to FIRST — "flag it bunk, it
+    # locks right back in." clear_last tries to drop the sticky at flag-time but is
+    # fragile (exact-`full` match; a later success re-adds it), so the durable guard is
+    # here: a bad/unreachable host loses its sticky privilege and drops to TIER_BAD.
+    # A good/maybe/unknown sticky still earns TIER_LAST (warm-cache preference kept).
+    if in_bad:
+        return TIER_BAD
     if is_last:
         return TIER_LAST
     if in_good:
         return TIER_GOOD
     if in_maybe:
         return TIER_MAYBE
-    if in_bad:
-        return TIER_BAD
     return TIER_UNKNOWN
 
 
@@ -3752,6 +3776,22 @@ def _write_worker_job(rec):
         path = os.path.join(CACHE_DIR, "worker-jobs.jsonl")
         with open(path, "a") as f:
             f.write(json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def _write_stat(host, model, up, down, tps):
+    """Append one compact per-request usage line to STATS_FILE for the Stats view:
+    {date(utime), host, model, down, up, tps}. Append-only and tiny (~90 bytes);
+    aggregated by day at read time. Best-effort, never raises."""
+    if not model:
+        return
+    try:
+        rec = {"date": int(time.time()), "host": _norm_host(host), "model": model,
+               "down": down, "up": up,
+               "tps": round(float(tps), 2) if tps is not None else None}
+        with open(STATS_FILE, "a") as f:
+            f.write(json.dumps(rec) + "\n")
     except Exception:
         pass
 
@@ -5956,6 +5996,67 @@ async def handle_reload_hosts(request):
     servers = load_servers()
     return web.json_response({"servers": len(servers), "models": len(all_models()),
                               "loaded": _hosts_loaded_str()})
+
+
+async def handle_stats(request):
+    """
+    Usage over time (for the Stats view).
+    ---
+    tags: [UI]
+    summary: GET /api/stats — per-day token usage plus per-model and per-host breakdown
+    description: >
+      Aggregates the append-only per-request usage log (stats.jsonl) into daily
+      token totals (up/down) and per-model / per-host breakdowns. Read-time
+      aggregation, so the raw log can grow unbounded without the client ever
+      pulling it whole.
+    responses:
+      '200':
+        description: Aggregated usage
+    """
+    import datetime as _dt
+    days, models, hosts = {}, {}, {}
+    tot_up = tot_down = tot_reqs = 0
+    try:
+        with open(STATS_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                up = r.get("up") or 0
+                down = r.get("down") or 0
+                tps = r.get("tps")
+                try:
+                    day = _dt.datetime.fromtimestamp(r.get("date") or 0, _dt.timezone.utc).strftime("%Y-%m-%d")
+                except (ValueError, OSError, OverflowError):
+                    continue
+                d = days.setdefault(day, {"day": day, "up": 0, "down": 0, "reqs": 0})
+                d["up"] += up; d["down"] += down; d["reqs"] += 1
+                for bucket, bkey in ((models, r.get("model") or "?"), (hosts, r.get("host") or "?")):
+                    b = bucket.setdefault(bkey, {"up": 0, "down": 0, "reqs": 0, "_tps": 0.0, "_tn": 0})
+                    b["up"] += up; b["down"] += down; b["reqs"] += 1
+                    if tps is not None:
+                        b["_tps"] += tps; b["_tn"] += 1
+                tot_up += up; tot_down += down; tot_reqs += 1
+    except OSError:
+        pass
+
+    def _rows(bucket):
+        out = [{"name": k, "up": b["up"], "down": b["down"], "reqs": b["reqs"],
+                "tps": round(b["_tps"] / b["_tn"], 1) if b["_tn"] else None}
+               for k, b in bucket.items()]
+        out.sort(key=lambda x: x["up"] + x["down"], reverse=True)
+        return out
+
+    return web.json_response({
+        "days": [days[k] for k in sorted(days)],
+        "models": _rows(models),
+        "hosts": _rows(hosts),
+        "totals": {"up": tot_up, "down": tot_down, "reqs": tot_reqs},
+    })
 
 
 async def handle_geo_summary(request):
@@ -14201,6 +14302,7 @@ def make_app():
     swagger.add_get("/guide", handle_guide)
     swagger.add_get("/reload-hosts", handle_reload_hosts)
     swagger.add_get("/host-info", handle_host_info)
+    swagger.add_get("/api/stats", handle_stats)
     swagger.add_get("/geo-summary", handle_geo_summary)
     swagger.add_get("/geo-compare", handle_geo_compare)
     swagger.add_get("/dashboard", handle_dashboard)
