@@ -162,6 +162,7 @@ _knowns_cache = None
 _probe_cache = None
 _LOCAL = False
 _CURLIFY = False
+ACTIVITY_LOG = False   # --log: mirror the activity feed to a date-stamped JSONL on disk
 
 PORT = 11434
 TIMEOUT = 30
@@ -1303,6 +1304,25 @@ async def _unregister_worker(wid, ok=None):
 
 
 
+def _write_activity(entry):
+    """Append one activity event as a JSON line to a DATE-STAMPED file, only when
+    started with --log (ACTIVITY_LOG). The filename carries the UTC date
+    (activity-YYYY-MM-DD.jsonl, matching the Z timestamps in the feed) so a new day
+    simply lands in a new file — there is NO rollover/rename step that could fail and
+    hose the log, and the software only ever appends. Retention and compression are
+    left to the operator / external tooling on purpose. A write error here must never
+    break the request path, so it's swallowed."""
+    if not ACTIVITY_LOG:
+        return
+    try:
+        day = datetime.datetime.utcnow().strftime('%Y-%m-%d')
+        path = os.path.join(CACHE_DIR, f"activity-{day}.jsonl")
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 async def broadcast_activity(host, model, status, message, duration=None, wid=None, aid=None,
                              rmodel=None):
     """Publish one activity event.
@@ -1320,6 +1340,7 @@ async def broadcast_activity(host, model, status, message, duration=None, wid=No
         entry['rmodel'] = rmodel
     if duration is not None:
         entry['duration'] = round(duration, 2)
+    _write_activity(entry)
     # Mirror to stderr so the server log carries the same narrative as the
     # dashboard feed — otherwise a failure is only visible to whoever happens to
     # have the Activity pane open, and is gone once it scrolls past the cap.
@@ -1956,8 +1977,12 @@ def refresh_cache(source=None, cleanse=True):
                      ", ".join(f"{k}={v}" for k, v in by.most_common()) +
                      f") -> {CLEANSED_FILE}")
 
-    with open(_db, 'w', encoding="utf-8") as f:
-      json.dump(records, f)
+    # Atomic write: a raw open(_db,'w') truncates the LIVE file and streams the
+    # dump straight into it, so a concurrent refresh (or a reader mid-write) sees
+    # a torn/interleaved file — which is exactly how free-ollama.json got the
+    # `"host": "…:2087: "comfyui"` / truncated-url corruption that 500'd the
+    # dashboard. _save_json_atomic writes a unique temp + fsync + os.replace.
+    _save_json_atomic(_db, records)
 
     by_source = {}
     for v in host_map.values():
@@ -1987,8 +2012,17 @@ def load_servers():
         if not os.path.exists(CACHE_FILE):
             _servers_cache = []
         else:
-            with open(CACHE_FILE, encoding="utf-8") as f:
-                _servers_cache = json.load(f)
+            try:
+                with open(CACHE_FILE, encoding="utf-8") as f:
+                    _servers_cache = json.load(f)
+            except (ValueError, OSError) as e:
+                # A torn/half-written CACHE_FILE (the merged pool is rewritten by the
+                # refresh/combine) must NOT 500 the whole dashboard. Serve 0 hosts and
+                # log loudly; the next refresh invalidates this cache and re-reads the
+                # now-complete file. (Was a bare json.load -> JSONDecodeError -> 500 on /.)
+                log.error(f"load_servers: {CACHE_FILE} unreadable/corrupt ({e}); "
+                          "serving 0 hosts until the next refresh")
+                _servers_cache = []
             # Normalize every record's `models` to canonical Form A at INGEST, so
             # the rest of dyva sees one shape regardless of what the graflex source
             # (list-of-names, list-of-dicts, or Form A object) delivered. Fail-safe:
@@ -2426,6 +2460,23 @@ def smoke_dated(host, model):
         return bool(row and row[0])
     except Exception:
         return False
+
+
+def _host_trusted(host):
+    """True if this HOST is verified as a real machine — it has any good/maybe verdict
+    OR any smoke PASS, for ANY model. A honeypot is a whole-machine trait, so one clean
+    contact (a real answer, or a smoke pass) proves the machine for every model. Used to
+    gate the pre-send smoke test: an unknown/never-verified host is smoked with a tiny
+    prompt before we ship it the real payload; a trusted host isn't. Fail-open on a DB
+    error (treat as trusted) so a transient glitch doesn't add a probe to every request."""
+    try:
+        row = _get_db().execute(
+            "SELECT 1 FROM host_status WHERE host=? AND "
+            "(state IN ('good','maybe_good') OR (smoke_date IS NOT NULL AND fail_smoke=0)) "
+            f"AND {_LIVE_REAL} LIMIT 1", [host]).fetchone()
+        return row is not None
+    except Exception:
+        return True
 
 
 # Failure-kind -> counter column. Whitelisted so the kind can be interpolated
@@ -14434,7 +14485,7 @@ def banner():
 """)
 
 def main():
-    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY, BASE_PATH
+    global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY, BASE_PATH, ACTIVITY_LOG
 
     parser = argparse.ArgumentParser(description="dumpster-dyva - Like the Ollama :cloud models, but you don't pay.")
     parser.add_argument("-p", "--port",     type=int, default=PORT, help=f"port to listen on (default: {PORT})")
@@ -14457,6 +14508,7 @@ def main():
                              "for the keys marked bad, '--hosts bad __tts__' for the hosts carrying "
                              "that mark, and '--hosts bad __tts__ del' to clear them")
     parser.add_argument("--curlify", action="store_true", help="print curl commands of upstream requests to stderr")
+    parser.add_argument("--log", action="store_true", help="persist the activity feed to a date-stamped JSONL on disk (~/.cache/free-ollama/activity-YYYY-MM-DD.jsonl); off by default")
     parser.add_argument("-v", "--version",  action="store_true", help="show version information")
     parser.add_argument("--virgin", action="store_true", help=argparse.SUPPRESS)  # say it out loud
     args = parser.parse_args()
@@ -14493,6 +14545,9 @@ def main():
     PORT = args.port
     _LOCAL = args.local
     _CURLIFY = args.curlify
+    ACTIVITY_LOG = args.log
+    if ACTIVITY_LOG:
+        log.info("Activity feed logging ON -> " + os.path.join(CACHE_DIR, "activity-<UTC-date>.jsonl"))
     load_settings()   # persisted dashboard settings override the CLI defaults
     if args.local:       # an explicit -l flag always wins over saved settings
         _LOCAL = True

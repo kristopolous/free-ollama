@@ -2295,6 +2295,7 @@ function renderWorkers(workers){
     var card=document.createElement('div');card.className='worker-card'
       +(w.done?' worker-done'+(w.ok===false?' worker-failed':''):'');
     card.setAttribute('data-wid',w.wid);
+    card.title='wid '+w.wid;   // hover to read the unique worker id (for debugging)
     var body=document.createElement('div');body.className='worker-body';
     var top=document.createElement('div');top.className='worker-title';
     // Row 1: the model being searched for (the routing key).
@@ -7687,7 +7688,7 @@ function _statRows(rows){
     return '<div class="stats-row"><span class="sr-name" title="'+escHtml(x.name)+'">'+escHtml(x.name)+'</span>'
       +'<span class="sr-bar"><i style="width:'+(100*tot/max).toFixed(1)+'%"></i></span>'
       +'<span class="sr-tok">'+_kfmt(tot)+'</span>'
-      +'<span class="sr-tps">'+(x.tps?x.tps+'t/s':'')+'</span>'
+      +'<span class="sr-tps">'+(x.tps?Math.round(x.tps)+'t/s':'')+'</span>'
       +'<span class="sr-req">'+(x.reqs||0)+'</span></div>';
   }).join('');
 }

@@ -39,6 +39,7 @@ case "$SERVICE" in
     ;;
 
   enrich)
+    DATE=$(date +%Y%m%d)
     source .venv/bin/activate
     for i in ~/.cache/free-ollama/*-notworking.json; do
       MALLOC_ARENA_MAX=2 python3 -OO ./graflex.py -a enrich "$i" host
