@@ -4,3 +4,4 @@ dist
 .direnv
 .env
 .envrc
+benchmarks/

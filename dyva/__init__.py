@@ -1135,7 +1135,21 @@ def _kind_for_key(key):
     return "text"
 
 
-async def _register_worker(model, total, stop, phase=None, host=None, kind="text"):
+def _client_title(request):
+    """The calling app's own name, from the `X-Title` request header — OpenRouter's
+    convention for a client identifying itself (goose, a custom agent, etc.). Purely
+    observational: we record it on the worker and in the usage log so the Stats view can
+    later break usage down by which tool drove it. Nothing routes on it, and it is
+    attacker-controlled free text, so it is trimmed and length-capped."""
+    try:
+        t = (request.headers.get("X-Title") or "").strip()
+    except Exception:
+        return None
+    return t[:64] or None
+
+
+async def _register_worker(model, total, stop, phase=None, host=None, kind="text",
+                           title=None):
     wid = _new_wid()
     _trim_done_workers()
     if len(_workers) >= _WORKERS_MAX:
@@ -1155,6 +1169,7 @@ async def _register_worker(model, total, stop, phase=None, host=None, kind="text
         "host": host,
         "kind": kind,
         "service": service_of(host) if host else None,
+        "title": title,          # calling app's X-Title, if it sent one
         "found": None,
         "done": None,
         "ok": None,
@@ -1218,7 +1233,7 @@ async def _waiting_worker(label, host, phase="rendering", model=None, kind=None)
         await _unregister_worker(wid, ok=ok)
 
 
-def is_active(host):
+def is_active(host, except_wid=None):
     """Is one of our own jobs already sitting on this host?
 
     Derived from the live worker registry rather than an "active hosts" set of
@@ -1233,10 +1248,14 @@ def is_active(host):
     it, so two requests that check within the same instant can both pick it.
     The window is milliseconds against renders that run for minutes, and
     losing it only costs the old behaviour, so it is not worth closing.
+
+    `except_wid` ignores one worker — the caller's own. A tool-loop continuation
+    re-races while its job is still registered ON the host it wants to stay on, so
+    without this it would read itself as "busy" and abandon its own warm host.
     """
     if not host:
         return False
-    return any(w.get("host") == host and not w.get("done")
+    return any(w.get("host") == host and not w.get("done") and w.get("wid") != except_wid
                for w in _workers.values())
 
 
@@ -1477,7 +1496,8 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     # One compact per-request usage line for the Stats view (down/up/tps by host+model
     # over time). Only accounted requests reach here (tokens present), so failures and
     # zero-token calls don't pollute the usage numbers.
-    _write_stat(host, model, up=p, down=c, tps=tps)
+    _write_stat(host, model, up=p, down=c, tps=tps,
+                title=(_workers.get(wid) or {}).get("title"))
     # Token counts live on the WORKER CARD, not the activity feed — the feed is for
     # request events (trying / failed / connected), and per-turn token metrics
     # aren't that class of thing. The one exception is a truncation, which is a
@@ -3847,9 +3867,11 @@ def _write_worker_job(rec):
         pass
 
 
-def _write_stat(host, model, up, down, tps):
+def _write_stat(host, model, up, down, tps, title=None):
     """Append one compact per-request usage line to STATS_FILE for the Stats view:
-    {date(utime), host, model, down, up, tps}. Append-only and tiny (~90 bytes);
+    {date(utime), host, model, down, up, tps} plus `title` (the calling app's X-Title)
+    when it sent one — recorded now so the breakdown is available later; nothing reads
+    it yet. Omitted when absent so the line stays tiny. Append-only (~90 bytes);
     aggregated by day at read time. Best-effort, never raises."""
     if not model:
         return
@@ -3857,6 +3879,8 @@ def _write_stat(host, model, up, down, tps):
         rec = {"date": int(time.time()), "host": _norm_host(host), "model": model,
                "down": down, "up": up,
                "tps": round(float(tps), 2) if tps is not None else None}
+        if title:
+            rec["title"] = title
         with open(STATS_FILE, "a") as f:
             f.write(json.dumps(rec) + "\n")
     except Exception:
@@ -4621,6 +4645,17 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         await broadcast_activity(host, model, "trying",
             f"trying: {host} for {model}", wid=wid)
 
+        # One machine must not serve two jobs at once. With subagents fanning out,
+        # several races run concurrently and the same good host can win all of them —
+        # it then serialises the jobs (or thrashes) while other hosts sit idle. If
+        # another worker is already on this box, throw it back to the pool and let the
+        # race move on. Our OWN job is excluded, so a tool-loop continuation can still
+        # re-land on the warm host it was already using. Checked before the reachability
+        # probe and the smoke screen so a host we're going to reject costs no round
+        # trips. (_idle_first already *prefers* idle hosts; this is the hard check.)
+        if is_active(host, except_wid=job_wid):
+            return skip("host busy (another worker is already on it)")
+
         # last-used / known-good hosts go straight to the request;
         # untested ones get probed first, caps refreshed only if needed
         trusted = prio < 0
@@ -4648,7 +4683,10 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             if sok is False:
                 return skip("failed smoke test: " + (sdetail or "not a real model"))
             if sok is None:
-                return skip("smoke inconclusive (too slow to answer)")
+                # Inconclusive: too slow, or a request-level rejection (400 / 503 /
+                # loading). Carry the detail so the race record shows WHY, not just
+                # "inconclusive" — no penalty either way, the host stays re-testable.
+                return skip("smoke inconclusive: " + (sdetail or "no answer in time"))
             # PASSED — promote it. _quick_probe deliberately leaves this to the caller
             # ("not promoted" in its log); :test does the same set_last for a verified
             # host. Without it the host it just proved good stays an ordinary pool
@@ -5667,11 +5705,31 @@ async def _quick_probe(session, host, full, model_in, tools=None):
             duration=time.time() - start, wid=wid)
         return False, why
     if resp.status != 200:
-        await resp.release()
-        add_bad(host, full, reason=f"smoke: status {resp.status}")
-        await broadcast_activity(host, model_in, "failed",
-            f"quick test: {host} for {model_in} - status {resp.status}", duration=time.time() - start, wid=wid)
-        return False, f"status {resp.status}"
+        # SURFACE THE BODY. This used to release the response and report a bare
+        # "status 400", which made every probe rejection undiagnosable — the body is
+        # the part that says whether it was the host or us.
+        body = ""
+        try:
+            raw = await resp.read()
+            body = " ".join(raw.decode("utf-8", errors="replace").split())[:300]
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            await resp.release()
+        detail = f"status {resp.status}" + (f": {body}" if body else "")
+        # Do NOT condemn the machine for a REQUEST-level rejection. A 400 is our own
+        # payload or a model that won't load ("Invalid 'messages' in payload", "Failed
+        # to load model", "No models loaded"); a 503 is a busy host; a 500 "loading
+        # model" is a cold start. None of those mean the MACHINE is bad, and marking
+        # them bad here was condemning hosts that should have passed. Inconclusive ->
+        # skip, no penalty, still re-testable. Anything else keeps the bad mark.
+        benign = (resp.status in (400, 503)) or ("loading model" in body.lower())
+        if not benign:
+            add_bad(host, full, reason=f"smoke: {detail}")
+        await broadcast_activity(host, model_in, "warming" if benign else "failed",
+            f"quick test: {host} for {model_in} - {detail}",
+            duration=time.time() - start, wid=wid)
+        return (None if benign else False), detail
     try:
         data = await resp.json()
     except Exception:
@@ -5852,7 +5910,8 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
     _servers = find_servers(model_in, req_caps)
     total = len(_servers)
-    job_wid = await _register_worker(model_list[0], total, lambda: None, kind="text")
+    job_wid = await _register_worker(model_list[0], total, lambda: None, kind="text",
+                                     title=_client_title(request))
     try:
         # The sticky (last-good) host is already sorted first in _servers, so
         # the hedged race tries it alone for HEDGE_DELAY seconds and only fans
@@ -5987,7 +6046,8 @@ async def _proxy_generate(request, session):
             return web.json_response(err_obj(f"no available servers for '{model}'", "model_not_found"), status=404)
         return _info_response(model, info, do_stream=do_stream)
 
-    job_wid = await _register_worker(model, len(find_servers(model, req_caps)), lambda: None, kind="text")
+    job_wid = await _register_worker(model, len(find_servers(model, req_caps)), lambda: None,
+                                     kind="text", title=_client_title(request))
     try:
         # Sticky host first (via find_servers), then hedge: it gets HEDGE_DELAY
         # to itself before the rest of the pool is raced alongside it.
@@ -14423,6 +14483,26 @@ def make_app():
                 await asyncio.wait(others, timeout=2)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(app["session"].close(), timeout=2)
+        # Close the DATABASES last — after the tasks that write to them are cancelled.
+        # All three are WAL-mode and nothing ever closed them, so Ctrl+C left an
+        # un-checkpointed -wal behind every time. SQLite recovers on the next open, so
+        # it wasn't losing data, but the .db file ALONE was not complete — which now
+        # matters, because a backup that copies only the .db (and not -wal/-shm) would
+        # silently miss the most recent writes. wal_checkpoint(TRUNCATE) folds the WAL
+        # back into the main file and empties it, so what's on disk at exit is whole.
+        for _db in (_status_db, _chats_db):
+            if _db is None:
+                continue
+            with contextlib.suppress(Exception):
+                _db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                _db.commit()
+                _db.close()
+        if _jobs_db is not None:      # aiosqlite (async) connection
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(_jobs_db.execute("PRAGMA wal_checkpoint(TRUNCATE)"), timeout=2)
+                await asyncio.wait_for(_jobs_db.commit(), timeout=2)
+                await asyncio.wait_for(_jobs_db.close(), timeout=2)
+        log.info("shutdown: databases checkpointed and closed")
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
