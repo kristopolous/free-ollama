@@ -4973,6 +4973,19 @@ def _estimate_prompt_tokens(payload):
             for part in c:
                 if isinstance(part, dict):
                     tokens += _count_tokens(part.get("text") or "")
+        # An assistant turn's tool_calls carry the function name AND the arguments
+        # blob, and in an agentic loop those turns are most of the history — they were
+        # counted as ZERO, so a tool-heavy conversation estimated far under its real
+        # size and num_ctx (and the too-slow budget) came out too small. `arguments` is
+        # a STRING in the OpenAI dialect and a dict in Ollama's, so dump the whole list
+        # rather than reaching into either shape; the JSON punctuation overcounts
+        # slightly, which is the safe direction for sizing.
+        tc = m.get("tool_calls") if isinstance(m, dict) else None
+        if tc:
+            try:
+                tokens += _count_tokens(json.dumps(tc, ensure_ascii=False))
+            except (TypeError, ValueError):
+                pass
     if payload.get("tools"):               # the tool schemas cost real tokens
         try:
             tokens += _count_tokens(json.dumps(payload["tools"], ensure_ascii=False))
@@ -14546,13 +14559,14 @@ def banner():
         VERSION=importlib.metadata.version('dyva')
     except Exception as e:
         VERSION="(git)"
+    color = random.randint(125,230)
     print(f"""
-\\\\       DDDDd.  YY  yY Vv    vV   aa     //
- l'>      DD  dD  YyyY   Vv  vV   aAAa   <-l
- ll       DD  dD   yY     VvvV   aA  Aa   ll
- llama~  DDDDd"   yY       VV   aA    Aa  llama~
+\\\\  \033[38;5;{color}m     ████▅▅  █▂ ▂█  █▄    ▄█   ▟▙ \033[0m    //
+ l'>  \033[38;5;{color}m    █▍  ▐█  ▜▄▛    █▄  ▄█   ▄▛▜▄  \033[0m <-l
+ ll   \033[38;5;{color}m    █▍  ▐█   █      █▄▄█   ▄█  █▄  \033[0m ll
+ llama~\033[38;5;{color}m  █████▛    █       ██   ▄█    █▄ \033[0m llama~
  || ||               v{VERSION}               || ||
- '' ''               dibatag              '' ''
+ '' ''              epixerus              '' ''
 """)
 
 def main():
