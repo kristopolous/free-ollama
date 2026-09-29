@@ -176,6 +176,12 @@ WORKER_COUNT = 10
 # pool is raced alongside it; first to produce wins, the loser is dropped.
 # Caps the wait on a dead-but-connected favourite. 0 disables (race at once).
 HEDGE_DELAY = 15
+# Slowest INPUT rate (tokens/second) we're willing to wait through before calling a
+# host "too slow". The too-slow budget CANNOT be a constant: a host that answers a
+# 20-token probe instantly may still need a long time to prefill a 20k-token prompt,
+# so a fixed TIMEOUT condemns it for doing exactly what we asked. Budget scales as
+# prompt_tokens / MIN_TPS, floored at TIMEOUT. Settable at runtime (min_tps).
+MIN_TPS = 5
 # Upper bound on a believable tokens/second reading. Even a tiny model on top-end
 # hardware stays well under this; a computed value above it is a measurement
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
@@ -417,7 +423,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -431,6 +437,8 @@ def load_settings():
         TIMEOUT = s["timeout"]
     if isinstance(s.get("hedge_delay"), (int, float)) and s["hedge_delay"] >= 0:
         HEDGE_DELAY = s["hedge_delay"]
+    if isinstance(s.get("min_tps"), (int, float)) and s["min_tps"] > 0:
+        MIN_TPS = s["min_tps"]
     if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
         MIN_COUNT = s["min_count"]
     if isinstance(s.get("admin_pw"), str):
@@ -459,7 +467,7 @@ def save_settings(extra=None):
     if not isinstance(data, dict):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                 "hedge_delay": HEDGE_DELAY,
+                 "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST,
                  "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
@@ -1316,7 +1324,9 @@ def _write_activity(entry):
         return
     try:
         day = datetime.datetime.utcnow().strftime('%Y-%m-%d')
-        path = os.path.join(CACHE_DIR, f"activity-{day}.jsonl")
+        d = os.path.join(CACHE_DIR, "logs")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"activity-{day}.jsonl")
         with open(path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
@@ -2462,21 +2472,27 @@ def smoke_dated(host, model):
         return False
 
 
-def _host_trusted(host):
-    """True if this HOST is verified as a real machine — it has any good/maybe verdict
-    OR any smoke PASS, for ANY model. A honeypot is a whole-machine trait, so one clean
-    contact (a real answer, or a smoke pass) proves the machine for every model. Used to
-    gate the pre-send smoke test: an unknown/never-verified host is smoked with a tiny
-    prompt before we ship it the real payload; a trusted host isn't. Fail-open on a DB
-    error (treat as trusted) so a transient glitch doesn't add a probe to every request."""
+def _host_screened(host):
+    """True ONLY if this HOST has actually PASSED the smoke test at some point, for any
+    model: smoke_date set with fail_smoke=0. A honeypot is a whole-machine trait, so one
+    real answer to the #000000 test proves the machine for every model.
+
+    Deliberately NOT keyed on state/'good' or on priority, because neither is evidence
+    that we ever tested the host: a honeypot's canned bait is a 200, so its first
+    unscreened request is recorded as a SUCCESS -> state='good' -> prio<0 -> "trusted",
+    and it would bootstrap itself out of ever being tested on the strength of its own
+    bait. (That is exactly what happened: a honeypot row with success=1, state='good'
+    and smoke_date=NULL.) Being the sticky/last-good host is not evidence either.
+
+    Fails CLOSED on a DB error: assume-bad means when in doubt we TEST it. Defaulting to
+    trusted is the one direction that can hand our payload to a honeypot."""
     try:
         row = _get_db().execute(
-            "SELECT 1 FROM host_status WHERE host=? AND "
-            "(state IN ('good','maybe_good') OR (smoke_date IS NOT NULL AND fail_smoke=0)) "
-            f"AND {_LIVE_REAL} LIMIT 1", [host]).fetchone()
+            "SELECT 1 FROM host_status WHERE host=? AND smoke_date IS NOT NULL "
+            f"AND fail_smoke=0 AND {_LIVE_REAL} LIMIT 1", [host]).fetchone()
         return row is not None
     except Exception:
-        return True
+        return False
 
 
 # Failure-kind -> counter column. Whitelisted so the kind can be interpolated
@@ -4230,8 +4246,14 @@ def _messages_openai(messages):
 def openai_payload(p):
     out = {k: v for k, v in p.items() if k not in _OLLAMA_ONLY}
     opts = p.get("options") or {}
+    # num_ctx -> context_length: the OpenAI-dialect spelling of the window. Without it
+    # the host falls back to whatever it was launched with (commonly 8192) and 400s a
+    # bigger prompt with "request (N tokens) exceeds the available context size" — which
+    # is what a 20k-token payload was hitting. Sized by the same _auto_num_ctx the
+    # Ollama branch uses; the caller's pin still wins.
     for src, dst in (("temperature", "temperature"), ("top_p", "top_p"),
                      ("num_predict", "max_tokens"), ("seed", "seed"),
+                     ("num_ctx", "context_length"),
                      ("stop", "stop")):
         if src in opts:
             out[dst] = opts[src]
@@ -4488,14 +4510,17 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
             else:
                 p["think"] = False                 # Ollama native
         if attempt_oai:
-            p = openai_payload(p)
+            # Size the window first, exactly as the Ollama branch does — openai_payload
+            # then emits it as context_length. Otherwise the host uses whatever it was
+            # launched with (often 8192) and rejects a big prompt outright.
+            p = openai_payload(_with_num_ctx(p))
         else:
             # Ollama defaults every request to a 4096-token window and SILENTLY
             # truncates anything past it — the head just vanishes, no error. So
             # always send an auto-sized options.num_ctx when the caller didn't pin
             # one; the premise is that a long chat or a big tool payload must not
-            # quietly fail. (num_ctx is Ollama-native — the OpenAI dialect has no
-            # such field, so only this branch.)
+            # quietly fail. (The OpenAI branch sizes the same window above and ships
+            # it as context_length — the sizing is shared, only the spelling differs.)
             p = _with_num_ctx(p)
             p = _with_num_predict(p)   # lift the host's output cap so it can fill the window
             if p.get("messages"):
@@ -4513,7 +4538,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
             # slow" (see the except handler on the send site).
             resp = await session.post(
                 f"{host}{ep}", json=p,
-                timeout=aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT))
+                timeout=aiohttp.ClientTimeout(total=_slow_timeout(p), sock_connect=CONNECT_TIMEOUT))
         except Exception as e:
             log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
                      f"after {time.time()-_t0:.1f}s")
@@ -4535,7 +4560,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
             try:
                 resp = await session.post(
                     f"{host}{ep}", json=p,
-                    timeout=aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT))
+                    timeout=aiohttp.ClientTimeout(total=_slow_timeout(p), sock_connect=CONNECT_TIMEOUT))
             except Exception as e:
                 log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
                          f"after {time.time()-_t0:.1f}s")
@@ -4605,6 +4630,32 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             return unreachable_host("probe failed")
         if not trusted and caps and caps != {"completion"}:
             await refresh_host_caps(session, host)
+
+        # Honeypot screen — the connection is up (race won), so before we hand THIS host
+        # any data, ask it the #000000 test. _quick_probe passes only on a real colour
+        # answer (a honeypot's canned bait never is), condemns a confirmed honeypot
+        # host-wide, and is inconclusive on a merely-slow box. Runs before the vision
+        # balloon, which itself sends an image. NOT part of the race — a fail just skips
+        # to the next host via the same failover any host failure uses.
+        #
+        # Gated ONLY on "has this host actually passed the test" (_host_screened), NOT on
+        # `trusted`/prio: a honeypot's bait is a 200, so its first unscreened request is
+        # logged as a success -> state='good' -> prio<0 -> trusted, and short-circuiting
+        # on that let it skip the test forever on the strength of its own canned reply.
+        # Once a host really passes, smoke_date is stamped and it's never screened again.
+        if not _host_screened(host):
+            sok, sdetail = await _quick_probe(session, host, full, model)
+            if sok is False:
+                return skip("failed smoke test: " + (sdetail or "not a real model"))
+            if sok is None:
+                return skip("smoke inconclusive (too slow to answer)")
+            # PASSED — promote it. _quick_probe deliberately leaves this to the caller
+            # ("not promoted" in its log); :test does the same set_last for a verified
+            # host. Without it the host it just proved good stays an ordinary pool
+            # candidate and the race keeps churning past it — the pass gets thrown back
+            # into the pool. Sticking it (TIER_LAST) lands this request, and the next
+            # one, on the machine we just verified instead of re-racing into honeypots.
+            set_last(model, host, full)
 
         if "vision" in (caps or []) and not _known_has(host, full, "vision"):
             sees = await trial_balloon(session, host, full, model)
@@ -4934,6 +4985,24 @@ def _auto_num_ctx(payload):
     want = _estimate_prompt_tokens(payload) * NUM_CTX_PAD + NUM_CTX_REPLY
     stepped = ((int(want) + NUM_CTX_STEP - 1) // NUM_CTX_STEP) * NUM_CTX_STEP  # round up
     return max(NUM_CTX_MIN, min(NUM_CTX_MAX, stepped))
+
+
+def _slow_timeout(payload):
+    """Total-response budget for one send, SCALED BY INPUT SIZE.
+
+    A constant cannot work here: a host that answers a 20-token probe instantly may
+    still need a long time to prefill a 20k-token prompt, so a fixed TIMEOUT condemns
+    it as "too slow" for doing exactly what we asked of it. MIN_TPS is the slowest
+    input rate we are willing to wait through, so the budget is
+    prompt_tokens / MIN_TPS, floored at TIMEOUT so small prompts keep today's
+    behaviour. This only changes WHEN we call a host too slow — nothing else."""
+    try:
+        toks = _estimate_prompt_tokens(payload)
+    except Exception:
+        return TIMEOUT
+    if not toks or not MIN_TPS or MIN_TPS <= 0:
+        return TIMEOUT
+    return max(TIMEOUT, toks / float(MIN_TPS))
 
 
 def _apply_no_think(p):
@@ -6509,7 +6578,7 @@ async def handle_settings_get(request):
         # show a password prompt instead of the controls.
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY,
+                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -6529,7 +6598,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -6552,6 +6621,8 @@ async def handle_settings_post(request):
         TIMEOUT = min(body["timeout"], 600)
     if isinstance(body.get("hedge_delay"), (int, float)) and body["hedge_delay"] >= 0:
         HEDGE_DELAY = min(body["hedge_delay"], 600)
+    if isinstance(body.get("min_tps"), (int, float)) and body["min_tps"] > 0:
+        MIN_TPS = body["min_tps"]
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
         MIN_COUNT = body["min_count"]
     if isinstance(body.get("local"), bool):
@@ -6584,7 +6655,7 @@ async def handle_settings_post(request):
     if sources_changed:
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY,
+                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),

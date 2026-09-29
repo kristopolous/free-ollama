@@ -279,9 +279,16 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 /* Fixed-width right-aligned columns so tokens / tps / reqs line up straight down the
    list (tabular-nums keeps digits monospaced) instead of snaking with the text. */
 .sr-tok,.sr-tps,.sr-req{text-align:right;white-space:nowrap;color:var(--text-muted);font-variant-numeric:tabular-nums}
-.sr-tok{flex:0 0 56px}
-.sr-tps{flex:0 0 58px}
-.sr-req{flex:0 0 30px}
+.sr-tok{flex:0 0 62px}
+.sr-tps{flex:0 0 46px}
+.sr-req{flex:0 0 40px}
+/* Units live here once, in the header, instead of being suffixed onto all 40 rows.
+   Sticky so the columns stay labelled while the bounded list scrolls. */
+.stats-hdr .sr-name{font-size:var(--fs-md);letter-spacing:var(--eyebrow-tracking)}
+.stats-rows{margin-top:var(--sp-4)}
+.stats-hdr{position:sticky;top:0;z-index:1;background:var(--card);font-size:11px;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted);
+  border-bottom:1px solid var(--border);padding-bottom:3px}
 .stats-chart .muted,.stats-rows .muted{color:var(--text-muted)}
 /* .card has no margin and the Stats panel stacks two of them (stats + map) as block
    elements, so they sit flush. Give the map card breathing room below the stats card. */
@@ -1354,8 +1361,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="card"><div class="card-inner">
 <div class="map-head"><h2>Usage over time</h2><span id="statsTotals" class="stats-tot"></span></div>
 <div id="statsChart" class="stats-chart"></div>
-<h3 class="stats-h3">By model</h3><div id="statsModels" class="stats-rows"></div>
-<h3 class="stats-h3">By host</h3><div id="statsHosts" class="stats-rows"></div>
+<div id="statsModels" class="stats-rows"></div>
+<div id="statsHosts" class="stats-rows"></div>
 </div></div>
 <div class="card"><div class="card-inner map-inner">
 <div class="map-head"><h2>Host population</h2><button id="mapHelp" class="map-help" title="map syntax" aria-label="map syntax">?</button><div id="mapMode" class="seg"></div></div>
@@ -1416,6 +1423,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="settingsBody">
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Min tok/s</span><small class="setting-help">Slowest input rate worth waiting through. The timeout scales with prompt size (tokens &divide; this), so a big prompt gets proportionally longer before a host is called too slow. Never shorter than Timeout.</small></span><input type="number" id="setMinTps" min="1" max="10000" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Hedge delay (s)</span><small class="setting-help">How long the last-good host gets to respond before the rest of the pool is raced alongside it. Whoever answers first wins. 0 races everything at once. Keeps a dead-but-connected favourite from stalling the whole request.</small></span><input type="number" id="setHedge" min="0" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Base path</span><small class="setting-help">Serve dyva under a secret URL path instead of the root. A path like <code>/some-path</code> moves the dashboard to <code>/some-path/</code> and the API to <code>/some-path/v1/models</code> — deterrence by obscurity: a scanner hitting the default paths (<code>/v1/models</code>, <code>/api/tags</code>) finds nothing. Blank = served at the root. <b>Takes effect on restart</b> (like the listen port); the <code>--base</code> flag overrides this.</small></span><input type="text" id="setBasePath" placeholder="/some-path" spellcheck="false" autocomplete="off"></label>
@@ -1743,6 +1751,14 @@ function globSearch(query,list,key){
 // Thousands-separated counts for the tab badges (locale-aware). One shared
 // formatter so a 12,345-host pool doesn't read as a wall of digits.
 var NUM_FMT=new Intl.NumberFormat();
+// Token counts are shown in THOUSANDS so the numbers stay short; the "k" lives in the
+// column header (or the surrounding prose), never suffixed onto every row. INTEGERS
+// only — an opportunistic tenth on some rows and not others wrecks the column's shape.
+var K_FMT=new Intl.NumberFormat(undefined,{maximumFractionDigits:0});
+// A non-zero count under 1k reads "<1" rather than a misleading "0". Raw "<" on
+// purpose: this lands in textContent (totals), innerHTML (rows) and a title attribute,
+// and "<" before a digit is never a tag start, so it renders as text in all three.
+function _ktok(n){n=n||0;var k=n/1000;return (n>0&&k<1)?'<1':K_FMT.format(k);}
 function fmtCount(n){var v=Number(n);return isFinite(v)?NUM_FMT.format(v):String(n)}
 // The tab labels are icons now, so the count carries the meaning: how many
 // models in that pane match the current filter. The words live in title=.
@@ -7679,23 +7695,29 @@ function _mapTip(){var t=document.getElementById('mapTip');if(!t){t=document.cre
 function _showTip(html,ev){var t=_mapTip();t.innerHTML=html;t.style.display='block';var x=ev.clientX+14,y=ev.clientY+14;t.style.left=Math.min(x,innerWidth-t.offsetWidth-8)+'px';t.style.top=Math.min(y,innerHeight-t.offsetHeight-8)+'px'}
 function _hideTip(){var t=document.getElementById('mapTip');if(t)t.style.display='none'}
 var _mapData=null,_mapCmp=null,_mapWired=false;
-function _statRows(rows){
+function _statRows(rows,label){
   rows=rows||[];
-  if(!rows.length)return '<div class="muted">—</div>';
+  // The section title ("By model") sits in the header row's NAME column rather than in
+  // its own <h3> above, so the label and the column units read as one line. Units live
+  // in the header, so every row prints a bare number.
+  var hdr='<div class="stats-row stats-hdr"><span class="sr-name">'+escHtml(label||'')+'</span>'
+    +'<span class="sr-bar"></span><span class="sr-tok">Tokens (k)</span>'
+    +'<span class="sr-tps">Tok/s</span><span class="sr-req">Req</span></div>';
+  if(!rows.length)return hdr+'<div class="muted">—</div>';
   var max=1;rows.forEach(function(x){max=Math.max(max,(x.up||0)+(x.down||0))});
-  return rows.slice(0,40).map(function(x){
+  return hdr+rows.slice(0,40).map(function(x){
     var tot=(x.up||0)+(x.down||0);
     return '<div class="stats-row"><span class="sr-name" title="'+escHtml(x.name)+'">'+escHtml(x.name)+'</span>'
       +'<span class="sr-bar"><i style="width:'+(100*tot/max).toFixed(1)+'%"></i></span>'
-      +'<span class="sr-tok">'+_kfmt(tot)+'</span>'
-      +'<span class="sr-tps">'+(x.tps?Math.round(x.tps)+'t/s':'')+'</span>'
-      +'<span class="sr-req">'+(x.reqs||0)+'</span></div>';
+      +'<span class="sr-tok">'+_ktok(tot)+'</span>'
+      +'<span class="sr-tps">'+(x.tps?NUM_FMT.format(Math.round(x.tps)):'')+'</span>'
+      +'<span class="sr-req">'+NUM_FMT.format(x.reqs||0)+'</span></div>';
   }).join('');
 }
 function renderStats(d){
   var t=(d&&d.totals)||{};
   var tot=document.getElementById('statsTotals');
-  if(tot)tot.textContent=_kfmt((t.up||0)+(t.down||0))+' tokens · '+(t.reqs||0)+' reqs';
+  if(tot)tot.textContent=_ktok((t.up||0)+(t.down||0))+'k tokens · '+NUM_FMT.format(t.reqs||0)+' reqs';
   var days=(d&&d.days)||[];
   var chart=document.getElementById('statsChart');
   if(chart){
@@ -7721,15 +7743,15 @@ function renderStats(d){
       var yTop=max*1.25;   // 25% headroom so the tallest bar doesn't slam the ceiling
       var bars=series.map(function(s){
         var h=(100*s[1]/yTop).toFixed(1);
-        return '<div class="sc-col" title="'+escHtml(s[0])+' · '+_kfmt(s[1])+' tokens"><i style="height:'+h+'%"></i></div>';
+        return '<div class="sc-col" title="'+escHtml(s[0])+' · '+_ktok(s[1])+'k tokens"><i style="height:'+h+'%"></i></div>';
       }).join('');
-      chart.innerHTML='<div class="sc-ymax">'+_kfmt(yTop)+'</div>'
+      chart.innerHTML='<div class="sc-ymax">'+_ktok(yTop)+'k</div>'
         +'<div class="sc-bars">'+bars+'</div>'
         +'<div class="sc-x"><span>'+escHtml(start)+'</span><span>'+escHtml(end)+'</span></div>';
     }
   }
-  var me=document.getElementById('statsModels');if(me)me.innerHTML=_statRows(d&&d.models);
-  var he=document.getElementById('statsHosts');if(he)he.innerHTML=_statRows(d&&d.hosts);
+  var me=document.getElementById('statsModels');if(me)me.innerHTML=_statRows(d&&d.models,'By model');
+  var he=document.getElementById('statsHosts');if(he)he.innerHTML=_statRows(d&&d.hosts,'By host');
 }
 function loadStats(){
   fetch('api/stats').then(function(r){return r.json()}).then(renderStats).catch(function(){});
@@ -8094,6 +8116,7 @@ function populateSettings(s){
   showSettingsLocked(false);
   document.getElementById('setWorkers').value=s.workers;
   document.getElementById('setTimeout').value=s.timeout;
+  document.getElementById('setMinTps').value=s.min_tps;
   document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   document.getElementById('setMinCount').value=s.min_count;
   document.getElementById('setBasePath').value=s.base_path||'';
@@ -8186,6 +8209,7 @@ function saveSettings(){
   var body={
     workers:parseInt(document.getElementById('setWorkers').value,10),
     timeout:parseInt(document.getElementById('setTimeout').value,10),
+    min_tps:parseInt(document.getElementById('setMinTps').value,10),
     hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
     base_path:document.getElementById('setBasePath').value,
@@ -8217,6 +8241,7 @@ function saveSettings(){
       if(newPw)setAdminKeyStored(newPw);
       document.getElementById('setWorkers').value=s.workers;
       document.getElementById('setTimeout').value=s.timeout;
+  document.getElementById('setMinTps').value=s.min_tps;
       document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
       document.getElementById('setMinCount').value=s.min_count;
   document.getElementById('setBasePath').value=s.base_path||'';
