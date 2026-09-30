@@ -189,6 +189,12 @@ MIN_TPS = 5
 # Separated, a slow host keeps its full TIMEOUT while we widen every FANOUT seconds.
 # Concurrency then rides at ceil(TIMEOUT/FANOUT) * workers (shown in settings).
 FANOUT = 20
+# A host that answers with a cold-start signal ("loading model") or a busy signal
+# (503 / full queue) is ALIVE and committing to serve us — it just isn't ready this
+# instant. That is the whole availability-beats-speed premise: we do not drop it, we
+# come back. WARMING_RETRY is how long we wait before re-fronting such a host, retried
+# until it's ready or the request TIMEOUT lapses.
+WARMING_RETRY = 5
 # Upper bound on a believable tokens/second reading. Even a tiny model on top-end
 # hardware stays well under this; a computed value above it is a measurement
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
@@ -3402,6 +3408,63 @@ def _lru_rank(ts):
         return float("-inf")
 
 
+BUFFER = 8   # pseudocounts on win_rate: a 1/0 host reads ~0.6 not 1.0; sparse -> ~0.5
+
+
+def _favorability(model, servers):
+    """Rank the GOOD/MAYBE hosts for `model` by expected delivered speed. Computed ONCE
+    per race (a frozen snapshot — this race's own outcomes must not reorder it mid-job,
+    or a host re-enters a later fanout wave for no reason). Returns {host: {fav, tps_pct,
+    win_rate, tps, success, failure}} for good/maybe hosts only (that's where the numbers
+    live); everything else keeps its tier order.
+
+      favorability = tps_percentile x win_rate
+      win_rate     = (success + BUFFER/2) / (success + failure + BUFFER)   # neutral 0.5 prior
+      tps_pct      = rank of this host's tps within THIS query's good/maybe pool
+                     (rank-based, so one fast outlier can't distort it; missing tps -> 0.5)
+
+    Uses DELIVERY success/failure (add_good/add_bad), NOT race_won/race_lost: a
+    slow-but-reliable host must not be punished for losing races to faster peers — tps
+    already carries speed, so counting race-losses too would double-penalize slow and
+    fight availability-beats-speed. One indexed query; fast."""
+    gm = [(h, ms) for prio, h, ms in servers if prio in (TIER_GOOD, TIER_MAYBE)]
+    if not gm:
+        return {}
+    hosts = [h for h, _ in gm]
+    want = {h: {canon_pattern(m) for m in ms} for h, ms in gm}   # this query's model keys per host
+    rows = {}
+    try:
+        db = _get_db()
+        qmarks = ",".join("?" * len(hosts))
+        for h, mdl, tps, succ, fail in db.execute(
+                "SELECT host, model, tps, success, failure FROM host_status "
+                f"WHERE host IN ({qmarks}) AND state IN ('good','maybe_good') AND {_LIVE_REAL}",
+                hosts):
+            if mdl not in want.get(h, ()):       # only the model(s) we asked THIS host for
+                continue
+            r = rows.setdefault(h, {"tps": None, "success": 0, "failure": 0})
+            if tps is not None:
+                r["tps"] = tps if r["tps"] is None else max(r["tps"], tps)
+            r["success"] += succ or 0
+            r["failure"] += fail or 0
+    except Exception as e:
+        log.debug(f"favorability query failed: {e}")
+        return {}
+    tvals = sorted(r["tps"] for r in rows.values() if r["tps"] is not None)
+    def pct(t):
+        if t is None or len(tvals) < 2:
+            return 0.5
+        return sum(1 for v in tvals if v < t) / (len(tvals) - 1)   # 0=slowest .. 1=fastest
+    out = {}
+    for h in hosts:
+        r = rows.get(h, {"tps": None, "success": 0, "failure": 0})
+        wr = (r["success"] + BUFFER / 2) / (r["success"] + r["failure"] + BUFFER)
+        tp = pct(r["tps"])
+        out[h] = {"fav": round(tp * wr, 4), "tps_pct": round(tp, 3), "win_rate": round(wr, 3),
+                  "tps": r["tps"], "success": r["success"], "failure": r["failure"]}
+    return out
+
+
 def find_servers(sub, caps=None):
     # A size predicate (">3gb") is a query modifier, not part of the model name.
     # Strip it, match on the name as usual, then keep only candidates whose
@@ -3801,6 +3864,8 @@ V_UNREACHABLE = "unreachable"  # dead at the connection level, for every capabil
 V_FAILED = "failed"            # transient: refused, errored, bad response
 V_TIMEOUT = "timeout"          # transient: accepted the connection, never answered
 V_SKIP = "skip"                # inconclusive — move on, record nothing
+V_RETRY = "retry"              # alive but not ready NOW (cold start / busy) — re-front
+                               # this host after WARMING_RETRY, don't drop it; records nothing
 
 Outcome = collections.namedtuple("Outcome", "verdict result extra detail")
 
@@ -3829,6 +3894,10 @@ def timed_out(detail=None):
 
 def skip(detail=None):
     return Outcome(V_SKIP, None, "", detail)
+
+
+def retry_later(detail=None):
+    return Outcome(V_RETRY, None, "", detail)
 
 
 def record_verdict(host, key, outcome, sticky_key=None):
@@ -3912,7 +3981,7 @@ def _write_stat(host, model, up, down, tps, title=None):
 
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
-                      label=None, hedge_delay=0, key_of=None, banker_key=None):
+                      label=None, hedge_delay=0, key_of=None, banker_key=None, fav=None):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -3964,17 +4033,47 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     _starved = [0]      # candidates skipped because another job held them
     _spent = [False]    # candidate list exhausted — the wave loop must stop, or the
                         # race never sees all(t.done()) and hangs
+    # Warming-retry queue: a host that answered ALIVE-but-not-ready (cold start /
+    # busy -> V_RETRY) is parked here as [ready_at, item] instead of being dropped,
+    # and re-fronted once ready_at passes. The race stays open while anything is
+    # parked and the request budget hasn't lapsed, so a host we asked to spin up is
+    # actually waited for rather than abandoned. _deadline is that budget (the request
+    # TIMEOUT); past it we stop re-queueing and let a still-cold host age out.
+    retry_q = []
+    _deadline = time.time() + TIMEOUT
+    _RETRY_POLL = 0.25  # how often a worker with nothing ready re-checks the parked set
+
+    def _take_item():
+        # Called under iter_lock. Returns (item, waiting): a real item to attempt, or
+        # (None, True) = "nothing ready but retries are still pending, keep the worker
+        # alive", or (None, False) = "truly nothing left" (sets _spent). A parked
+        # warming host whose backoff has elapsed comes before a fresh candidate.
+        nonlocal tried
+        now = time.time()
+        if retry_q:
+            retry_q.sort(key=lambda e: e[0])
+            if retry_q[0][0] <= now:
+                tried += 1
+                return retry_q.pop(0)[1], False
+        try:
+            it = next(entry_iter)
+        except StopIteration:
+            if retry_q and now < _deadline:
+                return None, True
+            _spent[0] = True
+            return None, False
+        tried += 1
+        return it, False
 
     async def worker():
-        nonlocal tried
         while not done.is_set():
             async with iter_lock:
-                try:
-                    item = next(entry_iter)
-                except StopIteration:
-                    _spent[0] = True
-                    return
-                tried += 1
+                item, _waiting = _take_item()
+            if item is None:
+                if _waiting and not done.is_set():
+                    await asyncio.sleep(_RETRY_POLL)   # parked retries pending — stay alive
+                    continue
+                return                                 # nothing left to try
             await _worker_checked(wwid)
             wid = asyncio.current_task().get_name()
             # Run the attempt as its own task so a user "skip" can cancel just
@@ -3992,9 +4091,13 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                     continue          # another job is on it — next candidate
                 _leased = True
             _astart = time.time()
+            _fv = (fav or {}).get(_ih) or {}
             _rec = {"host": _ih, "model": key_of(item), "start_time": _astart,
                     "connect_time": None, "finish_time": None, "generation_time": None,
-                    "token_count": None, "outcome": None, "detail": None}
+                    "token_count": None, "outcome": None, "detail": None,
+                    "favorability": _fv.get("fav"), "fav_rank": _fv.get("rank"),
+                    "tps_pct": _fv.get("tps_pct"), "win_rate": _fv.get("win_rate"),
+                    "fav_tps": _fv.get("tps")}
             race_log.append(_rec)
             def _log_done(outcome_str, detail=None, tokens=None, _rec=_rec, _astart=_astart):
                 _rec["finish_time"] = time.time()
@@ -4065,6 +4168,16 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                         or outcome.extra.get("tokens"))
             _log_done(outcome.verdict, detail=outcome.detail, tokens=_tok)
             tally[outcome.verdict] += 1
+            if outcome.verdict == V_RETRY:
+                # Alive, just not ready this instant (cold start / busy). Park the host
+                # and come back after WARMING_RETRY — no reputation change, no race loss —
+                # as long as we're still inside the request budget. Past the deadline we
+                # let it go (a genuinely stuck host ages out instead of hanging the race).
+                _now = time.time()
+                if not done.is_set() and _now + WARMING_RETRY <= _deadline:
+                    async with iter_lock:
+                        retry_q.append([_now + WARMING_RETRY, item])
+                continue
             record_verdict(host_of(item), key_of(item), outcome, sticky_key=key)
             if outcome.verdict == V_ACCEPTED:
                 record_race(host_of(item), key_of(item), won=True)
@@ -4700,8 +4813,20 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     # Stable sort, so the reputation ordering survives inside each group, and bad /
     # unreachable hosts (prio >= TIER_BAD) are never promoted by warmth.
     _warm = set(_banker.warm(model))
-    if _warm:
-        servers = sorted(servers, key=lambda it: 0 if (it[1] in _warm and it[0] < TIER_BAD) else 1)
+    # Order: warm/sticky first, then tier, then WITHIN good/maybe by favorability
+    # (best expected delivered speed first). _fav is a per-job frozen snapshot so this
+    # race's own record_race writes can't churn the order mid-race. Unknown/explore
+    # hosts get favk=0 and keep their find_servers order via the stable sort.
+    _fav = _favorability(model, servers)
+    def _order(it):
+        prio, host, _ms = it
+        warm0 = 0 if (host in _warm and prio < TIER_BAD) else 1
+        favk = -_fav[host]["fav"] if (host in _fav and prio in (TIER_GOOD, TIER_MAYBE)) else 0.0
+        return (warm0, prio, favk)
+    servers = sorted(servers, key=_order)
+    for _i, (_p, _h, _m) in enumerate(servers):     # stamp final try-order rank for the log
+        if _h in _fav:
+            _fav[_h]["rank"] = _i
     errors = []
     errors_lock = asyncio.Lock()
 
@@ -4869,7 +4994,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             if "loading model" in body.lower():
                 await broadcast_activity(host, model, "warming",
                     f"warming up: {host} for {model} - model loading", duration=dur, wid=wid)
-                return skip(detail)
+                return retry_later(detail)
             # 503 Service Unavailable = the host is ALIVE but at capacity — a full
             # queue / llama.cpp's "maximum number of pending requests", vLLM's "no
             # slot", etc. That's a busy signal, not a bad host: skip (no penalty, its
@@ -4878,6 +5003,22 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             if code == 503:
                 await broadcast_activity(host, model, "warming",
                     f"busy: {host} for {model} - {detail}", duration=dur, wid=wid)
+                return retry_later(detail)
+            # The prompt is bigger than the window this host was LOADED with (LM Studio
+            # "exceed_context_size_error", llama.cpp "exceeds the available context",
+            # vLLM "maximum context length"). On the OpenAI dialect the window is a
+            # load-time setting we can't raise from a request — but it's not a bad host:
+            # it's this PROMPT not fitting this host's CURRENT config, which the operator
+            # can reload bigger at any time, and the host still serves smaller prompts
+            # fine. Recording a ceiling would be a stale-tomorrow lie, and add_bad would
+            # suppress a fine host for the reputation half-life. So skip (no penalty, stays
+            # eligible) and let the race find a host with room — same family as 503/loading.
+            _blow = body.lower()
+            if code == 400 and ("exceed_context_size_error" in _blow
+                                or "exceeds the available context" in _blow
+                                or "maximum context length" in _blow):
+                await broadcast_activity(host, model, "warming",
+                    f"won't fit: {host} for {model} - {detail}", duration=dur, wid=wid)
                 return skip(detail)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - {detail}", duration=dur, wid=wid)
@@ -5007,7 +5148,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
         key_of=lambda it: it[2][0],   # reputation keyed by the RESOLVED model (ms[0]), not the query
-        hedge_delay=hedge_delay, banker_key=model)
+        hedge_delay=hedge_delay, banker_key=model, fav=_fav)
     return result, errors, stopped
 
 

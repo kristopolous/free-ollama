@@ -169,7 +169,9 @@ a{color:var(--text-muted)}
 .ap-offline{flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--sp-3);min-height:6rem;margin:var(--sp-3) 0;padding:var(--sp-5);border:1px dashed var(--border-hover);border-radius:var(--r-lg);background:var(--bg-sunken)}
 .ap-offline-msg{font-size:var(--fs-md);color:var(--text-dim)}
 .ap-offline .pager-btn{font-size:var(--fs-md);padding:var(--sp-2) var(--sp-5)}
-.ap-workers{flex-shrink:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0;padding-bottom:var(--sp-3);border-bottom:1px solid var(--border);max-height:min(30vh,240px);overflow-y:auto}
+.ap-workers{flex-shrink:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0 0;padding-top:var(--sp-3);border-top:1px solid var(--border);max-height:min(30vh,240px);overflow-y:auto}
+.ap-filter{flex-shrink:0;box-sizing:border-box;width:100%;margin:var(--sp-3) 0;font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border)}
+.status-line[hidden]{display:none}
 .ap-worker{min-width:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-sunken);padding:var(--sp-2) var(--sp-3)}
 .ap-worker .apw-model{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  /* two lines: the key, then status and elapsed sharing the second */
@@ -713,7 +715,7 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .login-row input[type=password]{flex:1;max-width:280px;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-3);font-size:var(--fs-lg)}
 .setting-help{color:var(--text-dim);font-size:var(--fs-xs);margin-top:var(--sp-1);line-height:var(--line-body)}
 .setting-help code{background:var(--bg-inset);padding:.05em .3em;border-radius:var(--r-sm);font-size:var(--fs-2xs)}
-.cloudskip-list{display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-5);margin-top:var(--sp-3)}
+.cloudskip-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2) var(--sp-5);margin-top:var(--sp-3)}
 .cloudskip-item{display:flex;align-items:center;gap:.35em;font-size:var(--fs-md);color:var(--text);cursor:pointer}
 .cloudskip-item .cloudskip-n{color:var(--text-muted);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}
 .setting-sources{margin-bottom:var(--sp-6)}
@@ -1031,12 +1033,13 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾<span id="actBadge" class="act-badge" hidden></span></button>
 <div id="activityPop" class="activity-pop">
 <div class="ap-head">Activity <span id="pauseBtn" style="font-size:var(--fs-2xl);font-weight:normal;cursor:pointer;color:var(--text-dim);margin-left:auto;border:1px solid var(--text-dim);border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></div>
-<div id="activityWorkers" class="ap-workers" style="display:none"></div>
+<input id="activityFilter" class="ap-filter" type="search" placeholder="filter (regex): host, worker, model…" autocomplete="off" spellcheck="false">
 <div id="activityOffline" class="ap-offline" style="display:none">
   <span class="ap-offline-msg">Activity stream disconnected</span>
   <button type="button" id="activityReconnect" class="pager-btn">Reconnect</button>
 </div>
 <div id="activityList"></div>
+<div id="activityWorkers" class="ap-workers" style="display:none"></div>
 </div>
 </div>
 
@@ -1586,6 +1589,24 @@ function connectActivity(fresh){
 }
 var _actLines={};  // activity id -> its line element, for in-place updates
 var ACTIVITY_LINES=500;   // the server keeps 500; showing 50 threw most of it away
+// Feed filter: a regex over each line's full text (time, @wid, host, model, message),
+// so "a particular host or worker" both work. Invalid/partial regex (mid-typing `[`)
+// falls back to a plain substring so the feed never blanks out; empty shows all.
+var _actMatch=function(){return true};
+function _buildActMatch(q){
+  q=(q||'').trim();
+  if(!q)return function(){return true};
+  var re=null;try{re=new RegExp(q,'i')}catch(e){re=null}
+  if(re)return function(t){return re.test(t)};
+  var lq=q.toLowerCase();
+  return function(t){return t.toLowerCase().indexOf(lq)>=0};
+}
+function _applyActFilter(){
+  var fe=document.getElementById('activityFilter');
+  _actMatch=_buildActMatch(fe?fe.value:'');
+  var c=document.getElementById('activityList');if(!c)return;
+  var kids=c.children;for(var i=0;i<kids.length;i++){kids[i].hidden=!_actMatch(kids[i].textContent||'')}
+}
 function refreshListsNow(){fetch('dashboard-data').then(function(r){return r.json()}).then(function(d){_good=new Set(d.good||[]);_bad=new Set(d.bad||[]);renderHostLists(d);refreshModelBars()}).catch(function(){})}
 // The model coverage bars read _good/_bad only when built, so after reputation
 // changes (e.g. a :test-all sweep) rebuild each visible bar in place — cheap, and
@@ -1623,6 +1644,7 @@ function onActivityMessage(e){try{if(paused)return;var d=JSON.parse(e.data);if(!
   p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'
     +(w?'<span style=color:var(--text-faint)>@'+escHtml(w)+'</span>':'')
     +s+' '+escHtml(d.message);
+  p.hidden=!_actMatch(p.textContent||'');   // honour the feed filter on new/updated lines
   if(fresh)c.insertBefore(p,c.firstChild);
   while(c.children.length>ACTIVITY_LINES){var gone=c.lastChild;for(var k in _actLines)if(_actLines[k]===gone)delete _actLines[k];c.removeChild(gone)}}catch(ex){}}
 document.getElementById('activityReconnect').addEventListener('click',function(ev){
@@ -1632,6 +1654,9 @@ document.getElementById('activityReconnect').addEventListener('click',function(e
   connectActivity(true);
   setTimeout(function(){btn.disabled=false;btn.textContent='Reconnect'},1500);
 });
+(function(){var fe=document.getElementById('activityFilter');
+  if(fe){fe.addEventListener('input',_applyActFilter);
+    fe.addEventListener('click',function(e){e.stopPropagation()});}})();
 connectActivity(false);
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
@@ -7870,11 +7895,12 @@ function _raceDiagram(){
   var hl=Math.min(pps*h, branchLen*1.2);                  // hedge lead (0 when h=0), capped
   var dx=Math.min(pps*f, branchLen*1.6);                  // wave-2 offset, capped
   var hedgeX=40, spineX=hedgeX+14+Math.max(hl,6);         // wave-1 node = after the hedge lead
-  var padT=44, vGap=62;
+  var padT=44, vGap=fanH+40;
   var w1=padT+fanH/2+8, w2=w1+vGap;
   var b1=spineX+con, e1=b1+branchLen;                     // wave-1 branch span
   var b2=spineX+dx+con, e2=b2+branchLen;                  // wave-2 branch span
-  var W=Math.max(e1+64, e2+24), H=w2+fanH/2+40;
+  var W=Math.max(e1+64, e2+24), H=w2+fanH/2+30;
+  var waves=Math.max(1,Math.ceil(t/f)), maxc=waves*w;
   var A={hedge:'#c77dff',wave:'#4895ef',wave2:'#4895ef',to:'#90be6d',fo:'#f9c74f',ax:'#8a8a8a',tx:'#bbb'};
   var g=['<svg viewBox=\'0 0 '+W.toFixed(0)+' '+H.toFixed(0)+'\' preserveAspectRatio=\'xMidYMid meet\' role=\'img\'>'];
   function ln(a,b,c,d,col,ex){g.push('<line x1=\''+a.toFixed(1)+'\' y1=\''+b.toFixed(1)+'\' x2=\''+c.toFixed(1)+'\' y2=\''+d.toFixed(1)+'\' stroke=\''+col+'\' stroke-width=\'1.4\' '+(ex||'')+'/>');}
@@ -7886,7 +7912,7 @@ function _raceDiagram(){
   // hedge host + lead
   node(hedgeX,w1,A.hedge);
   ln(hedgeX+7,w1,spineX-7,w1,A.hedge,dash);
-  tx((hedgeX+spineX)/2,w1-9,A.hedge,'hedge '+Math.round(h)+'s','middle',10);
+  tx((hedgeX+spineX)/2,w1-14,A.hedge,'hedge '+Math.round(h)+'s','middle',10);
   // cascade connector wave1 -> wave2 (down and to the right = later in time)
   ln(spineX,w1+7,spineX+dx,w2-7,A.ax,dash);
   // the two waves
@@ -7904,7 +7930,9 @@ function _raceDiagram(){
   var fy=(w1+w2)/2;
   ln(spineX,fy,spineX+dx,fy,A.fo); ln(spineX,fy-4,spineX,fy+4,A.fo); ln(spineX+dx,fy-4,spineX+dx,fy+4,A.fo);
   tx((spineX+spineX+dx)/2,fy-5,A.fo,'Fanout '+Math.round(f)+'s','middle',10);
-  tx(W-6,H-6,A.ax,'time \u2192','end',10);
+  g.push('<text x=\'6\' y=\''+(H-9).toFixed(1)+'\' font-size=\'10\' fill=\''+A.fo+'\'>'
+    +'<tspan font-weight=\'700\' font-size=\'13\'>'+maxc+'</tspan>'
+    +'<tspan opacity=\'0.5\'>  ('+w+' workers \u00d7 \u2308'+Math.round(t)+'s timeout \u00f7 '+Math.round(f)+'s fanout\u2309)</tspan></text>');
   g.push('</svg>');
   el.innerHTML=g.join('');
 }
@@ -7913,12 +7941,9 @@ function _fanoutImpl(){
   function v(id){var e=document.getElementById(id);return e?parseFloat(e.value):NaN}
   var w=v('setWorkers'),t=v('setTimeout'),f=v('setFanout');
   if(!(w>0&&t>0&&f>0)){el.textContent='';return}
-  var waves=Math.max(1,Math.ceil(t/f)), live=waves*w;
-  // Stated, not clamped: this is also the outbound socket count, and the WAF soft-ban
-  // tripwire fires on the connect itself.
-  el.textContent='\u2192 up to '+waves+' wave'+(waves>1?'s':'')+' alive \u00d7 '+w+
-                 ' = '+live+' concurrent connections.'+
-    (f>t?' Above Timeout the waves don\u2019t overlap and there is an idle gap between them \u2014 fewer sockets held at once, slower to widen.':'');
+  // The concurrent-connection maximum moved to the diagram (poor form buried in text);
+  // only the fanout>timeout caveat stays here, and only when it applies.
+  el.textContent=(f>t)?'Above Timeout the waves don\u2019t overlap \u2014 an idle gap between them, fewer sockets at once, slower to widen.':'';
   _raceDiagram();
 }
 function _wireFanoutImpl(){
