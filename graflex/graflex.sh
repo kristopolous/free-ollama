@@ -35,21 +35,27 @@ case "$SERVICE" in
     COMBINED_JSON=$(jq -s 'add' ~/.cache/free-ollama/*-working.json)
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > $_SERVER_PATH"
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > ${_SERVER_PATH%.json}-$DATE.json"
-    exit
+    exit 0
+    ;;
+
+  refresh)
+    DATE=$(date +%Y%m%d)
+    jq -s 'add' ~/.cache/free-ollama/*-notworking.json > ~/.cache/free-ollama/notworking-consolidated.json
+
+    cp "$HOME/.cache/free-ollama/host-status.db" "$HOME/.cache/free-ollama/backups/host-status-${DATE}.db"
+    source .venv/bin/activate
+    ./dyva.py --refresh
+
+    exit 0
     ;;
 
   enrich)
-    DATE=$(date +%Y%m%d)
     source .venv/bin/activate
     for i in ~/.cache/free-ollama/*-notworking.json; do
       MALLOC_ARENA_MAX=2 python3 -OO ./graflex.py -a enrich "$i" host
     done
 
-    jq -s 'add' ~/.cache/free-ollama/*-notworking.json > ~/.cache/free-ollama/notworking-consolidated.json
-
-    cp "$HOME/.cache/free-ollama/host-status.db" "$HOME/.cache/free-ollama/backups/host-status-${DATE}.db"
-    ./dyva.py --refresh
-    exit
+    exit 0
     ;;
 
   get-dates)
