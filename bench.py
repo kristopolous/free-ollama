@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import glob
 import json
+import math
 import os
 import random
 import statistics
@@ -157,7 +158,10 @@ def summarize(records):
             uniq = len(set(hosts))
             top = max((hosts.count(h) for h in set(hosts)), default=0)
             p50 = statistics.median(lat) if lat else float("nan")
-            p95 = lat[max(0, int(len(lat) * 0.95) - 1)] if lat else float("nan")
+            # nearest-rank: ceil(0.95*n)-1. int() floors, and flooring AND
+            # subtracting 1 lands a rank too low whenever 0.95*n isn't whole — at
+            # n=2 that returned the minimum, printing a p95 below the p50.
+            p95 = lat[min(len(lat) - 1, max(0, math.ceil(0.95 * len(lat)) - 1))] if lat else float("nan")
             sd = statistics.stdev(walls[(m, c)]) if len(walls[(m, c)]) > 1 else 0.0
             print(f"{m:10} {c:>4} {len(walls[(m, c)]):>4} {len(ok):>5} "
                   f"{len(rs) - len(ok):>4} {med_wall:>8.1f} {sd:>7.1f} {spd:>7.2f} "

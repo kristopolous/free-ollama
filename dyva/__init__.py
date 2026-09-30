@@ -1266,6 +1266,12 @@ def is_active(host, except_wid=None):
 # all pile onto the sticky. _inflight closes that window.
 _inflight = collections.Counter()
 
+from .banker import Banker            # noqa: E402  (kept next to what it supersedes)
+# Single owner of "who is on which machine" and "who is warm". withdraw/deposit is
+# synchronous, so two coroutines cannot both take a host — that closes the
+# check-then-act window is_active could only narrow.
+_banker = Banker()
+
 
 def _host_busy(host):
     """Busy = we have a request mid-attempt on it (cold-starting) OR already streaming
@@ -3888,7 +3894,7 @@ def _write_stat(host, model, up, down, tps, title=None):
 
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
-                      label=None, hedge_delay=0, key_of=None):
+                      label=None, hedge_delay=0, key_of=None, banker_key=None):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -3937,6 +3943,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     # builds its record and appends in one synchronous step (no await between),
     # so asyncio can't interleave two appends.
     race_log = []
+    _starved = [0]      # candidates skipped because another job held them
 
     async def worker():
         nonlocal tried
@@ -3954,6 +3961,15 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             # cancels the worker task and sets `done`; a "skip" cancels only the
             # attempt, leaving `done` clear so the loop pulls the next host.
             _ih = host_of(item)
+            # Lease the machine before committing to it. Only the chat path passes a
+            # banker_key — media (one good ComfyUI on the network) must keep the old
+            # "busy beats none" behaviour, so it stays unleased.
+            _leased = False
+            if banker_key is not None:
+                if not _banker.withdraw(banker_key, [_ih], 1).hosts:
+                    _starved[0] += 1
+                    continue          # another job is on it — next candidate
+                _leased = True
             _astart = time.time()
             _rec = {"host": _ih, "model": key_of(item), "start_time": _astart,
                     "connect_time": None, "finish_time": None, "generation_time": None,
@@ -4015,6 +4031,11 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 _inflight[_ih] -= 1
                 if _inflight[_ih] <= 0:
                     del _inflight[_ih]
+                # Deposit at race RESOLUTION, not request completion: the losers are
+                # still warm and the next fanout should get them while they are.
+                # The winner streams on past this, covered by is_active().
+                if _leased:
+                    _banker.deposit(_ih)
             if outcome is None:
                 outcome = skip()
             _tok = None
@@ -4631,6 +4652,14 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     # before racing the pool (failover still fires instantly on a real failure).
     if hedge_delay and _is_tool_continuation((payload or {}).get("messages")):
         hedge_delay = CONTINUATION_HEDGE
+    # Warm-first. A host that did REAL WORK for this model inside ollama's keep_alive
+    # window still has it resident, and today only ONE such host (the depth-1 sticky)
+    # could be preferred — with 5 agents and 5 warm hosts, four went cold for nothing.
+    # Stable sort, so the reputation ordering survives inside each group, and bad /
+    # unreachable hosts (prio >= TIER_BAD) are never promoted by warmth.
+    _warm = set(_banker.warm(model))
+    if _warm:
+        servers = sorted(servers, key=lambda it: 0 if (it[1] in _warm and it[0] < TIER_BAD) else 1)
     errors = []
     errors_lock = asyncio.Lock()
 
@@ -4936,7 +4965,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
         key_of=lambda it: it[2][0],   # reputation keyed by the RESOLVED model (ms[0]), not the query
-        hedge_delay=hedge_delay)
+        hedge_delay=hedge_delay, banker_key=model)
     return result, errors, stopped
 
 
@@ -5390,6 +5419,15 @@ async def _stream_chat_failover(request, session, model, servers, opayload,
         with contextlib.suppress(Exception):
             await _write_terminal_done(response, full, openai_format)
         break
+    # WORK earns the keep — and only work. `partial` is content chars plus tool-call
+    # argument chars, so a turn that was nothing but a tool call counts, which is the
+    # blind spot that has bitten three times now. A test never reaches here: a probe
+    # that passes is followed by the real payload, which records this a moment later,
+    # so a honeypot's canned reply (which only ever appears during a probe) can never
+    # enter the warm set.
+    if (len(partial[0]) + partial[1]) > 0:
+        with contextlib.suppress(Exception):
+            _banker.served(model, host)
     return response
 
 
@@ -6207,6 +6245,12 @@ async def handle_stats(request):
         description: Aggregated usage
     """
     import datetime as _dt
+    # ?q= filters the sweep. Applied to every bucket (days, models, hosts) so the whole
+    # view agrees — a chart that ignored the filter while the lists honoured it would
+    # be worse than no filter. Matched with match_model, the same forgiving
+    # substring/glob rule the routing queries use, against the model OR the host, so
+    # "qwen" and "51.68" both do what you'd expect.
+    q = (request.query.get("q") or "").strip()
     days, models, hosts = {}, {}, {}
     tot_up = tot_down = tot_reqs = 0
     try:
@@ -6218,6 +6262,9 @@ async def handle_stats(request):
                 try:
                     r = json.loads(line)
                 except ValueError:
+                    continue
+                if q and not (match_model(r.get("model") or "", q)
+                              or match_model(r.get("host") or "", q)):
                     continue
                 up = r.get("up") or 0
                 down = r.get("down") or 0
@@ -6249,6 +6296,7 @@ async def handle_stats(request):
         "models": _rows(models),
         "hosts": _rows(hosts),
         "totals": {"up": tot_up, "down": tot_down, "reqs": tot_reqs},
+        "q": q,              # echoed so the client can show what's actually applied
     })
 
 

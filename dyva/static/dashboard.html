@@ -257,13 +257,25 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .map-head .map-help{margin-left:auto;flex:0 0 auto;width:22px;height:22px;padding:0;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text-2);font-size:.8rem;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .map-head .map-help:hover{color:var(--text);background:var(--accent-bg)}
 .stats-tot{margin-left:auto;color:var(--text-muted);font-size:var(--fs-md);font-variant-numeric:tabular-nums}
+/* This view does NOT poll — it loads when the tab is opened — so the reading is a
+   snapshot and the stamp says how old it is. */
+/* Explicit Apply, no keystroke filtering: /api/stats is a linear sweep of the whole
+   jsonl, so every keypress would re-read the log end to end. */
+.stats-filter{font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border);min-width:9rem;max-width:14rem}
+.stats-go{font:inherit;font-size:var(--fs-sm);padding:4px 10px;border-radius:var(--r-md);background:var(--surface);color:var(--text);border:1px solid var(--border);cursor:pointer}
+.stats-go:hover{border-color:var(--border-hover)}
+.stats-asof{margin-left:10px;color:var(--text-muted);opacity:.75;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .stats-h3{margin:var(--sp-4) 0 var(--sp-2);font-size:var(--fs-md);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted)}
 /* Tokens over time — a vertical bar chart, UNDIFFERENTIATED (one bar per day, total
    tokens, single colour). Model-query stacking is deferred; leave it unlabelled. */
 .stats-chart{margin:2px 0 var(--sp-4)}
 .sc-ymax{font-size:11px;color:var(--text-muted);margin-bottom:4px;font-variant-numeric:tabular-nums}
-.sc-bars{display:flex;align-items:flex-end;gap:3px;height:160px}
-.sc-col{flex:1 1 0;min-width:2px;height:100%;display:flex;align-items:flex-end}
+.sc-bars{display:flex;align-items:flex-end;gap:3px;height:160px;position:relative}
+/* Gridline at every multiple of the leading place value (yTop 6408 -> a line at each
+   1000). Absolutely positioned so it sits outside the flex flow; z-index keeps it
+   behind the bars rather than painting over them. */
+.sc-grid{position:absolute;left:0;right:0;height:1px;background:var(--border);opacity:.55;pointer-events:none;z-index:0}
+.sc-col{flex:1 1 0;min-width:2px;height:100%;display:flex;align-items:flex-end;position:relative;z-index:1}
 .sc-col i{display:block;width:100%;min-height:1px;background:var(--accent);border-radius:2px 2px 0 0}
 .sc-col:hover i{background:var(--accent-bright)}
 .sc-x{display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-top:4px}
@@ -1359,7 +1371,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 
 <div id="stats" class="panel">
 <div class="card"><div class="card-inner">
-<div class="map-head"><h2>Usage over time</h2><span id="statsTotals" class="stats-tot"></span></div>
+<div class="map-head"><input id="statsFilter" class="stats-filter" type="search" placeholder="filter model or host" autocomplete="off"><button id="statsGo" class="stats-go">Apply</button><span id="statsTotals" class="stats-tot"></span><span id="statsAsOf" class="stats-asof"></span></div>
 <div id="statsChart" class="stats-chart"></div>
 <div id="statsModels" class="stats-rows"></div>
 <div id="statsHosts" class="stats-rows"></div>
@@ -7714,10 +7726,11 @@ function _statRows(rows,label){
       +'<span class="sr-req">'+NUM_FMT.format(x.reqs||0)+'</span></div>';
   }).join('');
 }
+var _statsCeil=0;   // chart ceiling remembered from the last UNFILTERED load
 function renderStats(d){
   var t=(d&&d.totals)||{};
   var tot=document.getElementById('statsTotals');
-  if(tot)tot.textContent=_ktok((t.up||0)+(t.down||0))+'k tokens · '+NUM_FMT.format(t.reqs||0)+' reqs';
+  if(tot)tot.textContent=_ktok((t.up||0)+(t.down||0))+'k tokens · '+NUM_FMT.format(t.reqs||0)+' reqs'+((d&&d.q)?' · "'+d.q+'"':'');
   var days=(d&&d.days)||[];
   var chart=document.getElementById('statsChart');
   if(chart){
@@ -7740,21 +7753,51 @@ function renderStats(d){
       for(var dt=new Date(start+'T00:00:00Z');ymd(dt)<=end;dt.setUTCDate(dt.getUTCDate()+1)){
         var k=ymd(dt),t=byDay[k]||0;series.push([k,t]);if(t>max)max=t;
       }
-      var yTop=max*1.25;   // 25% headroom so the tallest bar doesn't slam the ceiling
+      // NEVER rescale on a filter. Rescaling redraws a subset at the same bar heights
+      // with only a small axis number changing, which reads as "nothing happened". The
+      // ceiling is remembered from the unfiltered load, so a filtered view draws
+      // visibly shorter bars against a fixed axis. Purely client-side; the tab always
+      // loads unfiltered first, so the ceiling is set before any filter can apply.
+      var _filtered=!!(d&&d.q);
+      if(!_filtered)_statsCeil=max;
+      var yTop=Math.max(max,_filtered?_statsCeil:0)*1.25;   // 25% headroom
+      // one line per multiple of the leading power of ten, below the ceiling
+      var grid='';
+      if(isFinite(yTop)&&yTop>0){
+        var step=Math.pow(10,Math.floor(Math.log10(yTop)));
+        for(var g=step;g<yTop;g+=step){
+          grid+='<i class="sc-grid" style="bottom:'+(100*g/yTop).toFixed(2)+'%"></i>';
+        }
+      }
       var bars=series.map(function(s){
         var h=(100*s[1]/yTop).toFixed(1);
         return '<div class="sc-col" title="'+escHtml(s[0])+' · '+_ktok(s[1])+'k tokens"><i style="height:'+h+'%"></i></div>';
       }).join('');
       chart.innerHTML='<div class="sc-ymax">'+_ktok(yTop)+'k</div>'
-        +'<div class="sc-bars">'+bars+'</div>'
+        +'<div class="sc-bars">'+grid+bars+'</div>'
         +'<div class="sc-x"><span>'+escHtml(start)+'</span><span>'+escHtml(end)+'</span></div>';
     }
   }
   var me=document.getElementById('statsModels');if(me)me.innerHTML=_statRows(d&&d.models,'By model');
   var he=document.getElementById('statsHosts');if(he)he.innerHTML=_statRows(d&&d.hosts,'By host');
+  var as=document.getElementById('statsAsOf');
+  // UTC, matching the chart: the day buckets come from the server in UTC and the
+  // window is built with toISOString(), so a local clock here read as a different
+  // timezone from the graph beside it. Same trailing-Z form the activity feed uses.
+  if(as){var t=new Date();as.textContent='as of '+t.toISOString().slice(11,19)+'Z';
+         as.title='stats last fetched '+t.toISOString().replace('T',' ').slice(0,19)+' UTC';}
 }
 function loadStats(){
-  fetch('api/stats').then(function(r){return r.json()}).then(renderStats).catch(function(){});
+  var fe=document.getElementById('statsFilter');
+  var q=(fe&&fe.value||'').trim();
+  fetch('api/stats'+(q?'?q='+encodeURIComponent(q):''))
+    .then(function(r){return r.json()}).then(renderStats).catch(function(){});
+}
+function _wireStatsFilter(){
+  var go=document.getElementById('statsGo'),fe=document.getElementById('statsFilter');
+  if(go&&!go._wired){go._wired=true;go.addEventListener('click',loadStats);}
+  if(fe&&!fe._wired){fe._wired=true;fe.addEventListener('keydown',function(e){
+    if(e.key==='Enter'){e.preventDefault();loadStats();}});}
 }
 function openMap(){
   if(!_mapWired){
@@ -8023,7 +8066,7 @@ function activateTab(name,chatId,pane,mode){
     }
   }
   if(name==='settings'){injectSettingsPwFields();loadSettings();}
-  if(name==='stats'){openMap();loadStats();}
+  if(name==='stats'){openMap();_wireStatsFilter();loadStats();}
   // Lazy-load the image gallery only when its tab is first opened — building a
   // node per image on every page load (even in the Server Room) is wasteful.
   if(name==='media'){
