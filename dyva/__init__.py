@@ -1367,6 +1367,11 @@ async def broadcast_activity(host, model, status, message, duration=None, wid=No
     out over many hosts shows a single line that resolves in place instead of a
     trying/failed pair per host."""
     entry = {'host': host, 'model': model, 'status': status, 'message': message, 'time': time.time()}
+    # The worker id was accepted but never recorded, so every line in the feed and in
+    # activity-*.jsonl was unattributable — you could not tell which lines belonged to
+    # the same job. Carry it; the client shows the tail of it.
+    if wid:
+        entry['wid'] = str(wid)
     if aid is not None:
         entry['id'] = aid
     if rmodel:
@@ -4513,7 +4518,7 @@ def _now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-async def _send_chat(session, host, full, payload, endpoint, do_stream):
+async def _send_chat(session, host, full, payload, endpoint, do_stream, timeout=None):
     """Send one chat request to a single host IN ITS OWN DIALECT, and return the
     open response. This is the primitive every chat send should go through — the
     race, and every probe/test — so dialect handling lives in exactly one place.
@@ -4587,7 +4592,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
             # slow" (see the except handler on the send site).
             resp = await session.post(
                 f"{host}{ep}", json=p,
-                timeout=aiohttp.ClientTimeout(total=_slow_timeout(p), sock_connect=CONNECT_TIMEOUT))
+                timeout=aiohttp.ClientTimeout(total=timeout or _slow_timeout(p), sock_connect=CONNECT_TIMEOUT))
         except Exception as e:
             log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
                      f"after {time.time()-_t0:.1f}s")
@@ -4609,7 +4614,7 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream):
             try:
                 resp = await session.post(
                     f"{host}{ep}", json=p,
-                    timeout=aiohttp.ClientTimeout(total=_slow_timeout(p), sock_connect=CONNECT_TIMEOUT))
+                    timeout=aiohttp.ClientTimeout(total=timeout or _slow_timeout(p), sock_connect=CONNECT_TIMEOUT))
             except Exception as e:
                 log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
                          f"after {time.time()-_t0:.1f}s")
@@ -5721,7 +5726,12 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     try:
         # Same send primitive as the real request path: the host's own dialect with a
         # fallback to the other (a probe that forced /api/chat culled every OpenAI host).
-        resp, oai, _ep, why = await _send_chat(session, host, full, payload, "/api/chat", False)
+        # Capped at CONNECT_TIMEOUT. Without this the probe inherits the full request
+        # budget, so a connected-but-mute box costs 30s to learn nothing — three of
+        # them in one search is 90s of probing. A host too slow to answer twenty
+        # tokens inside the connect budget is not one to hand a 19k-token payload.
+        resp, oai, _ep, why = await _send_chat(session, host, full, payload, "/api/chat",
+                                               False, timeout=CONNECT_TIMEOUT)
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
         dur = time.time() - start
         detail = " ".join(str(e).split())[:200] or type(e).__name__
@@ -5821,7 +5831,10 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     # revisit — the documented escalation trigger.
     add_good(host, full)
     mark_smoke(host, full, failed=False)
-    record_perf(host, full, ttft=dur)   # the smoke response arrived at `dur` — that's our TTFT
+    # NO record_perf here. The probe is a gate, not work: its `dur` is the round trip
+    # for a 20-token prompt with no real prefill, so recording it as the host's TTFT
+    # writes a systematically optimistic number that the host never earned. Only the
+    # real request path measures performance (see record_perf in the race attempt).
     log.info(f"quick test PASS (unknown — not promoted) {host} ({full}): answer={shown!r}")
     await broadcast_activity(host, model_in, "connected",
         f"quick test: {host} for {model_in} - answered (unknown, not promoted): {shown!r}", duration=dur, wid=wid)

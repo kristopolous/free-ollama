@@ -1559,11 +1559,19 @@ function onActivityMessage(e){try{if(paused)return;var d=JSON.parse(e.data);if(!
   // that line so a fan-out resolves in place instead of stacking a row per host.
   var p=d.id?_actLines[d.id]:null;var fresh=!p;
   if(fresh){p=document.createElement('div');if(d.id)_actLines[d.id]=p}
-  p.className='status-line status-'+d.status;var t=d.time?new Date(d.time*1e3).toISOString():'';var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';
+  // Time only, no date — every line in view is from the same day and the date just
+  // ate horizontal space. The wid tail identifies the JOB, so lines from one request
+  // can be picked out of an interleaved fan-out; uuid4 tails collide only by accident.
+  p.className='status-line status-'+d.status;
+  var t=d.time?new Date(d.time*1e3).toISOString().slice(11,23):'';
+  var w=d.wid?String(d.wid).slice(-5):'';
+  var s=d.duration!==undefined?' <span style=color:var(--text-faint)>['+d.duration.toFixed(2)+'s]</span>':'';
   // d.message carries the REAL upstream error body (see the "surface real errors"
   // rule) which is attacker-controlled — a malicious host can put <script>/<img
   // onerror> in a 502 body. It must be escaped before it touches innerHTML.
-  p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'+s+' '+escHtml(d.message);
+  p.innerHTML='<span style=color:var(--text-3)>'+t+'</span>'
+    +(w?'<span style=color:var(--text-faint)>@'+escHtml(w)+'</span>':'')
+    +s+' '+escHtml(d.message);
   if(fresh)c.insertBefore(p,c.firstChild);
   while(c.children.length>ACTIVITY_LINES){var gone=c.lastChild;for(var k in _actLines)if(_actLines[k]===gone)delete _actLines[k];c.removeChild(gone)}}catch(ex){}}
 document.getElementById('activityReconnect').addEventListener('click',function(ev){
