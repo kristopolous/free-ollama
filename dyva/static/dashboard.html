@@ -170,7 +170,6 @@ a{color:var(--text-muted)}
 .ap-offline-msg{font-size:var(--fs-md);color:var(--text-dim)}
 .ap-offline .pager-btn{font-size:var(--fs-md);padding:var(--sp-2) var(--sp-5)}
 .ap-workers{flex-shrink:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0;padding-bottom:var(--sp-3);border-bottom:1px solid var(--border);max-height:min(30vh,240px);overflow-y:auto}
-@media (max-width:520px){.ap-workers{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .ap-worker{min-width:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-sunken);padding:var(--sp-2) var(--sp-3)}
 .ap-worker .apw-model{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  /* two lines: the key, then status and elapsed sharing the second */
@@ -271,6 +270,21 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
    snapshot and the stamp says how old it is. */
 /* Explicit Apply, no keystroke filtering: /api/stats is a linear sweep of the whole
    jsonl, so every keypress would re-read the log end to end. */
+.race-diagram{margin:0 0 12px;overflow-x:auto;background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:8px 6px}
+.settings-card{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--sp-5);margin-bottom:var(--sp-5)}
+/* Title reads as a section eyebrow, not a body line: small, uppercase, tracked, in the
+   accent, with clear space before the controls start. */
+.settings-card-title{margin:calc(-1 * var(--sp-2)) 0 var(--sp-5);
+  font-size:var(--fs-xs);font-weight:700;text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);
+  color:var(--accent)}
+.settings-card .setting:last-child{margin-bottom:0}
+.rc-section{margin-bottom:var(--sp-6)}
+.rc-title{font-size:var(--fs-lg);color:var(--text);margin-bottom:2px}
+.rc-hint{color:var(--text-dim);font-size:var(--fs-xs);line-height:var(--line-body);margin-bottom:10px}
+/* two knobs per row so the four routing dials stay compact and read as one story */
+.rc-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4) 32px;margin-bottom:var(--sp-6)}
+.rc-grid .setting{margin-bottom:0}
+.race-diagram svg{display:block;width:100%;height:auto;font:inherit}
 .stats-filter{font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border);min-width:9rem;max-width:14rem}
 .stats-go{font:inherit;font-size:var(--fs-sm);padding:4px 10px;border-radius:var(--r-md);background:var(--surface);color:var(--text);border:1px solid var(--border);cursor:pointer}
 .stats-go:hover{border-color:var(--border-hover)}
@@ -670,6 +684,9 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .doc-ver.old .doc-ver-label{color:var(--accent);font-weight:600}
 .settings-wrap{max-width:none}
 .settings-inner{height:auto;display:block;gap:0;overflow:visible}
+/* The four .settings-card boxes ARE the containers now; drop the outer card's grey
+   surface/shadow/padding so they sit on the page instead of a card-in-a-card. */
+.settings-inner{background:transparent;box-shadow:none;padding:0}
 .setting{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-5);margin-bottom:var(--sp-6)}
 .setting-text{display:flex;flex-direction:column;min-width:0}
 .setting-name{font-size:var(--fs-lg);color:var(--text)}
@@ -990,6 +1007,16 @@ body.dragging-image .hist-item{cursor:grabbing}
 #lightbox.open{display:flex}
 #lightbox img{max-width:90vw;max-height:78vh;border-radius:var(--r-lg)}
 #lightbox .cap{color:var(--text-2);font-size:var(--fs-md);max-width:90vw;overflow-wrap:anywhere;text-align:center}
+@media (max-width:520px){
+  .settings-inner .rc-grid{grid-template-columns:1fr}
+  /* Only the LONG controls drop below their help so it isn't crushed into a half-
+     column (a URL, a password). Number inputs stay small and inline on the side —
+     nobody needs a full-width box to type '6'. Targeted, not a blanket restack. */
+  .settings-inner .setting:has(input[type=text]),
+  .settings-inner .setting:has(input[type=password]){flex-direction:column;align-items:stretch;gap:var(--sp-3)}
+  .settings-inner .setting:has(input[type=text]) input[type=text],
+  .settings-inner .setting:has(input[type=password]) input[type=password]{width:100%}
+}
 </style>
 </head>
 <body>
@@ -1443,11 +1470,27 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 </div>
 <div id="settingsBody">
+<div class="settings-card">
+<div class="settings-card-title">Routing configuration</div>
+<div class="rc-hint">The fine-tunable hyperparameters for how a request finds a host — the diagram tracks them live as you adjust.</div>
+<div id="raceDiagram" class="race-diagram" aria-hidden="true"></div>
+<div class="rc-grid">
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
-<label class="setting"><span class="setting-text"><span class="setting-name">Min tok/s</span><small class="setting-help">Slowest input rate worth waiting through. The timeout scales with prompt size (tokens &divide; this), so a big prompt gets proportionally longer before a host is called too slow. Never shorter than Timeout.</small></span><input type="number" id="setMinTps" min="1" max="10000" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Hedge delay (s)</span><small class="setting-help">How long the last-good host gets to respond before the rest of the pool is raced alongside it. Whoever answers first wins. 0 races everything at once. Keeps a dead-but-connected favourite from stalling the whole request.</small></span><input type="number" id="setHedge" min="0" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Fanout (s)</span><small class="setting-help">How often another wave of hosts is opened, independent of Timeout. Lower = widen the search faster; each attempt still gets its full Timeout, so a cold host isn't dropped to make room. <b id="fanoutImpl"></b></small></span><input type="number" id="setFanout" min="1" max="600" step="1"></label>
+</div>
+<label class="setting"><span class="setting-text"><span class="setting-name">Min tok/s</span><small class="setting-help">Slowest input rate worth waiting through. The timeout scales with prompt size (tokens &divide; this), so a big prompt gets proportionally longer before a host is called too slow. Never shorter than Timeout.</small></span><input type="number" id="setMinTps" min="1" max="10000" step="1"></label>
+<div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
+</div>
+<div class="settings-card">
+<div class="settings-card-title">Behavior</div>
+<label class="setting"><span class="setting-text"><span class="setting-name">Explore mode</span><small class="setting-help">Discover more of the unknown network: route hosts we haven't visited (unknown state) to the front of the line, ahead of known-good ones. Deliberately slower — a request may probe cold hosts first — but it maps out the pool. Off by default. <b>Caution:</b> the unvisited frontier is where the canary honeypots live, and poking a burst of fresh IPs is exactly what trips Cloudflare/WAF reputation — so this raises the chance of a soft IP ban on your egress. Use it for deliberate survey passes, not routine routing.</small></span><input type="checkbox" id="setExplore" onchange="updateExploreLogo()"></label>
+<div class="setting"><span class="setting-text"><span class="setting-name">Cloudskipper</span><small class="setting-help">Never route to — or even connect to — hosts on the ticked clouds. The soft-ban tripwire can fire on the TCP connection itself, so a skipped cloud's hosts are dropped from every request <b>before any connection is made</b>. Clouds are identified by enrichment; the list below is the ones most represented in the current survey. Applies to every source and is always in effect, independent of Explore mode.</small><div id="cloudSkipList" class="cloudskip-list"></div></span></div>
+<div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
+</div>
+<div class="settings-card">
+<div class="settings-card-title">Presentation</div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Base path</span><small class="setting-help">Serve dyva under a secret URL path instead of the root. A path like <code>/some-path</code> moves the dashboard to <code>/some-path/</code> and the API to <code>/some-path/v1/models</code> — deterrence by obscurity: a scanner hitting the default paths (<code>/v1/models</code>, <code>/api/tags</code>) finds nothing. Blank = served at the root. <b>Takes effect on restart</b> (like the listen port); the <code>--base</code> flag overrides this.</small></span><input type="text" id="setBasePath" placeholder="/some-path" spellcheck="false" autocomplete="off"></label>
 <div class="setting">
@@ -1461,10 +1504,12 @@ body.dragging-image .hist-item{cursor:grabbing}
 </span></span>
 </div>
 <input type="file" id="mlFile" accept=".txt,.list,.text,text/plain" style="display:none">
-<label class="setting"><span class="setting-text"><span class="setting-name">Localhost only</span><small class="setting-help">Restrict inference endpoints to localhost only (a remote host that reaches this port can't chat or generate). Equivalent to the <code>./dyva -l</code> flag; saved here it persists across restarts.</small></span><input type="checkbox" id="setLocal"></label>
-<label class="setting"><span class="setting-text"><span class="setting-name">Explore mode</span><small class="setting-help">Discover more of the unknown network: route hosts we haven't visited (unknown state) to the front of the line, ahead of known-good ones. Deliberately slower — a request may probe cold hosts first — but it maps out the pool. Off by default. <b>Caution:</b> the unvisited frontier is where the canary honeypots live, and poking a burst of fresh IPs is exactly what trips Cloudflare/WAF reputation — so this raises the chance of a soft IP ban on your egress. Use it for deliberate survey passes, not routine routing.</small></span><input type="checkbox" id="setExplore" onchange="updateExploreLogo()"></label>
-<div class="setting"><span class="setting-text"><span class="setting-name">Cloudskipper</span><small class="setting-help">Never route to — or even connect to — hosts on the ticked clouds. The soft-ban tripwire can fire on the TCP connection itself, so a skipped cloud's hosts are dropped from every request <b>before any connection is made</b>. Clouds are identified by enrichment; the list below is the ones most represented in the current survey. Applies to every source and is always in effect, independent of Explore mode.</small><div id="cloudSkipList" class="cloudskip-list"></div></span></div>
+<div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
+</div>
+<div class="settings-card">
+<div class="settings-card-title">Congeniality</div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><template id="setAdminPwTpl"><input type="text" id="adminPwUserDecoy" name="username" class="admin-pw-decoy" placeholder="username" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" tabindex="-1" aria-hidden="true"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></span></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Localhost only</span><small class="setting-help">Restrict inference endpoints to localhost only (a remote host that reaches this port can't chat or generate). Equivalent to the <code>./dyva -l</code> flag; saved here it persists across restarts.</small></span><input type="checkbox" id="setLocal"></label>
 <div class="setting-sources">
 <div class="src-head"><span class="setting-name">Additional sources</span><button type="button" id="srcHelpBtn" class="src-help-btn" title="Format &amp; examples">?</button>
 <div id="srcHelp" class="src-help-pop">
@@ -1495,7 +1540,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="srcError" class="src-error"></div>
 <div id="srcTest" class="src-test"></div>
 </div>
-<div class="settings-actions"><span id="settingsStatus" class="settings-status"></span><button id="settingsSave" class="settings-save">Save</button></div>
+<div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
+</div>
 </div>
 </div></div>
 </div>
@@ -7806,6 +7852,62 @@ function renderStats(d){
   if(as){var t=new Date();as.textContent='as of '+t.toISOString().slice(11,19)+'Z';
          as.title='stats last fetched '+t.toISOString().replace('T',' ').slice(0,19)+' UTC';}
 }
+function _raceDiagram(){
+  var el=document.getElementById('raceDiagram'); if(!el)return;
+  function v(id){var e=document.getElementById(id);return e?parseFloat(e.value):NaN}
+  var w=v('setWorkers'),t=v('setTimeout'),h=v('setHedge'),f=v('setFanout');
+  if(!(w>0&&t>0&&f>0)){el.innerHTML='';return}
+  if(!(h>=0))h=0;
+  // Schematic: hedge lead -> wave of N branches (length = Timeout). Wave 2 is the same,
+  // but shifted RIGHT because it starts Fanout seconds later, so the branches overlap
+  // exactly when Fanout < Timeout and pull apart into a gap when Fanout > Timeout.
+  // The rightward shift is proportional to Fanout/Timeout; labels carry the live values.
+  var N=Math.min(Math.max(1,Math.round(w)),5);
+  var lg=9, fanH=(N-1)*lg;
+  // ONE horizontal scale for everything: branchLen pixels = Timeout seconds. So the
+  // hedge lead, the wave-2 shift and the branch length all read against the same clock.
+  var branchLen=260, con=16, pps=branchLen/t;             // pixels per second
+  var hl=Math.min(pps*h, branchLen*1.2);                  // hedge lead (0 when h=0), capped
+  var dx=Math.min(pps*f, branchLen*1.6);                  // wave-2 offset, capped
+  var hedgeX=40, spineX=hedgeX+14+Math.max(hl,6);         // wave-1 node = after the hedge lead
+  var padT=44, vGap=62;
+  var w1=padT+fanH/2+8, w2=w1+vGap;
+  var b1=spineX+con, e1=b1+branchLen;                     // wave-1 branch span
+  var b2=spineX+dx+con, e2=b2+branchLen;                  // wave-2 branch span
+  var W=Math.max(e1+64, e2+24), H=w2+fanH/2+40;
+  var A={hedge:'#c77dff',wave:'#4895ef',wave2:'#4895ef',to:'#90be6d',fo:'#f9c74f',ax:'#8a8a8a',tx:'#bbb'};
+  var g=['<svg viewBox=\'0 0 '+W.toFixed(0)+' '+H.toFixed(0)+'\' preserveAspectRatio=\'xMidYMid meet\' role=\'img\'>'];
+  function ln(a,b,c,d,col,ex){g.push('<line x1=\''+a.toFixed(1)+'\' y1=\''+b.toFixed(1)+'\' x2=\''+c.toFixed(1)+'\' y2=\''+d.toFixed(1)+'\' stroke=\''+col+'\' stroke-width=\'1.4\' '+(ex||'')+'/>');}
+  function tx(x,y,col,str,anc,sz,rot){g.push('<text x=\''+x.toFixed(1)+'\' y=\''+y.toFixed(1)+'\' fill=\''+col+'\' font-size=\''+(sz||10)+'\' text-anchor=\''+(anc||'start')+'\''+(rot?' transform=\'rotate('+rot+' '+x.toFixed(1)+' '+y.toFixed(1)+')\'':'')+'>'+str+'</text>');}
+  function node(x,y,col){g.push('<rect x=\''+(x-7).toFixed(1)+'\' y=\''+(y-7).toFixed(1)+'\' width=\'14\' height=\'14\' rx=\'2\' fill=\'none\' stroke=\''+col+'\' stroke-width=\'1.5\'/>');}
+  var dash='stroke-dasharray=\'5 4\'';
+  function fan(nx,cy,bx,col){ node(nx,cy,col);
+    for(var i=0;i<N;i++){var ly=cy+(i-(N-1)/2)*lg; ln(nx+7,cy,bx,ly,col); ln(bx,ly,bx+branchLen,ly,col,dash);} }
+  // hedge host + lead
+  node(hedgeX,w1,A.hedge);
+  ln(hedgeX+7,w1,spineX-7,w1,A.hedge,dash);
+  tx((hedgeX+spineX)/2,w1-9,A.hedge,'hedge '+Math.round(h)+'s','middle',10);
+  // cascade connector wave1 -> wave2 (down and to the right = later in time)
+  ln(spineX,w1+7,spineX+dx,w2-7,A.ax,dash);
+  // the two waves
+  fan(spineX,w1,b1,A.wave);
+  fan(spineX+dx,w2,b2,A.wave2);
+  // Timeout bracket over wave-1 top branch
+  var topY=w1-(N-1)/2*lg;
+  ln(b1,topY-13,e1,topY-13,A.to); ln(b1,topY-13,b1,topY-8,A.to); ln(e1,topY-13,e1,topY-8,A.to);
+  tx((b1+e1)/2,topY-16,A.to,'Timeout '+Math.round(t)+'s','middle',10);
+  // worker-count brace at wave-1 fan
+  var bx=e1+8;
+  ln(bx,w1-fanH/2,bx,w1+fanH/2,A.ax); ln(bx-4,w1-fanH/2,bx,w1-fanH/2,A.ax); ln(bx-4,w1+fanH/2,bx,w1+fanH/2,A.ax);
+  tx(bx+5,w1+4,A.tx,'\u00d7'+w+' workers','start',10);
+  // Fanout = the horizontal shift between wave starts
+  var fy=(w1+w2)/2;
+  ln(spineX,fy,spineX+dx,fy,A.fo); ln(spineX,fy-4,spineX,fy+4,A.fo); ln(spineX+dx,fy-4,spineX+dx,fy+4,A.fo);
+  tx((spineX+spineX+dx)/2,fy-5,A.fo,'Fanout '+Math.round(f)+'s','middle',10);
+  tx(W-6,H-6,A.ax,'time \u2192','end',10);
+  g.push('</svg>');
+  el.innerHTML=g.join('');
+}
 function _fanoutImpl(){
   var el=document.getElementById('fanoutImpl'); if(!el)return;
   function v(id){var e=document.getElementById(id);return e?parseFloat(e.value):NaN}
@@ -7817,9 +7919,10 @@ function _fanoutImpl(){
   el.textContent='\u2192 up to '+waves+' wave'+(waves>1?'s':'')+' alive \u00d7 '+w+
                  ' = '+live+' concurrent connections.'+
     (f>t?' Above Timeout the waves don\u2019t overlap and there is an idle gap between them \u2014 fewer sockets held at once, slower to widen.':'');
+  _raceDiagram();
 }
 function _wireFanoutImpl(){
-  ['setWorkers','setTimeout','setFanout'].forEach(function(id){
+  ['setWorkers','setTimeout','setFanout','setHedge'].forEach(function(id){
     var e=document.getElementById(id); if(!e||e._fi)return; e._fi=true;
     e.addEventListener('input',_fanoutImpl);
   });
@@ -8215,8 +8318,8 @@ function populateSettings(s){
   document.getElementById('setTimeout').value=s.timeout;
   document.getElementById('setMinTps').value=s.min_tps;
   document.getElementById('setFanout').value=s.fanout;
-  _wireFanoutImpl();
   document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
+  _wireFanoutImpl();
   document.getElementById('setMinCount').value=s.min_count;
   document.getElementById('setBasePath').value=s.base_path||'';
   setModelList(s.model_list||[],false);
@@ -8227,7 +8330,7 @@ function populateSettings(s){
   setPwState(!!s.admin_pw_set);
   document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
   document.getElementById('srcError').textContent='';
-  document.getElementById('settingsStatus').textContent='';
+  document.querySelectorAll('.settings-card .settings-status').forEach(function(e){e.textContent='';});
 }
 // The override list lives here rather than in a textarea — it's a file you
 // upload, not something to hand-edit in a box. `pending` marks a list that's
@@ -8273,7 +8376,7 @@ document.getElementById('mlFile').addEventListener('change',function(){
   r.onload=function(){
     var list=parseModelList(r.result);
     setModelList(list,true);
-    var st=document.getElementById('settingsStatus');
+    var st=_stEl();
     if(!list.length){st.style.color='var(--err)';st.textContent='no model names in '+f.name;}
     else{st.style.color='var(--ok)';st.textContent='read '+list.length+' from '+f.name;}
     setTimeout(function(){st.textContent=''},4000);
@@ -8304,6 +8407,8 @@ function unlockSettings(){
     return r.json();
   }).then(function(s){document.getElementById('loginPw').value='';populateSettings(s);}).catch(function(){});
 }
+var _saveStatus=null;
+function _stEl(){return _saveStatus||document.querySelector('.settings-card .settings-status');}
 function saveSettings(){
   var body={
     workers:parseInt(document.getElementById('setWorkers').value,10),
@@ -8331,7 +8436,7 @@ function saveSettings(){
   try{sources=raw?JSON.parse(raw):[]}catch(e){srcErr.textContent='Invalid JSON: '+e.message;return;}
   if(!Array.isArray(sources)){srcErr.textContent='Sources must be a JSON array.';return;}
   body.sources=sources;
-  var st=document.getElementById('settingsStatus');st.style.color='var(--ok)';st.textContent='saving…';
+  var st=_stEl();st.style.color='var(--ok)';st.textContent='saving…';
   fetch('settings',{method:'POST',headers:adminHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)})
     .then(function(r){return r.json().then(function(s){return {ok:r.ok,s:s}})})
     .then(function(res){
@@ -8343,8 +8448,8 @@ function saveSettings(){
       document.getElementById('setTimeout').value=s.timeout;
   document.getElementById('setMinTps').value=s.min_tps;
   document.getElementById('setFanout').value=s.fanout;
-  _wireFanoutImpl();
       document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
+  _wireFanoutImpl();
       document.getElementById('setMinCount').value=s.min_count;
   document.getElementById('setBasePath').value=s.base_path||'';
       setModelList(s.model_list||[],false);
@@ -8423,7 +8528,7 @@ function addFromUrl(){
     })
     .catch(function(){srcErr.style.color='var(--err)';srcErr.textContent='import failed';});
 }
-document.getElementById('settingsSave').addEventListener('click',saveSettings);
+Array.prototype.forEach.call(document.querySelectorAll('.settings-card .settings-save'),function(b){b.addEventListener('click',function(){var c=b.closest('.settings-card');_saveStatus=c?c.querySelector('.settings-status'):null;saveSettings();});});
 document.getElementById('loginBtn').addEventListener('click',unlockSettings);
 document.getElementById('srcAddBtn').addEventListener('click',addSource);
 document.getElementById('srcUrlBtn').addEventListener('click',addFromUrl);
