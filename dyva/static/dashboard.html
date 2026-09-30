@@ -172,7 +172,8 @@ a{color:var(--text-muted)}
 .ap-workers{flex-shrink:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2);margin:var(--sp-3) 0 0;padding-top:var(--sp-3);border-top:1px solid var(--border);max-height:min(30vh,240px);overflow-y:auto}
 .ap-filter{flex-shrink:0;box-sizing:border-box;width:100%;margin:var(--sp-3) 0;font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border)}
 .status-line[hidden]{display:none}
-.ap-worker{min-width:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-sunken);padding:var(--sp-2) var(--sp-3)}
+.ap-worker{min-width:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-sunken);padding:var(--sp-2) var(--sp-3);cursor:pointer}
+.ap-worker:hover{border-color:var(--border-hover)}
 .ap-worker .apw-model{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  /* two lines: the key, then status and elapsed sharing the second */
 .ap-worker .apw-row{display:flex;align-items:baseline;gap:var(--sp-2);margin-top:1px}
@@ -2336,6 +2337,18 @@ function renderActivityWorkers(all){
     var row=document.createElement('div');row.className='apw-row';
     row.appendChild(meta);row.appendChild(age);
     card.appendChild(m);card.appendChild(row);
+    // Click a card to filter the feed down to this worker's lines — its wid tail is
+    // exactly the "@xxxxx" the feed stamps on every line, so it doubles as the filter.
+    var _tail=String(w.wid||'').slice(-5);
+    if(_tail){
+      card.title='filter feed for @'+_tail;
+      card.addEventListener('click',function(ev){
+        ev.stopPropagation();
+        var fe=document.getElementById('activityFilter');
+        if(!fe)return;
+        fe.value=_tail;_applyActFilter();
+      });
+    }
     box.appendChild(card);
   });
 }

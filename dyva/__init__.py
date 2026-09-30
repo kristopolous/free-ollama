@@ -104,6 +104,27 @@ access_logger.addHandler(logging.StreamHandler(sys.stderr))
 access_logger.handlers[-1].setFormatter(logging.Formatter("%(message)s"))
 
 
+class _DailyLogFile(logging.Handler):
+    """Persist each log record to CACHE_DIR/logs/dyva-<UTC-date>.log, recomputing the
+    date per record so it rolls at UTC midnight with NO in-process rotation — no
+    rename, gzip or prune; dyva never manages its own log lifecycle (an external
+    logrotate can, or not). Same date-based scheme and directory as the activity
+    feed. This is the persistent, TIMESTAMPED audit trail of requests and errors that
+    --log turns on alongside the feed: without it the app/access log only ever went to
+    stderr and was lost, so a 500 the user saw in the UI (e.g. a failed 'Locate hosts')
+    left no trace on disk. Reads CACHE_DIR at emit time, so a --cache override still
+    lands in the right place."""
+    def emit(self, record):
+        try:
+            d = os.path.join(CACHE_DIR, "logs")
+            os.makedirs(d, exist_ok=True)
+            day = time.strftime("%Y-%m-%d", time.gmtime(record.created))
+            with open(os.path.join(d, f"dyva-{day}.log"), "a", encoding="utf-8") as f:
+                f.write(self.format(record) + "\n")
+        except Exception:
+            self.handleError(record)
+
+
 def log_upstream(code, host, endpoint, body, remote=None):
     log.warning(
         f"upstream error {code} from {host}{endpoint}: {body}",
@@ -7496,7 +7517,7 @@ async def handle_stop_worker(request):
     if callable(stop):
         log.warning(f"worker manually stopped: model={w.get('model')} wid={w.get('wid')}")
         await broadcast_activity("", w.get("model"), "stopped",
-            f"worker manually stopped: {w.get('model')}")
+            f"worker manually stopped: {w.get('model')}", wid=w.get("wid"))
         loop = asyncio.get_event_loop()
         loop.call_soon_threadsafe(stop) if loop.is_running() else stop()
     return web.json_response({"stopped": w.get("model"), "wid": w.get("wid")})
@@ -15038,7 +15059,19 @@ def main():
     _CURLIFY = args.curlify
     ACTIVITY_LOG = args.log
     if ACTIVITY_LOG:
-        log.info("Activity feed logging ON -> " + os.path.join(CACHE_DIR, "activity-<UTC-date>.jsonl"))
+        # --log persists BOTH the activity feed AND a timestamped app/request log, so
+        # there's an on-disk audit trail (requests + errors like a failed geo-enrich),
+        # not just the live feed. App log -> root (info/warn/error); the aiohttp access
+        # log is propagate=False, so it needs its own handler (its lines already carry %t).
+        _logdir = os.path.join(CACHE_DIR, "logs")
+        _app_fh = _DailyLogFile()
+        _app_fh.setFormatter(ApacheStyleFormatter(LOG_FORMAT))
+        logging.getLogger().addHandler(_app_fh)
+        _acc_fh = _DailyLogFile()
+        _acc_fh.setFormatter(logging.Formatter("%(message)s"))
+        access_logger.addHandler(_acc_fh)
+        log.info("Logging ON -> " + os.path.join(_logdir, "activity-<UTC-date>.jsonl")
+                 + " (feed) + " + os.path.join(_logdir, "dyva-<UTC-date>.log") + " (requests/errors)")
     load_settings()   # persisted dashboard settings override the CLI defaults
     if args.local:       # an explicit -l flag always wins over saved settings
         _LOCAL = True
