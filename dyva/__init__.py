@@ -1989,16 +1989,20 @@ def refresh_cache(source=None, cleanse=True):
         import glob as _glob
         from graflex import geoip as _geoip
         gd = _geoip.GEO_DIR
-        # Enrich only when a DB is already on disk (mmdb or csv) — never let a
-        # routine refresh trigger a download. enrich_records self-selects mmdb.
         have = ((_glob.glob(os.path.join(gd, "dbip-city-lite-*.mmdb")) and
                  _glob.glob(os.path.join(gd, "dbip-asn-lite-*.mmdb"))) or
                 (_glob.glob(os.path.join(gd, "dbip-city-lite-*.csv.gz")) and
                  _glob.glob(os.path.join(gd, "dbip-asn-lite-*.csv.gz"))))
+        # Only enrich from a DB already on disk — a routine refresh must never pull
+        # 85 MB, least of all from inside a request handler. A fresh install gets its
+        # data from the map's "Locate hosts" button instead, which is discoverable
+        # right where the empty map is and runs off the event loop.
         if have:
             _geoip.enrich_records(records)
     except Exception as _e:
-        log.debug(f"geo re-enrich after refresh skipped: {_e}")
+        # Loud, not debug: a silent failure here is exactly how you end up staring at
+        # an empty map with no idea it was ever meant to have data.
+        log.warning(f"geo enrichment skipped ({_e}) — map will have no location data")
     # Cleanse the MERGED pool (all sources) unless --refresh-only. Junk arrives
     # from several sources, so this can't be a per-source graflex fix. This is a
     # MODEL cleanse — hosts stay, only fake/ransomware/proxy model entries are
@@ -6298,6 +6302,46 @@ async def handle_stats(request):
         "totals": {"up": tot_up, "down": tot_down, "reqs": tot_reqs},
         "q": q,              # echoed so the client can show what's actually applied
     })
+
+
+async def handle_geo_enrich(request):
+    """
+    Stamp geo/provider onto the cached hosts (downloads the offline DB if needed).
+    ---
+    tags: [UI]
+    summary: POST /geo-enrich — make the map have data
+    description: >
+      Runs graflex's geoip enrichment over the host cache, fetching DB-IP Lite
+      (~85 MB, one time) if no local database exists. Exposed as a button because a
+      new install otherwise shows an empty map forever with nothing saying that a
+      manual step was ever required. Runs in an executor — the download and the
+      per-IP sweep are both blocking, and refresh_cache is already called from
+      request handlers, so doing this inline would stall the server.
+    responses:
+      '200':
+        description: How many hosts were looked up and matched
+    """
+    resp = await _check_local(request) or _check_admin(request)
+    if resp:
+        return resp
+
+    def _work():
+        from graflex import geoip as _geoip
+        with open(CACHE_FILE, encoding="utf-8") as f:
+            recs = json.load(f)
+        looked, matched = _geoip.enrich_records(recs)
+        _save_json_atomic(CACHE_FILE, recs)
+        return len(recs), looked, matched
+
+    try:
+        total, looked, matched = await asyncio.get_event_loop().run_in_executor(None, _work)
+    except Exception as e:
+        log.warning(f"geo-enrich failed: {e}")
+        return web.json_response({"error": " ".join(str(e).split())[:300]}, status=500)
+    global _servers_cache
+    _servers_cache = None          # force a re-read so the map sees the new fields
+    log.info(f"geo-enrich: {matched}/{looked} of {total} hosts located")
+    return web.json_response({"hosts": total, "looked_up": looked, "matched": matched})
 
 
 async def handle_geo_summary(request):
@@ -14566,6 +14610,7 @@ def make_app():
     swagger.add_get("/reload-hosts", handle_reload_hosts)
     swagger.add_get("/host-info", handle_host_info)
     swagger.add_get("/api/stats", handle_stats)
+    swagger.add_post("/geo-enrich", handle_geo_enrich)
     swagger.add_get("/geo-summary", handle_geo_summary)
     swagger.add_get("/geo-compare", handle_geo_compare)
     swagger.add_get("/dashboard", handle_dashboard)
