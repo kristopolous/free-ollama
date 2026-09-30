@@ -1989,16 +1989,24 @@ def refresh_cache(source=None, cleanse=True):
         import glob as _glob
         from graflex import geoip as _geoip
         gd = _geoip.GEO_DIR
-        # Enrich only when a DB is already on disk (mmdb or csv) — never let a
-        # routine refresh trigger a download. enrich_records self-selects mmdb.
         have = ((_glob.glob(os.path.join(gd, "dbip-city-lite-*.mmdb")) and
                  _glob.glob(os.path.join(gd, "dbip-asn-lite-*.mmdb"))) or
                 (_glob.glob(os.path.join(gd, "dbip-city-lite-*.csv.gz")) and
                  _glob.glob(os.path.join(gd, "dbip-asn-lite-*.csv.gz"))))
-        if have:
-            _geoip.enrich_records(records)
+        if not have:
+            # FIRST INGEST on a fresh install. This used to be skipped whenever no DB
+            # was on disk, which meant it was skipped forever: the map stayed empty,
+            # nothing said why, and the operator had to already know to run the enrich
+            # step by hand. Geo belongs to ingest, so fetch it once here. It is not a
+            # per-refresh cost — geoip reuses a current OR previous month already on
+            # disk, so this only fires on a genuinely empty cache.
+            log.info("geoip: no local database yet — fetching DB-IP Lite once "
+                     "(~85 MB) so the map has data; later refreshes reuse it")
+        _geoip.enrich_records(records)
     except Exception as _e:
-        log.debug(f"geo re-enrich after refresh skipped: {_e}")
+        # Loud, not debug: a silent failure here is exactly how you end up staring at
+        # an empty map with no idea it was ever meant to have data.
+        log.warning(f"geo enrichment skipped ({_e}) — map will have no location data")
     # Cleanse the MERGED pool (all sources) unless --refresh-only. Junk arrives
     # from several sources, so this can't be a per-source graflex fix. This is a
     # MODEL cleanse — hosts stay, only fake/ransomware/proxy model entries are
