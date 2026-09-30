@@ -210,6 +210,43 @@ instead of hanging the request until it times out. It is implemented as an
 opt-in staggered start in the shared race engine (`hedge_delay`), so every
 capability could use it, but only chat and generate do today.
 
+### Fan-out waves
+
+Three clocks run the search and they are deliberately independent. Conflating any
+two of them is the thing this design exists to avoid.
+
+| setting | typical | what it governs |
+|---|---|---|
+| `hedge_delay` | 5 | one-shot sentinel — how long the sticky host gets *alone* before we widen. "If it's warm it answers, otherwise move on." |
+| `fanout` | 20 | the period of every wave *after* that |
+| `timeout` | 120 | how long any single attempt may live |
+
+A worker is occupied for its whole attempt, so before `fanout` existed the wave
+period was welded to the timeout: the search could only widen when an attempt
+expired. That made a generous timeout actively harmful — raising it to give a cold
+host a real chance also made the search slower to widen, and a host that needed
+`timeout + 1s` was dropped at the exact moment we moved on.
+
+Separated, a slow host keeps its full `timeout` while the next wave starts
+alongside it. Concurrency then rides at:
+
+    ceil(timeout / fanout) x workers
+
+which is also the outbound socket count — and the WAF soft-ban tripwire fires on
+the TCP connect itself, not the completed request. The settings page shows the
+computed figure live as you move the dials. It is **not clamped**; setting it high
+is your call.
+
+Setting `fanout` **equal to** `timeout` gives exactly one wave at a time, which is
+the pre-`fanout` behaviour and a safe default.
+
+Setting it **above** `timeout` means a wave's attempts all expire before the next
+one starts, so there is an idle gap with nothing in flight. That is usually not
+what you want — but it is a legitimate low-footprint mode: it holds the fewest
+sockets open at any instant and spreads contacts out over time, at the cost of a
+slower search. If that is what you are after, it works; the readout tells you what
+you are choosing either way.
+
 Failover also applies **mid-stream**, not just before the first token. If an
 upstream drops the connection partway through a streaming answer — without ever
 sending its terminal `done` token — dyva doesn't close the client. It logs the

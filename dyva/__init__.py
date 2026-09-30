@@ -182,6 +182,13 @@ HEDGE_DELAY = 15
 # so a fixed TIMEOUT condemns it for doing exactly what we asked. Budget scales as
 # prompt_tokens / MIN_TPS, floored at TIMEOUT. Settable at runtime (min_tps).
 MIN_TPS = 5
+# Period between fan-out WAVES, independent of how long an attempt may live. Without
+# this the two are welded: a worker is occupied for its whole attempt, so the search can
+# only widen when one expires — meaning the wave period IS the timeout, and raising the
+# timeout to give a cold host a real chance would make the search slower to widen.
+# Separated, a slow host keeps its full TIMEOUT while we widen every FANOUT seconds.
+# Concurrency then rides at ceil(TIMEOUT/FANOUT) * workers (shown in settings).
+FANOUT = 20
 # Upper bound on a believable tokens/second reading. Even a tiny model on top-end
 # hardware stays well under this; a computed value above it is a measurement
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
@@ -423,7 +430,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -439,6 +446,8 @@ def load_settings():
         HEDGE_DELAY = s["hedge_delay"]
     if isinstance(s.get("min_tps"), (int, float)) and s["min_tps"] > 0:
         MIN_TPS = s["min_tps"]
+    if isinstance(s.get("fanout"), (int, float)) and s["fanout"] > 0:
+        FANOUT = s["fanout"]
     if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
         MIN_COUNT = s["min_count"]
     if isinstance(s.get("admin_pw"), str):
@@ -467,7 +476,7 @@ def save_settings(extra=None):
     if not isinstance(data, dict):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                 "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS,
+                 "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS, "fanout": FANOUT,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST,
                  "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
@@ -3953,6 +3962,8 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     # so asyncio can't interleave two appends.
     race_log = []
     _starved = [0]      # candidates skipped because another job held them
+    _spent = [False]    # candidate list exhausted — the wave loop must stop, or the
+                        # race never sees all(t.done()) and hangs
 
     async def worker():
         nonlocal tried
@@ -3961,6 +3972,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 try:
                     item = next(entry_iter)
                 except StopIteration:
+                    _spent[0] = True
                     return
                 tried += 1
             await _worker_checked(wwid)
@@ -4101,23 +4113,44 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     _tasks_holder[:] = tasks
 
     async def _fanout():
-        # wait out the head start, but cut it short the moment the first host
-        # has failed and the pool has moved on (tried >= 2) — a fast failure
-        # shouldn't cost the full delay before the rest are raced
-        t0 = time.time()
-        while (not done.is_set() and time.time() - t0 < hedge_delay and tried < 2):
-            await asyncio.sleep(0.1)
-        if done.is_set():
-            return
-        for _ in range(n - initial):
-            t = asyncio.create_task(worker())
-            tasks.append(t)
-            _tasks_holder.append(t)
+        me = asyncio.current_task()
 
-    if hedging:
-        fan = asyncio.create_task(_fanout())
-        tasks.append(fan)
-        _tasks_holder.append(fan)
+        def _spawn(k):
+            for _ in range(k):
+                t = asyncio.create_task(worker())
+                tasks.append(t)
+                _tasks_holder.append(t)
+
+        # SENTINEL (one-shot, its own short clock): the sticky host gets hedge_delay
+        # alone — if it's warm it answers, otherwise we widen. Cut short the moment it
+        # has failed and the pool moved on (tried >= 2). This is deliberately NOT the
+        # wave period: ~5s is right for "is the warm host answering", and absurd as a
+        # rate to keep opening sockets at.
+        if hedging:
+            t0 = time.time()
+            while (not done.is_set() and time.time() - t0 < hedge_delay and tried < 2):
+                await asyncio.sleep(0.1)
+            if done.is_set():
+                return
+            _spawn(n - initial)
+
+        # WAVES (repeating, own clock). Bounded by ceil(TIMEOUT/FANOUT) * n; that is
+        # also the outbound socket count, and the soft-ban tripwire fires on the connect
+        # itself, so the number is surfaced in settings rather than silently clamped.
+        if not FANOUT or FANOUT <= 0 or _spent[0]:
+            return
+        cap = max(1, int(-(-float(TIMEOUT) // float(FANOUT)))) * n
+        while not done.is_set() and not _spent[0]:
+            await asyncio.sleep(FANOUT)
+            if done.is_set() or _spent[0]:
+                return
+            live = sum(1 for t in tasks if t is not me and not t.done())
+            if live + n <= cap:
+                _spawn(n)
+
+    fan = asyncio.create_task(_fanout())
+    tasks.append(fan)
+    _tasks_holder.append(fan)
     try:
         while True:
             try:
@@ -4717,7 +4750,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
         # on that let it skip the test forever on the strength of its own canned reply.
         # Once a host really passes, smoke_date is stamped and it's never screened again.
         if not _host_screened(host):
-            sok, sdetail = await _quick_probe(session, host, full, model)
+            sok, sdetail = await _quick_probe(session, host, full, model, grade=False)
             if sok is False:
                 return skip("failed smoke test: " + (sdetail or "not a real model"))
             if sok is None:
@@ -5710,7 +5743,15 @@ async def _run_info_test(session, model_in, tools=None):
     return found or None
 
 
-async def _quick_probe(session, host, full, model_in, tools=None):
+async def _quick_probe(session, host, full, model_in, tools=None, grade=True):
+    # `grade` splits the two roles this serves. As the `:test` harness it is the
+    # operator deliberately grading the fleet, so it writes verdicts. As the race's
+    # pre-payload GATE it must convey nothing beyond its own result: a 20-token probe
+    # has no business granting a routing reputation, in either direction. With
+    # grade=False it writes only mark_smoke (the test's own record, which is what
+    # _host_screened reads) and, on a confirmed honeypot, mark_honeypot — determining
+    # the machine is not a real inference host IS the gate's purpose, not a quality
+    # judgement.
     """One quick factual probe against a single host: updates reputation (bad on any
     failure or wrong answer, good on a pass) and emits an activity line. Returns
     (verdict, detail): True = passed, False = failed (marked bad), None = inconclusive
@@ -5746,12 +5787,14 @@ async def _quick_probe(session, host, full, model_in, tools=None):
                 duration=dur, wid=wid)
             return None, f"too slow — connected, no answer in {dur:.0f}s"
         msg = ("no connection: " + detail) if no_socket else detail
-        add_bad(host, full, reason=f"smoke: {msg}")
+        if grade:
+            add_bad(host, full, reason=f"smoke: {msg}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - {msg}", duration=dur, wid=wid)
         return False, msg
     if resp is None:
-        add_bad(host, full, reason=f"smoke: {why}")
+        if grade:
+            add_bad(host, full, reason=f"smoke: {why}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - {why}",
             duration=time.time() - start, wid=wid)
@@ -5777,7 +5820,8 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         # skip, no penalty, still re-testable. Anything else keeps the bad mark.
         benign = (resp.status in (400, 503)) or ("loading model" in body.lower())
         if not benign:
-            add_bad(host, full, reason=f"smoke: {detail}")
+            if grade:
+                add_bad(host, full, reason=f"smoke: {detail}")
         await broadcast_activity(host, model_in, "warming" if benign else "failed",
             f"quick test: {host} for {model_in} - {detail}",
             duration=time.time() - start, wid=wid)
@@ -5786,7 +5830,8 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         data = await resp.json()
     except Exception:
         await resp.release()
-        add_bad(host, full, reason="smoke: bad response (JSON decode failed)")
+        if grade:
+            add_bad(host, full, reason="smoke: bad response (JSON decode failed)")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - bad response", duration=time.time() - start, wid=wid)
         return False, "bad response"
@@ -5797,7 +5842,8 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     dur = time.time() - start
     shown = content.strip()[:160]
     if "error" in data:
-        add_bad(host, full, reason=f"smoke error: {data['error']}")
+        if grade:
+            add_bad(host, full, reason=f"smoke error: {data['error']}")
         await broadcast_activity(host, model_in, "failed",
             f"quick test: {host} for {model_in} - error: {data['error']}", duration=dur, wid=wid)
         return False, f"error: {str(data['error'])[:80]}"
@@ -5808,7 +5854,8 @@ async def _quick_probe(session, host, full, model_in, tools=None):
             # line has nothing to do with the model), so condemn the whole HOST. Keep
             # the per-model record too (force_bad + mark_smoke) as provenance of which
             # model was probed; the raw reply is stored as the reason on both.
-            force_bad(host, full, reason=shown)
+            if grade:
+                force_bad(host, full, reason=shown)
             mark_smoke(host, full, failed=True)
             mark_honeypot(host, reason=shown)   # host-wide: drop the machine for every model
             log.warning(f"quick test HONEYPOT (machine flagged) {host} ({full}): {shown!r}")
@@ -5818,7 +5865,8 @@ async def _quick_probe(session, host, full, model_in, tools=None):
         # Failed, but NOT a recognized garbage reply (empty, gibberish, an off answer).
         # Record it as 'maybe' — data capture ONLY, no routing effect yet — so we can
         # SEE these replies and grow the classifier before deciding what they mean.
-        mark_maybe(host, full, reason=shown)
+        if grade:
+            mark_maybe(host, full, reason=shown)
         log.info(f"quick test MAYBE (recorded, no routing effect) {host} ({full}): {shown!r}")
         await broadcast_activity(host, model_in, "warming",
             f"quick test: {host} for {model_in} - unrecognized fail (maybe): {shown!r}", duration=dur, wid=wid)
@@ -5829,7 +5877,8 @@ async def _quick_probe(session, host, full, model_in, tools=None):
     # host by recency) and record THAT WE TESTED IT (mark_smoke: smoke_date=now,
     # fail_smoke stays 0 = it didn't fail). If honeypots ever learn to answer "black",
     # revisit — the documented escalation trigger.
-    add_good(host, full)
+    if grade:
+        add_good(host, full)
     mark_smoke(host, full, failed=False)
     # NO record_perf here. The probe is a gate, not work: its `dur` is the round trip
     # for a 20-token prompt with no real prefill, so recording it as the host's TTFT
@@ -6317,6 +6366,23 @@ async def handle_stats(request):
     })
 
 
+async def handle_robots(request):
+    """
+    robots.txt
+    ---
+    tags: [UI]
+    summary: GET /robots.txt — disallow everything
+    description: >
+      Belt to the meta tag's braces. Not always ours to serve (a reverse proxy may own
+      the root, and under --base we only answer below the base path), so it is the
+      weakest of the three signals — but free where it does apply.
+    responses:
+      '200':
+        description: robots.txt
+    """
+    return web.Response(text="User-agent: *\nDisallow: /\n", content_type="text/plain")
+
+
 async def handle_geo_enrich(request):
     """
     Stamp geo/provider onto the cached hosts (downloads the offline DB if needed).
@@ -6756,7 +6822,7 @@ async def handle_settings_get(request):
         # show a password prompt instead of the controls.
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS,
+                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS, "fanout": FANOUT,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -6776,7 +6842,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -6801,6 +6867,8 @@ async def handle_settings_post(request):
         HEDGE_DELAY = min(body["hedge_delay"], 600)
     if isinstance(body.get("min_tps"), (int, float)) and body["min_tps"] > 0:
         MIN_TPS = body["min_tps"]
+    if isinstance(body.get("fanout"), (int, float)) and body["fanout"] > 0:
+        FANOUT = body["fanout"]
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
         MIN_COUNT = body["min_count"]
     if isinstance(body.get("local"), bool):
@@ -6833,7 +6901,7 @@ async def handle_settings_post(request):
     if sources_changed:
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS,
+                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS, "fanout": FANOUT,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -14609,6 +14677,16 @@ def make_app():
                 await asyncio.wait_for(_jobs_db.close(), timeout=2)
         log.info("shutdown: databases checkpointed and closed")
 
+    async def _no_index(request, response):
+        """Public, but not discoverable. bingbot crawled the dashboard and pulled the
+        whole 496 KB host list, so say go away on every response — not just the two
+        HTML pages. The meta tag can't reach /v1/models, /geo-summary or /api/stats,
+        which are the more interesting things to index. on_response_prepare rather than
+        a middleware because it fires before headers go out for STREAMING responses
+        too, where setting a header after prepare() would raise."""
+        response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
+
+    app.on_response_prepare.append(_no_index)
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
@@ -14619,6 +14697,7 @@ def make_app():
     )
 
     swagger.add_get("/", handle_dashboard)
+    swagger.add_get("/robots.txt", handle_robots)
     swagger.add_get("/guide", handle_guide)
     swagger.add_get("/reload-hosts", handle_reload_hosts)
     swagger.add_get("/host-info", handle_host_info)
