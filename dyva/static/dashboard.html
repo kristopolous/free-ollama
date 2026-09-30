@@ -254,6 +254,12 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .map-inner{height:auto;max-height:none}
 .map-head{display:flex;align-items:center;gap:12px;margin-bottom:var(--sp-3);flex-wrap:wrap}
 .map-meta{font-size:.8rem;color:var(--text-dim)}
+/* Sits left of the ?, which keeps margin-left:auto and stays pinned right. Without
+   this a fresh install has an empty map and no hint that a step was ever needed. */
+.map-proc{margin-left:auto;font:inherit;font-size:var(--fs-sm);padding:3px 10px;border-radius:var(--r-md);background:var(--surface);color:var(--text-2);border:1px solid var(--border);cursor:pointer;white-space:nowrap}
+.map-proc:hover:not(:disabled){color:var(--text);border-color:var(--border-hover)}
+.map-proc:disabled{opacity:.6;cursor:default}
+.map-head .map-proc + .map-help{margin-left:8px}
 .map-head .map-help{margin-left:auto;flex:0 0 auto;width:22px;height:22px;padding:0;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text-2);font-size:.8rem;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .map-head .map-help:hover{color:var(--text);background:var(--accent-bg)}
 .stats-tot{margin-left:auto;color:var(--text-muted);font-size:var(--fs-md);font-variant-numeric:tabular-nums}
@@ -1377,7 +1383,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="statsHosts" class="stats-rows"></div>
 </div></div>
 <div class="card"><div class="card-inner map-inner">
-<div class="map-head"><h2>Host population</h2><button id="mapHelp" class="map-help" title="map syntax" aria-label="map syntax">?</button><div id="mapMode" class="seg"></div></div>
+<div class="map-head"><h2>Host population</h2><button id="mapEnrich" class="map-proc" title="look up each host's country/ASN and stamp it onto the cache (downloads the offline DB-IP database the first time, ~85 MB)">Locate hosts</button><button id="mapHelp" class="map-help" title="map syntax" aria-label="map syntax">?</button><div id="mapMode" class="seg"></div></div>
 <div id="mapHelpBox" class="map-help-box" hidden><div class="mhb-card">
 <button class="mhb-close" aria-label="close">✕</button>
 <h3>Map &amp; compare syntax</h3>
@@ -7799,6 +7805,22 @@ function _wireStatsFilter(){
   if(fe&&!fe._wired){fe._wired=true;fe.addEventListener('keydown',function(e){
     if(e.key==='Enter'){e.preventDefault();loadStats();}});}
 }
+function _wireMapEnrich(){
+  var b=document.getElementById('mapEnrich');
+  if(!b||b._wired)return;
+  b._wired=true;
+  b.addEventListener('click',function(){
+    var was=b.textContent;
+    b.disabled=true;b.textContent='locating\u2026';
+    fetch('geo-enrich',{method:'POST'}).then(function(r){return r.json()}).then(function(j){
+      b.disabled=false;
+      if(j&&j.error){b.textContent='failed';b.title=j.error;setTimeout(function(){b.textContent=was},4000);return;}
+      b.textContent=was;
+      openMap();     // its geo-summary fetch sits outside the _mapWired guard, so this redraws
+    }).catch(function(){b.disabled=false;b.textContent='failed';
+      setTimeout(function(){b.textContent=was},4000);});
+  });
+}
 function openMap(){
   if(!_mapWired){
     _mapWired=true;
@@ -8066,7 +8088,7 @@ function activateTab(name,chatId,pane,mode){
     }
   }
   if(name==='settings'){injectSettingsPwFields();loadSettings();}
-  if(name==='stats'){openMap();_wireStatsFilter();loadStats();}
+  if(name==='stats'){openMap();_wireMapEnrich();_wireStatsFilter();loadStats();}
   // Lazy-load the image gallery only when its tab is first opened — building a
   // node per image on every page load (even in the Server Room) is wasteful.
   if(name==='media'){
