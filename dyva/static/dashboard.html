@@ -325,6 +325,8 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
    Sticky so the columns stay labelled while the bounded list scrolls. */
 .stats-hdr .sr-name{font-size:var(--fs-md);letter-spacing:var(--eyebrow-tracking)}
 .stats-rows{margin-top:var(--sp-4)}
+.stats-seg{margin-top:var(--sp-4)}
+.stats-seg + .stats-rows{margin-top:var(--sp-2)}
 .stats-hdr{position:sticky;top:0;z-index:1;background:var(--surface);font-size:11px;
   letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted);
   border-bottom:1px solid var(--border);padding-bottom:3px}
@@ -1414,8 +1416,12 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="card"><div class="card-inner">
 <div class="map-head"><input id="statsFilter" class="stats-filter" type="search" placeholder="filter model or host" autocomplete="off"><button id="statsGo" class="stats-go">Apply</button><span id="statsTotals" class="stats-tot"></span><span id="statsAsOf" class="stats-asof"></span></div>
 <div id="statsChart" class="stats-chart"></div>
-<div id="statsModels" class="stats-rows"></div>
-<div id="statsHosts" class="stats-rows"></div>
+<div class="seg stats-seg" id="statsTabs" role="tablist">
+<button type="button" data-view="models" aria-pressed="true">By model</button>
+<button type="button" data-view="family" aria-pressed="false">By family</button>
+<button type="button" data-view="hosts" aria-pressed="false">By host</button>
+</div>
+<div id="statsTable" class="stats-rows"></div>
 </div></div>
 <div class="card"><div class="card-inner map-inner">
 <div class="map-head"><h2>Host population</h2><button id="mapEnrich" class="map-proc" title="look up each host's country/ASN and stamp it onto the cache (downloads the offline DB-IP database the first time, ~85 MB)">Locate hosts</button><button id="mapHelp" class="map-help" title="map syntax" aria-label="map syntax">?</button><div id="mapMode" class="seg"></div></div>
@@ -7830,6 +7836,44 @@ function _statRows(rows,label){
   }).join('');
 }
 var _statsCeil=0;   // chart ceiling remembered from the last UNFILTERED load
+// The stats table is one table with three tabbed views. renderStats stashes the
+// latest payload here; the active tab decides what _renderStatsTable draws.
+var _statsData={}, _statsView='models';
+// "By family" is derived client-side from the per-model rows: group by _familyOf (the
+// same leading-alpha family used for the model-list grouping), summing tokens/reqs and
+// REQUEST-WEIGHTING tps (a plain mean would let a one-off fast reading dominate a
+// family's rate). No server round-trip — it's a regrouping of data already on hand.
+function _familyRows(models){
+  var g={};
+  (models||[]).forEach(function(x){
+    var f=_familyOf(x.name);
+    var r=g[f]||(g[f]={name:f,up:0,down:0,reqs:0,_tw:0,_tn:0});
+    r.up+=x.up||0;r.down+=x.down||0;r.reqs+=x.reqs||0;
+    if(x.tps){r._tw+=x.tps*(x.reqs||0);r._tn+=(x.reqs||0);}
+  });
+  var out=Object.keys(g).map(function(k){var r=g[k];r.tps=r._tn?r._tw/r._tn:0;return r;});
+  out.sort(function(a,b){return (b.up+b.down)-(a.up+a.down);});   // tokens desc, like the server rows
+  return out;
+}
+function _renderStatsTable(){
+  var el=document.getElementById('statsTable');if(!el)return;
+  var rows,label;
+  if(_statsView==='hosts'){rows=_statsData.hosts;label='By host';}
+  else if(_statsView==='family'){rows=_familyRows(_statsData.models);label='By family';}
+  else{rows=_statsData.models;label='By model';}
+  el.innerHTML=_statRows(rows,label);
+  var tabs=document.getElementById('statsTabs');
+  if(tabs)tabs.querySelectorAll('button').forEach(function(b){
+    b.setAttribute('aria-pressed', b.getAttribute('data-view')===_statsView?'true':'false');});
+}
+function _wireStatsTabs(){
+  var tabs=document.getElementById('statsTabs');
+  if(!tabs||tabs._wired)return;tabs._wired=true;
+  tabs.addEventListener('click',function(e){
+    var b=e.target.closest&&e.target.closest('button[data-view]');if(!b)return;
+    _statsView=b.getAttribute('data-view');_renderStatsTable();
+  });
+}
 function renderStats(d){
   var t=(d&&d.totals)||{};
   var tot=document.getElementById('statsTotals');
@@ -7881,8 +7925,8 @@ function renderStats(d){
         +'<div class="sc-x"><span>'+escHtml(start)+'</span><span>'+escHtml(end)+'</span></div>';
     }
   }
-  var me=document.getElementById('statsModels');if(me)me.innerHTML=_statRows(d&&d.models,'By model');
-  var he=document.getElementById('statsHosts');if(he)he.innerHTML=_statRows(d&&d.hosts,'By host');
+  _statsData=d||{};
+  _renderStatsTable();   // one table, driven by the active tab (model / family / host)
   var as=document.getElementById('statsAsOf');
   // UTC, matching the chart: the day buckets come from the server in UTC and the
   // window is built with toISOString(), so a local clock here read as a different
@@ -7977,6 +8021,7 @@ function _wireStatsFilter(){
   if(go&&!go._wired){go._wired=true;go.addEventListener('click',loadStats);}
   if(fe&&!fe._wired){fe._wired=true;fe.addEventListener('keydown',function(e){
     if(e.key==='Enter'){e.preventDefault();loadStats();}});}
+  _wireStatsTabs();
 }
 function _wireMapEnrich(){
   var b=document.getElementById('mapEnrich');
