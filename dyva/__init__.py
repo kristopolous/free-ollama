@@ -5391,10 +5391,28 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 if a is not None:
                     partial[1] += len(a if isinstance(a, str) else json.dumps(a))
 
+    # Tell the worker view we're CONNECTED and producing — not still hunting for a host.
+    # The external-agent passthrough (opencode et al.) sets no phase otherwise, so a
+    # connected worker streaming a long tool-call turn rendered IDENTICALLY to one still
+    # searching ("checked N/total"). "generating" at connect, upgraded to "running tools"
+    # the instant a tool-call delta appears, so a tool loop reads as active work.
+    tool_phase = [False]
+    def _has_tool(obj):
+        return bool(((obj or {}).get("message") or {}).get("tool_calls"))
+    async def _phase(p):
+        if wid:
+            _set_worker_phase(wid, p)
+            with contextlib.suppress(Exception):
+                await _broadcast_workers()
+    await _phase("generating")
+
     try:
         if openai_format:
             first = json.loads(first_line)
             accum(first)                      # count content AND tool-call args
+            if not tool_phase[0] and _has_tool(first):
+                tool_phase[0] = True
+                await _phase("running tools")
             msg = dict(first.get("message", {}))
             tcs = msg.pop("tool_calls", None)
             if tcs:
@@ -5428,6 +5446,9 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 obj = json.loads(line)
             except Exception:
                 obj = None
+            if obj and not tool_phase[0] and _has_tool(obj):
+                tool_phase[0] = True
+                await _phase("running tools")
             if obj and obj.get("done"):
                 # OpenAI with stream_options.include_usage streams `usage` in a SEPARATE
                 # chunk AFTER this finish chunk. If the done chunk carried no token counts,
