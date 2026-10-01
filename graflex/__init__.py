@@ -250,6 +250,19 @@ def _zoomeye_cookie():
     return os.getenv("ZOOMEYE_COOKIE", "")
 
 
+# Jiasule/加速乐 binds the __jsl_clearance_s clearance cookie to the User-Agent (and the
+# egress IP), so the request UA MUST match the browser that generated the cookie — a
+# mismatch gets re-challenged (HTTP 521 + the __jsl_clearance_s JS wall) even with a
+# valid cookie. The operator sets ZOOMEYE_UA to their browser's UA alongside
+# ZOOMEYE_COOKIE; this default matches the previously-captured request. (Same pattern
+# as CENSYS_UA.)
+ZOOMEYE_UA_DEFAULT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+
+
+def _zoomeye_ua():
+    return os.getenv("ZOOMEYE_UA", "") or ZOOMEYE_UA_DEFAULT
+
+
 # Censys platform search (JSON API behind Cloudflare). The session cookie is a
 # SECRET — read only from the environment (CENSYS_COOKIE in .env), never hard-coded
 # or committed. It must be human-generated on THIS machine's egress IP: Cloudflare
@@ -2047,7 +2060,7 @@ def _fetch_zoomeye(dry, svc, base_query, page=1, run_ts=None, curlify=False, lab
     # ~250 cap instead of ~25, so far fewer requests per country slice.
     params = {"q": qb64, "page": page, "pageSize": 50, "t": "v4+v6+web"}
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "User-Agent": _zoomeye_ua(),   # MUST match the browser that made the cookie (UA-bound clearance)
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://www.zoomeye.ai/searchResult?q={qb64}",
@@ -2078,6 +2091,15 @@ def _fetch_zoomeye(dry, svc, base_query, page=1, run_ts=None, curlify=False, lab
         return None
     if resp.status_code != 200:
         log.warning(f"zoomeye: stopping — HTTP {resp.status_code}: {(resp.text or '')[:300]}")
+        # Dump the EXACT request we sent (resp.request = the real PreparedRequest, every
+        # header/cookie/UA included) so it can be diffed against the browser's request to
+        # see what the anti-bot wall is keying on. Contains the cookie — local debug only.
+        try:
+            import curlify as curlify_mod
+            log.warning("zoomeye: the exact request we sent (compare with your browser) —\n"
+                        + curlify_mod.to_curl(resp.request))
+        except Exception as _e:
+            log.debug(f"zoomeye: could not curlify the failed request: {_e}")
         return None
     try:
         data = resp.json()
@@ -2263,15 +2285,26 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
             got = 0
             while page <= ZOOMEYE_MAX_PAGES:    # ZoomEye only serves pages 1-5; p6+ errors
                 label = f"{_tag(combined)}-p{page}"
+                cached = _zoomeye_path(label, run_ts, svc)
                 # Resume (-i): a page whose raw JSON is already cached this session was
-                # fetched (and its hosts pooled + checked) on a prior run. Skip the
-                # re-fetch so we don't burn ZoomEye points re-pulling what we have.
-                if session and not dry and os.path.exists(_zoomeye_path(label, run_ts, svc)):
-                    log.info(f"[{qi+1}/{len(queries)}] {combined} p{page}: cached, skip")
-                    page += 1
-                    continue
-                data = _fetch_zoomeye(dry, svc, combined, page=page, run_ts=run_ts,
-                                      curlify=curlify, label=label, pname=svc)
+                # fetched on a prior run. REPROCESS it from disk — never re-fetch (burns
+                # ZoomEye points) and never blindly skip: the page may have been saved but
+                # its hosts not fully pooled/checked if the prior run was interrupted, so
+                # we still run it through the rest of the pipeline (parse -> pool -> check).
+                # Skipping fetch is NOT skipping processing. (Same rule as Censys/Hunter.)
+                was_fetched = True
+                if session and not dry and not curlify and os.path.exists(cached):
+                    log.info(f"[{qi+1}/{len(queries)}] {combined} p{page}: cached, reprocessing")
+                    try:
+                        data = _load_json(cached, silent=True)
+                        was_fetched = False
+                    except Exception as e:
+                        log.warning(f"  cached page unreadable ({e}); re-fetching: {cached}")
+                        data = _fetch_zoomeye(dry, svc, combined, page=page, run_ts=run_ts,
+                                              curlify=curlify, label=label, pname=svc)
+                else:
+                    data = _fetch_zoomeye(dry, svc, combined, page=page, run_ts=run_ts,
+                                          curlify=curlify, label=label, pname=svc)
                 if curlify or dry or data is None:
                     break                       # dry / curlify / http error / unparsable -> stop
                 t_fetched = time.time()         # the check that follows counts toward --sleep pacing
@@ -2296,15 +2329,19 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                              f"{len(page_hosts)} hosts (+{fresh} new), {got} this query"
                              + (f" of {total} available" if total else ""))
                     log.info(f"  pool: {len(pool)}   eta: {_fmt_duration(eta)}   lapsed: {_fmt_duration(elapsed)}")
-                if check_batch_fn and fresh_hosts:
-                    check_batch_fn(fresh_hosts)
+                # Fresh fetch: check the NEW hosts. Reprocess: the pool already holds this
+                # page's hosts (so fresh is empty), hand the WHOLE page to the check — it
+                # skips already-checked hosts and probes only the ones left unchecked.
+                _to_check = fresh_hosts if was_fetched else page_hosts
+                if check_batch_fn and _to_check:
+                    check_batch_fn(_to_check)
                 page += 1
                 if page > ZOOMEYE_MAX_PAGES:    # ZoomEye only serves pages 1-5; p6+ errors
                     break
-                if not curlify:
-                    # The check phase above already spent wall-clock time; count it
-                    # toward the --sleep pacing and only sleep the remainder (>=0),
-                    # rather than fetch + full-check + full-sleep.
+                if not curlify and was_fetched:
+                    # Pace only REAL fetches (a reprocess hits no network). The check above
+                    # already spent wall-clock time; count it toward --sleep pacing and
+                    # only sleep the remainder (>=0).
                     remaining = sleep - (time.time() - t_fetched)
                     if remaining > 0:
                         time.sleep(remaining)
