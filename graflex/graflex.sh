@@ -85,7 +85,6 @@ case "$SERVICE" in
   ollama-zoomeye)
     SERVICE=ollama
     SITE=zoomeye
-    ACTION=fetch
     # No port filter — ollama runs on many ports. ISO alpha-2 codes (UK -> GB);
     # each country is its own ≤250 slice past ZoomEye's cap.
     COUNTRIES="RU,DE,US,CN,IN,GB,ES" #TR,RO,TH,SK,FR,JP,SG,IT,SA,ID,BR,VT"
