@@ -4001,6 +4001,17 @@ def main():
                     log.info("--- drain remaining new hosts ---")
                     check(service=_svc, name=_nm, check_timeout=args.check_timeout,
                           check_new=True, check_all=False, workers=args.workers, session=args.session)
+                    # Fold every PROBED host into the working pool from the session's
+                    # /check snapshots. The interleaved check deliberately SKIPS a host it
+                    # already has a probe record for (a resumed run, or a shared-ZFS session
+                    # probed on another box) — so without this those results are never
+                    # written to <name>-working.json: the "+40 new in the pool, +0 working"
+                    # gap. Offline, no re-probe — the snapshot (+ failed.json) IS the
+                    # verdict. reconstruct merges newest-wins and never drops existing rows,
+                    # and is ollama-shaped, so gate it on the ollama service.
+                    if args.session and _svc == "ollama":
+                        log.info("--- fold probed hosts into working (from check snapshots) ---")
+                        reconstruct(name=_nm, session=args.session)
             else:
                 for step in parts:
                     # log.info(f"--- {step} ---")
