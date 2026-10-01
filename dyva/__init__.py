@@ -1508,6 +1508,9 @@ async def account_tokens(wid, host, model, obj, num_ctx):
     if speaks_openai(host):
         num_ctx = None
     mark_worker_tokens(wid, p, c, num_ctx)
+    # Self-refresh the context ceiling: the host just ingested `p` prompt tokens, so if a
+    # recorded ctx_limit was <= that, it was stale (reloaded bigger) — clear it.
+    clear_ctx_limit(host, model, p)
     # tokens/second, most-recent (host, model) reading. Prefer the upstream's OWN
     # generation timing when it reports it: Ollama gives eval_count / eval_duration
     # (nanoseconds), the true tok/s regardless of how fast WE drained the socket.
@@ -2246,6 +2249,18 @@ def _get_db():
                      # Soft delete: a non-NULL deleted_at means the row is retired but KEPT
                      # for recovery/audit; every prioritization read filters deleted_at IS NULL.
                      "deleted_at TEXT",
+                     # Context ceiling: the loaded context size (n_ctx) a host reported when
+                     # it rejected an oversized prompt (exceed-context 400). A SOFT signal —
+                     # a prompt bigger than this demotes the host to the BACK OF ITS TIER
+                     # (still raced, never banned), and it's cleared the moment the host
+                     # succeeds on a prompt that big (it was reloaded bigger). NULL = unknown.
+                     "ctx_limit INTEGER",
+                     # User "deprioritize" (👎): a manual, reputation-ORTHOGONAL flag that
+                     # sorts this (host,model) to the back of the race so the next request
+                     # goes elsewhere. Unlike good/bad it is NOT touched by add_good/add_bad,
+                     # so a slow-but-working host can't self-heal back to the front — only an
+                     # explicit 👍 (favor) clears it. 1 = deprioritized, 0/NULL = normal.
+                     "deprio INTEGER NOT NULL DEFAULT 0",
                      # When the row was first created / last written. SQLite forbids a
                      # CURRENT_TIMESTAMP default on ADD COLUMN, so both columns are plain and
                      # triggers (below) stamp them; pre-existing rows stay NULL until touched.
@@ -2649,6 +2664,99 @@ def mark_unreachable(host):
         " fail_conn=fail_conn+1, last_fail=excluded.last_fail",
         (host, UNREACHABLE_KEY, _now_iso()))
     db.commit()
+
+
+def _parse_ctx_limit(body):
+    """Pull the host's LOADED context size out of an exceed-context 400. LM Studio /
+    llama.cpp put it in an `n_ctx` field; vLLM says 'maximum context length is N tokens'."""
+    try:
+        j = json.loads(body)
+        for src in ((j.get("error") if isinstance(j, dict) else None), j):
+            if isinstance(src, dict):
+                n = src.get("n_ctx")
+                if isinstance(n, int) and n > 0:
+                    return n
+    except Exception:
+        pass
+    m = (re.search(r"maximum context length is (\d+)", body or "", re.I)
+         or re.search(r"\bn_ctx['\"]?\s*[:=]\s*(\d+)", body or ""))
+    return int(m.group(1)) if m else None
+
+
+def mark_ctx_limit(host, model, n_ctx):
+    """Record the context ceiling a host reported when it rejected an oversized prompt.
+    Per (host, resolved-model). Upserts a neutral 'unknown' row if none exists (an
+    exceed-context is a skip, so the host may have no reputation row yet) — this adds
+    no good/bad/maybe mark, only the ceiling. Soft + reversible; see the column comment."""
+    if not n_ctx:
+        return
+    try:
+        db = _get_db()
+        db.execute(
+            "INSERT INTO host_status(host,model,state,ctx_limit) VALUES(?,?, 'unknown', ?)"
+            " ON CONFLICT(host,model) DO UPDATE SET ctx_limit=excluded.ctx_limit",
+            (host, model, int(n_ctx)))
+        db.commit()
+    except Exception as e:
+        log.debug(f"mark_ctx_limit failed: {e}")
+
+
+def clear_ctx_limit(host, model, ingested):
+    """A host just SUCCEEDED ingesting `ingested` prompt tokens; if that meets or beats a
+    recorded ceiling, the ceiling was stale (the host was reloaded bigger) — clear it so
+    the host returns to normal order. One conditional UPDATE, no read on the hot path."""
+    if not ingested:
+        return
+    try:
+        db = _get_db()
+        db.execute("UPDATE host_status SET ctx_limit=NULL "
+                   "WHERE host=? AND model=? AND ctx_limit IS NOT NULL AND ctx_limit<=?",
+                   (host, model, int(ingested)))
+        db.commit()
+    except Exception as e:
+        log.debug(f"clear_ctx_limit failed: {e}")
+
+
+def _load_ctx_limits():
+    """{(host, model): ctx_limit} for the hosts that have rejected an oversized prompt.
+    Only non-NULL rows (few — most hosts never hit it), so cheap to load per race."""
+    try:
+        db = _get_db()
+        return {(h, m): lim for h, m, lim in db.execute(
+            f"SELECT host, model, ctx_limit FROM host_status "
+            f"WHERE ctx_limit IS NOT NULL AND {_LIVE_REAL}")}
+    except Exception:
+        return {}
+
+
+def set_deprio(host, model, on):
+    """User deprioritize (👎) / favor (👍) for a (host, resolved-model). on=True sets the
+    flag (upserting a neutral 'unknown' row if the pair has none); on=False clears it.
+    NEVER touches good/bad state — it's an orthogonal, reversible routing preference, so a
+    slow-but-working host can't self-heal back to the front on its next success."""
+    try:
+        db = _get_db()
+        if on:
+            db.execute(
+                "INSERT INTO host_status(host,model,state,deprio) VALUES(?,?, 'unknown', 1)"
+                " ON CONFLICT(host,model) DO UPDATE SET deprio=1",
+                (host, model))
+        else:
+            db.execute("UPDATE host_status SET deprio=0 WHERE host=? AND model=?",
+                       (host, model))
+        db.commit()
+    except Exception as e:
+        log.debug(f"set_deprio failed: {e}")
+
+
+def _load_deprio():
+    """Set of (host, model) the user has deprioritized (👎). Cheap: only deprio=1 rows."""
+    try:
+        db = _get_db()
+        return {(h, m) for h, m in db.execute(
+            f"SELECT host, model FROM host_status WHERE deprio=1 AND {_LIVE_REAL}")}
+    except Exception:
+        return set()
 
 
 def mark_honeypot(host, reason=None):
@@ -4834,16 +4942,40 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     # Stable sort, so the reputation ordering survives inside each group, and bad /
     # unreachable hosts (prio >= TIER_BAD) are never promoted by warmth.
     _warm = set(_banker.warm(model))
-    # Order: warm/sticky first, then tier, then WITHIN good/maybe by favorability
-    # (best expected delivered speed first). _fav is a per-job frozen snapshot so this
-    # race's own record_race writes can't churn the order mid-race. Unknown/explore
+    # Context ceiling (soft, back-of-tier): for a prompt bigger than a host's recorded
+    # ctx_limit, put any FITTING model on that host first, and if NO model fits, flag the
+    # host so it sinks to the BACK OF ITS TIER — still raced (the ceiling may be stale; the
+    # operator may have reloaded bigger), just after everything that might fit. An unknown
+    # ceiling is optimistic (treated as fits), same as how unknown model size is kept.
+    _pt = _estimate_prompt_tokens(payload) if payload else 0
+    _ctx = _load_ctx_limits() if _pt else {}
+    def _fits(host, m):
+        lim = _ctx.get((host, m))
+        return lim is None or lim >= _pt
+    if _ctx:
+        servers = [(prio, host,
+                    [m for m in ms if _fits(host, m)] + [m for m in ms if not _fits(host, m)])
+                   for (prio, host, ms) in servers]
+    def _toobig(host, ms):
+        return 0 if (not _ctx or not ms or _fits(host, ms[0])) else 1
+    # User deprioritize (👎): a manual veto, so it's the PRIMARY key — a deprioritized
+    # (host,model) sorts behind EVERYTHING ("go elsewhere for the next request"), past
+    # warmth/sticky/tier, overriding the self-healing that kept pulling a slow-but-working
+    # host back to the front. Still in the list, so it's used only as a last resort; 👍
+    # clears it. (Stronger than the automatic ctx back-of-tier demotion, by intent.)
+    _deprio = _load_deprio()
+    def _dep(host, ms):
+        return 1 if any((host, m) in _deprio for m in ms) else 0
+    # Order: deprioritized-last, then warm/sticky, then tier, then too-big to the back of
+    # its tier, then WITHIN good/maybe by favorability. _fav is a per-job frozen snapshot so
+    # this race's own record_race writes can't churn the order mid-race. Unknown/explore
     # hosts get favk=0 and keep their find_servers order via the stable sort.
     _fav = _favorability(model, servers)
     def _order(it):
-        prio, host, _ms = it
+        prio, host, ms = it
         warm0 = 0 if (host in _warm and prio < TIER_BAD) else 1
         favk = -_fav[host]["fav"] if (host in _fav and prio in (TIER_GOOD, TIER_MAYBE)) else 0.0
-        return (warm0, prio, favk)
+        return (_dep(host, ms), warm0, prio, _toobig(host, ms), favk)
     servers = sorted(servers, key=_order)
     for _i, (_p, _h, _m) in enumerate(servers):     # stamp final try-order rank for the log
         if _h in _fav:
@@ -5038,6 +5170,9 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
             if code == 400 and ("exceed_context_size_error" in _blow
                                 or "exceeds the available context" in _blow
                                 or "maximum context length" in _blow):
+                # Record the host's loaded ceiling so a future oversized prompt demotes it
+                # to the back of its tier (soft; cleared on a later success this big).
+                mark_ctx_limit(host, full, _parse_ctx_limit(body))
                 await broadcast_activity(host, model, "warming",
                     f"won't fit: {host} for {model} - {detail}", duration=dur, wid=wid)
                 return skip(detail)
@@ -6787,9 +6922,11 @@ async def handle_host_info(request):
         out["reputation"] = [
             {"model": m, "state": st, "last_good": lg, "failure_streak": fs,
              "ttft": ttft, "tps": tps, "fail_smoke": fsm, "smoke_date": sd,
+             "success": succ, "failure": fail, "race_won": rw, "race_lost": rl,
              "caps": capmap.get(m)}
-            for (m, st, lg, fs, ttft, tps, fsm, sd) in db.execute(
-                f"SELECT model, state, last_good, failure_streak, ttft, tps, fail_smoke, smoke_date "
+            for (m, st, lg, fs, ttft, tps, fsm, sd, succ, fail, rw, rl) in db.execute(
+                f"SELECT model, state, last_good, failure_streak, ttft, tps, fail_smoke, smoke_date, "
+                f"success, failure, race_won, race_lost "
                 f"FROM host_status WHERE host=? AND {_LIVE_REAL} ORDER BY model", (server_url,)).fetchall()]
         caps = []
         for (cap, node, voices, checked) in db.execute(
@@ -7615,11 +7752,45 @@ async def handle_flag_worker(request):
     model = (w.get("rmodel") if w else None) or request.query.get("model")
     if not host or not model:
         return web.json_response({"error": "no host/model to flag"}, status=404)
-    force_bad(host, model, reason="user flag: bunk output")
-    log.warning(f"worker thumbs-down: host={host} model={model} wid={wid}")
+    # Deprioritize, don't condemn: a slow-but-working host flagged with force_bad healed
+    # straight back to the front on its next success. set_deprio is reputation-orthogonal,
+    # so it sticks until the user clears it with 👍 (handle_favor_worker).
+    set_deprio(host, model, True)
+    log.warning(f"worker deprioritized (👎): host={host} model={model} wid={wid}")
     await broadcast_activity(host, model, "flagged",
-        f"user flagged bunk output: {model} @ {_norm_host(host)}")
-    return web.json_response({"flagged": True, "host": host, "model": model})
+        f"deprioritized: {model} @ {_norm_host(host)}")
+    return web.json_response({"deprioritized": True, "host": host, "model": model})
+
+
+async def handle_favor_worker(request):
+    """
+    Thumbs-up a finished worker: clear a deprioritize and mark its (host, model) good.
+    ---
+    tags: [Admin]
+    summary: Favor (👍) the host+model a finished worker used — the undo for 👎
+    description: >
+      "This one is good": clears any user deprioritize on that exact (host, resolved
+      model) and promotes it to the good tier. The reversible counterpart to
+      /flag-worker. Resolves host/model from the worker record, else the query params.
+    parameters:
+      - {in: query, name: wid,   schema: {type: string}, required: false, description: Worker id}
+      - {in: query, name: host,  schema: {type: string}, required: false, description: Host (fallback)}
+      - {in: query, name: model, schema: {type: string}, required: false, description: Resolved model (fallback)}
+    responses:
+      '200': {description: Favored}
+    """
+    wid = request.query.get("wid")
+    w = _workers.get(wid) if wid else None
+    host = (w.get("host") if w else None) or request.query.get("host")
+    model = (w.get("rmodel") if w else None) or request.query.get("model")
+    if not host or not model:
+        return web.json_response({"error": "no host/model to favor"}, status=404)
+    set_deprio(host, model, False)   # clear the deprioritize (the undo)
+    add_good(host, model)            # "this one is good" — promote to good standing
+    log.warning(f"worker favored (👍): host={host} model={model} wid={wid}")
+    await broadcast_activity(host, model, "connected",
+        f"favored (good): {model} @ {_norm_host(host)}")
+    return web.json_response({"favored": True, "host": host, "model": model})
 
 
 async def handle_api_tags(request):
@@ -14906,6 +15077,7 @@ def make_app():
     swagger.add_get("/stop-worker", handle_stop_worker)
     swagger.add_get("/skip-worker", handle_skip_worker)
     swagger.add_get("/flag-worker", handle_flag_worker)
+    swagger.add_get("/favor-worker", handle_favor_worker)
     swagger.add_get("/api/tags", handle_api_tags)
     swagger.add_get("/api/ps", handle_api_ps)
     swagger.add_get("/api/version", handle_api_version)
