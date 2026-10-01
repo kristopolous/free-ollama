@@ -654,7 +654,10 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
   .msg .body{font-size:var(--fs-md)}
   .input-tools button{padding:var(--sp-3) var(--sp-4)}
   .src-head{flex-wrap:wrap}
-  .src-head .src-add-btn,.src-head .src-test-btn{width:100%;margin-left:0;text-align:center}
+  /* The three source buttons drop to their own row below the title and share it
+     equally, instead of stacking full-width (three tall rows ate the space). */
+  .src-btns{flex:1 1 100%;margin-left:0}
+  .src-btns .src-add-btn,.src-btns .src-test-btn{flex:1 1 0;min-width:0;text-align:center;padding-left:var(--sp-2);padding-right:var(--sp-2)}
 }
 .chat-sidebar{width:var(--sidebar-w);flex-shrink:0;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);display:flex;flex-direction:column;overflow:hidden}
 .sidebar-top{display:flex;align-items:center;gap:var(--sp-2);margin:10px;flex-shrink:0}
@@ -746,6 +749,8 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .src-add-btn{margin-left:auto}
 .src-test-btn{margin-left:var(--sp-3)}
 .src-add-btn:hover,.src-test-btn:hover{background:var(--accent-bg)}
+.src-btns{display:flex;gap:var(--sp-3);margin-left:auto;flex-shrink:0}
+.src-btns .src-add-btn,.src-btns .src-test-btn{margin-left:0}
 .src-test{margin-top:var(--sp-3);font-size:var(--fs-xs);line-height:var(--line-loose)}
 .src-test-item{margin-bottom:var(--sp-3)}
 .src-test-ok{color:var(--text-3)}
@@ -1544,9 +1549,11 @@ body.dragging-image .hist-item{cursor:grabbing}
   }
 ]</pre>
 </div>
+<div class="src-btns">
 <button type="button" id="srcAddBtn" class="src-add-btn">Add source</button>
 <button type="button" id="srcUrlBtn" class="src-test-btn">Add from url</button>
 <button type="button" id="srcTestBtn" class="src-test-btn">Test sources</button>
+</div>
 </div>
 <small class="setting-help">Extra JSON host sources, fetched before the built-ins (highest priority). A JSON array of <code>{name, url, mapping}</code>.</small>
 <textarea id="setSources" class="src-textarea" spellcheck="false" placeholder="[]"></textarea>
