@@ -268,7 +268,9 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .map-head .map-proc + .map-help{margin-left:8px}
 .map-head .map-help{margin-left:auto;flex:0 0 auto;width:22px;height:22px;padding:0;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text-2);font-size:.8rem;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .map-head .map-help:hover{color:var(--text);background:var(--accent-bg)}
-.stats-tot{margin-left:auto;color:var(--text-muted);font-size:var(--fs-md);font-variant-numeric:tabular-nums}
+.stats-tot{color:var(--text-muted);font-size:var(--fs-md);font-variant-numeric:tabular-nums}
+/* The granularity dropdown carries the auto-push so it + the token count group right. */
+.stats-gran{margin-left:auto;font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border);cursor:pointer}
 /* This view does NOT poll — it loads when the tab is opened — so the reading is a
    snapshot and the stamp says how old it is. */
 /* Explicit Apply, no keystroke filtering: /api/stats is a linear sweep of the whole
@@ -1430,7 +1432,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 
 <div id="stats" class="panel">
 <div class="card"><div class="card-inner">
-<div class="map-head"><input id="statsFilter" class="stats-filter" type="search" placeholder="filter model or host" autocomplete="off"><button id="statsGo" class="stats-go">Apply</button><span id="statsTotals" class="stats-tot"></span><span id="statsAsOf" class="stats-asof"></span></div>
+<div class="map-head"><input id="statsFilter" class="stats-filter" type="search" placeholder="filter model or host" autocomplete="off"><button id="statsGo" class="stats-go">Apply</button><select id="statsGran" class="stats-gran" title="chart granularity"><option value="hour">Hourly</option><option value="day" selected>Daily</option><option value="week">Weekly</option></select><span id="statsTotals" class="stats-tot"></span><span id="statsAsOf" class="stats-asof"></span></div>
 <div id="statsChart" class="stats-chart"></div>
 <div class="stats-tabs" id="statsTabs" role="tablist">
 <button type="button" class="htab active" data-view="models">Models</button>
@@ -7879,7 +7881,51 @@ function _statRows(rows,label){
       +'<span class="sr-req">'+NUM_FMT.format(x.reqs||0)+'</span></div>';
   }).join('');
 }
-var _statsCeil=0;   // chart ceiling remembered from the last UNFILTERED load
+var _statsGran='day';   // usage-chart granularity: hour / day / week
+var _statsCeil={};      // chart ceiling PER granularity, remembered from the last UNFILTERED load
+// Each granularity: which server array, how many buckets to show, and how to step/format
+// a UTC bucket label. Labels match the server's (hour "YYYY-MM-DD HH", day/week "YYYY-MM-DD").
+var _GRAN={
+  hour:{series:'hours',count:168,back:function(dt,n){dt.setUTCHours(dt.getUTCHours()-n)},step:function(dt){dt.setUTCHours(dt.getUTCHours()+1)},fmt:function(dt){return dt.toISOString().slice(0,13).replace('T',' ')},parse:function(k){return new Date(k.replace(' ','T')+':00:00Z')},tfmt:function(k){return k+':00'}},
+  day:{series:'days',count:30,back:function(dt,n){dt.setUTCDate(dt.getUTCDate()-n)},step:function(dt){dt.setUTCDate(dt.getUTCDate()+1)},fmt:function(dt){return dt.toISOString().slice(0,10)},parse:function(k){return new Date(k+'T00:00:00Z')},tfmt:function(k){return k}},
+  // week labels MUST be Monday-aligned to match the server's keys, else every lookup
+  // misses and the chart reads 0 — so fmt snaps any date back to its week's Monday.
+  week:{series:'weeks',count:26,back:function(dt,n){dt.setUTCDate(dt.getUTCDate()-7*n)},step:function(dt){dt.setUTCDate(dt.getUTCDate()+7)},fmt:function(dt){var m=new Date(dt);m.setUTCDate(m.getUTCDate()-((m.getUTCDay()+6)%7));return m.toISOString().slice(0,10)},parse:function(k){return new Date(k+'T00:00:00Z')},tfmt:function(k){return 'week of '+k}}
+};
+function _renderStatsChart(){
+  var chart=document.getElementById('statsChart');if(!chart)return;
+  var g=_GRAN[_statsGran]||_GRAN.day, d=_statsData||{};
+  var gt=document.getElementById('statsGran');
+  if(gt&&gt.value!==_statsGran)gt.value=_statsGran;
+  var rows=d[g.series]||[];
+  if(!rows.length){chart.innerHTML='<div class="muted">no usage recorded yet</div>';return;}
+  var by={};rows.forEach(function(x){by[x.day]=(x.up||0)+(x.down||0)});
+  var keys=rows.map(function(x){return x.day}).sort();
+  var endStr=g.fmt(new Date());
+  if(keys[keys.length-1]>endStr)endStr=keys[keys.length-1];   // data ahead of our clock
+  var startD=g.parse(endStr);g.back(startD,g.count-1);        // fixed window of `count` buckets
+  var series=[],max=1;
+  for(var dt=new Date(startD);g.fmt(dt)<=endStr;g.step(dt)){
+    var k=g.fmt(dt),v=by[k]||0;series.push([k,v]);if(v>max)max=v;
+  }
+  // NEVER rescale on a filter (per granularity): the ceiling is remembered from the last
+  // UNFILTERED load so a filtered view draws visibly shorter bars against a fixed axis.
+  var _filtered=!!(d.q);
+  if(!_filtered)_statsCeil[_statsGran]=max;
+  var yTop=Math.max(max,_filtered?(_statsCeil[_statsGran]||0):0)*1.25;
+  var grid='';
+  if(isFinite(yTop)&&yTop>0){
+    var gs=Math.pow(10,Math.floor(Math.log10(yTop)));
+    for(var gg=gs;gg<yTop;gg+=gs){grid+='<i class="sc-grid" style="bottom:'+(100*gg/yTop).toFixed(2)+'%"></i>';}
+  }
+  var bars=series.map(function(s){
+    var h=(100*s[1]/yTop).toFixed(1);
+    return '<div class="sc-col" title="'+escHtml(g.tfmt(s[0]))+' · '+_ktok(s[1])+'k tokens"><i style="height:'+h+'%"></i></div>';
+  }).join('');
+  chart.innerHTML='<div class="sc-ymax">'+_ktok(yTop)+'k</div>'
+    +'<div class="sc-bars">'+grid+bars+'</div>'
+    +'<div class="sc-x"><span>'+escHtml(series.length?series[0][0]:'')+'</span><span>'+escHtml(endStr)+'</span></div>';
+}
 // The stats table is one table with three tabbed views. renderStats stashes the
 // latest payload here; the active tab decides what _renderStatsTable draws.
 var _statsData={}, _statsView='models';
@@ -7912,64 +7958,23 @@ function _renderStatsTable(){
 }
 function _wireStatsTabs(){
   var tabs=document.getElementById('statsTabs');
-  if(!tabs||tabs._wired)return;tabs._wired=true;
-  tabs.addEventListener('click',function(e){
-    var b=e.target.closest&&e.target.closest('button[data-view]');if(!b)return;
-    _statsView=b.getAttribute('data-view');_renderStatsTable();
-  });
+  if(tabs&&!tabs._wired){tabs._wired=true;
+    tabs.addEventListener('click',function(e){
+      var b=e.target.closest&&e.target.closest('button[data-view]');if(!b)return;
+      _statsView=b.getAttribute('data-view');_renderStatsTable();
+    });
+  }
+  var gran=document.getElementById('statsGran');
+  if(gran&&!gran._wired){gran._wired=true;
+    gran.addEventListener('change',function(){_statsGran=gran.value;_renderStatsChart();});   // re-render from stashed data, no refetch
+  }
 }
 function renderStats(d){
   var t=(d&&d.totals)||{};
   var tot=document.getElementById('statsTotals');
   if(tot)tot.textContent=_ktok((t.up||0)+(t.down||0))+'k tokens · '+NUM_FMT.format(t.reqs||0)+' reqs'+((d&&d.q)?' · "'+d.q+'"':'');
-  var days=(d&&d.days)||[];
-  var chart=document.getElementById('statsChart');
-  if(chart){
-    if(!days.length){chart.innerHTML='<div class="muted">no usage recorded yet</div>';}
-    else{
-      // Pad to a continuous window of at least 30 days (up to a 1-year ceiling) so a
-      // single day of data isn't one giant rectangle — days with no usage render as a
-      // flat baseline bar. Day strings are UTC (matching the endpoint), so build in UTC.
-      var byDay={};days.forEach(function(x){byDay[x.day]=(x.up||0)+(x.down||0)});
-      function ymd(dt){return dt.toISOString().slice(0,10)}
-      var keys=days.map(function(x){return x.day}).sort();
-      var end=ymd(new Date());
-      if(keys[keys.length-1]>end)end=keys[keys.length-1];
-      var eD=new Date(end+'T00:00:00Z');
-      var sD=new Date(eD);sD.setUTCDate(sD.getUTCDate()-29);var start=ymd(sD);   // 30-day floor
-      if(keys[0]<start)start=keys[0];                                            // extend back to earliest data
-      var capD=new Date(eD);capD.setUTCDate(capD.getUTCDate()-364);              // but no more than ~1 year
-      if(start<ymd(capD))start=ymd(capD);
-      var series=[],max=1;
-      for(var dt=new Date(start+'T00:00:00Z');ymd(dt)<=end;dt.setUTCDate(dt.getUTCDate()+1)){
-        var k=ymd(dt),t=byDay[k]||0;series.push([k,t]);if(t>max)max=t;
-      }
-      // NEVER rescale on a filter. Rescaling redraws a subset at the same bar heights
-      // with only a small axis number changing, which reads as "nothing happened". The
-      // ceiling is remembered from the unfiltered load, so a filtered view draws
-      // visibly shorter bars against a fixed axis. Purely client-side; the tab always
-      // loads unfiltered first, so the ceiling is set before any filter can apply.
-      var _filtered=!!(d&&d.q);
-      if(!_filtered)_statsCeil=max;
-      var yTop=Math.max(max,_filtered?_statsCeil:0)*1.25;   // 25% headroom
-      // one line per multiple of the leading power of ten, below the ceiling
-      var grid='';
-      if(isFinite(yTop)&&yTop>0){
-        var step=Math.pow(10,Math.floor(Math.log10(yTop)));
-        for(var g=step;g<yTop;g+=step){
-          grid+='<i class="sc-grid" style="bottom:'+(100*g/yTop).toFixed(2)+'%"></i>';
-        }
-      }
-      var bars=series.map(function(s){
-        var h=(100*s[1]/yTop).toFixed(1);
-        return '<div class="sc-col" title="'+escHtml(s[0])+' · '+_ktok(s[1])+'k tokens"><i style="height:'+h+'%"></i></div>';
-      }).join('');
-      chart.innerHTML='<div class="sc-ymax">'+_ktok(yTop)+'k</div>'
-        +'<div class="sc-bars">'+grid+bars+'</div>'
-        +'<div class="sc-x"><span>'+escHtml(start)+'</span><span>'+escHtml(end)+'</span></div>';
-    }
-  }
   _statsData=d||{};
+  _renderStatsChart();   // usage bars at the active granularity (hour / day / week)
   _renderStatsTable();   // one table, driven by the active tab (model / family / host)
   var as=document.getElementById('statsAsOf');
   // UTC, matching the chart: the day buckets come from the server in UTC and the

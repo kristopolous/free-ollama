@@ -6635,7 +6635,12 @@ async def handle_stats(request):
     # substring/glob rule the routing queries use, against the model OR the host, so
     # "qwen" and "51.68" both do what you'd expect.
     q = (request.query.get("q") or "").strip()
-    days, models, hosts = {}, {}, {}
+    # Three time granularities off the SAME per-request records (no new storage): hour,
+    # day, week (Monday-aligned). Each bucket's label lives in "day" so the chart renders
+    # them uniformly. Hours are capped to the last 168h so a long history can't bloat the
+    # payload; days/weeks are naturally small. The client windows to 168h / 30d / 26w.
+    hour_cutoff = time.time() - 168 * 3600
+    days, weeks, hours, models, hosts = {}, {}, {}, {}, {}
     tot_up = tot_down = tot_reqs = 0
     try:
         with open(STATS_FILE, encoding="utf-8") as f:
@@ -6653,12 +6658,21 @@ async def handle_stats(request):
                 up = r.get("up") or 0
                 down = r.get("down") or 0
                 tps = r.get("tps")
+                rdate = r.get("date") or 0
                 try:
-                    day = _dt.datetime.fromtimestamp(r.get("date") or 0, _dt.timezone.utc).strftime("%Y-%m-%d")
+                    dt = _dt.datetime.fromtimestamp(rdate, _dt.timezone.utc)
                 except (ValueError, OSError, OverflowError):
                     continue
+                day = dt.strftime("%Y-%m-%d")
                 d = days.setdefault(day, {"day": day, "up": 0, "down": 0, "reqs": 0})
                 d["up"] += up; d["down"] += down; d["reqs"] += 1
+                wk = (dt - _dt.timedelta(days=dt.weekday())).strftime("%Y-%m-%d")   # Monday of this week
+                w = weeks.setdefault(wk, {"day": wk, "up": 0, "down": 0, "reqs": 0})
+                w["up"] += up; w["down"] += down; w["reqs"] += 1
+                if rdate >= hour_cutoff:
+                    hk = dt.strftime("%Y-%m-%d %H")
+                    h = hours.setdefault(hk, {"day": hk, "up": 0, "down": 0, "reqs": 0})
+                    h["up"] += up; h["down"] += down; h["reqs"] += 1
                 for bucket, bkey in ((models, r.get("model") or "?"), (hosts, r.get("host") or "?")):
                     b = bucket.setdefault(bkey, {"up": 0, "down": 0, "reqs": 0, "_tps": 0.0, "_tn": 0})
                     b["up"] += up; b["down"] += down; b["reqs"] += 1
@@ -6677,6 +6691,8 @@ async def handle_stats(request):
 
     return web.json_response({
         "days": [days[k] for k in sorted(days)],
+        "weeks": [weeks[k] for k in sorted(weeks)],
+        "hours": [hours[k] for k in sorted(hours)],
         "models": _rows(models),
         "hosts": _rows(hosts),
         "totals": {"up": tot_up, "down": tot_down, "reqs": tot_reqs},
