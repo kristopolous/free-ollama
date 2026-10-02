@@ -192,6 +192,45 @@ into "no hosts available". There is a race — a host only appears once a job ha
 taken it — but the window is milliseconds against renders that run for minutes,
 and losing it merely costs the old behaviour.
 
+### Warming hosts
+
+A host can answer a request by saying, in effect, *not yet*: Ollama returns an
+HTTP 500 `llm server loading model` while a cold model loads into VRAM, and
+llama.cpp / vLLM return 503 when every slot is busy. Neither is a failure — the
+host is **alive and willing**, it just isn't ready this instant. That is the whole
+availability-beats-speed premise: the race is decided by who will *take* the
+request, not by who is fastest, so a warming host is one we *want*. dyva doesn't
+drop it and records no reputation change against it; it **parks** the host and
+re-fronts it after `WARMING_RETRY` (5s), retried until the host is ready or the
+request's budget (the same stretched timeout described under Fan-out waves) lapses.
+A parked host holds no open socket while it waits, so retrying costs nothing
+against the concurrency cap.
+
+### Oversized prompts
+
+A host loads a model with a fixed context window, and some runtimes ignore a
+per-request `num_ctx` entirely (LM Studio's `/v1`, for one, uses whatever window it
+was started with). Hand such a host a prompt bigger than that window and it returns
+a 400 — a fact about *this host right now*, not a reason to mark it bad: it may well
+have been restarted with a larger window by the time you next route to it. So dyva
+records the ceiling it reported (`ctx_limit`) and, for a prompt that wouldn't fit,
+demotes the host to the **back of its tier** rather than dropping it — still tried,
+just last among equals. The ceiling is **cleared on the next success**, so a host
+that comes back with more room re-earns its place automatically. This is the host's
+window; our *own* under-sized window is a different thing — that one is grown and
+the request reissued (see Context window).
+
+### Deprioritise / favour (👎 / 👍)
+
+Reputation self-heals: a host that fails and later succeeds climbs back on its own.
+That is exactly the wrong behaviour for a **manual** "send work elsewhere" — if you
+thumbs-down a host because you don't want it serving you, its next success shouldn't
+quietly undo your decision. So the 👎 on a host's card is stored **orthogonal to
+reputation**: a `deprio` flag that sorts the (host, model) pair to the **back of the
+line** no matter how good its reputation is, and that only an explicit 👍 (favour)
+clears. Favour also nudges the pair back toward good. It's a routing veto you own,
+not a quality signal the router is allowed to overrule.
+
 ### Hedged failover
 
 The sticky host is tried first, as always, but it no longer gets to block the
@@ -212,14 +251,21 @@ capability could use it, but only chat and generate do today.
 
 ### Fan-out waves
 
-Three clocks run the search and they are deliberately independent. Conflating any
-two of them is the thing this design exists to avoid.
+dyva's routing is an **availability** contest, not a speed one: the race is decided
+by which host will *take* the request — a TCP connect plus a willingness to serve —
+and a present-but-slow host is never penalised for being slow. Who generates fastest
+is a later, secondary concern; the race itself only finds a reachable, willing host.
+
+The search is run by a few deliberately independent clocks. Conflating any two of
+them is the thing this design exists to avoid.
 
 | setting | typical | what it governs |
 |---|---|---|
-| `hedge_delay` | 5 | one-shot sentinel — how long the sticky host gets *alone* before we widen. "If it's warm it answers, otherwise move on." |
-| `fanout` | 20 | the period of every wave *after* that |
-| `timeout` | 120 | how long any single attempt may live |
+| `hedge_delay` | 15 | one-shot sentinel — how long the sticky host gets *alone* before we widen. "If it's warm it answers, otherwise move on." |
+| `fanout` | 20 | the base period of every wave *after* that |
+| `timeout` (minimum) | 30 | the floor on how long any single attempt may live |
+| `timeout_max` (maximum) | 180 | the ceiling that budget scales up to for a big prompt |
+| `input_rate` | 1000 | assumed prefill tok/s — turns prompt size into the per-attempt budget between the two timeouts |
 
 A worker is occupied for its whole attempt, so before `fanout` existed the wave
 period was welded to the timeout: the search could only widen when an attempt
@@ -227,25 +273,43 @@ expired. That made a generous timeout actively harmful — raising it to give a 
 host a real chance also made the search slower to widen, and a host that needed
 `timeout + 1s` was dropped at the exact moment we moved on.
 
-Separated, a slow host keeps its full `timeout` while the next wave starts
-alongside it. Concurrency then rides at:
+Separated, a slow host keeps its full budget while the next wave starts alongside
+it. Concurrency then rides at:
 
     ceil(timeout / fanout) x workers
 
 which is also the outbound socket count — and the WAF soft-ban tripwire fires on
 the TCP connect itself, not the completed request. The settings page shows the
-computed figure live as you move the dials. It is **not clamped**; setting it high
-is your call.
+computed figure live and draws the race as a schematic as you move the dials. It is
+**not clamped**; setting it high is your call.
 
-Setting `fanout` **equal to** `timeout` gives exactly one wave at a time, which is
-the pre-`fanout` behaviour and a safe default.
+Setting `fanout` **equal to** the minimum `timeout` gives exactly one wave at a
+time, the pre-`fanout` behaviour and a safe default. Setting it **above** means a
+wave's attempts all expire before the next one starts — an idle gap with nothing in
+flight: the fewest sockets held at any instant, contacts spread out over time, a
+slower search. A legitimate low-footprint mode, and the readout tells you what you
+are choosing either way.
 
-Setting it **above** `timeout` means a wave's attempts all expire before the next
-one starts, so there is an idle gap with nothing in flight. That is usually not
-what you want — but it is a legitimate low-footprint mode: it holds the fewest
-sockets open at any instant and spreads contacts out over time, at the cost of a
-slower search. If that is what you are after, it works; the readout tells you what
-you are choosing either way.
+**Scaling the budget to the prompt.** A 20-token probe and a 400k-token context are
+not the same request: the big one needs a long *prefill* before its first token, and
+a fixed timeout would condemn a perfectly good host for doing exactly what we asked.
+So the per-attempt budget is a range, not a constant. The expected prefill time —
+`prompt_tokens / input_rate` — is clamped between the **minimum** `timeout` (a small
+prompt uses exactly this, so everyday requests are unchanged) and the **maximum**
+`timeout_max` (the longest first-token wait we will ever allow). `input_rate` is
+deliberately conservative — a fraction of what real hardware prefills at — so it
+over-waits rather than cutting a capable host short.
+
+Stretching only the timeout would break the concurrency bound, though: the fan-out
+would keep opening waves across the longer window and the socket count — the thing
+the soft-ban watches — would balloon. So **whatever seconds get added to the timeout
+for a big prompt are added to `fanout` too.** If an attempt may now live
+`timeout + x`, waves open every `fanout + x`. Because `timeout > fanout`, the wave
+ratio only slides toward 1 as `x` grows, so the cap `ceil(timeout/fanout) x workers`
+can hold or shrink — never grow past the figure on the dial. A big prompt waits
+longer on the *same* number of hosts; it never widens the fan-out. The race diagram
+draws exactly this: the timeout runs from a solid **Min** to a lighter dashed
+**Max**, and the fanout carries the same-length dashout.
 
 Failover also applies **mid-stream**, not just before the first token. If an
 upstream drops the connection partway through a streaming answer — without ever
@@ -256,6 +320,14 @@ turn plus a "continue where you left off" nudge) and continuing on the **same op
 client connection**, so the reader sees one uninterrupted stream. It's capped
 (`MAX_STREAM_CONTINUES`) so a flaky pool can't loop forever; if the pool is spent
 the stream is closed cleanly with a terminal done.
+
+A committed stream can also be **stopped by hand**. The Stop button on a running
+worker aborts a stream that has already won and is generating — even one trickling
+tokens so slowly the silence watchdog never trips — releasing the upstream socket
+and closing the client cleanly, without failing over (you asked to stop, not
+reroute). The dashboard also shows the live outbound **connection count** after
+*Activity* and above the worker list, so you can see how much of the fan-out budget
+is in flight at any moment.
 
 ## Use It Like Ollama
 
@@ -857,8 +929,11 @@ The dashboard's **Settings** tab is backed by `~/.cache/free-ollama/settings.jso
 | Setting | Meaning |
 |---------|---------|
 | **Workers** | Parallel hosts raced per request (fan-out). |
-| **Timeout** | Per-host request timeout, in seconds. |
+| **Minimum timeout** | Floor on the per-host first-token wait, in seconds. A small prompt uses exactly this. |
+| **Maximum timeout** | Ceiling the per-attempt budget scales up to for a large prompt (see Fan-out waves). Set it equal to the minimum to switch scaling off. |
+| **Input rate** | Assumed input-prefill tok/s; converts prompt size into the per-attempt budget between the two timeouts. Conservative on purpose. |
 | **Hedge delay** | Seconds the sticky (last-good) host gets to itself before the rest of the pool is raced alongside it; whoever answers first wins and the loser is dropped. Default `30`, `0` races everything at once. This is what stops a dead-but-still-connected favourite from stalling a whole request for a full timeout before failover kicks in — in practice, when the host is healthy it answers well inside the delay and nothing else is ever contacted. |
+| **Fanout** | Base seconds between fan-out waves, independent of the timeout. A big prompt adds the same extra seconds here as it adds to the timeout, so the worker cap doesn't grow. |
 | **Minimum model count** | Hide models served by fewer than this many hosts from `/api/tags` and `/v1/models` — the listings third-party apps read. `0` = show everything. (The dashboard always shows everything.) |
 | **Admin password** | When set, viewing or changing the Settings tab and its sources requires it (sent as an `X-Admin-Key` header). Everything else — chat, models, the dashboard — stays public, so you can host a demo without letting visitors edit your config. Stored hashed; if you forget it, clear `admin_pw` in `settings.json` and restart. |
 | **Additional sources** | Extra host lists to pull from — see below. |

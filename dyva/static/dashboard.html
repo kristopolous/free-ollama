@@ -8054,7 +8054,7 @@ function _raceDiagram(){
   tx((spineX+fdx)/2,fy-5,A.fo,'Fanout '+Math.round(f)+'s','middle',10);
   if(ext>0.5){
     ln(fdx,fy,fdx+ext,fy,A.fo,dash2); ln(fdx+ext,fy-4,fdx+ext,fy+4,A.fo);
-    tx((fdx+fdx+ext)/2,fy-5,A.fo,'Max '+Math.round(f+(tm-t))+'s','middle',10);
+    tx((fdx+fdx+ext)/2,fy+13,A.fo,'Max '+Math.round(f+(tm-t))+'s','middle',10);   // below the line; "Fanout Ns" stays on top
   }
   g.push('<text x=\'6\' y=\''+(H-9).toFixed(1)+'\' font-size=\'10\' fill=\''+A.fo+'\'>'
     +'<tspan font-weight=\'700\' font-size=\'13\'>'+maxc+'</tspan>'
