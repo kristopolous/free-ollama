@@ -269,8 +269,10 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .map-head .map-help{margin-left:auto;flex:0 0 auto;width:22px;height:22px;padding:0;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text-2);font-size:.8rem;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .map-head .map-help:hover{color:var(--text);background:var(--accent-bg)}
 .stats-tot{color:var(--text-muted);font-size:var(--fs-md);font-variant-numeric:tabular-nums}
-/* The granularity dropdown carries the auto-push so it + the token count group right. */
-.stats-gran{margin-left:auto;font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border);cursor:pointer}
+/* The granularity dropdown carries the auto-push so it + the token count group right.
+   width:auto overrides the global `select{width:100%}` that was stretching it to its
+   own full-width row. */
+.stats-gran{width:auto;margin-left:auto;font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border);cursor:pointer}
 /* This view does NOT poll — it loads when the tab is opened — so the reading is a
    snapshot and the stamp says how old it is. */
 /* Explicit Apply, no keystroke filtering: /api/stats is a linear sweep of the whole

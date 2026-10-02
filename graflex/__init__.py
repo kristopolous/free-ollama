@@ -364,6 +364,7 @@ SERVICE_CONFIG = {
     "llama.cpp": {
         "port": 8080,
         "fofa_query": 'server=="llama.cpp"',
+        "zoomeye_query": 'http.header.server="llama.cpp"',
         "check_path": "/v1/models",
     },
     "vllm": {

@@ -90,6 +90,13 @@ case "$SERVICE" in
     COUNTRIES="RU,DE,US,CN,IN,GB,ES" #TR,RO,TH,SK,FR,JP,SG,IT,SA,ID,BR,VT"
     ;;
 
+  llamacpp-zoomeye)
+    SERVICE=llama.cpp
+    SITE=zoomeye
+    COUNTRIES="US,CN,IR,DE,FR"
+    PORTS="8082,8001,8000,11434,8090,8081"
+    ;;
+
   lmstudio-zoomeye)
     SERVICE=lmstudio
     SITE=zoomeye
