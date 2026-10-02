@@ -97,6 +97,12 @@ case "$SERVICE" in
     PORTS="8082,8001,8000,11434,8090,8081"
     ;;
 
+  llamacpp-hunter)
+    SERVICE=llama.cpp
+    SITE=hunter
+    PORTS="8000,8082,8001,11434,8090,8081"
+    ;;
+
   lmstudio-zoomeye)
     SERVICE=lmstudio
     SITE=zoomeye

@@ -468,6 +468,12 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 /* 👍/👎 vote pair: down hovers/locks red (the base), up green; .active = the current vote. */
 .worker-flag.up:hover,.worker-flag.up.active{background:#2f8f5b;border-color:#2f8f5b;color:#fff}
 .worker-flag.down.active{background:#a73d5d;border-color:#a73d5d;color:#fff}
+/* 👎/👍 votes in the host-info card's per-model rows (moved off the worker rows). */
+.hd-vote{display:inline-flex;gap:3px;margin-left:6px;vertical-align:middle}
+.hd-v-btn{background:transparent;border:1px solid var(--border);border-radius:var(--r-sm);padding:0 5px;font-size:var(--fs-2xs);line-height:1.4;cursor:pointer}
+.hd-v-btn[disabled]{opacity:.5;cursor:default}
+.hd-v-btn.up:hover{background:#2f8f5b;border-color:#2f8f5b}
+.hd-v-btn.down:hover,.hd-v-btn.down.active{background:#a73d5d;border-color:#a73d5d}
 
 label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom:var(--sp-2)}
 .lbl-row{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);margin-bottom:var(--sp-2)}
@@ -1523,17 +1529,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="settings-card-title">Presentation</div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Base path</span><small class="setting-help">Serve dyva under a secret URL path instead of the root. A path like <code>/some-path</code> moves the dashboard to <code>/some-path/</code> and the API to <code>/some-path/v1/models</code> — deterrence by obscurity: a scanner hitting the default paths (<code>/v1/models</code>, <code>/api/tags</code>) finds nothing. Blank = served at the root. <b>Takes effect on restart</b> (like the listen port); the <code>--base</code> flag overrides this.</small></span><input type="text" id="setBasePath" placeholder="/some-path" spellcheck="false" autocomplete="off"></label>
-<div class="setting">
-<span class="setting-text"><span class="setting-name">Model list override</span>
-<small class="setting-help">Advertise a fixed list of model names from <code>/api/tags</code> and <code>/v1/models</code> instead of the discovered catalog, for tools that make you pick one specific model id. Every dyva model name is a routing pattern, so one entry like <code>qwen3</code> covers every <code>qwen3:*</code> variant on every host. Upload a plain text file, one name per line; blank lines and <code>#comments</code> are ignored. <b>Clear</b> turns the override back off and goes back to advertising the real catalog. Names no host currently serves stay listed (count 0) so the menu can't shift under a tool that pinned one. <b>Minimum model count</b> doesn't apply to an explicit list.</small>
-<span class="ml-row">
-<button type="button" id="mlUpload" class="src-test-btn">Upload list…</button>
-<button type="button" id="mlDownload" class="src-test-btn">Download</button>
-<button type="button" id="mlClear" class="src-test-btn">Clear</button>
-<span id="mlSummary" class="ml-summary"></span>
-</span></span>
-</div>
-<input type="file" id="mlFile" accept=".txt,.list,.text,text/plain" style="display:none">
+<label class="setting"><span class="setting-text"><span class="setting-name">Model list override</span><small class="setting-help">Advertise a fixed list of model names from <code>/api/tags</code> and <code>/v1/models</code> instead of the discovered catalog, for tools that make you pick one specific model id. Every dyva model name is a routing pattern, so one entry like <code>qwen3</code> covers every <code>qwen3:*</code> variant on every host. Tick <b>Enabled</b> and put one name per line in the box below (blank lines and <code>#comments</code> are ignored). Untick to go back to the real catalog — the list stays in the box so you can flip it back on. Names no host currently serves stay listed (count 0) so the menu can't shift under a tool that pinned one. <b>Minimum model count</b> doesn't apply to an explicit list.</small></span><input type="checkbox" id="setModelListOn"></label>
+<textarea id="setModelList" class="src-textarea" spellcheck="false" placeholder="one model name per line (blank lines and #comments ignored)"></textarea>
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
 </div>
 <div class="settings-card">
@@ -2193,10 +2190,32 @@ function selectHostRow(d){
   if(_selHostRow)_selHostRow.style.background='var(--accent-bg-active)';
 }
 function closeHostDetailCard(){var c=document.getElementById('hostDetailCard');if(c)c.style.display='none';selectHostRow(null)}
+// Per-(host,model) 👎/👍 votes in the host card: one delegated handler on the card body
+// (survives innerHTML redraws), reading the clicked button's data-model + the body's
+// data-host. down => deprioritize (flag-worker), up => favor/undo (favor-worker).
+function _wireHostVotes(){
+  var body=document.getElementById('hostDetailBody');
+  if(!body||body._votesWired)return;body._votesWired=true;
+  body.addEventListener('click',function(e){
+    var b=e.target.closest&&e.target.closest('button[data-vote]');if(!b||b.disabled)return;
+    var host=body.getAttribute('data-host'),model=b.getAttribute('data-model'),vote=b.getAttribute('data-vote');
+    if(!host||!model)return;
+    b.disabled=true;
+    var ep=vote==='down'?'flag-worker':'favor-worker';
+    fetch(ep+'?host='+encodeURIComponent(host)+'&model='+encodeURIComponent(model))
+      .then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(){
+        var cell=b.closest('.hd-model'),dn=cell&&cell.querySelector('.hd-v-btn.down');
+        if(dn)dn.classList.toggle('active',vote==='down');   // down active iff deprioritized
+        b.disabled=false;
+        if(typeof refreshListsNow==='function')refreshListsNow();
+      }).catch(function(){b.disabled=false;});
+  });
+}
 function openHostDetail(host){
   var card=document.getElementById('hostDetailCard'),body=document.getElementById('hostDetailBody');
   if(!card||!body)return;
   var title=document.getElementById('hostDetailTitle');if(title)title.textContent=host;
+  body.setAttribute('data-host',host);_wireHostVotes();
   body.innerHTML='<div class="hd-attr">loading…</div>';
   card.style.display='';
   fetch('host-info?host='+encodeURIComponent(host),{cache:'no-store'})
@@ -2207,17 +2226,14 @@ function openHostDetail(host){
 // Usage as a bar, same style/scale as the model-coverage bars: served = green,
 // failed = red, width from modelBarWidth(total) so a heavily-used pair reads wider.
 // Returns an HTML string (hostDetailHtml builds strings). Values are our own ints.
-function usageBarHtml(served,failed){
-  var total=served+failed,W=modelBarWidth(total);
-  if(total<=0||W<=0)return '';
-  var sg=served>0?Math.max(2,Math.round(served/total*W)):0;
-  var sr=failed>0?Math.max(2,W-sg):0;
-  if(sg+sr!==W){if(served>=failed)sg=W-sr;else sr=W-sg;}
-  if(sg<0)sg=0;if(sr<0)sr=0;
-  var t='served '+NUM_FMT.format(served)+' · failed '+NUM_FMT.format(failed);
-  return '<span class="model-bar" title="'+t+'">'
-    +(sg>0?'<i class="mb-g" style="width:'+sg+'px"></i>':'')
-    +(sr>0?'<i class="mb-r" style="width:'+sr+'px"></i>':'')+'</span>';
+// Usage as compact, scannable emoji counts — the tiny bars were unreadable. ✅ served,
+// ❌ failed, 🏁 races won/lost. Returns '' when there's nothing to show.
+function usageEmoji(served,failed,won,lost){
+  var p=[];
+  if(served)p.push('✅ '+NUM_FMT.format(served));
+  if(failed)p.push('❌ '+NUM_FMT.format(failed));
+  if(won||lost)p.push('🏁 '+NUM_FMT.format(won||0)+'/'+NUM_FMT.format(lost||0));
+  return p.join('  ');
 }
 function hostDetailHtml(host,j){
   var h=[];
@@ -2238,13 +2254,8 @@ function hostDetailHtml(host,j){
   // counter — it's derived from the delivery/race outcome counters).
   var tSucc=0,tFail=0,tRW=0,tRL=0;
   (j.reputation||[]).forEach(function(r){tSucc+=r.success||0;tFail+=r.failure||0;tRW+=r.race_won||0;tRL+=r.race_lost||0;});
-  if(tSucc||tFail||tRW||tRL){
-    var u=NUM_FMT.format(tSucc)+' served';
-    if(tFail)u+=' · '+NUM_FMT.format(tFail)+' failed';
-    if(tRW||tRL)u+=' · '+NUM_FMT.format(tRW)+'/'+NUM_FMT.format(tRL)+' races';
-    var _ub=usageBarHtml(tSucc,tFail);
-    h.push(row('usage',(_ub?_ub+' ':'')+u));
-  }
+  var _ue=usageEmoji(tSucc,tFail,tRW,tRL);
+  if(_ue)h.push(row('usage',_ue));
   // j.models may be a Form A object {name:{}} or a legacy array of names; also fold in
   // any model host_status has a reputation row for even if the record's list omits it.
   var rep={};(j.reputation||[]).forEach(function(r){rep[r.model]=r});
@@ -2261,12 +2272,17 @@ function hostDetailHtml(host,j){
         ['state', r.state?escHtml(r.state):dim],
         ['ttft', (r.ttft!=null&&r.ttft!=='')?(escHtml(String(r.ttft))+'s'):dim],
         ['tps', (r.tps!=null&&r.tps!=='')?(escHtml(String(r.tps))+' t/s'):dim],
-        ['used', (r.success||r.failure)?(usageBarHtml(r.success||0,r.failure||0)+' <span class="hd-dim">'+NUM_FMT.format(r.success||0)+' served'+(r.failure?' · '+NUM_FMT.format(r.failure)+' fail':'')+'</span>'):dim],
+        ['used', usageEmoji(r.success||0,r.failure||0,r.race_won||0,r.race_lost||0)||dim],
         ['smoke', r.smoke_date?(r.fail_smoke?'canned':'passed'):'<span class="hd-dim">untested</span>'],
         ['caps', r.caps?escHtml(String(r.caps).split(',').join(' · ')):dim]
       ];
       var trs=rows.map(function(kv){return '<tr><td class="hd-kv-k">'+kv[0]+'</td><td>'+kv[1]+'</td></tr>'}).join('');
-      h.push('<div class="hd-model"><span class="hd-model-name">'+name+'</span><table class="hd-model-kv">'+trs+'</table></div>');
+      // 👎/👍 moved here from the worker rows — act on this (host, model) pair. The card's
+      // delegated handler reads data-model + the card's data-host; down.active = deprioritized.
+      var votes='<span class="hd-vote">'
+        +'<button type="button" class="hd-v-btn down'+(r.deprio?' active':'')+'" data-vote="down" data-model="'+escHtml(m)+'" title="Deprioritize this host+model — next request goes elsewhere (undo with 👍)">👎🏽</button>'
+        +'<button type="button" class="hd-v-btn up" data-vote="up" data-model="'+escHtml(m)+'" title="This one is good — clear the deprioritize and favor it">👍🏽</button></span>';
+      h.push('<div class="hd-model"><span class="hd-model-name">'+name+'</span>'+votes+'<table class="hd-model-kv">'+trs+'</table></div>');
     });
     if(models.length>50)h.push('<div class="hd-attr">… and '+(models.length-50)+' more</div>');
   }
@@ -2537,33 +2553,8 @@ function renderWorkers(workers){
       hs.textContent=prov;hs.title=prov;
       sub.appendChild(hs);
     }
-    // Finished worker that reached a host: a 👎/👍 vote pair. 👎 DEPRIORITIZES this exact
-    // (host, resolved-model) — reputation untouched, so a slow-but-working host stops
-    // locking in and the next request goes elsewhere; 👍 ("this one is good") clears the
-    // deprioritize and marks it good. Medium skin tone, so the row isn't a wall of yellow.
-    if(w.done&&w.host){
-      var _vq='wid='+encodeURIComponent(w.wid||'')+'&host='+encodeURIComponent(w.host||'')
-             +'&model='+encodeURIComponent(w.rmodel||'');
-      var _down,_up;
-      function _vote(cls,glyph,ep,tip){
-        var b=document.createElement('button');b.type='button';b.className='worker-flag '+cls;
-        b.textContent=glyph;b.title=tip;
-        b.addEventListener('click',function(){
-          if(b.disabled)return;b.disabled=true;
-          fetch(ep+'?'+_vq).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(){
-            if(_down)_down.classList.remove('active');if(_up)_up.classList.remove('active');
-            b.classList.add('active');b.disabled=false;
-            if(typeof refreshListsNow==='function')refreshListsNow();
-          }).catch(function(){b.disabled=false;});
-        });
-        return b;
-      }
-      _down=_vote('down','👎🏽','flag-worker',
-        'Deprioritize this host+model — push it to the back so the next request goes elsewhere (reversible with 👍)');
-      _up=_vote('up','👍🏽','favor-worker',
-        'This one is good — clear any deprioritize and favor it');
-      sub.appendChild(_down);sub.appendChild(_up);
-    }
+    // (The 👎/👍 deprioritize/favor votes moved to the host-info card's per-model rows —
+    // they don't belong on every live worker row. Open a host to vote on its models.)
     body.appendChild(sub);
     // Two spans, two clocks: finding a host (blue) and running the job on it
     // (green). Data attributes drive the local ticker; the server hands back
@@ -8456,7 +8447,7 @@ function populateSettings(s){
   _wireFanoutImpl();
   document.getElementById('setMinCount').value=s.min_count;
   document.getElementById('setBasePath').value=s.base_path||'';
-  setModelList(s.model_list||[],false);
+  setModelList(s.model_list||[],s.model_list_on);
   document.getElementById('setLocal').checked=!!s.local;
   document.getElementById('setExplore').checked=!!s.explore;
   updateExploreLogo();
@@ -8466,30 +8457,15 @@ function populateSettings(s){
   document.getElementById('srcError').textContent='';
   document.querySelectorAll('.settings-card .settings-status').forEach(function(e){e.textContent='';});
 }
-// The override list lives here rather than in a textarea — it's a file you
-// upload, not something to hand-edit in a box. `pending` marks a list that's
-// been uploaded or cleared but not saved yet.
-var _modelList=[],_mlPending=false;
-function setModelList(list,pending){
-  if(list!==undefined)_modelList=Array.isArray(list)?list:[];
-  if(pending!==undefined)_mlPending=!!pending;
-  pending=_mlPending;
-  var el=document.getElementById('mlSummary');
-  if(!_modelList.length){
-    el.textContent=pending?'cleared — press Save':'no list uploaded — advertising the real catalog';
-    el.title='';
-  }else{
-    var head=_modelList.slice(0,3).join(', ');
-    el.textContent=_modelList.length+' model'+(_modelList.length===1?'':'s')+': '+head
-      +(_modelList.length>3?', +'+(_modelList.length-3)+' more':'')
-      +(pending?' — press Save':'');
-    el.title=_modelList.join('\n');
-  }
-  el.classList.toggle('pending',!!pending);
-  document.getElementById('mlDownload').disabled=!_modelList.length;
-  document.getElementById('mlClear').disabled=!_modelList.length;
+// The override list lives in a textarea now (one name per line, like Additional
+// sources), with an "Enabled" checkbox that applies it WITHOUT discarding the list.
+function setModelList(list,on){
+  var ta=document.getElementById('setModelList');
+  if(ta&&list!==undefined)ta.value=(Array.isArray(list)?list:[]).join('\n');
+  var cb=document.getElementById('setModelListOn');
+  if(cb&&on!==undefined)cb.checked=!!on;
 }
-// same rules the server applies, so the summary shows exactly what gets stored
+// same dedup/comment rules the server applies, so Save stores exactly what's shown
 function parseModelList(text){
   var out=[],seen={};
   String(text||'').split(/[\r\n,]+/).forEach(function(l){
@@ -8499,33 +8475,6 @@ function parseModelList(text){
   });
   return out;
 }
-document.getElementById('mlUpload').addEventListener('click',function(){
-  document.getElementById('mlFile').click();
-});
-document.getElementById('mlFile').addEventListener('change',function(){
-  var f=this.files&&this.files[0];
-  this.value='';
-  if(!f)return;
-  var r=new FileReader();
-  r.onload=function(){
-    var list=parseModelList(r.result);
-    setModelList(list,true);
-    var st=_stEl();
-    if(!list.length){st.style.color='var(--err)';st.textContent='no model names in '+f.name;}
-    else{st.style.color='var(--ok)';st.textContent='read '+list.length+' from '+f.name;}
-    setTimeout(function(){st.textContent=''},4000);
-  };
-  r.readAsText(f);
-});
-document.getElementById('mlDownload').addEventListener('click',function(){
-  if(!_modelList.length)return;
-  var blob=new Blob([_modelList.join('\n')+'\n'],{type:'text/plain;charset=utf-8'});
-  var a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);a.download='dyva-models.txt';
-  document.body.appendChild(a);a.click();a.remove();
-  setTimeout(function(){URL.revokeObjectURL(a.href)},1000);
-});
-document.getElementById('mlClear').addEventListener('click',function(){setModelList([],true)});
 function loadSettings(){
   fetch('settings',{cache:'no-store',headers:adminHeaders()}).then(function(r){
     if(r.status===403){showSettingsLocked(true);throw new Error('locked');}
@@ -8552,7 +8501,8 @@ function saveSettings(){
     hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
     base_path:document.getElementById('setBasePath').value,
-    model_list:_modelList,
+    model_list:parseModelList(document.getElementById('setModelList').value),
+    model_list_on:document.getElementById('setModelListOn').checked,
     local:document.getElementById('setLocal').checked,
     explore:document.getElementById('setExplore').checked,
     cloudskip:_collectCloudSkip()
@@ -8586,7 +8536,7 @@ function saveSettings(){
   _wireFanoutImpl();
       document.getElementById('setMinCount').value=s.min_count;
   document.getElementById('setBasePath').value=s.base_path||'';
-      setModelList(s.model_list||[],false);
+      setModelList(s.model_list||[],s.model_list_on);
       document.getElementById('setLocal').checked=!!s.local;
       document.getElementById('setExplore').checked=!!s.explore;
       renderCloudSkip(s.cloudskip||[]);

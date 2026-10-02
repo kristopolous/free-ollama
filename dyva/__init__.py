@@ -283,7 +283,9 @@ def _normalize_base(s):
     return s
 
 
-MODEL_LIST = []  # when non-empty, the exact model ids /api/tags and /v1/models advertise
+MODEL_LIST = []  # when non-empty AND MODEL_LIST_ON, the exact model ids /api/tags and /v1/models advertise
+MODEL_LIST_ON = False  # the UI "Enabled" checkbox — the override applies ONLY when on, so the
+                       # list stays stored (and editable) while it's toggled off
 ADMIN_PW = ""   # sha256 hex of the admin password; when set, viewing/changing
                 # settings & sources requires it (localhost always exempt).
 VERSION = "0"
@@ -457,7 +459,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -485,6 +487,8 @@ def load_settings():
         EXPLORE_MODE = s["explore"]
     if "model_list" in s:
         MODEL_LIST = parse_model_list(s["model_list"])
+    if "model_list_on" in s:
+        MODEL_LIST_ON = bool(s["model_list_on"])
     if isinstance(s.get("cloudskip"), list):
         CLOUD_SKIP = {x.lower() for x in s["cloudskip"] if isinstance(x, str) and x.strip()}
     if isinstance(s.get("base_path"), str):
@@ -505,7 +509,7 @@ def save_settings(extra=None):
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                  "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS, "fanout": FANOUT,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
-                 "admin_pw": ADMIN_PW, "model_list": MODEL_LIST,
+                 "admin_pw": ADMIN_PW, "model_list": MODEL_LIST, "model_list_on": MODEL_LIST_ON,
                  "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
     if isinstance(extra, dict):
         data.update(extra)
@@ -3821,7 +3825,7 @@ def listed_models():
     because every dyva model name is a routing pattern, one entry like "qwen3"
     covers every qwen3:* variant any host happens to carry. MIN_COUNT is not
     applied to an explicit list — the operator asked for these names by hand."""
-    if MODEL_LIST:
+    if MODEL_LIST_ON and MODEL_LIST:
         out = []
         for name in MODEL_LIST:
             try:
@@ -6939,10 +6943,10 @@ async def handle_host_info(request):
             {"model": m, "state": st, "last_good": lg, "failure_streak": fs,
              "ttft": ttft, "tps": tps, "fail_smoke": fsm, "smoke_date": sd,
              "success": succ, "failure": fail, "race_won": rw, "race_lost": rl,
-             "caps": capmap.get(m)}
-            for (m, st, lg, fs, ttft, tps, fsm, sd, succ, fail, rw, rl) in db.execute(
+             "deprio": dep, "caps": capmap.get(m)}
+            for (m, st, lg, fs, ttft, tps, fsm, sd, succ, fail, rw, rl, dep) in db.execute(
                 f"SELECT model, state, last_good, failure_streak, ttft, tps, fail_smoke, smoke_date, "
-                f"success, failure, race_won, race_lost "
+                f"success, failure, race_won, race_lost, deprio "
                 f"FROM host_status WHERE host=? AND {_LIVE_REAL} ORDER BY model", (server_url,)).fetchall()]
         caps = []
         for (cap, node, voices, checked) in db.execute(
@@ -7164,7 +7168,7 @@ async def handle_settings_get(request):
                               "cloudskip": sorted(CLOUD_SKIP),
                               "base_path": BASE_PATH,
                               "admin_pw_set": bool(ADMIN_PW),
-                              "model_list": MODEL_LIST,
+                              "model_list": MODEL_LIST, "model_list_on": MODEL_LIST_ON,
                               "admin": True, "sources": _stored_sources()})
 
 
@@ -7178,7 +7182,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -7219,6 +7223,8 @@ async def handle_settings_post(request):
         BASE_PATH = _normalize_base(body["base_path"])
     if "model_list" in body:
         MODEL_LIST = parse_model_list(body["model_list"])
+    if "model_list_on" in body:
+        MODEL_LIST_ON = bool(body["model_list_on"])
     # admin_pw: only when the key is present. A non-empty value sets/changes the
     # password (stored hashed); an explicit empty string clears protection. The
     # plaintext is never stored or echoed back.
@@ -7243,7 +7249,7 @@ async def handle_settings_post(request):
                               "cloudskip": sorted(CLOUD_SKIP),
                               "base_path": BASE_PATH,
                               "admin_pw_set": bool(ADMIN_PW),
-                              "model_list": MODEL_LIST,
+                              "model_list": MODEL_LIST, "model_list_on": MODEL_LIST_ON,
                               "admin": True, "sources": _stored_sources(),
                               "refreshed": sources_changed})
 
