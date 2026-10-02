@@ -294,6 +294,8 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .rc-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4) 32px;margin-bottom:var(--sp-6)}
 .rc-grid .setting{margin-bottom:0}
 .race-diagram svg{display:block;width:100%;height:auto;font:inherit}
+.rc-grip{cursor:ew-resize;touch-action:none}
+.rc-knob{cursor:ew-resize;pointer-events:none}
 .stats-filter{font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border);min-width:9rem;max-width:14rem}
 .stats-go{font:inherit;font-size:var(--fs-sm);padding:4px 10px;border-radius:var(--r-md);background:var(--surface);color:var(--text);border:1px solid var(--border);cursor:pointer}
 .stats-go:hover{border-color:var(--border-hover)}
@@ -8059,6 +8061,21 @@ function _raceDiagram(){
   g.push('<text x=\'6\' y=\''+(H-9).toFixed(1)+'\' font-size=\'10\' fill=\''+A.fo+'\'>'
     +'<tspan font-weight=\'700\' font-size=\'13\'>'+maxc+'</tspan>'
     +'<tspan opacity=\'0.5\'>  ('+w+' workers \u00d7 \u2308'+Math.round(t)+'s min timeout \u00f7 '+Math.round(f)+'s fanout\u2309)</tspan></text>');
+  // Draggable grips: a transparent fat hit-target + a small knob on each adjustable tick.
+  // Each carries the field it drives and a FIXED seconds-per-pixel (the shared time axis),
+  // captured at pointerdown so the drag stays smooth while the layout — which feeds back on
+  // the values — redraws under the cursor. Wiring is delegated+once in _wireDiagramDrag.
+  var spp=(t>0?t/branchLen:0.1);
+  function grip(gx,gy0,gy1,setId,lo,hi,col){
+    g.push('<rect x=\''+(gx-7).toFixed(1)+'\' y=\''+gy0.toFixed(1)+'\' width=\'14\' height=\''+Math.max(12,gy1-gy0).toFixed(1)+'\' fill=\'transparent\' class=\'rc-grip\' data-set=\''+setId+'\' data-spp=\''+spp.toFixed(4)+'\' data-lo=\''+lo+'\' data-hi=\''+hi+'\'><title>drag to adjust</title></rect>');
+    g.push('<circle cx=\''+gx.toFixed(1)+'\' cy=\''+gy0.toFixed(1)+'\' r=\'3.2\' fill=\''+col+'\' stroke=\'#111\' stroke-width=\'0.5\' class=\'rc-knob\'/>');
+  }
+  // Min timeout is the diagram's fixed ruler (branchLen is constant; everything else is
+  // scaled against it), so a knob on it couldn't move — it stays a field. Hedge, Max and
+  // Fanout are drawn proportionally and track the cursor 1:1.
+  grip(spineX,w1-9,w1+9,'setHedge',0,600,A.hedge);
+  if(ext>0.5)grip(eMax,topY-16,topY+4,'setTimeoutMax',1,3600,A.to);
+  grip(fdx,fy-12,fy+12,'setFanout',1,600,A.fo);
   g.push('</svg>');
   el.innerHTML=g.join('');
 }
@@ -8078,6 +8095,37 @@ function _wireFanoutImpl(){
     e.addEventListener('input',_fanoutImpl);
   });
   _fanoutImpl();
+  _wireDiagramDrag();
+}
+// Drag any diagram knob to set its field. ONE delegated listener on the persistent
+// container (the SVG inside is rebuilt every redraw, so per-element handlers wouldn't
+// survive a drag). seconds-per-pixel and the field are captured at pointerdown; each
+// move writes the clamped value back and fires 'input', which redraws the diagram under
+// the cursor. Does not auto-save — the value lands in the field, you Save as usual.
+var _diagDragWired=false;
+function _wireDiagramDrag(){
+  if(_diagDragWired)return;
+  var host=document.getElementById('raceDiagram'); if(!host)return;
+  _diagDragWired=true;
+  host.addEventListener('pointerdown',function(e){
+    var el=e.target;
+    if(!el||!el.getAttribute||el.getAttribute('class')!=='rc-grip')return;
+    var input=document.getElementById(el.getAttribute('data-set')); if(!input)return;
+    e.preventDefault();
+    var spp=parseFloat(el.getAttribute('data-spp'))||0.1;
+    var lo=parseFloat(el.getAttribute('data-lo')), hi=parseFloat(el.getAttribute('data-hi'));
+    var startVal=parseFloat(input.value)||0, startX=e.clientX;
+    function move(ev){
+      var val=Math.round(startVal+(ev.clientX-startX)*spp);
+      if(isNaN(val))return;
+      val=Math.max(lo,Math.min(hi,val));
+      if(String(val)!==input.value){input.value=val;input.dispatchEvent(new Event('input',{bubbles:true}));}
+    }
+    function up(){document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);document.removeEventListener('pointercancel',up);}
+    document.addEventListener('pointermove',move);
+    document.addEventListener('pointerup',up);
+    document.addEventListener('pointercancel',up);
+  });
 }
 function loadStats(){
   var fe=document.getElementById('statsFilter');
