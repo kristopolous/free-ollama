@@ -181,6 +181,8 @@ a{color:var(--text-muted)}
 .ap-worker .apw-meta.phase{color:var(--accent)}
 .ap-worker .apw-age{flex:0 0 20%;text-align:right;white-space:nowrap;font-size:var(--fs-2xs);color:var(--text-faint);font-variant-numeric:tabular-nums}
 .ap-head{font-size:var(--fs-xl);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);color:var(--text-muted);margin-bottom:var(--sp-3);display:flex;align-items:center}
+.conn-count{text-transform:none;letter-spacing:0;font-size:var(--fs-sm);color:var(--text-faint);font-weight:normal;margin-left:var(--sp-3);font-variant-numeric:tabular-nums}
+.conn-count-row{font-size:var(--fs-2xs);color:var(--text-faint);margin:0 0 var(--sp-2);text-align:right;font-variant-numeric:tabular-nums}
 .header-text h1{font-family:var(--font-display);font-weight:400;font-size:var(--fs-h1);margin-bottom:2px}
 .header-text .sub{color:var(--text-muted);font-size:var(--fs-md)}
 .tabs{display:flex;gap:0;margin-bottom:var(--sp-5);flex-shrink:0;border-bottom:1px solid var(--border)}
@@ -1061,7 +1063,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 <button type="button" id="activityBtn" class="activity-btn" title="Proxy activity">Activity ▾<span id="actBadge" class="act-badge" hidden></span></button>
 <div id="activityPop" class="activity-pop">
-<div class="ap-head">Activity <span id="pauseBtn" style="font-size:var(--fs-2xl);font-weight:normal;cursor:pointer;color:var(--text-dim);margin-left:auto;border:1px solid var(--text-dim);border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></div>
+<div class="ap-head">Activity <span id="actConnCount" class="conn-count"></span> <span id="pauseBtn" style="font-size:var(--fs-2xl);font-weight:normal;cursor:pointer;color:var(--text-dim);margin-left:auto;border:1px solid var(--text-dim);border-radius:0.2rem;width:1.5rem;height:1.25rem;display:inline-flex;align-items:center;justify-content:center">⏸</span></div>
 <input id="activityFilter" class="ap-filter" type="search" placeholder="filter (regex): host, worker, model…" autocomplete="off" spellcheck="false">
 <div id="activityOffline" class="ap-offline" style="display:none">
   <span class="ap-offline-msg">Activity stream disconnected</span>
@@ -1145,6 +1147,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="badMore"></div>
 </div>
 <div id="pane-workers">
+<div id="paneConnCount" class="conn-count-row"></div>
 <div id="workersList"></div>
 </div>
 </div>
@@ -1512,11 +1515,12 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="raceDiagram" class="race-diagram" aria-hidden="true"></div>
 <div class="rc-grid">
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
-<label class="setting"><span class="setting-text"><span class="setting-name">Timeout (s)</span><small class="setting-help">Per-host request timeout in seconds.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Minimum timeout (s)</span><small class="setting-help">Floor on the per-host first-token wait. A small prompt uses exactly this; a big prompt scales up from here toward Maximum timeout. Also the base clock for the worker cap in the diagram.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Hedge delay (s)</span><small class="setting-help">How long the last-good host gets to respond before the rest of the pool is raced alongside it. Whoever answers first wins. 0 races everything at once. Keeps a dead-but-connected favourite from stalling the whole request.</small></span><input type="number" id="setHedge" min="0" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Fanout (s)</span><small class="setting-help">How often another wave of hosts is opened, independent of Timeout. Lower = widen the search faster; each attempt still gets its full Timeout, so a cold host isn't dropped to make room. <b id="fanoutImpl"></b></small></span><input type="number" id="setFanout" min="1" max="600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Input rate (tok/s)</span><small class="setting-help">Assumed prefill speed &mdash; how fast a capable host chews through the prompt before the first token. Turns prompt size into expected prefill time, so the race clocks stretch for a big prompt and it isn't dropped for taking the prefill we asked of it. Conservative on purpose (real hardware does several times this). Small prompts are unaffected.</small></span><input type="number" id="setInputRate" min="1" max="100000" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Maximum timeout (s)</span><small class="setting-help">Ceiling on the per-host first-token wait &mdash; the longest we'll ever wait on a monster prompt. The budget scales from Minimum up to this with prompt size (at Input rate), and Fanout scales by the same ratio, so the worker/connection maximum is unchanged &mdash; a big prompt just waits longer on the same number of hosts. Set equal to Minimum timeout to disable scaling.</small></span><input type="number" id="setTimeoutMax" min="1" max="3600" step="1"></label>
 </div>
-<label class="setting"><span class="setting-text"><span class="setting-name">Min tok/s</span><small class="setting-help">Slowest input rate worth waiting through. The timeout scales with prompt size (tokens &divide; this), so a big prompt gets proportionally longer before a host is called too slow. Never shorter than Timeout.</small></span><input type="number" id="setMinTps" min="1" max="10000" step="1"></label>
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
 </div>
 <div class="settings-card">
@@ -2618,8 +2622,16 @@ setInterval(function(){
 },100);
 // Live worker updates over WebSocket (robust through the reverse proxy where
 // SSE streaming gets buffered/dropped). Auto-reconnects on close.
+// Live outbound-connection gauge (open upstream sockets right now), shown after
+// "Activity" and above the worker list. Painted straight off every snapshot so it
+// updates even when the worker array itself hasn't structurally changed.
+function paintConnCount(n){
+  var txt=(typeof n==='number'&&n>=0)?(n+' connection'+(n===1?'':'s')):'';
+  var a=document.getElementById('actConnCount');if(a)a.textContent=txt;
+  var p=document.getElementById('paneConnCount');if(p)p.textContent=txt;
+}
 function renderWorkersFromMsg(ev){
-  try{var d=JSON.parse(ev.data);renderWorkers(d.workers||[]);}catch(e){}
+  try{var d=JSON.parse(ev.data);paintConnCount(d.connections);renderWorkers(d.workers||[]);}catch(e){}
 }
 // Preferred transport is the WebSocket; if the upgrade never completes (some
 // reverse proxies drop the Upgrade header) we fall back to polling instead of
@@ -2630,7 +2642,7 @@ function startWorkerPolling(){
   if(_workerPoll)return;
   function poll(){
     fetch('workers-now',{cache:'no-store'}).then(function(r){return r.json()})
-      .then(function(d){renderWorkers(d.workers||[])}).catch(function(){});
+      .then(function(d){paintConnCount(d.connections);renderWorkers(d.workers||[])}).catch(function(){});
   }
   poll();
   _workerPoll=setInterval(poll,2000);
@@ -7979,7 +7991,7 @@ function renderStats(d){
 function _raceDiagram(){
   var el=document.getElementById('raceDiagram'); if(!el)return;
   function v(id){var e=document.getElementById(id);return e?parseFloat(e.value):NaN}
-  var w=v('setWorkers'),t=v('setTimeout'),h=v('setHedge'),f=v('setFanout');
+  var w=v('setWorkers'),t=v('setTimeout'),h=v('setHedge'),f=v('setFanout'),tm=v('setTimeoutMax');
   if(!(w>0&&t>0&&f>0)){el.innerHTML='';return}
   if(!(h>=0))h=0;
   // Schematic: hedge lead -> wave of N branches (length = Timeout). Wave 2 is the same,
@@ -7996,18 +8008,22 @@ function _raceDiagram(){
   var hedgeX=40, spineX=hedgeX+14+Math.max(hl,6);         // wave-1 node = after the hedge lead
   var padT=44, vGap=fanH+40;
   var w1=padT+fanH/2+8, w2=w1+vGap;
-  var b1=spineX+con, e1=b1+branchLen;                     // wave-1 branch span
+  var b1=spineX+con, e1=b1+branchLen;                     // wave-1 branch span (to MIN timeout)
   var b2=spineX+dx+con, e2=b2+branchLen;                  // wave-2 branch span
-  var W=Math.max(e1+64, e2+24), H=w2+fanH/2+30;
+  if(!(tm>=t))tm=t;                                       // max timeout >= min; else no stretch
+  var ext=Math.min(pps*(tm-t), branchLen*1.5);            // min->max stretch zone, same scale, capped
+  var eMax=e1+ext, braceX=eMax+8;                         // worker brace sits past the MAX end
+  var W=Math.max(e2+ext+24, braceX+70), H=w2+fanH/2+46;
   var waves=Math.max(1,Math.ceil(t/f)), maxc=waves*w;
   var A={hedge:'#c77dff',wave:'#4895ef',wave2:'#4895ef',to:'#90be6d',fo:'#f9c74f',ax:'#8a8a8a',tx:'#bbb'};
   var g=['<svg viewBox=\'0 0 '+W.toFixed(0)+' '+H.toFixed(0)+'\' preserveAspectRatio=\'xMidYMid meet\' role=\'img\'>'];
   function ln(a,b,c,d,col,ex){g.push('<line x1=\''+a.toFixed(1)+'\' y1=\''+b.toFixed(1)+'\' x2=\''+c.toFixed(1)+'\' y2=\''+d.toFixed(1)+'\' stroke=\''+col+'\' stroke-width=\'1.4\' '+(ex||'')+'/>');}
   function tx(x,y,col,str,anc,sz,rot){g.push('<text x=\''+x.toFixed(1)+'\' y=\''+y.toFixed(1)+'\' fill=\''+col+'\' font-size=\''+(sz||10)+'\' text-anchor=\''+(anc||'start')+'\''+(rot?' transform=\'rotate('+rot+' '+x.toFixed(1)+' '+y.toFixed(1)+')\'':'')+'>'+str+'</text>');}
   function node(x,y,col){g.push('<rect x=\''+(x-7).toFixed(1)+'\' y=\''+(y-7).toFixed(1)+'\' width=\'14\' height=\'14\' rx=\'2\' fill=\'none\' stroke=\''+col+'\' stroke-width=\'1.5\'/>');}
-  var dash='stroke-dasharray=\'5 4\'';
+  var dash='stroke-dasharray=\'5 4\'', dash2='stroke-dasharray=\'2 5\' opacity=\'0.5\'';
   function fan(nx,cy,bx,col){ node(nx,cy,col);
-    for(var i=0;i<N;i++){var ly=cy+(i-(N-1)/2)*lg; ln(nx+7,cy,bx,ly,col); ln(bx,ly,bx+branchLen,ly,col,dash);} }
+    for(var i=0;i<N;i++){var ly=cy+(i-(N-1)/2)*lg; ln(nx+7,cy,bx,ly,col); ln(bx,ly,bx+branchLen,ly,col,dash);
+      if(ext>0.5)ln(bx+branchLen,ly,bx+branchLen+ext,ly,col,dash2);} }   // lighter dash = stretch to MAX
   // hedge host + lead
   node(hedgeX,w1,A.hedge);
   ln(hedgeX+7,w1,spineX-7,w1,A.hedge,dash);
@@ -8017,21 +8033,27 @@ function _raceDiagram(){
   // the two waves
   fan(spineX,w1,b1,A.wave);
   fan(spineX+dx,w2,b2,A.wave2);
-  // Timeout bracket over wave-1 top branch
+  // Timeout bracket over wave-1 top branch: solid span to the MINIMUM timeout, then a
+  // lighter dashed span continuing to the MAXIMUM — the prompt-size stretch range.
   var topY=w1-(N-1)/2*lg;
   ln(b1,topY-13,e1,topY-13,A.to); ln(b1,topY-13,b1,topY-8,A.to); ln(e1,topY-13,e1,topY-8,A.to);
-  tx((b1+e1)/2,topY-16,A.to,'Timeout '+Math.round(t)+'s','middle',10);
-  // worker-count brace at wave-1 fan
-  var bx=e1+8;
+  tx((b1+e1)/2,topY-16,A.to,'Min '+Math.round(t)+'s','middle',10);
+  if(ext>0.5){
+    ln(e1,topY-13,eMax,topY-13,A.to,dash2); ln(eMax,topY-13,eMax,topY-8,A.to);
+    tx((e1+eMax)/2,topY-16,A.to,'Max '+Math.round(tm)+'s','middle',10);
+  }
+  // worker-count brace, past the MAX-timeout end so it clears the stretch zone
+  var bx=braceX;
   ln(bx,w1-fanH/2,bx,w1+fanH/2,A.ax); ln(bx-4,w1-fanH/2,bx,w1-fanH/2,A.ax); ln(bx-4,w1+fanH/2,bx,w1+fanH/2,A.ax);
   tx(bx+5,w1+4,A.tx,'\u00d7'+w+' workers','start',10);
   // Fanout = the horizontal shift between wave starts
   var fy=(w1+w2)/2;
   ln(spineX,fy,spineX+dx,fy,A.fo); ln(spineX,fy-4,spineX,fy+4,A.fo); ln(spineX+dx,fy-4,spineX+dx,fy+4,A.fo);
   tx((spineX+spineX+dx)/2,fy-5,A.fo,'Fanout '+Math.round(f)+'s','middle',10);
-  g.push('<text x=\'6\' y=\''+(H-9).toFixed(1)+'\' font-size=\'10\' fill=\''+A.fo+'\'>'
+  g.push('<text x=\'6\' y=\''+(H-22).toFixed(1)+'\' font-size=\'10\' fill=\''+A.fo+'\'>'
     +'<tspan font-weight=\'700\' font-size=\'13\'>'+maxc+'</tspan>'
-    +'<tspan opacity=\'0.5\'>  ('+w+' workers \u00d7 \u2308'+Math.round(t)+'s timeout \u00f7 '+Math.round(f)+'s fanout\u2309)</tspan></text>');
+    +'<tspan opacity=\'0.5\'>  ('+w+' workers \u00d7 \u2308'+Math.round(t)+'s min timeout \u00f7 '+Math.round(f)+'s fanout\u2309)</tspan>'
+    +'<tspan x=\'6\' dy=\'13\' opacity=\'0.5\'>unchanged at any prompt size \u2014 big prompts stretch both clocks by k</tspan></text>');
   g.push('</svg>');
   el.innerHTML=g.join('');
 }
@@ -8046,7 +8068,7 @@ function _fanoutImpl(){
   _raceDiagram();
 }
 function _wireFanoutImpl(){
-  ['setWorkers','setTimeout','setFanout','setHedge'].forEach(function(id){
+  ['setWorkers','setTimeout','setFanout','setHedge','setTimeoutMax'].forEach(function(id){
     var e=document.getElementById(id); if(!e||e._fi)return; e._fi=true;
     e.addEventListener('input',_fanoutImpl);
   });
@@ -8441,7 +8463,8 @@ function populateSettings(s){
   showSettingsLocked(false);
   document.getElementById('setWorkers').value=s.workers;
   document.getElementById('setTimeout').value=s.timeout;
-  document.getElementById('setMinTps').value=s.min_tps;
+  document.getElementById('setInputRate').value=s.input_rate;
+  document.getElementById('setTimeoutMax').value=s.timeout_max;
   document.getElementById('setFanout').value=s.fanout;
   document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   _wireFanoutImpl();
@@ -8496,7 +8519,8 @@ function saveSettings(){
   var body={
     workers:parseInt(document.getElementById('setWorkers').value,10),
     timeout:parseInt(document.getElementById('setTimeout').value,10),
-    min_tps:parseInt(document.getElementById('setMinTps').value,10),
+    input_rate:parseInt(document.getElementById('setInputRate').value,10),
+    timeout_max:parseInt(document.getElementById('setTimeoutMax').value,10),
     fanout:parseInt(document.getElementById('setFanout').value,10),
     hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
@@ -8530,7 +8554,8 @@ function saveSettings(){
       if(newPw)setAdminKeyStored(newPw);
       document.getElementById('setWorkers').value=s.workers;
       document.getElementById('setTimeout').value=s.timeout;
-  document.getElementById('setMinTps').value=s.min_tps;
+  document.getElementById('setInputRate').value=s.input_rate;
+  document.getElementById('setTimeoutMax').value=s.timeout_max;
   document.getElementById('setFanout').value=s.fanout;
       document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   _wireFanoutImpl();

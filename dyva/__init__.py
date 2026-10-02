@@ -197,12 +197,14 @@ WORKER_COUNT = 10
 # pool is raced alongside it; first to produce wins, the loser is dropped.
 # Caps the wait on a dead-but-connected favourite. 0 disables (race at once).
 HEDGE_DELAY = 15
-# Slowest INPUT rate (tokens/second) we're willing to wait through before calling a
-# host "too slow". The too-slow budget CANNOT be a constant: a host that answers a
-# 20-token probe instantly may still need a long time to prefill a 20k-token prompt,
-# so a fixed TIMEOUT condemns it for doing exactly what we asked. Budget scales as
-# prompt_tokens / MIN_TPS, floored at TIMEOUT. Settable at runtime (min_tps).
-MIN_TPS = 5
+# Expected INPUT prefill rate (tokens/second) — how fast a capable host is ASSUMED to
+# chew through the prompt before the first output token. It's the scaling ratio that
+# turns prompt size into expected prefill time, which sets the per-attempt budget
+# between TIMEOUT and TIMEOUT_MAX: a 20-token probe needs no extra time, but a 400k-token
+# prompt needs a long prefill, so condemning it on a fixed TIMEOUT would be wrong.
+# Deliberately conservative (real hardware does several times this), so it over-waits
+# rather than cuts a capable host short. Settable at runtime (input_rate).
+INPUT_RATE = 1000
 # Period between fan-out WAVES, independent of how long an attempt may live. Without
 # this the two are welded: a worker is occupied for its whole attempt, so the search can
 # only widen when one expires — meaning the wave period IS the timeout, and raising the
@@ -210,6 +212,15 @@ MIN_TPS = 5
 # Separated, a slow host keeps its full TIMEOUT while we widen every FANOUT seconds.
 # Concurrency then rides at ceil(TIMEOUT/FANOUT) * workers (shown in settings).
 FANOUT = 20
+# MAXIMUM per-attempt budget (seconds). TIMEOUT is the MINIMUM (a small prompt keeps
+# today's behaviour); the budget scales with prompt size up to this ceiling — the longest
+# first-token wait we'll ever allow for a monster prompt. The budget is the expected
+# prefill time (prompt_tokens / INPUT_RATE) clamped to [TIMEOUT, TIMEOUT_MAX], and the
+# fan-out wave period scales by the SAME ratio (budget / TIMEOUT). Because both scale
+# together their ratio is unchanged, so the worker/socket cap ceil(TIMEOUT/FANOUT)*workers
+# stays invariant for ANY prompt size — a big prompt just waits longer on the same number
+# of hosts, it doesn't widen the fan-out. Settable at runtime (timeout_max).
+TIMEOUT_MAX = 180
 # A host that answers with a cold-start signal ("loading model") or a busy signal
 # (503 / full queue) is ALIVE and committing to serve us — it just isn't ready this
 # instant. That is the whole availability-beats-speed premise: we do not drop it, we
@@ -459,7 +470,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -473,8 +484,10 @@ def load_settings():
         TIMEOUT = s["timeout"]
     if isinstance(s.get("hedge_delay"), (int, float)) and s["hedge_delay"] >= 0:
         HEDGE_DELAY = s["hedge_delay"]
-    if isinstance(s.get("min_tps"), (int, float)) and s["min_tps"] > 0:
-        MIN_TPS = s["min_tps"]
+    if isinstance(s.get("input_rate"), (int, float)) and s["input_rate"] > 0:
+        INPUT_RATE = s["input_rate"]
+    if isinstance(s.get("timeout_max"), (int, float)) and s["timeout_max"] > 0:
+        TIMEOUT_MAX = s["timeout_max"]
     if isinstance(s.get("fanout"), (int, float)) and s["fanout"] > 0:
         FANOUT = s["fanout"]
     if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
@@ -507,7 +520,7 @@ def save_settings(extra=None):
     if not isinstance(data, dict):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                 "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS, "fanout": FANOUT,
+                 "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST, "model_list_on": MODEL_LIST_ON,
                  "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
@@ -1127,8 +1140,16 @@ def _worker_snapshot():
     return out
 
 
+def _conn_count():
+    """Live outbound connection count: the in-flight upstream ATTEMPTS right now (one
+    open socket each), summed across hosts. This is the number the fan-out cap bounds
+    and the soft-ban tripwire watches, surfaced live in the dashboard. A parked warming
+    host holds no socket, so it isn't counted until it's re-fronted."""
+    return sum(_inflight.values())
+
+
 async def _broadcast_workers():
-    payload = json.dumps({"workers": _worker_snapshot()})
+    payload = json.dumps({"workers": _worker_snapshot(), "connections": _conn_count()})
     async with _worker_lock:
         dead = []
         for q in _worker_queues:
@@ -4114,7 +4135,8 @@ def _write_stat(host, model, up, down, tps, title=None):
 
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
-                      label=None, hedge_delay=0, key_of=None, banker_key=None, fav=None):
+                      label=None, hedge_delay=0, key_of=None, banker_key=None, fav=None,
+                      scale=1.0):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -4171,9 +4193,11 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     # and re-fronted once ready_at passes. The race stays open while anything is
     # parked and the request budget hasn't lapsed, so a host we asked to spin up is
     # actually waited for rather than abandoned. _deadline is that budget (the request
-    # TIMEOUT); past it we stop re-queueing and let a still-cold host age out.
+    # TIMEOUT, stretched by `scale` for a big prompt — same factor the fan-out period
+    # uses, so the cap stays invariant); past it we stop re-queueing and let a still-cold
+    # host age out.
     retry_q = []
-    _deadline = time.time() + TIMEOUT
+    _deadline = time.time() + TIMEOUT * scale
     _RETRY_POLL = 0.25  # how often a worker with nothing ready re-checks the parked set
 
     def _take_item():
@@ -4383,11 +4407,14 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         # WAVES (repeating, own clock). Bounded by ceil(TIMEOUT/FANOUT) * n; that is
         # also the outbound socket count, and the soft-ban tripwire fires on the connect
         # itself, so the number is surfaced in settings rather than silently clamped.
+        # Both the period and the deadline stretch by `scale` for a big prompt, so the
+        # cap (their ratio) is unchanged — a big prompt waits longer, it doesn't widen.
         if not FANOUT or FANOUT <= 0 or _spent[0]:
             return
         cap = max(1, int(-(-float(TIMEOUT) // float(FANOUT)))) * n
+        _wave = FANOUT * scale
         while not done.is_set() and not _spent[0]:
-            await asyncio.sleep(FANOUT)
+            await asyncio.sleep(_wave)
             if done.is_set() or _spent[0]:
                 return
             live = sum(1 for t in tasks if t is not me and not t.done())
@@ -5308,7 +5335,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
         key_of=lambda it: it[2][0],   # reputation keyed by the RESOLVED model (ms[0]), not the query
-        hedge_delay=hedge_delay, banker_key=model, fav=_fav)
+        hedge_delay=hedge_delay, banker_key=model, fav=_fav, scale=_race_scale(payload))
     return result, errors, stopped
 
 
@@ -5410,22 +5437,39 @@ def _auto_num_ctx(payload):
     return max(NUM_CTX_MIN, min(NUM_CTX_MAX, stepped))
 
 
+def _race_scale(payload):
+    """Prompt-size stretch factor k >= 1 for the race clocks, from the input size.
+
+    A big prompt needs a long prefill before the first output token, so the per-attempt
+    budget AND the fan-out wave period both stretch by this SAME k — which keeps their
+    ratio, and thus the worker/socket cap ceil(TIMEOUT/FANOUT)*workers, invariant for any
+    prompt size (a big prompt waits longer on the same number of hosts; it does not widen
+    the fan-out or spray more connects). The budget is the expected prefill time
+    (prompt_tokens / INPUT_RATE) clamped to [TIMEOUT (minimum), TIMEOUT_MAX (maximum)]; k
+    is that budget as a multiple of the MINIMUM timeout, so k=1 for a small prompt (today's
+    exact behaviour) and tops out at TIMEOUT_MAX/TIMEOUT for a monster one."""
+    try:
+        toks = _estimate_prompt_tokens(payload)
+    except Exception:
+        return 1.0
+    if not toks or not INPUT_RATE or INPUT_RATE <= 0 or not TIMEOUT:
+        return 1.0
+    lo = float(TIMEOUT)
+    hi = max(lo, float(TIMEOUT_MAX))        # guard against a max set below the min
+    budget = min(max(toks / float(INPUT_RATE), lo), hi)   # expected prefill secs, clamped
+    return budget / lo                      # as a multiple of the minimum timeout
+
+
 def _slow_timeout(payload):
     """Total-response budget for one send, SCALED BY INPUT SIZE.
 
     A constant cannot work here: a host that answers a 20-token probe instantly may
     still need a long time to prefill a 20k-token prompt, so a fixed TIMEOUT condemns
-    it as "too slow" for doing exactly what we asked of it. MIN_TPS is the slowest
-    input rate we are willing to wait through, so the budget is
-    prompt_tokens / MIN_TPS, floored at TIMEOUT so small prompts keep today's
-    behaviour. This only changes WHEN we call a host too slow — nothing else."""
-    try:
-        toks = _estimate_prompt_tokens(payload)
-    except Exception:
-        return TIMEOUT
-    if not toks or not MIN_TPS or MIN_TPS <= 0:
-        return TIMEOUT
-    return max(TIMEOUT, toks / float(MIN_TPS))
+    it as "too slow" for doing exactly what we asked of it. The budget is the expected
+    prefill time clamped between the MINIMUM (TIMEOUT) and MAXIMUM (TIMEOUT_MAX) timeout —
+    equivalently TIMEOUT times the stretch factor the race's retry deadline and fan-out
+    period also ride, so every clock stretches together and the worker cap is unchanged."""
+    return TIMEOUT * _race_scale(payload)
 
 
 def _apply_no_think(p):
@@ -5497,7 +5541,7 @@ _STREAM_BREAK_ERRORS = (BrokenPipeError, ConnectionResetError,
 
 
 async def _pump_stream(response, resp, first_line, host, full, openai_format,
-                       upstream_openai, wid, num_ctx, partial):
+                       upstream_openai, wid, num_ctx, partial, cancel=None):
     """Forward ONE already-won upstream stream to the already-prepared client
     `response`, translating dialect as needed and accumulating the assistant text
     into partial[0] so a mid-stream failover can carry the work forward. Returns:
@@ -5507,7 +5551,9 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                   INCOMPLETE (a truncation with a done token); the done is swallowed,
                   not forwarded, so the caller can continue on the same connection;
       'truncated' the upstream closed/errored WITHOUT any done chunk (a mid-stream drop);
-      'client'    the CLIENT connection broke (abort — do NOT fail over).
+      'client'    the CLIENT connection broke (abort — do NOT fail over);
+      'stopped'   the operator hit Stop on this committed stream (`cancel` set): abort
+                  THIS host without failing over, so a slow crawler can be killed.
     Always releases `resp`. A client hang-up raises _ClientGone from the write
     helper; an upstream drop surfaces from the read loop — that split is the whole
     point, so we know whether to fail over."""
@@ -5545,6 +5591,10 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 await _broadcast_workers()
     await _phase("generating")
 
+    # One persistent waiter on the manual-stop signal, raced against each upstream read
+    # below so a Stop registers within one line even on a slow (or scaled-long TIMEOUT)
+    # stream, instead of only being noticed at the next line boundary.
+    cancel_wait = asyncio.ensure_future(cancel.wait()) if cancel is not None else None
     try:
         if openai_format:
             first = json.loads(first_line)
@@ -5566,10 +5616,27 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 pass
 
         while True:
-            # WATCHDOG (after first token): reset every line; a silence longer than
-            # the TIMEOUT watchdog raises asyncio.TimeoutError into the handler below and is
-            # treated as a mid-stream truncation -> fail over to another host.
-            line = await asyncio.wait_for(resp.content.readline(), TIMEOUT)
+            # WATCHDOG + MANUAL STOP (after first token). Race the next upstream line
+            # against (a) the TIMEOUT silence watchdog and (b) the manual-stop signal.
+            # Silence past TIMEOUT -> asyncio.TimeoutError, treated as a mid-stream
+            # truncation (fail over). A set `cancel` -> abort THIS host like a client
+            # hang-up ('stopped', no failover), which is how a committed slow crawler is
+            # killed. readline is reset every line, so slow-but-live generation is fine.
+            read_task = asyncio.ensure_future(resp.content.readline())
+            waiters = [read_task] + ([cancel_wait] if cancel_wait is not None else [])
+            done_set, _pending = await asyncio.wait(
+                waiters, timeout=TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_wait is not None and cancel_wait.done():
+                read_task.cancel()
+                with contextlib.suppress(Exception):
+                    await read_task
+                return "stopped"
+            if read_task not in done_set:
+                read_task.cancel()
+                with contextlib.suppress(Exception):
+                    await read_task
+                raise asyncio.TimeoutError
+            line = read_task.result()
             if not line:
                 break
             if line == b"\n":
@@ -5646,6 +5713,8 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
         # the host dropped mid-stream, so this generation is truncated
         return "truncated"
     finally:
+        if cancel_wait is not None and not cancel_wait.done():
+            cancel_wait.cancel()
         with contextlib.suppress(Exception):
             await resp.release()
 
@@ -5702,7 +5771,7 @@ def _continuation_payload(payload, partial_text):
 
 
 async def _stream_chat_failover(request, session, model, servers, opayload,
-                                openai_format, req_caps, job_wid, result):
+                                openai_format, req_caps, job_wid, result, cancel=None):
     """Stream a chat answer, and if an upstream drops mid-stream WITHOUT a terminal
     done token, seamlessly fail over to the next server — the SAME client connection
     stays open — carrying the work so far as context (with the window bumped to fit),
@@ -5730,8 +5799,23 @@ async def _stream_chat_failover(request, session, model, servers, opayload,
     continues = 0
     while True:
         mark_worker_found(job_wid, host, full)
+        # Re-arm the manual-stop handle for THIS streaming leg. _race_hosts swaps in its
+        # own race-cancel during the (re-)race, so once a host has been committed to the
+        # stream we point the worker's Stop button back at the stream cancel — otherwise
+        # Stop on a committed, slow stream is a no-op (what let a 0.4 t/s host run 20+ min).
+        if cancel is not None and job_wid:
+            _w = _workers.get(job_wid)
+            if _w is not None:
+                _w["stop"] = cancel.set
         status = await _pump_stream(response, resp, first_line, host, full, openai_format,
-                                    oai, job_wid, _effective_num_ctx(payload), partial)
+                                    oai, job_wid, _effective_num_ctx(payload), partial, cancel)
+        if status == "stopped":
+            # operator killed a committed stream: close the client's stream cleanly (the
+            # real API client is still connected and would otherwise hang) and stop — no
+            # failover, the host answered fine, we just don't want the rest.
+            with contextlib.suppress(Exception):
+                await _write_terminal_done(response, full, openai_format)
+            break
         if status in ("done", "client"):
             break
         made = len(partial[0]) + partial[1]   # real progress: content + tool-call args
@@ -6336,7 +6420,8 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
     _servers = find_servers(model_in, req_caps)
     total = len(_servers)
-    job_wid = await _register_worker(model_list[0], total, lambda: None, kind="text",
+    cancel = asyncio.Event()   # manual-stop signal; armed onto the worker for the stream
+    job_wid = await _register_worker(model_list[0], total, cancel.set, kind="text",
                                      title=_client_title(request))
     try:
         # The sticky (last-good) host is already sorted first in _servers, so
@@ -6355,7 +6440,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                 if result:
                     return await _stream_chat_failover(
                         request, session, model, _servers, opayload,
-                        openai_format, req_caps, job_wid, result)
+                        openai_format, req_caps, job_wid, result, cancel)
                 msg = "worker manually stopped" if stopped else "all servers failed"
                 if errors:
                     msg += ": " + "; ".join(dict.fromkeys(errors))
@@ -7162,7 +7247,7 @@ async def handle_settings_get(request):
         # show a password prompt instead of the controls.
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS, "fanout": FANOUT,
+                              "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -7182,7 +7267,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, MIN_TPS, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -7205,8 +7290,10 @@ async def handle_settings_post(request):
         TIMEOUT = min(body["timeout"], 600)
     if isinstance(body.get("hedge_delay"), (int, float)) and body["hedge_delay"] >= 0:
         HEDGE_DELAY = min(body["hedge_delay"], 600)
-    if isinstance(body.get("min_tps"), (int, float)) and body["min_tps"] > 0:
-        MIN_TPS = body["min_tps"]
+    if isinstance(body.get("input_rate"), (int, float)) and body["input_rate"] > 0:
+        INPUT_RATE = body["input_rate"]
+    if isinstance(body.get("timeout_max"), (int, float)) and body["timeout_max"] > 0:
+        TIMEOUT_MAX = min(body["timeout_max"], 3600)
     if isinstance(body.get("fanout"), (int, float)) and body["fanout"] > 0:
         FANOUT = body["fanout"]
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
@@ -7243,7 +7330,7 @@ async def handle_settings_post(request):
     if sources_changed:
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY, "min_tps": MIN_TPS, "fanout": FANOUT,
+                              "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -7568,7 +7655,7 @@ async def handle_workers(request):
     await response.prepare(request)
 
     try:
-        await response.write(f"data: {json.dumps({'workers': _worker_snapshot()})}\n\n".encode())
+        await response.write(f"data: {json.dumps({'workers': _worker_snapshot(), 'connections': _conn_count()})}\n\n".encode())
     except (BrokenPipeError, ConnectionResetError, OSError):
         return response
 
@@ -7621,7 +7708,7 @@ async def handle_workers_now(request):
             schema:
               type: object
     """
-    return web.json_response({"workers": _worker_snapshot()})
+    return web.json_response({"workers": _worker_snapshot(), "connections": _conn_count()})
 
 
 async def handle_workers_ws(request):
@@ -7639,7 +7726,7 @@ async def handle_workers_ws(request):
     q = asyncio.Queue()
     await _add_worker_listener(q)
     try:
-        await ws.send_json({"workers": _worker_snapshot()})
+        await ws.send_json({"workers": _worker_snapshot(), "connections": _conn_count()})
         while not ws.closed:
             try:
                 payload = await asyncio.wait_for(q.get(), timeout=25)
