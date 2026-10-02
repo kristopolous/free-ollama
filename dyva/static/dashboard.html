@@ -1515,11 +1515,11 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="raceDiagram" class="race-diagram" aria-hidden="true"></div>
 <div class="rc-grid">
 <label class="setting"><span class="setting-text"><span class="setting-name">Workers</span><small class="setting-help">Parallel hosts tried per request (fan-out).</small></span><input type="number" id="setWorkers" min="1" max="200" step="1"></label>
-<label class="setting"><span class="setting-text"><span class="setting-name">Minimum timeout (s)</span><small class="setting-help">Floor on the per-host first-token wait. A small prompt uses exactly this; a big prompt scales up from here toward Maximum timeout. Also the base clock for the worker cap in the diagram.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Hedge delay (s)</span><small class="setting-help">How long the last-good host gets to respond before the rest of the pool is raced alongside it. Whoever answers first wins. 0 races everything at once. Keeps a dead-but-connected favourite from stalling the whole request.</small></span><input type="number" id="setHedge" min="0" max="600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Minimum timeout (s)</span><small class="setting-help">Floor on the per-host first-token wait. A small prompt uses exactly this; a big prompt scales up from here toward Maximum timeout. Also the base clock for the worker cap in the diagram.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Maximum timeout (s)</span><small class="setting-help">Ceiling on the per-host first-token wait &mdash; the longest we'll ever wait on a monster prompt. The budget scales from Minimum up to this with prompt size (at Input rate), and the SAME extra seconds are added to Fanout, so the worker/connection maximum is unchanged &mdash; a big prompt just waits longer on the same number of hosts. Set equal to Minimum timeout to disable scaling.</small></span><input type="number" id="setTimeoutMax" min="1" max="3600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Fanout (s)</span><small class="setting-help">How often another wave of hosts is opened, independent of Timeout. Lower = widen the search faster; each attempt still gets its full Timeout, so a cold host isn't dropped to make room. <b id="fanoutImpl"></b></small></span><input type="number" id="setFanout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Input rate (tok/s)</span><small class="setting-help">Assumed prefill speed &mdash; how fast a capable host chews through the prompt before the first token. Turns prompt size into expected prefill time, so the race clocks stretch for a big prompt and it isn't dropped for taking the prefill we asked of it. Conservative on purpose (real hardware does several times this). Small prompts are unaffected.</small></span><input type="number" id="setInputRate" min="1" max="100000" step="1"></label>
-<label class="setting"><span class="setting-text"><span class="setting-name">Maximum timeout (s)</span><small class="setting-help">Ceiling on the per-host first-token wait &mdash; the longest we'll ever wait on a monster prompt. The budget scales from Minimum up to this with prompt size (at Input rate), and Fanout scales by the same ratio, so the worker/connection maximum is unchanged &mdash; a big prompt just waits longer on the same number of hosts. Set equal to Minimum timeout to disable scaling.</small></span><input type="number" id="setTimeoutMax" min="1" max="3600" step="1"></label>
 </div>
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
 </div>
@@ -8013,7 +8013,7 @@ function _raceDiagram(){
   if(!(tm>=t))tm=t;                                       // max timeout >= min; else no stretch
   var ext=Math.min(pps*(tm-t), branchLen*1.5);            // min->max stretch zone, same scale, capped
   var eMax=e1+ext, braceX=eMax+8;                         // worker brace sits past the MAX end
-  var W=Math.max(e2+ext+24, braceX+70), H=w2+fanH/2+46;
+  var W=Math.max(e2+ext+24, braceX+70), H=w2+fanH/2+30;
   var waves=Math.max(1,Math.ceil(t/f)), maxc=waves*w;
   var A={hedge:'#c77dff',wave:'#4895ef',wave2:'#4895ef',to:'#90be6d',fo:'#f9c74f',ax:'#8a8a8a',tx:'#bbb'};
   var g=['<svg viewBox=\'0 0 '+W.toFixed(0)+' '+H.toFixed(0)+'\' preserveAspectRatio=\'xMidYMid meet\' role=\'img\'>'];
@@ -8046,14 +8046,19 @@ function _raceDiagram(){
   var bx=braceX;
   ln(bx,w1-fanH/2,bx,w1+fanH/2,A.ax); ln(bx-4,w1-fanH/2,bx,w1-fanH/2,A.ax); ln(bx-4,w1+fanH/2,bx,w1+fanH/2,A.ax);
   tx(bx+5,w1+4,A.tx,'\u00d7'+w+' workers','start',10);
-  // Fanout = the horizontal shift between wave starts
-  var fy=(w1+w2)/2;
-  ln(spineX,fy,spineX+dx,fy,A.fo); ln(spineX,fy-4,spineX,fy+4,A.fo); ln(spineX+dx,fy-4,spineX+dx,fy+4,A.fo);
-  tx((spineX+spineX+dx)/2,fy-5,A.fo,'Fanout '+Math.round(f)+'s','middle',10);
-  g.push('<text x=\'6\' y=\''+(H-22).toFixed(1)+'\' font-size=\'10\' fill=\''+A.fo+'\'>'
+  // Fanout = the horizontal shift between wave starts. A big prompt adds the SAME extra
+  // seconds here as it adds to the timeout — drawn as the matching lighter dashout to Max,
+  // the same length as the timeout's min->max dash, so the two stretches read as equal.
+  var fy=(w1+w2)/2, fdx=spineX+dx;
+  ln(spineX,fy,fdx,fy,A.fo); ln(spineX,fy-4,spineX,fy+4,A.fo); ln(fdx,fy-4,fdx,fy+4,A.fo);
+  tx((spineX+fdx)/2,fy-5,A.fo,'Fanout '+Math.round(f)+'s','middle',10);
+  if(ext>0.5){
+    ln(fdx,fy,fdx+ext,fy,A.fo,dash2); ln(fdx+ext,fy-4,fdx+ext,fy+4,A.fo);
+    tx((fdx+fdx+ext)/2,fy-5,A.fo,'Max '+Math.round(f+(tm-t))+'s','middle',10);
+  }
+  g.push('<text x=\'6\' y=\''+(H-9).toFixed(1)+'\' font-size=\'10\' fill=\''+A.fo+'\'>'
     +'<tspan font-weight=\'700\' font-size=\'13\'>'+maxc+'</tspan>'
-    +'<tspan opacity=\'0.5\'>  ('+w+' workers \u00d7 \u2308'+Math.round(t)+'s min timeout \u00f7 '+Math.round(f)+'s fanout\u2309)</tspan>'
-    +'<tspan x=\'6\' dy=\'13\' opacity=\'0.5\'>unchanged at any prompt size \u2014 big prompts stretch both clocks by k</tspan></text>');
+    +'<tspan opacity=\'0.5\'>  ('+w+' workers \u00d7 \u2308'+Math.round(t)+'s min timeout \u00f7 '+Math.round(f)+'s fanout\u2309)</tspan></text>');
   g.push('</svg>');
   el.innerHTML=g.join('');
 }

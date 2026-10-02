@@ -215,11 +215,11 @@ FANOUT = 20
 # MAXIMUM per-attempt budget (seconds). TIMEOUT is the MINIMUM (a small prompt keeps
 # today's behaviour); the budget scales with prompt size up to this ceiling — the longest
 # first-token wait we'll ever allow for a monster prompt. The budget is the expected
-# prefill time (prompt_tokens / INPUT_RATE) clamped to [TIMEOUT, TIMEOUT_MAX], and the
-# fan-out wave period scales by the SAME ratio (budget / TIMEOUT). Because both scale
-# together their ratio is unchanged, so the worker/socket cap ceil(TIMEOUT/FANOUT)*workers
-# stays invariant for ANY prompt size — a big prompt just waits longer on the same number
-# of hosts, it doesn't widen the fan-out. Settable at runtime (timeout_max).
+# prefill time (prompt_tokens / INPUT_RATE) clamped to [TIMEOUT, TIMEOUT_MAX]; whatever it
+# adds OVER the minimum is added as the SAME number of seconds to the fan-out wave period
+# (FANOUT) and the retry deadline. Adding the same delta to both keeps the worker/socket
+# cap ceil(TIMEOUT/FANOUT)*workers from inflating for a big prompt — it just waits longer
+# on the same number of hosts, it doesn't widen the fan-out. Settable at runtime (timeout_max).
 TIMEOUT_MAX = 180
 # A host that answers with a cold-start signal ("loading model") or a busy signal
 # (503 / full queue) is ALIVE and committing to serve us — it just isn't ready this
@@ -4136,7 +4136,7 @@ def _write_stat(host, model, up, down, tps, title=None):
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
                       label=None, hedge_delay=0, key_of=None, banker_key=None, fav=None,
-                      scale=1.0):
+                      stretch=0.0):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -4193,11 +4193,11 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     # and re-fronted once ready_at passes. The race stays open while anything is
     # parked and the request budget hasn't lapsed, so a host we asked to spin up is
     # actually waited for rather than abandoned. _deadline is that budget (the request
-    # TIMEOUT, stretched by `scale` for a big prompt — same factor the fan-out period
-    # uses, so the cap stays invariant); past it we stop re-queueing and let a still-cold
-    # host age out.
+    # TIMEOUT plus `stretch` extra seconds for a big prompt — the SAME seconds added to the
+    # fan-out period below, so the cap can't inflate); past it we stop re-queueing and let a
+    # still-cold host age out.
     retry_q = []
-    _deadline = time.time() + TIMEOUT * scale
+    _deadline = time.time() + TIMEOUT + stretch
     _RETRY_POLL = 0.25  # how often a worker with nothing ready re-checks the parked set
 
     def _take_item():
@@ -4407,12 +4407,13 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         # WAVES (repeating, own clock). Bounded by ceil(TIMEOUT/FANOUT) * n; that is
         # also the outbound socket count, and the soft-ban tripwire fires on the connect
         # itself, so the number is surfaced in settings rather than silently clamped.
-        # Both the period and the deadline stretch by `scale` for a big prompt, so the
-        # cap (their ratio) is unchanged — a big prompt waits longer, it doesn't widen.
+        # Both the period and the deadline add the SAME `stretch` seconds for a big prompt,
+        # so the wave ratio (and the cap) can only hold or slide toward 1 — a big prompt
+        # waits longer, it never widens the fan-out past today's ceiling.
         if not FANOUT or FANOUT <= 0 or _spent[0]:
             return
         cap = max(1, int(-(-float(TIMEOUT) // float(FANOUT)))) * n
-        _wave = FANOUT * scale
+        _wave = FANOUT + stretch
         while not done.is_set() and not _spent[0]:
             await asyncio.sleep(_wave)
             if done.is_set() or _spent[0]:
@@ -5335,7 +5336,7 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
     result, stopped, _tried, _tally = await _race_hosts(
         servers, attempt, model, job_wid=job_wid, host_of=lambda it: it[1],
         key_of=lambda it: it[2][0],   # reputation keyed by the RESOLVED model (ms[0]), not the query
-        hedge_delay=hedge_delay, banker_key=model, fav=_fav, scale=_race_scale(payload))
+        hedge_delay=hedge_delay, banker_key=model, fav=_fav, stretch=_race_stretch(payload))
     return result, errors, stopped
 
 
@@ -5437,27 +5438,26 @@ def _auto_num_ctx(payload):
     return max(NUM_CTX_MIN, min(NUM_CTX_MAX, stepped))
 
 
-def _race_scale(payload):
-    """Prompt-size stretch factor k >= 1 for the race clocks, from the input size.
+def _race_stretch(payload):
+    """EXTRA seconds added to BOTH race clocks for a big prompt, from the input size.
 
-    A big prompt needs a long prefill before the first output token, so the per-attempt
-    budget AND the fan-out wave period both stretch by this SAME k — which keeps their
-    ratio, and thus the worker/socket cap ceil(TIMEOUT/FANOUT)*workers, invariant for any
-    prompt size (a big prompt waits longer on the same number of hosts; it does not widen
-    the fan-out or spray more connects). The budget is the expected prefill time
-    (prompt_tokens / INPUT_RATE) clamped to [TIMEOUT (minimum), TIMEOUT_MAX (maximum)]; k
-    is that budget as a multiple of the MINIMUM timeout, so k=1 for a small prompt (today's
-    exact behaviour) and tops out at TIMEOUT_MAX/TIMEOUT for a monster one."""
+    The per-attempt first-token budget scales with prompt size: the expected prefill time
+    (prompt_tokens / INPUT_RATE) clamped to [TIMEOUT (minimum), TIMEOUT_MAX (maximum)].
+    Whatever that adds OVER the minimum TIMEOUT is `x`, and the SAME x is added to the
+    fan-out wave period (FANOUT) and the retry deadline — if an attempt may now live
+    TIMEOUT+x, waves must open every FANOUT+x too, or the concurrent-wave count (and thus
+    the connection cap) would balloon. Adding the same ABSOLUTE delta to both keeps the cap
+    ceil(TIMEOUT/FANOUT)*workers from inflating (it can only hold or shrink toward
+    `workers` for a monster prompt, never grow). x=0 for any prompt the minimum covers."""
     try:
         toks = _estimate_prompt_tokens(payload)
     except Exception:
-        return 1.0
+        return 0.0
     if not toks or not INPUT_RATE or INPUT_RATE <= 0 or not TIMEOUT:
-        return 1.0
-    lo = float(TIMEOUT)
-    hi = max(lo, float(TIMEOUT_MAX))        # guard against a max set below the min
-    budget = min(max(toks / float(INPUT_RATE), lo), hi)   # expected prefill secs, clamped
-    return budget / lo                      # as a multiple of the minimum timeout
+        return 0.0
+    hi = max(float(TIMEOUT), float(TIMEOUT_MAX))     # guard against a max set below the min
+    budget = min(max(toks / float(INPUT_RATE), float(TIMEOUT)), hi)  # expected prefill secs, clamped
+    return budget - float(TIMEOUT)                   # extra seconds over the minimum timeout
 
 
 def _slow_timeout(payload):
@@ -5465,11 +5465,11 @@ def _slow_timeout(payload):
 
     A constant cannot work here: a host that answers a 20-token probe instantly may
     still need a long time to prefill a 20k-token prompt, so a fixed TIMEOUT condemns
-    it as "too slow" for doing exactly what we asked of it. The budget is the expected
-    prefill time clamped between the MINIMUM (TIMEOUT) and MAXIMUM (TIMEOUT_MAX) timeout —
-    equivalently TIMEOUT times the stretch factor the race's retry deadline and fan-out
-    period also ride, so every clock stretches together and the worker cap is unchanged."""
-    return TIMEOUT * _race_scale(payload)
+    it as "too slow" for doing exactly what we asked of it. The budget is the minimum
+    TIMEOUT plus the prompt-size stretch (see _race_stretch), clamped at TIMEOUT_MAX — the
+    SAME extra seconds the race's retry deadline and fan-out period also add, so every
+    clock grows by the same amount and the worker cap never inflates."""
+    return TIMEOUT + _race_stretch(payload)
 
 
 def _apply_no_think(p):
