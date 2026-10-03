@@ -227,6 +227,13 @@ TIMEOUT_MAX = 180
 # come back. WARMING_RETRY is how long we wait before re-fronting such a host, retried
 # until it's ready or the request TIMEOUT lapses.
 WARMING_RETRY = 5
+# How often, in seconds, to emit an SSE keepalive comment to a streaming OpenAI client
+# while dyva is still finding a host (race + hedge + warming + the winner's prefill) and
+# has no token to send yet. dyva adds pre-first-token latency raw ollama doesn't, so a
+# client with a short idle timeout can bail before the first token; a `: ...` comment
+# (ignored by compliant SSE clients) resets its idle timer without altering the stream.
+# Well under a typical short client timeout.
+KEEPALIVE_INTERVAL = 5
 # Upper bound on a believable tokens/second reading. Even a tiny model on top-end
 # hardware stays well under this; a computed value above it is a measurement
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
@@ -5808,28 +5815,80 @@ def _continuation_payload(payload, partial_text):
     return out
 
 
+async def _race_sse_keepalive(request, session, model, servers, payload, req_caps, job_wid):
+    """Race for a host while keeping a streaming SSE client's connection warm.
+
+    dyva adds pre-first-token latency raw ollama doesn't (the race, hedge delay,
+    warming-retries, then the winner's prefill), all before a single byte reaches the
+    client — so a client with a short idle timeout can give up while dyva is still
+    working fine. We prepare the SSE response up front and emit a keepalive COMMENT
+    (`: ...`, which compliant SSE clients ignore) every KEEPALIVE_INTERVAL until a host
+    wins, then hand the already-prepared response to the streamer.
+
+    Returns (response, result, errors, stopped). `response` is prepared (200 + headers
+    already sent), so the caller can no longer answer with a non-200 — a no-host outcome
+    must be written in-stream. result=None means no host won, the client hung up during
+    the wait, or the race raised; in every such case the prepared response is returned so
+    the caller finishes it on the same object."""
+    response = web.StreamResponse()
+    response.headers["Content-Type"] = "text/event-stream"
+    response.headers["Cache-Control"] = "no-cache"
+    try:
+        await response.prepare(request)
+    except _STREAM_BREAK_ERRORS:
+        return response, None, [], False
+    task = asyncio.ensure_future(_race_servers(
+        session, model, servers, payload, do_stream=True,
+        remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY))
+    while True:
+        done_set, _pending = await asyncio.wait({task}, timeout=KEEPALIVE_INTERVAL)
+        if done_set:
+            break
+        try:
+            await response.write(b": keepalive\n\n")
+        except _STREAM_BREAK_ERRORS:        # client gave up — stop racing for no one
+            task.cancel()
+            with contextlib.suppress(Exception):
+                await task
+            return response, None, [], False
+    try:
+        result, errors, stopped = task.result()
+    except Exception as e:                  # race blew up AFTER headers were sent
+        log.warning(f"race failed under keepalive: {e}")
+        return response, None, [str(e)], False
+    return response, result, errors, stopped
+
+
 async def _stream_chat_failover(request, session, model, servers, opayload,
-                                openai_format, req_caps, job_wid, result, cancel=None):
+                                openai_format, req_caps, job_wid, result, cancel=None,
+                                response=None):
     """Stream a chat answer, and if an upstream drops mid-stream WITHOUT a terminal
     done token, seamlessly fail over to the next server — the SAME client connection
     stays open — carrying the work so far as context (with the window bumped to fit),
     until a host completes the answer or the pool is spent. `result` is the race
     outcome that already won the first host; later hosts are re-raced from `servers`
-    with a continuation payload. Returns the prepared StreamResponse."""
+    with a continuation payload. Returns the prepared StreamResponse.
+
+    `response`, when given, is a StreamResponse the caller ALREADY prepared (the SSE
+    keepalive wrapper, which had to send headers before a host was known) — we stream
+    onto it as-is. Its headers (incl. the X-Dyva-* host/model tags) were committed before
+    the winner was known, so they're absent on that path; that's the cost of keeping the
+    client's connection warm during the pre-first-token wait."""
     _, host, full, resp, first_line, _first, oai = result
-    response = web.StreamResponse()
-    response.headers["Content-Type"] = "text/event-stream" if openai_format else "application/x-ndjson"
-    response.headers["Cache-Control"] = "no-cache"
-    response.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
-    response.headers["X-Dyva-Model"] = full
-    response.headers["X-Dyva-Service"] = service_of(host)
-    response.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
-    try:
-        await response.prepare(request)
-    except _STREAM_BREAK_ERRORS:
-        log.debug("Client disconnected before response headers sent")
-        await resp.release()
-        return response
+    if response is None:
+        response = web.StreamResponse()
+        response.headers["Content-Type"] = "text/event-stream" if openai_format else "application/x-ndjson"
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Dyva-Host"] = re.sub(r"^https?://", "", host)
+        response.headers["X-Dyva-Model"] = full
+        response.headers["X-Dyva-Service"] = service_of(host)
+        response.headers["Access-Control-Expose-Headers"] = "X-Dyva-Host, X-Dyva-Model, X-Dyva-Service"
+        try:
+            await response.prepare(request)
+        except _STREAM_BREAK_ERRORS:
+            log.debug("Client disconnected before response headers sent")
+            await resp.release()
+            return response
 
     partial = ["", 0]     # [content so far, tool-call-arg chars so far]
     payload = opayload
@@ -6479,20 +6538,31 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
 
         stopped = False
         for model in model_list:
-            if do_stream:
+            if do_stream and openai_format:
+                # SSE client: keep its connection warm during the pre-first-token wait so a
+                # short idle timeout doesn't bail while dyva is still finding a host. This
+                # prepares the response early, so a no-host outcome is written in-stream
+                # (the 200 is already committed) rather than returned as a 502.
+                ka_resp, result, errors, stopped = await _race_sse_keepalive(
+                    request, session, model, _servers, opayload, req_caps, job_wid)
+                if result:
+                    return await _stream_chat_failover(
+                        request, session, model, _servers, opayload,
+                        openai_format, req_caps, job_wid, result, cancel, response=ka_resp)
+                msg = "worker manually stopped" if stopped else "all servers failed"
+                if errors:
+                    msg += ": " + "; ".join(dict.fromkeys(errors))
+                with contextlib.suppress(Exception):
+                    await ka_resp.write(sse_str({"error": msg}).encode())
+                    await ka_resp.write(sse_str(sse_chunk("", {}, done=True)).encode())
+                return ka_resp
+            elif do_stream:
                 result, errors, stopped = await _race_servers(session, model, _servers, opayload, do_stream=True, remote=request.remote, caps=req_caps, job_wid=job_wid, hedge_delay=HEDGE_DELAY)
                 if result:
                     return await _stream_chat_failover(
                         request, session, model, _servers, opayload,
                         openai_format, req_caps, job_wid, result, cancel)
-                msg = "worker manually stopped" if stopped else "all servers failed"
-                if errors:
-                    msg += ": " + "; ".join(dict.fromkeys(errors))
-                if openai_format:
-                    return web.Response(
-                        text=sse_str({"error": msg}) + sse_str(sse_chunk("", {}, done=True)),
-                        content_type="text/event-stream",
-                    )
+                # native (/api/chat) streaming no-host: fall through to the pool-spent 502
             else:
                 # The CLIENT asked for stream:false, but we ALWAYS stream from the
                 # host (do_stream=True) and buffer it into one response here. A
