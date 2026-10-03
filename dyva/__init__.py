@@ -5882,12 +5882,18 @@ async def _stream_chat_failover(request, session, model, servers, opayload,
                 f"continuing with a larger window", wid=job_wid)
         continues += 1
         remaining = [s for s in servers if s[1] not in dead]
-        # continue on any real progress — streamed CONTENT (carry it forward) or a
-        # tool call (partial[1]): a tool-call argument can't be resumed mid-string,
-        # so re-race the original request fresh, just with a bigger window.
-        if continues <= MAX_STREAM_CONTINUES and remaining and (partial[0].strip() or partial[1] > 0):
+        has_progress = bool(partial[0].strip() or partial[1] > 0)
+        # Re-race the remaining pool while under the cap. Two distinct cases, previously
+        # conflated: if the dropped host produced real work (content / tool-call args),
+        # CARRY it forward as a continuation on the same client connection; if it produced
+        # NOTHING (a 0-char drop), there's nothing to carry — just try a FRESH host on the
+        # ORIGINAL request. The old gate required progress to re-race at all, so a winner
+        # that dropped at 0 chars made dyva give up — emitting an empty terminal done with
+        # finish_reason 'length' even with other hosts untried, which a client reads as
+        # "truncated / hit the output length limit."
+        if continues <= MAX_STREAM_CONTINUES and remaining:
             prev_ctx = _effective_num_ctx(payload)
-            if partial[0].strip():
+            if has_progress and partial[0].strip():
                 payload = _continuation_payload(payload, partial[0])
             if status == "length" or partial[1] > 0:
                 # the window (or a cut-off tool call) is what stopped it — grow it

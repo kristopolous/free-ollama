@@ -7926,7 +7926,15 @@ function _renderStatsChart(){
   var keys=rows.map(function(x){return x.day}).sort();
   var endStr=g.fmt(new Date());
   if(keys[keys.length-1]>endStr)endStr=keys[keys.length-1];   // data ahead of our clock
-  var startD=g.parse(endStr);g.back(startD,g.count-1);        // fixed window of `count` buckets
+  // The DAY view grows with the data: at least 7 days (so a first-time open isn't 23
+  // empty columns) and at most 30, after which it slides. Purely aesthetic, not a knob.
+  // Hour (168h) and week (26w) keep their fixed spans.
+  var count=g.count;
+  if(_statsGran==='day'){
+    var span=keys.length?Math.round((g.parse(endStr)-g.parse(keys[0]))/864e5)+1:7;
+    count=Math.max(7,Math.min(30,span));
+  }
+  var startD=g.parse(endStr);g.back(startD,count-1);          // window of `count` buckets
   var win=[],max=1;
   for(var dt=new Date(startD);g.fmt(dt)<=endStr;g.step(dt)){
     var k=g.fmt(dt),v=byTot[k]||0;win.push([k,v,byFam[k]||{}]);if(v>max)max=v;
