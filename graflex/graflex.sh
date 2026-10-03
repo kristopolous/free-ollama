@@ -36,7 +36,7 @@ case "$SERVICE" in
     echo "$COMBINED_JSON" > /tmp/full-json.json
     if [[ -e /tmp/full-json-old.json ]] ; then
       old_size=$(stat -c %s /tmp/full-json-old.json)
-      new_size=$(stat -c %c /tmp/full-json.json)
+      new_size=$(stat -c %s /tmp/full-json.json)
       if (( new_size * 2 < old_size )); then
         echo "Woah the fuck slow down. $new_size is smaller than $old_size. Fuck this"
         exit 1
