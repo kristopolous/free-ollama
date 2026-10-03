@@ -33,6 +33,16 @@ case "$SERVICE" in
   post)
     DATE=$(date +%Y%m%d)
     COMBINED_JSON=$(jq -s 'add' ~/.cache/free-ollama/*-working.json)
+    echo "$COMBINED_JSON" > /tmp/full-json.json
+    if [[ -e /tmp/full-json-old.json ]] ; then
+      old_size=$(stat -c %s /tmp/full-json-old.json)
+      new_size=$(stat -c %c /tmp/full-json.json)
+      if (( new_size * 2 < old_size )); then
+        echo "Woah the fuck slow down. $new_size is smaller than $old_size. Fuck this"
+        exit 1
+      fi
+    fi
+    cp /tmp/full-json.json /tmp/full-json-old.json
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > $_SERVER_PATH"
     echo "$COMBINED_JSON" | ssh $_SERVER "cat > ${_SERVER_PATH%.json}-$DATE.json"
     exit 0

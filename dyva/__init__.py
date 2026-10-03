@@ -8067,23 +8067,27 @@ async def handle_refresh(request):
     Refresh server cache
     ---
     tags: [Admin]
-    summary: Re-fetch server lists from all sources
+    summary: Re-fetch server lists from every source (network), then reload the pool
+    description: |
+      Unlike /reload-hosts (a pure disk re-read), this re-pulls all configured and
+      built-in sources over the network, rewrites free-ollama.json, and reloads the
+      in-memory pool — the full job behind the dashboard's host-count button. Returns
+      the new server/model counts so the UI can update in place.
     responses:
       '200':
-        description: Cache refreshed
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                status:
-                  type: string
-                message:
-                  type: string
+        description: Cache refreshed; new server and model counts
     """
+    global _servers_cache, _dead_cache
     await broadcast_activity("", "", "searching", "refreshing server cache...")
-    refresh_cache()
-    return web.json_response({"status": "ok", "message": "cache refreshed"})
+    # refresh_cache does blocking network I/O (a requests.get per source), so run it off
+    # the event loop or the whole server stalls for the length of the pull.
+    await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
+    _servers_cache = None          # re-read the freshly-written free-ollama.json
+    _dead_cache = None
+    servers = load_servers()
+    return web.json_response({"status": "ok", "message": "cache refreshed",
+                              "servers": len(servers), "models": len(all_models()),
+                              "loaded": _hosts_loaded_str()})
 
 
 async def handle_api_ps(request):

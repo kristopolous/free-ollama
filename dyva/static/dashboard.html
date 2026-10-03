@@ -285,7 +285,14 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
    accent, with clear space before the controls start. */
 .settings-card-title{margin:calc(-1 * var(--sp-2)) 0 var(--sp-5);
   font-size:var(--fs-xs);font-weight:700;text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);
-  color:var(--accent)}
+  color:var(--accent);display:flex;align-items:center;gap:var(--sp-3)}
+/* Unsaved-changes flag: hidden until an edit (including a diagram drag) dirties the card;
+   cleared when a Save succeeds. Reminds you to commit without auto-saving mid-drag. */
+.dirty-flag{display:none;margin-left:auto;font-size:var(--fs-2xs);font-weight:600;
+  text-transform:none;letter-spacing:0;color:#d9a441;border:1px solid currentColor;
+  border-radius:999px;padding:1px 8px;cursor:pointer}
+.dirty-flag:hover{background:#d9a441;color:#1a1a1a}
+.settings-card.is-dirty .dirty-flag{display:inline-block}
 .settings-card .setting:last-child{margin-bottom:0}
 .rc-section{margin-bottom:var(--sp-6)}
 .rc-title{font-size:var(--fs-lg);color:var(--text);margin-bottom:2px}
@@ -294,8 +301,10 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .rc-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4) 32px;margin-bottom:var(--sp-6)}
 .rc-grid .setting{margin-bottom:0}
 .race-diagram svg{display:block;width:100%;height:auto;font:inherit}
-.rc-grip{cursor:ew-resize;touch-action:none}
-.rc-knob{cursor:ew-resize;pointer-events:none}
+.rc-grip{touch-action:none}
+.rc-grip.rc-x{cursor:ew-resize}
+.rc-grip.rc-y{cursor:ns-resize}
+.rc-knob{pointer-events:none;opacity:.6}
 .stats-filter{font:inherit;font-size:var(--fs-sm);padding:4px 8px;border-radius:var(--r-md);background:var(--bg-inset);color:var(--text);border:1px solid var(--border);min-width:9rem;max-width:14rem}
 .stats-go{font:inherit;font-size:var(--fs-sm);padding:4px 10px;border-radius:var(--r-md);background:var(--surface);color:var(--text);border:1px solid var(--border);cursor:pointer}
 .stats-go:hover{border-color:var(--border-hover)}
@@ -1512,7 +1521,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 <div id="settingsBody">
 <div class="settings-card">
-<div class="settings-card-title">Routing configuration</div>
+<div class="settings-card-title">Routing configuration<span class="dirty-flag">needs save</span></div>
 <div class="rc-hint">The fine-tunable hyperparameters for how a request finds a host — the diagram tracks them live as you adjust.</div>
 <div id="raceDiagram" class="race-diagram" aria-hidden="true"></div>
 <div class="rc-grid">
@@ -1526,13 +1535,13 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
 </div>
 <div class="settings-card">
-<div class="settings-card-title">Behavior</div>
+<div class="settings-card-title">Behavior<span class="dirty-flag">needs save</span></div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Explore mode</span><small class="setting-help">Discover more of the unknown network: route hosts we haven't visited (unknown state) to the front of the line, ahead of known-good ones. Deliberately slower — a request may probe cold hosts first — but it maps out the pool. Off by default. <b>Caution:</b> the unvisited frontier is where the canary honeypots live, and poking a burst of fresh IPs is exactly what trips Cloudflare/WAF reputation — so this raises the chance of a soft IP ban on your egress. Use it for deliberate survey passes, not routine routing.</small></span><input type="checkbox" id="setExplore" onchange="updateExploreLogo()"></label>
 <div class="setting"><span class="setting-text"><span class="setting-name">Cloudskipper</span><small class="setting-help">Never route to — or even connect to — hosts on the ticked clouds. The soft-ban tripwire can fire on the TCP connection itself, so a skipped cloud's hosts are dropped from every request <b>before any connection is made</b>. Clouds are identified by enrichment; the list below is the ones most represented in the current survey. Applies to every source and is always in effect, independent of Explore mode.</small><div id="cloudSkipList" class="cloudskip-list"></div></span></div>
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
 </div>
 <div class="settings-card">
-<div class="settings-card-title">Presentation</div>
+<div class="settings-card-title">Presentation<span class="dirty-flag">needs save</span></div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum model count</span><small class="setting-help">Hide models served by fewer than this many hosts from the <code>/api/tags</code> and <code>/v1/models</code> listings that third-party apps read. 0 = show all. (The dashboard always shows everything.)</small></span><input type="number" id="setMinCount" min="0" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Base path</span><small class="setting-help">Serve dyva under a secret URL path instead of the root. A path like <code>/some-path</code> moves the dashboard to <code>/some-path/</code> and the API to <code>/some-path/v1/models</code> — deterrence by obscurity: a scanner hitting the default paths (<code>/v1/models</code>, <code>/api/tags</code>) finds nothing. Blank = served at the root. <b>Takes effect on restart</b> (like the listen port); the <code>--base</code> flag overrides this.</small></span><input type="text" id="setBasePath" placeholder="/some-path" spellcheck="false" autocomplete="off"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Model list override</span><small class="setting-help">Advertise a fixed list of model names from <code>/api/tags</code> and <code>/v1/models</code> instead of the discovered catalog, for tools that make you pick one specific model id. Every dyva model name is a routing pattern, so one entry like <code>qwen3</code> covers every <code>qwen3:*</code> variant on every host. Tick <b>Enabled</b> and put one name per line in the box below (blank lines and <code>#comments</code> are ignored). Untick to go back to the real catalog — the list stays in the box so you can flip it back on. Names no host currently serves stay listed (count 0) so the menu can't shift under a tool that pinned one. <b>Minimum model count</b> doesn't apply to an explicit list.</small></span><input type="checkbox" id="setModelListOn"></label>
@@ -1540,7 +1549,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
 </div>
 <div class="settings-card">
-<div class="settings-card-title">Congeniality</div>
+<div class="settings-card-title">Congeniality<span class="dirty-flag">needs save</span></div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Admin password</span><small class="setting-help">Protect this Settings tab and its sources. When set, opening Settings requires this password — everything else (chat, models, the dashboard) stays public. Type a new value to set or change it; leave blank to keep the current one. Forgot it? Clear <code>admin_pw</code> in <code>settings.json</code> and restart.</small></span><span class="admin-pw-field"><template id="setAdminPwTpl"><input type="text" id="adminPwUserDecoy" name="username" class="admin-pw-decoy" placeholder="username" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" tabindex="-1" aria-hidden="true"><input type="password" id="setAdminPw" placeholder="none" spellcheck="false" autocomplete="new-password"></template></span></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Localhost only</span><small class="setting-help">Restrict inference endpoints to localhost only (a remote host that reaches this port can't chat or generate). Equivalent to the <code>./dyva -l</code> flag; saved here it persists across restarts.</small></span><input type="checkbox" id="setLocal"></label>
 <div class="setting-sources">
@@ -1693,19 +1702,21 @@ connectActivity(false);
 document.getElementById('pauseBtn').addEventListener('click',function(e){e.stopPropagation();paused=!paused;this.textContent=paused?'▷':'⏸';this.style.fontSize=paused?'.9rem':'1.1rem'})
 var actPop=document.getElementById('activityPop');
 document.getElementById('activityBtn').addEventListener('click',function(e){e.stopPropagation();actPop.classList.toggle('open')});
-// Clicking the 💻 host count re-reads free-ollama.json from disk — the file can
-// be rewritten under a running dyva (graflex appends new servers) and there was
-// no way to pick that up short of a restart.
+// Clicking the 💻 host count runs a real /refresh: re-pull every source over the
+// network, rewrite free-ollama.json, and reload the pool — the full job, so you
+// don't need an external loop to regenerate the list. (The lighter /reload-hosts,
+// a pure disk re-read, still exists for the graflex-notify path.)
 (function(){
   var pill=document.getElementById('hostsPill');if(!pill)return;
   pill.addEventListener('click',function(){
     if(pill._busy)return;pill._busy=true;
     var sc=document.getElementById('serverCount'),
         ic=document.getElementById('hostsIcon');
-    // Indicate the reload by swapping the emoji (💻 → 🚚), not by replacing the
+    // Indicate the refresh by swapping the emoji (💻 → 🚚), not by replacing the
     // number — changing the count's width shifts the header and reads as a glitch.
+    // A network refresh takes a few seconds, so the truck sticks around a bit.
     if(ic)ic.textContent='🚚';
-    fetch('reload-hosts',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
+    fetch('refresh',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
       if(sc)sc.textContent=fmtCount(d.servers);
       if(d.loaded)pill.title='servers - loaded at '+d.loaded;
     }).catch(function(){}).then(function(){if(ic)ic.textContent='🖥';pill._busy=false;});
@@ -8004,16 +8015,22 @@ function _raceDiagram(){
   var lg=9, fanH=(N-1)*lg;
   // ONE horizontal scale for everything: branchLen pixels = Timeout seconds. So the
   // hedge lead, the wave-2 shift and the branch length all read against the same clock.
-  var branchLen=260, con=16, pps=branchLen/t;             // pixels per second
-  var hl=Math.min(pps*h, branchLen*1.2);                  // hedge lead (0 when h=0), capped
-  var dx=Math.min(pps*f, branchLen*1.6);                  // wave-2 offset, capped
+  // FIXED scale (pinned so a REF-second timeout renders at the familiar 260px, i.e. a
+  // typical config looks exactly as before). Unlike the old `pps = 260/t`, the MIN-timeout
+  // branch LENGTH now encodes t, so its tick moves with the value and can be dragged like
+  // the others. Spans are capped with constants so the diagram stays bounded/readable at
+  // extremes; a handle still adjusts its value past a cap via the drag delta.
+  var con=16, REF=60, pps=260/REF;                        // viewBox px per second
+  var branchLen=Math.min(pps*t, 390);                     // MIN timeout, length-coded
+  var hl=Math.min(pps*h, 312);                            // hedge lead (0 when h=0), capped
+  var dx=Math.min(pps*f, 416);                            // wave-2 offset, capped
   var hedgeX=40, spineX=hedgeX+14+Math.max(hl,6);         // wave-1 node = after the hedge lead
   var padT=44, vGap=fanH+40;
   var w1=padT+fanH/2+8, w2=w1+vGap;
   var b1=spineX+con, e1=b1+branchLen;                     // wave-1 branch span (to MIN timeout)
   var b2=spineX+dx+con, e2=b2+branchLen;                  // wave-2 branch span
   if(!(tm>=t))tm=t;                                       // max timeout >= min; else no stretch
-  var ext=Math.min(pps*(tm-t), branchLen*1.5);            // min->max stretch zone, same scale, capped
+  var ext=Math.min(pps*(tm-t), 390);                      // min->max stretch zone, same scale, capped
   var eMax=e1+ext, braceX=eMax+8;                         // worker brace sits past the MAX end
   var W=Math.max(e2+ext+24, braceX+70), H=w2+fanH/2+30;
   var waves=Math.max(1,Math.ceil(t/f)), maxc=waves*w;
@@ -8065,17 +8082,22 @@ function _raceDiagram(){
   // Each carries the field it drives and a FIXED seconds-per-pixel (the shared time axis),
   // captured at pointerdown so the drag stays smooth while the layout — which feeds back on
   // the values — redraws under the cursor. Wiring is delegated+once in _wireDiagramDrag.
-  var spp=(t>0?t/branchLen:0.1);
-  function grip(gx,gy0,gy1,setId,lo,hi,col){
-    g.push('<rect x=\''+(gx-7).toFixed(1)+'\' y=\''+gy0.toFixed(1)+'\' width=\'14\' height=\''+Math.max(12,gy1-gy0).toFixed(1)+'\' fill=\'transparent\' class=\'rc-grip\' data-set=\''+setId+'\' data-spp=\''+spp.toFixed(4)+'\' data-lo=\''+lo+'\' data-hi=\''+hi+'\'><title>drag to adjust</title></rect>');
+  var spp=1/pps;   // seconds per viewBox px on the shared time axis (fixed scale)
+  // axis 'x' = horizontal time handle (uses `spp`, scale-adjusted at drag time); axis 'y'
+  // = vertical handle with its own units-per-screen-px `sens` (not scale-adjusted).
+  function grip(gx,gy0,gy1,setId,lo,hi,col,axis,sens){
+    var ax=axis||'x', rx,ry,rw,rh;
+    if(ax==='y'){rx=gx-9;ry=gy0-9;rw=18;rh=18;} else {rx=gx-7;ry=gy0;rw=14;rh=Math.max(12,gy1-gy0);}
+    g.push('<rect x=\''+rx.toFixed(1)+'\' y=\''+ry.toFixed(1)+'\' width=\''+rw+'\' height=\''+rh.toFixed(1)+'\' fill=\'transparent\' class=\'rc-grip rc-'+ax+'\' data-set=\''+setId+'\' data-axis=\''+ax+'\' data-spp=\''+(sens==null?spp:sens)+'\' data-lo=\''+lo+'\' data-hi=\''+hi+'\'><title>drag to adjust</title></rect>');
     g.push('<circle cx=\''+gx.toFixed(1)+'\' cy=\''+gy0.toFixed(1)+'\' r=\'3.2\' fill=\''+col+'\' stroke=\'#111\' stroke-width=\'0.5\' class=\'rc-knob\'/>');
   }
-  // Min timeout is the diagram's fixed ruler (branchLen is constant; everything else is
-  // scaled against it), so a knob on it couldn't move — it stays a field. Hedge, Max and
-  // Fanout are drawn proportionally and track the cursor 1:1.
+  // Four time handles share the fixed time scale and track the cursor 1:1 up to their
+  // display cap; Workers is a vertical drag on the brace's bottom corner (down = more).
   grip(spineX,w1-9,w1+9,'setHedge',0,600,A.hedge);
+  grip(e1,topY-16,w1+fanH/2+2,'setTimeout',1,600,A.to);
   if(ext>0.5)grip(eMax,topY-16,topY+4,'setTimeoutMax',1,3600,A.to);
   grip(fdx,fy-12,fy+12,'setFanout',1,600,A.fo);
+  grip(bx,w1+fanH/2,w1+fanH/2,'setWorkers',1,200,A.ax,'y',0.2);
   g.push('</svg>');
   el.innerHTML=g.join('');
 }
@@ -8109,14 +8131,24 @@ function _wireDiagramDrag(){
   _diagDragWired=true;
   host.addEventListener('pointerdown',function(e){
     var el=e.target;
-    if(!el||!el.getAttribute||el.getAttribute('class')!=='rc-grip')return;
+    if(!el||!el.classList||!el.classList.contains('rc-grip'))return;
     var input=document.getElementById(el.getAttribute('data-set')); if(!input)return;
     e.preventDefault();
+    var axis=el.getAttribute('data-axis')||'x';
     var spp=parseFloat(el.getAttribute('data-spp'))||0.1;
     var lo=parseFloat(el.getAttribute('data-lo')), hi=parseFloat(el.getAttribute('data-hi'));
-    var startVal=parseFloat(input.value)||0, startX=e.clientX;
+    // Horizontal (time) handles live in viewBox px, which the SVG scales to fit the
+    // container — convert seconds-per-viewBox-px to seconds-per-SCREEN-px via the live fit
+    // factor (captured once). Vertical handles carry their own per-screen-px sensitivity.
+    if(axis==='x'){
+      var svg=host.querySelector('svg'), r=svg&&svg.getBoundingClientRect();
+      var vbw=(svg&&svg.viewBox&&svg.viewBox.baseVal)?svg.viewBox.baseVal.width:0;
+      if(r&&r.width>0&&vbw>0)spp=spp*(vbw/r.width);
+    }
+    var startVal=parseFloat(input.value)||0, start=(axis==='y')?e.clientY:e.clientX;
     function move(ev){
-      var val=Math.round(startVal+(ev.clientX-startX)*spp);
+      var now=(axis==='y')?ev.clientY:ev.clientX;   // y: drag down = increase
+      var val=Math.round(startVal+(now-start)*spp);
       if(isNaN(val))return;
       val=Math.max(lo,Math.min(hi,val));
       if(String(val)!==input.value){input.value=val;input.dispatchEvent(new Event('input',{bubbles:true}));}
@@ -8532,6 +8564,29 @@ function populateSettings(s){
   document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
   document.getElementById('srcError').textContent='';
   document.querySelectorAll('.settings-card .settings-status').forEach(function(e){e.textContent='';});
+  _wireDirty();
+  _clearDirty();   // a fresh load is clean (values set directly above fire no input events)
+}
+// Unsaved-changes tracking. Any edit inside a settings card — typing, a toggle, or a
+// diagram-knob drag (which dispatches 'input' on its field) — flags that card "needs
+// save"; a successful Save clears every card, since one POST commits all of them.
+var _dirtyWired=false;
+function _markDirty(e){var c=e.target&&e.target.closest&&e.target.closest('.settings-card');if(c)c.classList.add('is-dirty');}
+function _clearDirty(){Array.prototype.forEach.call(document.querySelectorAll('.settings-card.is-dirty'),function(c){c.classList.remove('is-dirty');});}
+function _wireDirty(){
+  if(_dirtyWired)return;
+  var body=document.getElementById('settingsBody'); if(!body)return;
+  _dirtyWired=true;
+  body.addEventListener('input',_markDirty);
+  body.addEventListener('change',_markDirty);
+  // Clicking the "needs save" flag commits, same as the card's Save button.
+  body.addEventListener('click',function(e){
+    var fl=e.target;
+    if(!fl||!fl.classList||!fl.classList.contains('dirty-flag'))return;
+    var c=fl.closest('.settings-card'); if(!c)return;
+    _saveStatus=c.querySelector('.settings-status');
+    saveSettings();
+  });
 }
 // The override list lives in a textarea now (one name per line, like Additional
 // sources), with an "Enabled" checkbox that applies it WITHOUT discarding the list.
@@ -8620,6 +8675,7 @@ function saveSettings(){
       renderCloudSkip(s.cloudskip||[]);
       setPwState(!!s.admin_pw_set);
       document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
+      _clearDirty();   // one POST committed every card
       st.style.color='var(--ok)';st.textContent=s.refreshed?'saved · sources re-pulled':'saved';setTimeout(function(){st.textContent=''},3000);
     })
     .catch(function(){st.style.color='var(--err)';st.textContent='save failed';});
