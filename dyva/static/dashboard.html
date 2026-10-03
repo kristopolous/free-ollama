@@ -319,9 +319,13 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
    1000). Absolutely positioned so it sits outside the flex flow; z-index keeps it
    behind the bars rather than painting over them. */
 .sc-grid{position:absolute;left:0;right:0;height:1px;background:var(--border);opacity:.55;pointer-events:none;z-index:0}
-.sc-col{flex:1 1 0;min-width:2px;height:100%;display:flex;align-items:flex-end;position:relative;z-index:1}
-.sc-col i{display:block;width:100%;min-height:1px;background:var(--accent);border-radius:2px 2px 0 0}
-.sc-col:hover i{background:var(--accent-bright)}
+.sc-col{flex:1 1 0;min-width:2px;height:100%;display:flex;flex-direction:column-reverse;position:relative;z-index:1}
+.sc-col i{display:block;width:100%;min-height:1px;background:var(--accent)}
+.sc-col i:last-child{border-radius:2px 2px 0 0}
+.sc-col:hover{filter:brightness(1.18)}
+.sc-legend{display:flex;flex-wrap:wrap;gap:3px 10px;margin-top:6px;font-size:11px;color:var(--text-muted)}
+.sc-legend span{display:inline-flex;align-items:center;gap:4px}
+.sc-legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
 .sc-x{display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-top:4px}
 /* The one tabbed table (Models / Families / Hosts): bounded + independently
    scrollable so a long list can't push the map off-screen. Lower cap than the old
@@ -7917,15 +7921,26 @@ function _renderStatsChart(){
   if(gt&&gt.value!==_statsGran)gt.value=_statsGran;
   var rows=d[g.series]||[];
   if(!rows.length){chart.innerHTML='<div class="muted">no usage recorded yet</div>';return;}
-  var by={};rows.forEach(function(x){by[x.day]=(x.up||0)+(x.down||0)});
+  var byTot={},byFam={};
+  rows.forEach(function(x){byTot[x.day]=(x.up||0)+(x.down||0);byFam[x.day]=x.fam||{};});
   var keys=rows.map(function(x){return x.day}).sort();
   var endStr=g.fmt(new Date());
   if(keys[keys.length-1]>endStr)endStr=keys[keys.length-1];   // data ahead of our clock
   var startD=g.parse(endStr);g.back(startD,g.count-1);        // fixed window of `count` buckets
-  var series=[],max=1;
+  var win=[],max=1;
   for(var dt=new Date(startD);g.fmt(dt)<=endStr;g.step(dt)){
-    var k=g.fmt(dt),v=by[k]||0;series.push([k,v]);if(v>max)max=v;
+    var k=g.fmt(dt),v=byTot[k]||0;win.push([k,v,byFam[k]||{}]);if(v>max)max=v;
   }
+  // Stack by model FAMILY (the server sends per-bucket {family: tokens}). Rank families
+  // by total across the visible window; the top few get fixed colours and everything
+  // else folds into a grey "Other" so the stack stays legible however many families appear.
+  var famTot={};win.forEach(function(s){var f=s[2];for(var k in f)famTot[k]=(famTot[k]||0)+f[k];});
+  var ranked=Object.keys(famTot).sort(function(a,b){return famTot[b]-famTot[a];});
+  var TOPN=8, top=ranked.slice(0,TOPN), isTop={};top.forEach(function(f){isTop[f]=1;});
+  var hasOther=ranked.length>TOPN;
+  var PAL=['#4895ef','#90be6d','#f9c74f','#c77dff','#f8961e','#43aa8b','#e5668a','#577590'],OTHER='#8a8a8a';
+  var color={};top.forEach(function(f,i){color[f]=PAL[i%PAL.length];});
+  var order=top.slice();if(hasOther)order.push('__other__');   // rank 1 first = bottom of the stack
   // NEVER rescale on a filter (per granularity): the ceiling is remembered from the last
   // UNFILTERED load so a filtered view draws visibly shorter bars against a fixed axis.
   var _filtered=!!(d.q);
@@ -7936,13 +7951,26 @@ function _renderStatsChart(){
     var gs=Math.pow(10,Math.floor(Math.log10(yTop)));
     for(var gg=gs;gg<yTop;gg+=gs){grid+='<i class="sc-grid" style="bottom:'+(100*gg/yTop).toFixed(2)+'%"></i>';}
   }
-  var bars=series.map(function(s){
-    var h=(100*s[1]/yTop).toFixed(1);
-    return '<div class="sc-col" title="'+escHtml(g.tfmt(s[0]))+' · '+_ktok(s[1])+'k tokens"><i style="height:'+h+'%"></i></div>';
+  var bars=win.map(function(s){
+    var fam=s[2],total=s[1],otherSum=0;
+    for(var f in fam){if(!isTop[f])otherSum+=fam[f];}
+    var html='';
+    order.forEach(function(f){
+      var val=f==='__other__'?otherSum:(fam[f]||0);
+      if(val<=0)return;
+      var nm=f==='__other__'?'Other':f, c=f==='__other__'?OTHER:color[f];
+      html+='<i style="height:'+(100*val/yTop).toFixed(2)+'%;background:'+c+'" title="'+escHtml(nm+' · '+_ktok(val)+'k')+'"></i>';
+    });
+    return '<div class="sc-col" title="'+escHtml(g.tfmt(s[0])+' · '+_ktok(total)+'k tokens')+'">'+html+'</div>';
+  }).join('');
+  var leg=order.map(function(f){
+    var nm=f==='__other__'?'Other':f, c=f==='__other__'?OTHER:color[f];
+    return '<span><i style="background:'+c+'"></i>'+escHtml(nm)+'</span>';
   }).join('');
   chart.innerHTML='<div class="sc-ymax">'+_ktok(yTop)+'k</div>'
     +'<div class="sc-bars">'+grid+bars+'</div>'
-    +'<div class="sc-x"><span>'+escHtml(series.length?series[0][0]:'')+'</span><span>'+escHtml(endStr)+'</span></div>';
+    +'<div class="sc-x"><span>'+escHtml(win.length?win[0][0]:'')+'</span><span>'+escHtml(endStr)+'</span></div>'
+    +(leg?'<div class="sc-legend">'+leg+'</div>':'');
 }
 // The stats table is one table with three tabbed views. renderStats stashes the
 // latest payload here; the active tab decides what _renderStatsTable draws.

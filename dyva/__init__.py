@@ -1141,11 +1141,16 @@ def _worker_snapshot():
 
 
 def _conn_count():
-    """Live outbound connection count: the in-flight upstream ATTEMPTS right now (one
-    open socket each), summed across hosts. This is the number the fan-out cap bounds
-    and the soft-ban tripwire watches, surfaced live in the dashboard. A parked warming
-    host holds no socket, so it isn't counted until it's re-fronted."""
-    return sum(_inflight.values())
+    """Live outbound connection count: upstream connections open RIGHT NOW. Two kinds,
+    summed (they don't overlap): in-flight race ATTEMPTS still hunting-for / warming a host
+    (sum of _inflight — the connect/first-token window), PLUS committed jobs that won their
+    race and are now streaming inference from a host (live workers with a host set; their
+    _inflight entry dropped the moment the race resolved). Counting only _inflight missed
+    every host actively serving a generation — they read as 0 connections mid-answer, which
+    is the bug this fixes. A parked warming host holds no socket, so it isn't counted until
+    it's re-fronted."""
+    serving = sum(1 for w in _workers.values() if w.get("host") and not w.get("done"))
+    return sum(_inflight.values()) + serving
 
 
 async def _broadcast_workers():
@@ -3916,6 +3921,39 @@ def _fmt_tool_calls(tcs):
     return out
 
 
+def _fmt_tool_calls_delta(tcs):
+    """Tool-call formatter for the STREAMING path, where each `tc` is a per-chunk DELTA,
+    not a complete call. The OpenAI chunk protocol is: the FIRST delta of a call carries
+    index + id + type + name + the start of `arguments`; every LATER delta carries the
+    SAME index and only more `arguments` text — no id, no name, no type. The client
+    concatenates `arguments` by index. So, unlike _fmt_tool_calls (which is for the
+    one-shot non-stream `to_openai` and mints an id per complete call), this must NEVER
+    mint a fresh id on a continuation fragment — a changing id per fragment is exactly
+    what makes a strict client drop the call as unrepairable. id/type/name ride along
+    only on the opening delta (the one that carries a name), where we mint an id only if
+    the upstream — e.g. native ollama, which sends a complete call in one delta with no
+    id — didn't supply one, so the client can still reference the call in its tool reply."""
+    out = []
+    for i, tc in enumerate(tcs):
+        fn = tc.get("function") or {}
+        name = fn.get("name")
+        d = {"index": tc.get("index", i), "function": {}}
+        if name:                        # opening (or complete) delta of this call
+            d["id"] = tc.get("id") or f"call_{int(time.time())}_{i}"
+            d["type"] = "function"
+            d["function"]["name"] = name
+        elif tc.get("id"):              # upstream carried an id without a name — keep it
+            d["id"] = tc["id"]
+            d["type"] = "function"
+        args = fn.get("arguments")
+        if isinstance(args, dict):      # ollama one-shot call: args is a dict, stringify
+            args = json.dumps(args)
+        if args is not None:
+            d["function"]["arguments"] = args
+        out.append(d)
+    return out
+
+
 def to_openai(resp, model):
     msg = dict(resp.get("message", {}))
     tcs = msg.pop("tool_calls", None)
@@ -5605,7 +5643,7 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
             msg = dict(first.get("message", {}))
             tcs = msg.pop("tool_calls", None)
             if tcs:
-                msg["tool_calls"] = _fmt_tool_calls(tcs)
+                msg["tool_calls"] = _fmt_tool_calls_delta(tcs)
                 msg["content"] = None
             await cw(sse_str(sse_chunk(full, msg)).encode())
         else:
@@ -5699,7 +5737,7 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 m = dict((obj or {}).get("message", {}))
                 tcs = m.pop("tool_calls", None)
                 if tcs:
-                    m["tool_calls"] = _fmt_tool_calls(tcs)
+                    m["tool_calls"] = _fmt_tool_calls_delta(tcs)
                     m["content"] = None
                 await cw(sse_str(sse_chunk(full, m)).encode())
             else:
@@ -6702,6 +6740,16 @@ async def handle_reload_hosts(request):
                               "loaded": _hosts_loaded_str()})
 
 
+def _family_of(name):
+    """Model family = the leading alpha run of the basename, capitalized — the SAME rule
+    the dashboard's _familyOf uses, so the stacked-bar families line up with the 'By
+    family' table. 'qwen3.8' -> 'Qwen', 'llama3:latest' -> 'Llama', 'x/mistral-7b' ->
+    'Mistral', anything with no leading letters -> 'Other'."""
+    base = str(name).split("/")[-1].lower()
+    m = re.match(r"[a-z]+", base)
+    return m.group(0).capitalize() if m else "Other"
+
+
 async def handle_stats(request):
     """
     Usage over time (for the Stats view).
@@ -6752,16 +6800,21 @@ async def handle_stats(request):
                     dt = _dt.datetime.fromtimestamp(rdate, _dt.timezone.utc)
                 except (ValueError, OSError, OverflowError):
                     continue
+                # Per-bucket family breakdown feeds the stacked bars: the chart can't
+                # reconstruct a stack from a bucket total, so each bucket carries a
+                # {family: tokens} map (up+down combined — the bars stack total tokens).
+                fam = _family_of(r.get("model") or "?")
+                toks = up + down
                 day = dt.strftime("%Y-%m-%d")
-                d = days.setdefault(day, {"day": day, "up": 0, "down": 0, "reqs": 0})
-                d["up"] += up; d["down"] += down; d["reqs"] += 1
+                d = days.setdefault(day, {"day": day, "up": 0, "down": 0, "reqs": 0, "fam": {}})
+                d["up"] += up; d["down"] += down; d["reqs"] += 1; d["fam"][fam] = d["fam"].get(fam, 0) + toks
                 wk = (dt - _dt.timedelta(days=dt.weekday())).strftime("%Y-%m-%d")   # Monday of this week
-                w = weeks.setdefault(wk, {"day": wk, "up": 0, "down": 0, "reqs": 0})
-                w["up"] += up; w["down"] += down; w["reqs"] += 1
+                w = weeks.setdefault(wk, {"day": wk, "up": 0, "down": 0, "reqs": 0, "fam": {}})
+                w["up"] += up; w["down"] += down; w["reqs"] += 1; w["fam"][fam] = w["fam"].get(fam, 0) + toks
                 if rdate >= hour_cutoff:
                     hk = dt.strftime("%Y-%m-%d %H")
-                    h = hours.setdefault(hk, {"day": hk, "up": 0, "down": 0, "reqs": 0})
-                    h["up"] += up; h["down"] += down; h["reqs"] += 1
+                    h = hours.setdefault(hk, {"day": hk, "up": 0, "down": 0, "reqs": 0, "fam": {}})
+                    h["up"] += up; h["down"] += down; h["reqs"] += 1; h["fam"][fam] = h["fam"].get(fam, 0) + toks
                 for bucket, bkey in ((models, r.get("model") or "?"), (hosts, r.get("host") or "?")):
                     b = bucket.setdefault(bkey, {"up": 0, "down": 0, "reqs": 0, "_tps": 0.0, "_tn": 0})
                     b["up"] += up; b["down"] += down; b["reqs"] += 1
