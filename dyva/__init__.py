@@ -1384,6 +1384,10 @@ async def _unregister_worker(wid, ok=None):
     if w.get("race") is not None and not w.get("_job_logged"):
         w["_job_logged"] = True
         _write_worker_job({
+            # The worker's unique id — the same uuid the dashboard shows (and now copies
+            # from the kind marker), so a job record can be correlated back to the exact
+            # worker card / activity line instead of being an anonymous row.
+            "wid": w.get("wid"),
             "model_query": w.get("model_query"),
             "label": w.get("model"),
             # The model that ACTUALLY ran/rendered — for image/edit/tts/etc. the

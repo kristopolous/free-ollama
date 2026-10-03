@@ -2525,9 +2525,24 @@ function renderWorkers(workers){
     var sub=document.createElement('div');sub.className='worker-sub';
     var kind=w.kind||'text';
     var k=document.createElement('span');k.className='worker-kind kind-'+kind;k.textContent=kind;
+    // Click the kind marker to copy this worker's id (the uuid you'd otherwise hover the
+    // card to read) to the clipboard — flashes "copied" and reverts.
+    k.title='click to copy worker id ('+w.wid+')';
+    k.style.cursor='pointer';
+    k.addEventListener('click',function(e){
+      e.stopPropagation();
+      _copyText(w.wid).then(function(ok){
+        k.textContent=ok?'copied':'copy failed';
+        setTimeout(function(){k.textContent=kind;},900);
+      });
+    });
     sub.appendChild(k);
     var _agent=w.kind==='agent';                           // sub-agents stay controllable through every phase
-    var _showStop=!w.done&&(!w.phase||_agent);             // stop while racing, or anytime for a sub-agent
+    // Stop works at ANY point now, not just while racing: a committed, streaming worker
+    // is cancelled via its re-armed stop handle (see _stream_chat_failover / _pump_stream),
+    // so offer stop for every running worker. (The old `!w.phase` gate predated that and
+    // hid the button exactly when a long generation most needs it.)
+    var _showStop=!w.done;
     var _showSkip=!w.done&&(!w.phase||w.kind==='video'||_agent);  // skip during a long video render, or anytime for a sub-agent
     if(_showStop||_showSkip){
      if(_showStop){
@@ -3297,6 +3312,18 @@ var COPY_SVG='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="
 var COPY_OK_SVG='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
 // A copy button for the role bar (mirrors makeSpeakBtn). getText returns the raw
 // message text (markdown), read from the record so it reflects later edits.
+// Copy `text` to the clipboard, with the execCommand fallback for non-secure contexts
+// (plain-http behind a proxy, where navigator.clipboard is unavailable). Returns a
+// promise of whether it worked.
+function _copyFallback(text){
+  try{var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();var ok=document.execCommand('copy');document.body.removeChild(ta);return ok;}catch(e){return false;}
+}
+function _copyText(text){
+  text=String(text||'');
+  if(!text)return Promise.resolve(false);
+  if(navigator.clipboard&&navigator.clipboard.writeText)return navigator.clipboard.writeText(text).then(function(){return true;},function(){return _copyFallback(text);});
+  return Promise.resolve(_copyFallback(text));
+}
 function makeCopyBtn(getText){
   var b=document.createElement('button');
   b.type='button';b.className='speak-btn copy-btn';b.title='Copy';
