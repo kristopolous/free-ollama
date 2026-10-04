@@ -4268,6 +4268,16 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     _starved = [0]      # candidates skipped because another job held them
     _spent = [False]    # candidate list exhausted — the wave loop must stop, or the
                         # race never sees all(t.done()) and hangs
+    # Cascade PERMITS: the number of FRESH servers we're allowed to have contacted so far.
+    # The fanout releases `n` more per wave (1 during the hedge); a worker may only START a
+    # new candidate while _started < _permit. This is what makes the search widen at the
+    # WAVE rate instead of as fast as attempts resolve — a host that fails/skips in 0.4s
+    # does NOT get to sprint down the list and spray the network; it waits for the next
+    # wave. (Warming-retries re-front an ALREADY-contacted host, so they're exempt.) Without
+    # this, the fanout only paced task spawns, and freed slots blew straight through it —
+    # which also skewed the race into an age contest where a long-open slow host "wins".
+    _started = [0]      # FRESH candidates started so far (retries don't count)
+    _permit = [0]       # FRESH candidates currently permitted (set from `initial`, += n per wave)
     # Warming-retry queue: a host that answered ALIVE-but-not-ready (cold start /
     # busy -> V_RETRY) is parked here as [ready_at, item] instead of being dropped,
     # and re-fronted once ready_at passes. The race stays open while anything is
@@ -4292,6 +4302,12 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             if retry_q[0][0] <= now:
                 tried += 1
                 return retry_q.pop(0)[1], False
+        # Cascade gate: a FRESH contact may only start once the fanout has released a
+        # permit for it (n per wave). If we're at the permit ceiling, stay alive and
+        # re-poll — do NOT race ahead just because this slot is free. (Retries above
+        # re-front an already-contacted host and bypass this.)
+        if _started[0] >= _permit[0]:
+            return None, True
         try:
             it = next(entry_iter)
         except StopIteration:
@@ -4299,6 +4315,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 return None, True
             _spent[0] = True
             return None, False
+        _started[0] += 1
         tried += 1
         return it, False
 
@@ -4470,6 +4487,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     if hedging and hedge_delay < CONTINUATION_HEDGE and entries and _host_busy(host_of(entries[0])):
         hedging = False
     initial = 1 if hedging else n
+    _permit[0] = initial        # wave 0: the hedge host alone (1), or the full first wave (n)
     tasks = [asyncio.create_task(worker()) for _ in range(initial)]
     _tasks_holder[:] = tasks
 
@@ -4493,6 +4511,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 await asyncio.sleep(0.1)
             if done.is_set():
                 return
+            _permit[0] = n        # hedge over: release the first full wave of contacts
             _spawn(n - initial)
 
         # WAVES (repeating, own clock). Bounded by ceil(TIMEOUT/FANOUT) * n; that is
@@ -4502,6 +4521,10 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         # so the wave ratio (and the cap) can only hold or slide toward 1 — a big prompt
         # waits longer, it never widens the fan-out past today's ceiling.
         if not FANOUT or FANOUT <= 0 or _spent[0]:
+            # No wave pacing (fanout disabled): release the gate entirely so the pool
+            # races freely, bounded only by the worker tasks already spawned. Otherwise
+            # the permit would freeze at `n` and workers would block forever on the rest.
+            _permit[0] = 10 ** 9
             return
         cap = max(1, int(-(-float(TIMEOUT) // float(FANOUT)))) * n
         _wave = FANOUT + stretch
@@ -4509,6 +4532,10 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             await asyncio.sleep(_wave)
             if done.is_set() or _spent[0]:
                 return
+            # Release another wave of CONTACT permits (the cascade) — this happens every
+            # wave regardless of the task cap below, so existing workers keep widening the
+            # search at the paced rate even once we stop spawning new tasks.
+            _permit[0] += n
             live = sum(1 for t in tasks if t is not me and not t.done())
             if live + n <= cap:
                 _spawn(n)
@@ -14330,12 +14357,18 @@ def _edit_workflow(plan, prompt, image_names, params=None):
 
     if fam.get("style") == "encode":
         slots = fam.get("images") or []
+        # Some encode nodes have REQUIRED inputs beyond clip/prompt/vae/image — e.g.
+        # TextEncodeZImageOmni needs `auto_resize_images`, and ComfyUI rejects the whole
+        # prompt ("required_input_missing") if it's absent. The family carries them in
+        # `encode_inputs`, merged into BOTH the positive and negative encode nodes.
+        extra = fam.get("encode_inputs") or {}
         pos_in = {"clip": CLIP, "prompt": prompt, "vae": VAE}
+        pos_in.update(extra)
         for slot, ref in zip(slots, img_nodes):
             pos_in[slot] = ref
         g["200"] = {"class_type": plan["encode"], "inputs": pos_in}
         g["201"] = {"class_type": plan["encode"],
-                    "inputs": {"clip": CLIP, "prompt": "", "vae": VAE}}
+                    "inputs": dict({"clip": CLIP, "prompt": "", "vae": VAE}, **extra)}
         POS, NEG = ["200", 0], ["201", 0]
         scaled_latent = None
     else:
@@ -15653,15 +15686,20 @@ def banner():
         VERSION=importlib.metadata.version('dyva')
     except Exception as e:
         VERSION="(git)"
-    color = random.randint(125,230)
-    print(f"""
-\\\\  \033[38;5;{color}m     ████▅▅  █▂ ▂█  █▄    ▄█   ▟▙ \033[0m    //
- l'>  \033[38;5;{color}m    █▍  ▐█  ▜▄▛    █▄  ▄█   ▄▛▜▄  \033[0m <-l
- ll   \033[38;5;{color}m    █▍  ▐█   █      █▄▄█   ▄█  █▄  \033[0m ll
- llama~\033[38;5;{color}m  ███▆▆▛▘   █       ▜▛   ▄█    █▄ \033[0m llama~
- || ||               v{VERSION}               || ||
- '' ''              epixerus              '' ''
-""")
+    color = int(random.randint(22,250)/6)*6 - 2
+    max=7
+    for i in range(0,max):
+        print(f"""
+    \\\\  \033[38;5;{color-i}m     ████▅▅  █▂ ▂█  █▄    ▄█   ▟▙ \033[0m    //
+     l'>  \033[38;5;{color-i+1}m    █▍  ▐█  ▜▄▛    █▄  ▄█   ▄▛▜▄  \033[0m <-l
+     ll   \033[38;5;{color-i+2}m    █▍  ▐█   █      █▄▄█   ▄█  █▄  \033[0m ll
+     llama~\033[38;5;{color-i+3}m  ███▆▆▛▘   █       ▜▛   ▄█    █▄ \033[0m llama~
+     || ||               v{VERSION}               || ||
+     '' ''              epixerus              '' ''
+    """)
+        if i < max-1:
+            print("\033[9A")
+            time.sleep(0.06)
 
 def main():
     global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY, BASE_PATH, ACTIVITY_LOG
