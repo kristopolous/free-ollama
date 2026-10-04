@@ -2576,7 +2576,7 @@ function renderWorkers(workers){
     // so offer stop for every running worker. (The old `!w.phase` gate predated that and
     // hid the button exactly when a long generation most needs it.)
     var _showStop=!w.done;
-    var _showSkip=!w.done&&(!w.phase||w.kind==='video'||_agent);  // skip during a long video render, or anytime for a sub-agent
+    var _showSkip=!w.done;   // skip works at any point now, same as stop: abandon the current host mid-render and let the race move to the next server
     if(_showStop||_showSkip){
      if(_showStop){
       var stop=document.createElement('button');stop.type='button';stop.className='worker-stop';
@@ -2622,8 +2622,34 @@ function renderWorkers(workers){
       hs.textContent=prov;hs.title=prov;
       sub.appendChild(hs);
     }
-    // (The 👎/👍 deprioritize/favor votes moved to the host-info card's per-model rows —
-    // they don't belong on every live worker row. Open a host to vote on its models.)
+    // Finished worker that reached a host: a 👎/👍 vote pair on the row itself. 👎
+    // DEPRIORITIZES this exact (host, resolved-model) — reputation untouched, so a
+    // slow-but-working host stops locking in and the next request goes elsewhere; 👍
+    // ("this one is good") clears the deprioritize and favors it. (Also exposed per
+    // model in the host-info card; this is the per-worker shortcut.)
+    if(w.done&&w.host){
+      var _vq='wid='+encodeURIComponent(w.wid||'')+'&host='+encodeURIComponent(w.host||'')
+             +'&model='+encodeURIComponent(w.rmodel||'');
+      var _down,_up;
+      function _vote(cls,glyph,ep,tip){
+        var b=document.createElement('button');b.type='button';b.className='worker-flag '+cls;
+        b.textContent=glyph;b.title=tip;
+        b.addEventListener('click',function(){
+          if(b.disabled)return;b.disabled=true;
+          fetch(ep+'?'+_vq).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(){
+            if(_down)_down.classList.remove('active');if(_up)_up.classList.remove('active');
+            b.classList.add('active');b.disabled=false;
+            if(typeof refreshListsNow==='function')refreshListsNow();
+          }).catch(function(){b.disabled=false;});
+        });
+        return b;
+      }
+      _down=_vote('down','👎🏽','flag-worker',
+        'Deprioritize this host+model — push it to the back so the next request goes elsewhere (reversible with 👍)');
+      _up=_vote('up','👍🏽','favor-worker',
+        'This one is good — clear any deprioritize and favor it');
+      sub.appendChild(_down);sub.appendChild(_up);
+    }
     body.appendChild(sub);
     // Two spans, two clocks: finding a host (blue) and running the job on it
     // (green). Data attributes drive the local ticker; the server hands back
@@ -5176,6 +5202,11 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
     // independent of this connection, backgrounding the phone no longer stops
     // it: a woken tab just asks for bytes past `offset` and catches up.
     var jobId=existingJob||null,offset=0;
+    // A durable server-side job survives a dropped poll, so a transient fetch
+    // failure (a reverse-proxy/tunnel blip) must RESUME from the same offset, not
+    // abandon a generation that is still running. Only a sustained run of failures
+    // surfaces as a real error. Reset on every clean poll.
+    var pollErrs=0,MAX_POLL_ERRS=12;
     if(!jobId){
       var _payload=(useTools&&toolList.length)?{model:model,messages:msgs,stream:true,tools:toolList}:{model:model,messages:msgs,stream:true};
       // Stash the EXACT body we POST so /download emits it verbatim — the thing you'd
@@ -5201,14 +5232,25 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
     try{localStorage.setItem('dyva_inflight',JSON.stringify({id:chatId,model:model,msgs:msgs,job:jobId}))}catch(e){}
     while(true){
       if(ac.signal.aborted)throw new DOMException('aborted','AbortError');
-      var presp=await fetch('api/chat/jobs/'+encodeURIComponent(jobId)+'?offset='+offset,{signal:ac.signal});
-      if(presp.status===404){
-        clearInflight();
-        errNote('generation not found');
-        if(inView())saveCurrentChat();renderSidebar();
-        return;
+      var presp,pj;
+      try{
+        presp=await fetch('api/chat/jobs/'+encodeURIComponent(jobId)+'?offset='+offset,{signal:ac.signal});
+        if(presp.status===404){
+          clearInflight();
+          errNote('generation not found');
+          if(inView())saveCurrentChat();renderSidebar();
+          return;
+        }
+        pj=await presp.json();
+      }catch(fe){
+        if(ac.signal.aborted)throw fe;              // user stop / navigation — let it propagate
+        if(++pollErrs>MAX_POLL_ERRS)throw fe;        // sustained outage (dyva down?) — surface it
+        // transient blip: the job keeps running server-side, so wait briefly and
+        // re-poll from the SAME offset rather than killing the visible answer.
+        await new Promise(function(res){var t=setTimeout(res,Math.min(2000,300*pollErrs));try{ac.signal.addEventListener('abort',function(){clearTimeout(t);res()},{once:true})}catch(e){}});
+        continue;
       }
-      var pj=await presp.json();
+      pollErrs=0;   // a clean poll ends any transient-failure streak
       if(pj.host){host=pj.host;gen.host=host;}
       if(pj.model){fmodel=pj.model;gen.fmodel=fmodel;}
       service=pj.service||service||'';gen.service=service;
