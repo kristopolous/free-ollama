@@ -77,3 +77,29 @@ def test_export_emits_full_set_so_guard_sees_true_count(tmp_path):
                            lambda p, d: seen.__setitem__(p.rsplit("/", 1)[-1], len(d)),
                            lambda s, x: f"{s}-{x}.json")
     assert seen["ollama-working.json"] == 10
+
+
+def _entry_host(e):
+    return e.get("host") or e.get("url", "").split("://")[-1].rstrip("/")
+
+
+def _load(p, silent=False):
+    with open(p) as f:
+        return json.load(f)
+
+
+def test_import_order_preserves_status_and_two_services(tmp_path):
+    d = tmp_path
+    (d / "ollama-working.json").write_text(json.dumps([{"host": "a:1", "models": ["m"], "checked": "t1"}]))
+    (d / "ollama-notworking.json").write_text(json.dumps({"b:2": {"host": "b:2", "reason": "timeout", "checked": "t2"}}))
+    # a:1 ALSO appears in hosts (discovery) — must NOT downgrade it to NULL
+    (d / "ollama-hosts.json").write_text(json.dumps([{"service": "ollama", "host": "a:1"}, {"service": "ollama", "host": "c:3"}]))
+    # same host:port under a second service
+    (d / "vllm-working.json").write_text(json.dumps([{"host": "a:1", "models": ["v"], "checked": "t3"}]))
+
+    conn = hoststore.connect(str(d / "g.db"))
+    hoststore.import_files(conn, str(d), _load, _entry_host)
+
+    got = dict(conn.execute("SELECT host, status FROM host WHERE service='ollama'").fetchall())
+    assert got == {"a:1": "working", "b:2": "notworking", "c:3": None}
+    assert conn.execute("SELECT status FROM host WHERE service='vllm' AND host='a:1'").fetchone()[0] == "working"

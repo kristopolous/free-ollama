@@ -86,3 +86,47 @@ def export_files(conn, save_fn, cache_file_fn):
         save_fn(cache_file_fn(svc, "hosts"), hosts)
         written += [cache_file_fn(svc, s) for s in ("working", "notworking", "hosts")]
     return written
+
+
+def _import_one(conn, service, status, record, host):
+    if not host:
+        return 0
+    payload = json.dumps(record, ensure_ascii=False)
+    checked = record.get("checked") if isinstance(record, dict) else None
+    if status is None:
+        # discovery row: never overwrite an existing working/notworking status
+        conn.execute(
+            "INSERT OR IGNORE INTO host(service, host, status, payload, checked) VALUES(?,?,?,?,?)",
+            (service, host, None, payload, checked))
+    else:
+        conn.execute(
+            "INSERT INTO host(service, host, status, payload, checked) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(service, host) DO UPDATE SET status=excluded.status, payload=excluded.payload, checked=excluded.checked",
+            (service, host, status, payload, checked))
+    return 1
+
+
+def import_files(conn, cache_dir, load_fn, entry_host_fn):
+    """One-time load of the existing <service>-{working,notworking,hosts}.json into the DB.
+    Order matters: working then notworking (real status + full payload), then hosts via
+    INSERT OR IGNORE so a discovery row never downgrades a host already checked. Bad
+    records are logged and skipped, never fatal. Returns the count imported."""
+    n = 0
+    for suffix, status in (("working", "working"), ("notworking", "notworking"), ("hosts", None)):
+        for path in sorted(_glob.glob(_os.path.join(cache_dir, f"*-{suffix}.json"))):
+            service = _os.path.basename(path)[: -len(f"-{suffix}.json")]
+            try:
+                data = load_fn(path, silent=True)
+            except Exception as e:
+                _log.warning(f"hoststore import: skip {path}: {e}")
+                continue
+            items = data.values() if isinstance(data, dict) else data
+            for rec in items:
+                if not isinstance(rec, dict):
+                    continue
+                try:
+                    n += _import_one(conn, service, status, rec, entry_host_fn(rec))
+                except Exception as e:
+                    _log.warning(f"hoststore import: skip record in {path}: {e}")
+    conn.commit()
+    return n
