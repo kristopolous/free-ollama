@@ -123,3 +123,12 @@ def test_roundtrip_fidelity(tmp_path):
                            lambda s, x: f"/{s}-{x}.json")
     assert out["ollama-working.json"] == working          # same list, sorted by (checked, host)
     assert out["ollama-notworking.json"] == notworking
+
+
+def test_discover_never_downgrades(tmp_path):
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    hoststore.upsert(conn, "ollama", "a:1", "working", {"host": "a:1"}, "t")
+    hoststore.discover(conn, "ollama", "a:1", {"service": "ollama", "host": "a:1"})   # must NOT downgrade
+    hoststore.discover(conn, "ollama", "z:9", {"service": "ollama", "host": "z:9"})   # new -> NULL
+    assert conn.execute("SELECT status FROM host WHERE host='a:1'").fetchone()[0] == "working"
+    assert conn.execute("SELECT status FROM host WHERE host='z:9'").fetchone()[0] is None
