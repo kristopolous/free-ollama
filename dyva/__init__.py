@@ -4212,7 +4212,7 @@ def _write_stat(host, model, up, down, tps, title=None):
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
                       label=None, hedge_delay=0, key_of=None, banker_key=None, fav=None,
-                      stretch=0.0):
+                      stretch=0.0, starved_out=None):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -4321,6 +4321,12 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             if banker_key is not None:
                 if not _banker.withdraw(banker_key, [_ih], 1).hosts:
                     _starved[0] += 1
+                    # Record WHICH host we skipped for being leased, so a caller that
+                    # wants busy-beats-none fallback (media: thin pool, one good
+                    # ComfyUI) can re-race exactly these once the leased pass finds
+                    # nothing — rather than failing a request that could queue.
+                    if starved_out is not None and _ih not in starved_out:
+                        starved_out.append(_ih)
                     continue          # another job is on it — next candidate
                 _leased = True
             _astart = time.time()
@@ -9928,10 +9934,25 @@ async def handle_txt2img(request):
         nonlocal tried_total
         if not host_list:
             return None
+        # Lease each host exclusively (banker_key) so N concurrent image requests
+        # spread across N hosts instead of all converging on the one that looked
+        # idle — the same one-job-per-host guarantee the text race has. A render
+        # holds its host for the whole job (comfy_attempt awaits the full render),
+        # so a sibling request can't grab a box mid-render.
+        starved = []
         result, _stopped, tried, tally = await _race_hosts(
-            host_list, attempt, IMG_KEY, workers=workers, label=wkey, job_wid=job_wid)
+            host_list, attempt, IMG_KEY, workers=workers, label=wkey, job_wid=job_wid,
+            banker_key=IMG_KEY, starved_out=starved)
         tried_total += tried
         verdict_totals.update(tally)
+        if result is None and starved and not _stopped:
+            # Every idle host was leased by a concurrent render. Busy-beats-none:
+            # re-race just those, unleased, so a thin pool still renders (ComfyUI
+            # queues the job) rather than failing.
+            result, _stopped, tried2, tally2 = await _race_hosts(
+                starved, attempt, IMG_KEY, workers=workers, label=wkey, job_wid=job_wid)
+            tried_total += tried2
+            verdict_totals.update(tally2)
         return result
 
     async def _deliver(data):
@@ -12120,8 +12141,14 @@ async def _run_video_job(session, jid):
                 continue
             break
         job["exclude_models"] = sorted(bad_models)
+        # Lease each host exclusively so concurrent video renders spread across the
+        # pool instead of piling onto one box (the text race's one-job-per-host rule).
+        starved = []
         result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey,
-                                                            job_wid=job_wid)
+                                                            job_wid=job_wid, banker_key=vkey, starved_out=starved)
+        if result is None and starved and not stopped:
+            # all idle hosts leased by concurrent renders — busy-beats-none fallback
+            result, stopped, _t2, _ta2 = await _race_hosts(starved, attempt, vkey, job_wid=job_wid)
         if not result or stopped:
             if not stopped and _try_fallback():   # no host could serve the requested model
                 continue
@@ -13560,10 +13587,18 @@ async def handle_tts_speech(request):
         pool = [h for h in hosts if h not in tried_hosts]
         if not pool:
             break
+        # Lease each host exclusively so concurrent speech jobs spread across the
+        # pool instead of piling onto one box (the text race's one-job-per-host rule).
+        starved = []
         result, stopped, n_tried, round_tally = await _race_hosts(pool, attempt, tkey,
-                                                                  job_wid=job_wid)
+                                                                  job_wid=job_wid, banker_key=tkey, starved_out=starved)
         tried += n_tried
         tally.update(round_tally)
+        if result is None and starved and not stopped:
+            # all idle hosts leased by concurrent jobs — busy-beats-none fallback
+            result, stopped, n_tried2, round_tally2 = await _race_hosts(starved, attempt, tkey, job_wid=job_wid)
+            tried += n_tried2
+            tally.update(round_tally2)
         if not result or stopped:
             break
         host, prompt_id, node = result
@@ -14187,7 +14222,11 @@ def _edit_plan(info, model_filter=None, exclude=(), n_images=0, reasons=None):
                 loader["kind"] = "checkpoint"
                 loader["ckpt"] = ckpt
             return {"family": fam, "encode": encode, "loader": loader,
-                    "model": unet or ckpt, "out": out_node}
+                    "model": unet or ckpt, "out": out_node,
+                    # Does the host expose the auto-fit scaler? Resolved here,
+                    # where the node catalog (`info`) is in scope — _edit_workflow
+                    # only gets the plan, not the catalog.
+                    "has_scale": "ImageScaleToTotalPixels" in info}
     return None
 
 
@@ -14304,7 +14343,7 @@ def _edit_workflow(plan, prompt, image_names, params=None):
                                        "width": fitted[0], "height": fitted[1],
                                        "crop": "disabled"}}
                 src = ["490", 0]
-            elif "ImageScaleToTotalPixels" in (host_info or {}):
+            elif plan.get("has_scale"):
                 # no dimensions from the caller — let the host work it out
                 g["490"] = {"class_type": "ImageScaleToTotalPixels",
                             "inputs": {"image": src, "upscale_method": "lanczos",
@@ -14622,10 +14661,20 @@ async def handle_image_edit(request):
         pool = [h for h in hosts if h not in tried_hosts]
         if not pool:
             break
+        # Lease each host exclusively so concurrent edits spread across the pool
+        # instead of piling onto one box (the text race's one-job-per-host rule).
+        starved = []
         result, stopped, n_tried, round_tally = await _race_hosts(
-            pool, attempt, ekey, job_wid=job_wid)
+            pool, attempt, ekey, job_wid=job_wid, banker_key=ekey, starved_out=starved)
         tried += n_tried
         tally.update(round_tally)
+        if result is None and starved and not stopped:
+            # All idle hosts were leased by concurrent edits — busy-beats-none: try
+            # those unleased so a thin pool still renders rather than failing.
+            result, stopped, n_tried2, round_tally2 = await _race_hosts(
+                starved, attempt, ekey, job_wid=job_wid)
+            tried += n_tried2
+            tally.update(round_tally2)
         if not result or stopped:
             break
         host, prompt_id, plan, workflow = result
