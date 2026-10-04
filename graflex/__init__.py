@@ -233,6 +233,23 @@ def _store_discovery(service, host):
     """Record a discovered host (status NULL) WITHOUT downgrading one already checked."""
     _hoststore.discover(_store(), service, host, {"service": service, "host": host})
 
+
+def export():
+    """Regenerate every <service>-{working,notworking,hosts}.json from the DB, in the
+    exact shapes dyva and resume consume. Called at the end of a check (and periodically
+    during one) so the json files stay a faithful, byte-shape-identical view of the store."""
+    return _hoststore.export_files(_store(), _save_json_atomic, _cache_file)
+
+
+def _import_if_empty():
+    """One-time migration: if the DB has no rows yet, load the existing per-service json
+    files into it so the first check after the switch starts from today's known hosts."""
+    conn = _store()
+    if conn.execute("SELECT 1 FROM host LIMIT 1").fetchone() is None:
+        n = _hoststore.import_files(conn, CACHE_DIR, _load_json, _entry_host)
+        if n:
+            log.info(f"hoststore: imported {n} records from existing json files")
+
 # Model knowledge base mined from the probe logs (shared with dyva, which loads
 # it read-only). Keyed by model name; general/extensible — currently size+digest.
 SURVEY_FILE = os.path.join(CACHE_DIR, "survey.json")
@@ -2735,6 +2752,10 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     if name is None:
         name = service
 
+    # First run after the sqlite switch: seed the DB from the existing json files so
+    # this sweep starts from today's known hosts (no-op once the DB has rows).
+    _import_if_empty()
+
     hosts_file = _cache_file(name, "hosts")
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
@@ -2823,8 +2844,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                      + f" in session {session}")
     if not to_check:
         log.info(f"check: all {len(hosts)} hosts already have model data")
-        existing_working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
-        _save_json_atomic(working_file, existing_working)
+        export()   # regenerate the json files from the DB (working sorted, notworking, hosts)
         return
 
     # Report the FULL pool, not just the remainder — otherwise "64 to check" reads as
@@ -2841,6 +2861,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     log.info(f"check{'-all' if check_all else ''}: {len(to_check)} to check of {_pool} in pool"
              + (f" ({'; '.join(_why)})" if _why else ""))
     await _check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working)
+    export()   # final regeneration of the json files from the DB after the sweep
 
 
 async def _check_hosts(hosts, service, working_file, notworking_file, check_timeout=60, workers=10, existing_working=None):
@@ -2928,6 +2949,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
             elapsed = time.time() - start
             eta = elapsed * (len(to_check) / completed) - elapsed
             log.info(f"Checked: {completed} | Runtime: {_fmt_duration(elapsed)} | Remaining: {len(to_check) - completed} | ETA: {_fmt_duration(eta)}")
+            export()   # flush the derived json from the DB on the same cadence so partial results reach dyva
         return ok
 
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
