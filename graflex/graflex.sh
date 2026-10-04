@@ -16,7 +16,7 @@ source .env
 case "$SERVICE" in
   all)
 
-    for i in ollama ds4 vllm lmstudio fooocus ollama-shodan llama.cpp comfyui a1111 gradio; do
+    for i in ds4 vllm lmstudio fooocus llama.cpp ollama ollama-shodan comfyui a1111 gradio; do
       $CMD $i ${EXTRA_ARGS[@]}
       last_res="$?"
       echo ">>   "$last_res
@@ -85,7 +85,7 @@ case "$SERVICE" in
   ollama-shodan)
     SERVICE=ollama
     SITE=shodan
-    PORTS="11434,9306,5172,5984,8500,50000"
+    PORTS="11434,9200,10001,8888,9000,8080,8083,80,443"
     COUNTRIES="US,AU,JP,IN,CA,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
     ;;
 
@@ -120,7 +120,9 @@ case "$SERVICE" in
     ;;
 
   ollama)
-    PORTS="11434,10443,1025,9443,9200,8085,1024,1025,10001,10000,8888,9000,8080,8083,3000,16000,80,443,1194,110,8983,28017,21,5060,5601"
+    #PORTS="11434,10443,1025,9443,9200,8085,1024,1025,10001,10000,8888,9000,8080,8083,3000,16000,80,443,1194,110,8983,28017,21,5060,5601"
+    # these are the ones that actually show up as winners that served 
+    PORTS="11434,9200,10001,8888,9000,8080,8083,80,443"
     SERVERS="nginx,cloudflare,Apache"
     COUNTRIES="TH,FI,MX,TR,IR,AR,TW,MA,MY,NZ,BH,SG,AT,KR,PE,GB,AE,US,NL,AU,IN,VN,JP,DE,CA,RU,IL,BR,BE,CN,IE,FR,UA,ES,ID,IT,CH,ZA,HK,PL"
     FID=$({ 
