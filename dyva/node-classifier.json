@@ -402,6 +402,9 @@
         "image2",
         "image3"
       ],
+      "encode_inputs": {
+        "auto_resize_images": true
+      },
       "model": "(?i)z[-_. ]?image",
       "clip": [
         "(?i)qwen[-_. ]?3[-_. ]?4b",
