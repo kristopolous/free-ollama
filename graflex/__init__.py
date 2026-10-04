@@ -246,7 +246,10 @@ def _import_if_empty():
     files into it so the first check after the switch starts from today's known hosts."""
     conn = _store()
     if conn.execute("SELECT 1 FROM host LIMIT 1").fetchone() is None:
-        n = _hoststore.import_files(conn, CACHE_DIR, _load_json, _entry_host)
+        # Allowlist to the real services only, so known-hosts.json / image-gen-hosts.json
+        # (same -hosts.json suffix, not per-service) are never imported or re-exported.
+        n = _hoststore.import_files(conn, CACHE_DIR, _load_json, _entry_host,
+                                    valid_services=set(SERVICE_CONFIG))
         if n:
             log.info(f"hoststore: imported {n} records from existing json files")
 

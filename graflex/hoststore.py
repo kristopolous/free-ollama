@@ -108,22 +108,34 @@ def _import_one(conn, service, status, record, host):
             "INSERT OR IGNORE INTO host(service, host, status, payload, checked) VALUES(?,?,?,?,?)",
             (service, host, None, payload, checked))
     else:
+        # A host can appear in both working and notworking (worked once, failed later or
+        # vice-versa). On conflict the most-recent probe must win, not whichever file is
+        # imported last — so only overwrite when the incoming `checked` is strictly newer
+        # (an untimestamped record never displaces a timestamped one).
         conn.execute(
             "INSERT INTO host(service, host, status, payload, checked) VALUES(?,?,?,?,?) "
-            "ON CONFLICT(service, host) DO UPDATE SET status=excluded.status, payload=excluded.payload, checked=excluded.checked",
+            "ON CONFLICT(service, host) DO UPDATE SET status=excluded.status, payload=excluded.payload, checked=excluded.checked "
+            "WHERE excluded.checked IS NOT NULL AND (host.checked IS NULL OR excluded.checked > host.checked)",
             (service, host, status, payload, checked))
     return 1
 
 
-def import_files(conn, cache_dir, load_fn, entry_host_fn):
+def import_files(conn, cache_dir, load_fn, entry_host_fn, valid_services=None):
     """One-time load of the existing <service>-{working,notworking,hosts}.json into the DB.
     Order matters: working then notworking (real status + full payload), then hosts via
     INSERT OR IGNORE so a discovery row never downgrades a host already checked. Bad
-    records are logged and skipped, never fatal. Returns the count imported."""
+    records are logged and skipped, never fatal. Returns the count imported.
+
+    valid_services, when given, is the allowlist of real service names: a file whose parsed
+    service is not in it is skipped. This keeps same-suffix-but-not-per-service files —
+    known-hosts.json, image-gen-hosts.json — out of the DB, so a later export() can never
+    invent a bogus service or clobber the real known-hosts.json."""
     n = 0
     for suffix, status in (("working", "working"), ("notworking", "notworking"), ("hosts", None)):
         for path in sorted(_glob.glob(_os.path.join(cache_dir, f"*-{suffix}.json"))):
             service = _os.path.basename(path)[: -len(f"-{suffix}.json")]
+            if valid_services is not None and service not in valid_services:
+                continue
             try:
                 data = load_fn(path, silent=True)
             except Exception as e:

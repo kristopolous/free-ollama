@@ -125,6 +125,42 @@ def test_roundtrip_fidelity(tmp_path):
     assert out["ollama-notworking.json"] == notworking
 
 
+def test_import_skips_non_service_hosts_files(tmp_path):
+    # known-hosts.json / image-gen-hosts.json live in the same cache dir but are NOT
+    # per-service files; importing them (and later re-exporting) would invent bogus
+    # services and could clobber the real known-hosts.json. An allowlist excludes them.
+    d = tmp_path
+    (d / "ollama-working.json").write_text(json.dumps([{"host": "a:1", "checked": "t"}]))
+    (d / "known-hosts.json").write_text(json.dumps([{"service": "ollama", "host": "x:9"}]))
+    (d / "image-gen-hosts.json").write_text(json.dumps([{"service": "comfyui", "host": "y:8"}]))
+
+    conn = hoststore.connect(str(d / "g.db"))
+    hoststore.import_files(conn, str(d), _load, _entry_host, valid_services={"ollama", "comfyui"})
+
+    assert hoststore.services(conn) == ["ollama"]
+    assert {h for h, _, _ in hoststore.rows(conn, "ollama")} == {"a:1"}
+
+
+def test_import_conflict_most_recent_checked_wins(tmp_path):
+    # A host legitimately appears in BOTH working and notworking (it worked once, failed
+    # later, or vice-versa). The import replays files in a fixed order, but the winner must
+    # be the most-recent probe, not whichever file is read last — otherwise ~half the
+    # overlap gets the wrong status.
+    d = tmp_path
+    (d / "ollama-working.json").write_text(json.dumps([
+        {"host": "stale-ok:1", "checked": "2026-01-01"},   # older working -> notworking wins
+        {"host": "fresh-ok:2", "checked": "2026-02-01"},   # newer working -> stays working
+    ]))
+    (d / "ollama-notworking.json").write_text(json.dumps({
+        "stale-ok:1": {"host": "stale-ok:1", "reason": "timeout", "checked": "2026-02-02"},
+        "fresh-ok:2": {"host": "fresh-ok:2", "reason": "timeout", "checked": "2026-01-02"},
+    }))
+    conn = hoststore.connect(str(d / "g.db"))
+    hoststore.import_files(conn, str(d), _load, _entry_host, valid_services={"ollama"})
+    got = dict(conn.execute("SELECT host, status FROM host WHERE service='ollama'").fetchall())
+    assert got == {"stale-ok:1": "notworking", "fresh-ok:2": "working"}
+
+
 def test_discover_never_downgrades(tmp_path):
     conn = hoststore.connect(str(tmp_path / "g.db"))
     hoststore.upsert(conn, "ollama", "a:1", "working", {"host": "a:1"}, "t")
