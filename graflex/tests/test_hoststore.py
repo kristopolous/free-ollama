@@ -103,3 +103,23 @@ def test_import_order_preserves_status_and_two_services(tmp_path):
     got = dict(conn.execute("SELECT host, status FROM host WHERE service='ollama'").fetchall())
     assert got == {"a:1": "working", "b:2": "notworking", "c:3": None}
     assert conn.execute("SELECT status FROM host WHERE service='vllm' AND host='a:1'").fetchone()[0] == "working"
+
+
+def test_roundtrip_fidelity(tmp_path):
+    d = tmp_path
+    working = [{"host": "a:1", "models": ["m"], "checked": "2026-01-01"},
+               {"host": "b:2", "models": [], "checked": "2026-01-02"}]
+    notworking = {"x:9": {"host": "x:9", "reason": "timeout", "result": "unreachable", "checked": "2026-01-03"}}
+    (d / "ollama-working.json").write_text(json.dumps(working))
+    (d / "ollama-notworking.json").write_text(json.dumps(notworking))
+    (d / "ollama-hosts.json").write_text(json.dumps([{"service": "ollama", "host": "a:1"}]))
+
+    conn = hoststore.connect(str(d / "g.db"))
+    hoststore.import_files(conn, str(d), _load, _entry_host)
+
+    out = {}
+    hoststore.export_files(conn,
+                           lambda p, data: out.__setitem__(p.rsplit("/", 1)[-1], data),
+                           lambda s, x: f"/{s}-{x}.json")
+    assert out["ollama-working.json"] == working          # same list, sorted by (checked, host)
+    assert out["ollama-notworking.json"] == notworking
