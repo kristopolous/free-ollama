@@ -10123,6 +10123,13 @@ class ComfyUnreachable(ComfyError):
     belongs on the host-wide unreachable mark, not a per-key one."""
 
 
+class ComfyBusy(ComfyError):
+    """Transient 'come back': the host answered but is at capacity right now — HTTP
+    503 / 429, e.g. an upload service 'temporarily unavailable'. ALIVE and willing, so
+    it's parked-and-retried with NO reputation penalty, exactly like a 503 on the
+    inference path or an ollama 'loading model'. Not a failure, not a bad host."""
+
+
 # ComfyUI's structural refusals, as they appear in a /prompt rejection body.
 _COMFY_STRUCTURAL = re.compile(r"prompt_outputs_failed_validation|missing_node_type"
                                r"|required_input_missing|return_type_mismatch")
@@ -10168,7 +10175,7 @@ async def comfy_submit(session, host, workflow, timeout=None):
             # A host part-way through loading a checkpoint accepts the socket
             # and answers late; that is a cold start, not a refusal.
             timeout=aiohttp.ClientTimeout(total=timeout or COMFY_SUBMIT,
-                                          sock_connect=COMFY_CONNECT),
+                                          sock_connect=TIMEOUT),
         )
         if r.status != 200:
             body = await r.text()
@@ -10180,6 +10187,8 @@ async def comfy_submit(session, host, workflow, timeout=None):
             log.warning(f"comfy {host} rejected the prompt: {detail}\n"
                         f"  body: {body[:1500]}\n"
                         f"  graph: {json.dumps(workflow)[:1500]}")
+            if r.status in (503, 429):
+                raise ComfyBusy(f"prompt busy HTTP {r.status}: {detail}")
             if _COMFY_STRUCTURAL.search(body):
                 raise ComfyUnsuitable(f"prompt rejected: {detail}")
             raise ComfyError(f"prompt rejected: {detail}")
@@ -10760,7 +10769,11 @@ _COMFY_INFO_TTL = 300
 # the socket wide open — so a short read timeout throws away hosts that were
 # only cold-starting. Waiting costs little: the race runs several hosts at
 # once, so a slow one never holds up a fast one.
-COMFY_CONNECT = 15      # kernel-level; a dead host is dead in 15s
+# Connect budget for comfy requests honors the operator's configured TIMEOUT (the
+# minimum-timeout setting), not a fixed cap: if they set 38s, a slow-to-accept host gets
+# 38s to complete the handshake rather than being written off at an arbitrary 15. A
+# dropped-SYN dead host still fails — at TIMEOUT now; lower the timeout for faster
+# dead-host detection, their call. (Was COMFY_CONNECT=15, which ignored the setting.)
 COMFY_STALL = 180       # silence while a big model loads is not a failure
 COMFY_INFO_TOTAL = 600  # backstop against a host that dribbles forever
 COMFY_SUBMIT = 120      # /prompt from a host mid-load answers late, not never
@@ -10846,7 +10859,7 @@ async def comfy_object_info(session, host):
             # *stops* — with a long backstop against a host that dribbles
             # forever.
             timeout=aiohttp.ClientTimeout(total=COMFY_INFO_TOTAL,
-                                          sock_connect=COMFY_CONNECT,
+                                          sock_connect=TIMEOUT,
                                           sock_read=COMFY_STALL),
         )
         status = r.status
@@ -10863,9 +10876,9 @@ async def comfy_object_info(session, host):
         # refusing them looks identical to a slow one until you time the
         # phases: no connection at all is unreachable, mid-download is not.
         took = time.time() - started
-        if took < COMFY_CONNECT + 1:
+        if took < TIMEOUT + 1:
             raise ComfyUnreachable(
-                f"no TCP connection within {COMFY_CONNECT}s (packets dropped, not refused)")
+                f"no TCP connection within {TIMEOUT}s (packets dropped, not refused)")
         raise _TtsError(
             f"object_info stalled after {took:.0f}s — connected, but silent for "
             f"{COMFY_STALL}s (wedged, or still loading something enormous)")
@@ -13889,6 +13902,8 @@ class ComfyQueueStalled(ComfyError):
 
 
 def render_verdict(err):
+    if isinstance(err, ComfyBusy):          # 503/429 — alive but at capacity; retry, no penalty
+        return retry_later(str(err) or "busy")
     if isinstance(err, ComfyQueueStalled):
         return timed_out(str(err))
     """Turn an exception from the render phase into a verdict, so a host that
@@ -14092,6 +14107,8 @@ async def comfy_upload_image(session, host, data, filename):
         await r.release()
     except Exception as e:
         raise ComfyError(f"upload failed: {e or type(e).__name__}")
+    if status in (503, 429):
+        raise ComfyBusy(f"upload busy HTTP {status}: {body[:120]}")
     if status != 200:
         raise ComfyError(f"upload HTTP {status}: {body[:120]}")
     try:
@@ -14453,6 +14470,18 @@ def _edit_workflow(plan, prompt, image_names, params=None):
     return g
 
 
+# ComfyUI's UNETLoader / CheckpointLoaderSimple only list models under their own folders
+# (diffusion_models/, unet/, checkpoints/, and custom-node variants). A model misfiled
+# under a SUPPORT folder — latent_upscale_models/, vae/, loras/, clip/, … — looks like an
+# edit model by its basename but can NEVER be loaded as one, so _edit_plan rejects it live
+# and the host fails "no edit model matching …". Excluding those folders here keeps such a
+# host out of the race entirely, so the cache filter predicts what planning will accept.
+_EDIT_AUX_DIR = re.compile(
+    r"(?i)(^|/)(latent_upscale_models|upscale_models|loras?|vae|clip|clip_vision|"
+    r"text_encoders?|controlnet|embeddings|style_models|hypernetworks|photomaker|"
+    r"ipadapter|pulid|taesd)/")
+
+
 def _host_edit_models(host, model_filter=None):
     """A host's cached edit-class models, optionally narrowed to a query."""
     out = []
@@ -14460,6 +14489,8 @@ def _host_edit_models(host, model_filter=None):
         if s.get("server") != host:
             continue
         for m in s.get("models") or []:
+            if _EDIT_AUX_DIR.search(m):     # a support-folder file can't be loaded as an edit UNET
+                continue
             if "edit" not in model_classes(m):
                 continue
             # Same separator-blind match _edit_plan uses, so the host we pick as
@@ -14712,6 +14743,14 @@ async def handle_image_edit(request):
             prompt_id = await comfy_submit(session, host, workflow)
         except (ComfyError, asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
             err = str(e) or type(e).__name__
+            if isinstance(e, ComfyBusy):
+                # Alive but at capacity (HTTP 503/429 — e.g. the upload service is
+                # momentarily unavailable). Not a failure and not a bad host: park it and
+                # retry with no penalty, and log it as busy rather than a failure.
+                await broadcast_activity(host, ekey, "warming",
+                    f"busy: {host} for {label} - {err} (retrying)",
+                    duration=time.time() - t0, wid=wid)
+                return retry_later(err)
             errors.append(f"{host}: {err}")
             await broadcast_activity(host, ekey, "failed",
                 f"failure: {host} for {label} - {err}",
