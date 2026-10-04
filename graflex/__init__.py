@@ -206,6 +206,33 @@ def _cache_file(name, suffix):
     prefix = name or "image-gen"
     return os.path.join(CACHE_DIR, f"{prefix}-{suffix}.json")
 
+
+from . import hoststore as _hoststore   # noqa: E402  (store backing the per-service json)
+
+# Lazily-opened handle to graflex.db — the working store behind working/notworking/hosts.
+# A per-host result is a single upsert here, not a whole-file rewrite; the json files are
+# regenerated from it by export(). WAL + busy_timeout, so a second scan or dyva reading
+# concurrently waits briefly instead of erroring.
+_HOSTSTORE = None
+
+
+def _store():
+    global _HOSTSTORE
+    if _HOSTSTORE is None:
+        _HOSTSTORE = _hoststore.connect(os.path.join(CACHE_DIR, "graflex.db"))
+    return _HOSTSTORE
+
+
+def _store_record(service, host, status, record):
+    """Upsert one host RESULT row. status: 'working'|'notworking'. Overwrites status."""
+    _hoststore.upsert(_store(), service, host, status, record,
+                      record.get("checked") if isinstance(record, dict) else None)
+
+
+def _store_discovery(service, host):
+    """Record a discovered host (status NULL) WITHOUT downgrading one already checked."""
+    _hoststore.discover(_store(), service, host, {"service": service, "host": host})
+
 # Model knowledge base mined from the probe logs (shared with dyva, which loads
 # it read-only). Keyed by model name; general/extensible — currently size+digest.
 SURVEY_FILE = os.path.join(CACHE_DIR, "survey.json")
@@ -2746,6 +2773,16 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                 # raw record, which may be url-only (no "host" key) and would KeyError
                 # downstream. check_one re-probes fresh and rewrites everything anyway.
                 hosts.append({"service": extra.get("service") or service, "host": eh})
+
+    # Record every host in the pool as a discovery row (status NULL) so the DB —
+    # and thus the exported hosts.json — stays complete even for hosts that never
+    # get a working/notworking result this run (interrupted, skipped on resume).
+    # Non-downgrading: a host already checked keeps its status (INSERT OR IGNORE).
+    for _h in hosts:
+        _eh = _entry_host(_h)
+        if _eh:
+            _store_discovery(_h.get("service") or service, _eh)
+
     done = set()
     if not check_all:
         # Keyed by host alone, not service@host: the working/notworking files are
@@ -2855,11 +2892,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                 nr = {"url": f"http://{entry['host']}",
                       "reason": "honeypot", "result": "honeypot",
                       "checked": datetime.now(timezone.utc).isoformat()}
-                notworking = _load_json(notworking_file, silent=True)
-                if not isinstance(notworking, dict):
-                    notworking = {}
-                notworking[entry["host"]] = nr
-                _save_json_atomic(notworking_file, notworking)
+                _store_record(service, entry["host"], "notworking", nr)
                 log.warning(f"~ {entry['host']}: honeypot (phantom catalog + /wp-login.php 200)")
             elif isinstance(result, dict) and "error" not in result:
                 result["checked"] = result.get("checked", datetime.now(timezone.utc).isoformat())
@@ -2870,17 +2903,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                     result["method"] = method
                 else:
                     result.pop("method", None)
-                working = _load_json(working_file, silent=True)
-                found = False
-                for i, w in enumerate(working):
-                    if _entry_host(w) == key:
-                        working[i] = result
-                        found = True
-                        break
-                if not found:
-                    working.append(result)
-                working.sort(key=lambda h: (h.get("checked", ""), _entry_host(h)))
-                _save_json_atomic(working_file, working)
+                _store_record(service, entry["host"], "working", result)
                 note = ""
                 if service == "comfyui" and not result["models"]:
                     # "0 models" is ambiguous on its own: no index at all reads
@@ -2893,12 +2916,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                 reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
                 result_type = "error" if (reason.startswith("HTTP ") or reason.startswith("show HTTP ") or reason.startswith("bad JSON") or "no real" in reason or "empty show" in reason or "auth required" in reason) else "unreachable"
                 nr = {"url": f"http://{entry['host']}", "reason": reason, "result": result_type, "checked": datetime.now(timezone.utc).isoformat()}
-                notworking = _load_json(notworking_file, silent=True)
-                if not isinstance(notworking, dict):
-                    notworking = {}
-                nkey = entry["host"]
-                notworking[nkey] = nr
-                _save_json_atomic(notworking_file, notworking)
+                _store_record(service, entry["host"], "notworking", nr)
                 # host:port for the -i resume skip-list — `h`/`p` were never defined
                 # in this scope, so this line used to NameError and get swallowed by
                 # gather(return_exceptions=True), taking the print below down with it.

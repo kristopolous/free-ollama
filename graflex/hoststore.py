@@ -54,6 +54,15 @@ def upsert(conn, service, host, status, payload, checked):
     conn.commit()
 
 
+def discover(conn, service, host, payload):
+    """Record a DISCOVERED host (status NULL) without ever downgrading one already
+    checked: INSERT OR IGNORE, so a host present as working/notworking keeps its status."""
+    conn.execute(
+        "INSERT OR IGNORE INTO host(service, host, status, payload, checked) VALUES(?,?,?,?,?)",
+        (service, host, None, json.dumps(payload, ensure_ascii=False), None))
+    conn.commit()
+
+
 def rows(conn, service, status=_UNSET):
     """(host, payload_dict, checked) for a service. status=_UNSET -> all rows;
     status=None -> only NULL-status (discovered) rows; a string -> that status."""
