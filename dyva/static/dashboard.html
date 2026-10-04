@@ -351,6 +351,18 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .src-q{display:inline-block;width:40px;height:6px;background:var(--border);border-radius:3px;overflow:hidden;vertical-align:middle;margin-right:5px}
 .src-q i{display:block;height:100%;background:var(--accent);border-radius:3px}
 .src-qn{display:inline-block;min-width:3.4ch;text-align:right}
+/* Service breakdown: one horizontal bar per technology, length proportional to host
+   count (vs the biggest), segmented live/dead/unknown in the same colors as the table. */
+.svc-chart{display:flex;flex-direction:column;gap:6px;max-height:22vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding-right:4px}
+.svc-row{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm)}
+.svc-label{flex:0 0 9ch;max-width:9ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);color:var(--text-2)}
+.svc-track{flex:1 1 auto;height:12px;border-radius:3px;background:var(--border);overflow:hidden;min-width:0}
+.svc-fill{display:flex;height:100%}
+.svc-seg{display:block;height:100%}
+.svc-seg.live{background:#90be6d}
+.svc-seg.dead{background:#e5668a}
+.svc-seg.unk{background:var(--text-faint)}
+.svc-count{flex:0 0 auto;min-width:5ch;text-align:right;font-family:var(--font-mono);color:var(--text-muted)}
 .src-break-head{margin-top:var(--sp-6)}
 .stats-row{display:flex;align-items:center;gap:6px;font-size:var(--fs-md);min-width:0}
 /* name flexes and ellipsis-truncates (so long host domains / model names don't force
@@ -1525,6 +1537,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="mapLists" class="map-lists"></div>
 <h2 class="src-break-head">Source breakdown</h2>
 <div id="sourceTable" class="stats-rows"></div>
+<h2 class="src-break-head">Service breakdown</h2>
+<div id="serviceChart" class="svc-chart"></div>
 </div></div>
 </div>
 
@@ -2258,8 +2272,9 @@ function _wireHostVotes(){
     var ep=vote==='down'?'flag-worker':'favor-worker';
     fetch(ep+'?host='+encodeURIComponent(host)+'&model='+encodeURIComponent(model))
       .then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(){
-        var cell=b.closest('.hd-model'),dn=cell&&cell.querySelector('.hd-v-btn.down');
-        if(dn)dn.classList.toggle('active',vote==='down');   // down active iff deprioritized
+        var cell=b.closest('.hd-model'),dn=cell&&cell.querySelector('.hd-v-btn.down'),up=cell&&cell.querySelector('.hd-v-btn.up');
+        if(dn)dn.classList.toggle('active',vote==='down');   // down active iff 👎 (deprio +1)
+        if(up)up.classList.toggle('active',vote==='up');     // up active iff 👍 (favor -1)
         b.disabled=false;
         if(typeof refreshListsNow==='function')refreshListsNow();
       }).catch(function(){b.disabled=false;});
@@ -2334,8 +2349,8 @@ function hostDetailHtml(host,j){
       // 👎/👍 moved here from the worker rows — act on this (host, model) pair. The card's
       // delegated handler reads data-model + the card's data-host; down.active = deprioritized.
       var votes='<span class="hd-vote">'
-        +'<button type="button" class="hd-v-btn down'+(r.deprio?' active':'')+'" data-vote="down" data-model="'+escHtml(m)+'" title="Deprioritize this host+model — next request goes elsewhere (undo with 👍)">👎🏽</button>'
-        +'<button type="button" class="hd-v-btn up" data-vote="up" data-model="'+escHtml(m)+'" title="This one is good — clear the deprioritize and favor it">👍🏽</button></span>';
+        +'<button type="button" class="hd-v-btn down'+(r.deprio<0?' active':'')+'" data-vote="down" data-model="'+escHtml(m)+'" title="Deprioritize this host+model within its tier — next request prefers others (toggle with 👍)">👎🏽</button>'
+        +'<button type="button" class="hd-v-btn up'+(r.deprio>0?' active':'')+'" data-vote="up" data-model="'+escHtml(m)+'" title="Favor this host+model within its tier — pull it to the front (does not change the tier)">👍🏽</button></span>';
       h.push('<div class="hd-model"><span class="hd-model-name">'+name+'</span>'+votes+'<table class="hd-model-kv">'+trs+'</table></div>');
     });
     if(models.length>50)h.push('<div class="hd-attr">… and '+(models.length-50)+' more</div>');
@@ -8303,6 +8318,7 @@ function loadStats(){
   fetch('api/stats'+(q?'?q='+encodeURIComponent(q):''))
     .then(function(r){return r.json()}).then(renderStats).catch(function(){});
   loadSourceStats();   // source-quality card — independent of the usage filter
+  loadServiceStats();  // service/technology breakdown — same, host counts per tech
 }
 // Source breakdown: per-source host-population quality (live/dead/unknown/honeypots and
 // race won/lost), so you can see which discovery sources actually yield usable hosts.
@@ -8330,6 +8346,33 @@ function renderSourceStats(d){
 }
 function loadSourceStats(){
   fetch('api/source-stats').then(function(r){return r.json()}).then(renderSourceStats).catch(function(){});
+}
+// Service breakdown: host count per technology (ollama / comfyui / llama.cpp / …) as a
+// horizontal bar, length proportional to the biggest, segmented live/dead/unknown. Makes
+// the text-vs-media pool skew obvious — e.g. comfyui is a tiny slice of the ollama fleet.
+function renderServiceStats(d){
+  var el=document.getElementById('serviceChart');if(!el)return;
+  var rows=(d&&d.services)||[];
+  if(!rows.length){el.innerHTML='<div class="muted">no services yet</div>';return;}
+  var max=rows.reduce(function(m,s){return Math.max(m,s.hosts||0)},0)||1;
+  el.innerHTML=rows.map(function(s){
+    var h=s.hosts||0,pct=Math.round(h/max*100);
+    var l=h?Math.round((s.live||0)/h*100):0,dd=h?Math.round((s.dead||0)/h*100):0,u=Math.max(0,100-l-dd);
+    var tip=escHtml(s.name)+': '+NUM_FMT.format(h)+' hosts — '+NUM_FMT.format(s.live||0)+' live, '
+      +NUM_FMT.format(s.dead||0)+' dead, '+NUM_FMT.format(s.unknown||0)+' unknown';
+    return '<div class="svc-row" title="'+tip+'">'
+      +'<span class="svc-label" title="'+escHtml(s.name)+'">'+escHtml(s.name)+'</span>'
+      +'<span class="svc-track"><span class="svc-fill" style="width:'+pct+'%">'
+        +'<i class="svc-seg live" style="width:'+l+'%"></i>'
+        +'<i class="svc-seg dead" style="width:'+dd+'%"></i>'
+        +'<i class="svc-seg unk" style="width:'+u+'%"></i>'
+      +'</span></span>'
+      +'<span class="svc-count">'+NUM_FMT.format(h)+'</span>'
+      +'</div>';
+  }).join('');
+}
+function loadServiceStats(){
+  fetch('api/service-stats').then(function(r){return r.json()}).then(renderServiceStats).catch(function(){});
 }
 function _wireStatsFilter(){
   var go=document.getElementById('statsGo'),fe=document.getElementById('statsFilter');

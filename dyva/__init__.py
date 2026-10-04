@@ -2308,11 +2308,13 @@ def _get_db():
                      # (still raced, never banned), and it's cleared the moment the host
                      # succeeds on a prompt that big (it was reloaded bigger). NULL = unknown.
                      "ctx_limit INTEGER",
-                     # User "deprioritize" (👎): a manual, reputation-ORTHOGONAL flag that
-                     # sorts this (host,model) to the back of the race so the next request
-                     # goes elsewhere. Unlike good/bad it is NOT touched by add_good/add_bad,
-                     # so a slow-but-working host can't self-heal back to the front — only an
-                     # explicit 👍 (favor) clears it. 1 = deprioritized, 0/NULL = normal.
+                     # User VOTE (👍/👎): a signed, reputation-ORTHOGONAL preference that
+                     # orders this (host,model) WITHIN its tier — it NEVER moves the tier.
+                     # +1 = 👍 (sort to the front), -1 = 👎 (sort to the back, next request
+                     # prefers others), 0/NULL = normal (the vast majority). Unlike good/bad it
+                     # is NOT touched by add_good/add_bad, so a slow-but-working host can't
+                     # self-heal back to the front and a disliked-but-working one can be parked
+                     # without pretending it's broken. (Legacy column name; now a signed vote.)
                      "deprio INTEGER NOT NULL DEFAULT 0",
                      # When the row was first created / last written. SQLite forbids a
                      # CURRENT_TIMESTAMP default on ADD COLUMN, so both columns are plain and
@@ -2782,34 +2784,36 @@ def _load_ctx_limits():
         return {}
 
 
-def set_deprio(host, model, on):
-    """User deprioritize (👎) / favor (👍) for a (host, resolved-model). on=True sets the
-    flag (upserting a neutral 'unknown' row if the pair has none); on=False clears it.
-    NEVER touches good/bad state — it's an orthogonal, reversible routing preference, so a
-    slow-but-working host can't self-heal back to the front on its next success."""
+def set_vote(host, model, score):
+    """User vote for a (host, resolved-model): a single signed SCORE in the `deprio`
+    column — 👍 = +1 (pull to the front of its tier), 👎 = -1 (push to the back), 0 = clear.
+    Default 0, so it changes nothing for the vast majority of pairs. ORTHOGONAL to the
+    mechanical good/bad tier — it only orders WITHIN a tier and NEVER moves it, so a
+    slow-but-working host can't self-heal back to the front, and a disliked-but-working
+    host can be parked without pretending it's broken. (A future threshold could let a
+    deeply-negative score drop a tier, but that's deliberately not wired yet.) Upserts a
+    neutral 'unknown' row if the pair has none. (Column name is legacy; value is a vote.)"""
     try:
+        score = max(-1, min(1, int(score)))
         db = _get_db()
-        if on:
-            db.execute(
-                "INSERT INTO host_status(host,model,state,deprio) VALUES(?,?, 'unknown', 1)"
-                " ON CONFLICT(host,model) DO UPDATE SET deprio=1",
-                (host, model))
-        else:
-            db.execute("UPDATE host_status SET deprio=0 WHERE host=? AND model=?",
-                       (host, model))
+        db.execute(
+            "INSERT INTO host_status(host,model,state,deprio) VALUES(?,?, 'unknown', ?)"
+            " ON CONFLICT(host,model) DO UPDATE SET deprio=?",
+            (host, model, score, score))
         db.commit()
     except Exception as e:
-        log.debug(f"set_deprio failed: {e}")
+        log.debug(f"set_vote failed: {e}")
 
 
-def _load_deprio():
-    """Set of (host, model) the user has deprioritized (👎). Cheap: only deprio=1 rows."""
+def _load_votes():
+    """{(host, model): score} for every pair the user has voted on (deprio != 0).
+    Positive = 👍 (front of tier), negative = 👎 (back). Cheap: only non-zero rows."""
     try:
         db = _get_db()
-        return {(h, m) for h, m in db.execute(
-            f"SELECT host, model FROM host_status WHERE deprio=1 AND {_LIVE_REAL}")}
+        return {(h, m): v for h, m, v in db.execute(
+            f"SELECT host, model, deprio FROM host_status WHERE deprio!=0 AND {_LIVE_REAL}")}
     except Exception:
-        return set()
+        return {}
 
 
 def mark_honeypot(host, reason=None):
@@ -4212,7 +4216,7 @@ def _write_stat(host, model, up, down, tps, title=None):
 
 async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of=None,
                       label=None, hedge_delay=0, key_of=None, banker_key=None, fav=None,
-                      stretch=0.0, starved_out=None):
+                      stretch=0.0, starved_out=None, defer_good=False):
     """The host race: run `attempt` against candidate hosts in parallel, keep the
     first success, cancel the rest.
 
@@ -4417,7 +4421,12 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                     async with iter_lock:
                         retry_q.append([_now + WARMING_RETRY, item])
                 continue
-            record_verdict(host_of(item), key_of(item), outcome, sticky_key=key)
+            # defer_good: the submit-then-collect media races win the race at "I'll take
+            # it" (a ComfyUI prompt_id), but the job isn't DONE yet — GOOD is recorded by
+            # the caller on actual completion, not here. Failures still record now (add_bad),
+            # so a host that takes the job and botches the render is penalised, not promoted.
+            if not (defer_good and outcome.verdict == V_ACCEPTED):
+                record_verdict(host_of(item), key_of(item), outcome, sticky_key=key)
             if outcome.verdict == V_ACCEPTED:
                 record_race(host_of(item), key_of(item), won=True)
                 mark_worker_found(wwid, host_of(item))
@@ -5072,24 +5081,25 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                    for (prio, host, ms) in servers]
     def _toobig(host, ms):
         return 0 if (not _ctx or not ms or _fits(host, ms[0])) else 1
-    # User deprioritize (👎): a manual veto, so it's the PRIMARY key — a deprioritized
-    # (host,model) sorts behind EVERYTHING ("go elsewhere for the next request"), past
-    # warmth/sticky/tier, overriding the self-healing that kept pulling a slow-but-working
-    # host back to the front. Still in the list, so it's used only as a last resort; 👍
-    # clears it. (Stronger than the automatic ctx back-of-tier demotion, by intent.)
-    _deprio = _load_deprio()
-    def _dep(host, ms):
-        return 1 if any((host, m) in _deprio for m in ms) else 0
-    # Order: deprioritized-last, then warm/sticky, then tier, then too-big to the back of
-    # its tier, then WITHIN good/maybe by favorability. _fav is a per-job frozen snapshot so
-    # this race's own record_race writes can't churn the order mid-race. Unknown/explore
-    # hosts get favk=0 and keep their find_servers order via the stable sort.
+    # User vote (👍/👎): a signed preference that orders a pair WITHIN its tier and NEVER
+    # moves the tier — tiers are the mechanical authority (can we reach it, does it return
+    # jobs). So the TIER is the primary key; the vote only breaks ties inside it. A 👎 (-1)
+    # sinks a disliked-but-working host to the back of its tier (effectively out of the
+    # races while better peers exist); a 👍 (+1) pulls a favored one to the front. Mostly 0.
+    _votes = _load_votes()
+    def _vote(host, ms):
+        vs = [_votes[(host, m)] for m in ms if (host, m) in _votes]
+        return max(vs) if vs else 0   # +1 (favored); sorted via -vote so it lands first
+    # Order: TIER first (mechanical), then the vote within it, then warm/sticky, then
+    # too-big to the back of its tier, then WITHIN good/maybe by favorability. _fav is a
+    # per-job frozen snapshot so this race's own record_race writes can't churn the order
+    # mid-race. Unknown/explore hosts get favk=0 and keep their find_servers order (stable sort).
     _fav = _favorability(model, servers)
     def _order(it):
         prio, host, ms = it
         warm0 = 0 if (host in _warm and prio < TIER_BAD) else 1
         favk = -_fav[host]["fav"] if (host in _fav and prio in (TIER_GOOD, TIER_MAYBE)) else 0.0
-        return (_dep(host, ms), warm0, prio, _toobig(host, ms), favk)
+        return (prio, -_vote(host, ms), warm0, _toobig(host, ms), favk)
     servers = sorted(servers, key=_order)
     for _i, (_p, _h, _m) in enumerate(servers):     # stamp final try-order rank for the log
         if _h in _fav:
@@ -5436,6 +5446,13 @@ NUM_CTX_PAD = 1.5              # GENEROUS headroom: our tiktoken count is only a
 NUM_CTX_REPLY = 4096           # ample room reserved for the model's own reply
 NUM_CTX_STEP = 2048            # snap to this bucket
 NUM_CTX_MIN = 4096             # never below Ollama's own default
+# Each attached image costs real CONTEXT tokens on a vision model (pixels tokenize into
+# patches), but the base64 blob we ship is NOT those tokens, so its length tells us
+# nothing. Count a flat, generous estimate per image instead: vision models land roughly
+# 0.5k–2k tokens/image depending on resolution/tiling, and dyva sizes conservatively
+# (over-ask beats truncate), so take the high end. Without this, photos contributed ZERO
+# to num_ctx, the window came out too small, and the answer truncated into a reissue loop.
+IMAGE_TOKENS = 2048
 # We don't set the real context ceiling — the host does. Cap only at 2**18 so a
 # runaway input can't request something truly absurd; a host that can't serve a
 # window that big will say so (reject / OOM), and that's fine — better than us
@@ -5492,7 +5509,16 @@ def _estimate_prompt_tokens(payload):
         elif isinstance(c, list):          # OpenAI-style multimodal parts
             for part in c:
                 if isinstance(part, dict):
-                    tokens += _count_tokens(part.get("text") or "")
+                    if part.get("type") in ("image_url", "input_image", "image", "file"):
+                        tokens += IMAGE_TOKENS   # pixels tokenize to real context, not the b64 length
+                    else:
+                        tokens += _count_tokens(part.get("text") or "")
+        # Native /api/chat carries images as a base64 list ON the message (the flattener
+        # lifts inline images out to here) — they cost context on a vision model but the
+        # blob isn't text, so count the flat per-image estimate, not its length.
+        _imgs = m.get("images") if isinstance(m, dict) else None
+        if _imgs:
+            tokens += IMAGE_TOKENS * len(_imgs)
         # An assistant turn's tool_calls carry the function name AND the arguments
         # blob, and in an agentic loop those turns are most of the history — they were
         # counted as ZERO, so a tool-heavy conversation estimated far under its real
@@ -6973,12 +6999,13 @@ async def handle_stats(request):
     })
 
 
-def _source_quality():
-    """Per-SOURCE host-population quality for the Stats 'Source breakdown' card — how
-    good each discovery source actually is. Joins the live server list (host -> source)
+def _pop_breakdown(key_field="source"):
+    """Per-GROUP host-population quality for the Stats breakdown cards, grouped by
+    `key_field` — 'source' (which discovery source) or 'service' (which technology:
+    ollama / comfyui / llama.cpp / …). Joins the live server list (host -> group)
     with host_status reputation (host -> verdict), both keyed on the scheme-stripped host
     so the two string shapes match. One GROUP BY query plus an in-memory pass over the
-    server list (cheap; the list is cached). Per source it tallies: hosts, live
+    server list (cheap; the list is cached). Per group it tallies: hosts, live
     (state good/maybe_good), dead (bad), unknown (unprobed / no row), honeypots
     (smoke_date set AND fail_smoke=1 — counted SEPARATELY since a honeypot can read
     'good' because it answered; whole-machine trait), and race won/lost sums. `quality`
@@ -7028,7 +7055,7 @@ def _source_quality():
             continue
         key = _norm_host(host).rstrip("/")
         seen.add(key)
-        _apply(_row(s.get("source") or "unknown"), q.get(key))
+        _apply(_row(s.get(key_field) or "unknown"), q.get(key))
     for key, v in q.items():          # host_status hosts not in any current source
         if key not in seen:
             _apply(_row("(retired)"), v)
@@ -7049,7 +7076,20 @@ async def handle_source_stats(request):
       '200':
         description: Per-source quality rows
     """
-    return web.json_response({"sources": _source_quality()})
+    return web.json_response({"sources": _pop_breakdown("source")})
+
+
+async def handle_service_stats(request):
+    """
+    Per-service host-population breakdown (for the Stats 'Service breakdown' chart).
+    ---
+    tags: [UI]
+    summary: GET /api/service-stats — host counts + live/dead/unknown per technology
+    responses:
+      '200':
+        description: Per-service population rows
+    """
+    return web.json_response({"services": _pop_breakdown("service")})
 
 
 async def handle_robots(request):
@@ -8127,9 +8167,9 @@ async def handle_flag_worker(request):
     if not host or not model:
         return web.json_response({"error": "no host/model to flag"}, status=404)
     # Deprioritize, don't condemn: a slow-but-working host flagged with force_bad healed
-    # straight back to the front on its next success. set_deprio is reputation-orthogonal,
-    # so it sticks until the user clears it with 👍 (handle_favor_worker).
-    set_deprio(host, model, True)
+    # straight back to the front on its next success. The vote is reputation-orthogonal
+    # (it sorts within the tier, never moves it), so it sticks until the user votes 👍.
+    set_vote(host, model, -1)
     log.warning(f"worker deprioritized (👎): host={host} model={model} wid={wid}")
     await broadcast_activity(host, model, "flagged",
         f"deprioritized: {model} @ {_norm_host(host)}")
@@ -8138,14 +8178,15 @@ async def handle_flag_worker(request):
 
 async def handle_favor_worker(request):
     """
-    Thumbs-up a finished worker: clear a deprioritize and mark its (host, model) good.
+    Thumbs-up a finished worker: a within-tier favor vote (does NOT change the tier).
     ---
     tags: [Admin]
-    summary: Favor (👍) the host+model a finished worker used — the undo for 👎
+    summary: Favor (👍) the host+model a finished worker used — the counterpart to 👎
     description: >
-      "This one is good": clears any user deprioritize on that exact (host, resolved
-      model) and promotes it to the good tier. The reversible counterpart to
-      /flag-worker. Resolves host/model from the worker record, else the query params.
+      Records a favor vote (-1) on that exact (host, resolved model), pulling it toward
+      the front of WHATEVER tier it mechanically earned — it does not promote the tier.
+      The reversible counterpart to /flag-worker. Resolves host/model from the worker
+      record, else the query params.
     parameters:
       - {in: query, name: wid,   schema: {type: string}, required: false, description: Worker id}
       - {in: query, name: host,  schema: {type: string}, required: false, description: Host (fallback)}
@@ -8159,8 +8200,10 @@ async def handle_favor_worker(request):
     model = (w.get("rmodel") if w else None) or request.query.get("model")
     if not host or not model:
         return web.json_response({"error": "no host/model to favor"}, status=404)
-    set_deprio(host, model, False)   # clear the deprioritize (the undo)
-    add_good(host, model)            # "this one is good" — promote to good standing
+    # 👍 is a within-tier preference, NOT a tier promotion: it records a favor vote and
+    # lets the mechanical tier stand. (A host that keeps failing belongs in bad on its own
+    # merits; a button must never paper over that — it used to call add_good here.)
+    set_vote(host, model, 1)
     log.warning(f"worker favored (👍): host={host} model={model} wid={wid}")
     await broadcast_activity(host, model, "connected",
         f"favored (good): {model} @ {_norm_host(host)}")
@@ -12145,10 +12188,10 @@ async def _run_video_job(session, jid):
         # pool instead of piling onto one box (the text race's one-job-per-host rule).
         starved = []
         result, stopped, _tried, _tally = await _race_hosts(pool, attempt, vkey,
-                                                            job_wid=job_wid, banker_key=vkey, starved_out=starved)
+                                                            job_wid=job_wid, banker_key=vkey, starved_out=starved, defer_good=True)
         if result is None and starved and not stopped:
             # all idle hosts leased by concurrent renders — busy-beats-none fallback
-            result, stopped, _t2, _ta2 = await _race_hosts(starved, attempt, vkey, job_wid=job_wid)
+            result, stopped, _t2, _ta2 = await _race_hosts(starved, attempt, vkey, job_wid=job_wid, defer_good=True)
         if not result or stopped:
             if not stopped and _try_fallback():   # no host could serve the requested model
                 continue
@@ -12223,6 +12266,8 @@ async def _run_video_job(session, jid):
         job.update({"content_path": content_path, "filename": filename,
                     "status": "completed",
                     "unsigned_urls": [f"/v1/videos/{jid}/content"]})
+        # GOOD on completion, not on accept (the race ran defer_good).
+        record_verdict(host, vkey, accepted(None, job.get("model")), sticky_key=vkey)
         _video_job_save()
         await _unregister_worker(job_wid, ok=True)
         return
@@ -13591,12 +13636,12 @@ async def handle_tts_speech(request):
         # pool instead of piling onto one box (the text race's one-job-per-host rule).
         starved = []
         result, stopped, n_tried, round_tally = await _race_hosts(pool, attempt, tkey,
-                                                                  job_wid=job_wid, banker_key=tkey, starved_out=starved)
+                                                                  job_wid=job_wid, banker_key=tkey, starved_out=starved, defer_good=True)
         tried += n_tried
         tally.update(round_tally)
         if result is None and starved and not stopped:
             # all idle hosts leased by concurrent jobs — busy-beats-none fallback
-            result, stopped, n_tried2, round_tally2 = await _race_hosts(starved, attempt, tkey, job_wid=job_wid)
+            result, stopped, n_tried2, round_tally2 = await _race_hosts(starved, attempt, tkey, job_wid=job_wid, defer_good=True)
             tried += n_tried2
             tally.update(round_tally2)
         if not result or stopped:
@@ -13625,6 +13670,8 @@ async def handle_tts_speech(request):
             continue
 
         clip = _save_audio_clip(raw, filename)
+        # GOOD on completion, not on accept (the race ran defer_good).
+        record_verdict(host, tkey, accepted(None, node), sticky_key=tkey)
         headers = {
             "X-Dyva-Host": host,
             "X-Dyva-Node": node,
@@ -14665,14 +14712,14 @@ async def handle_image_edit(request):
         # instead of piling onto one box (the text race's one-job-per-host rule).
         starved = []
         result, stopped, n_tried, round_tally = await _race_hosts(
-            pool, attempt, ekey, job_wid=job_wid, banker_key=ekey, starved_out=starved)
+            pool, attempt, ekey, job_wid=job_wid, banker_key=ekey, starved_out=starved, defer_good=True)
         tried += n_tried
         tally.update(round_tally)
         if result is None and starved and not stopped:
             # All idle hosts were leased by concurrent edits — busy-beats-none: try
             # those unleased so a thin pool still renders rather than failing.
             result, stopped, n_tried2, round_tally2 = await _race_hosts(
-                starved, attempt, ekey, job_wid=job_wid)
+                starved, attempt, ekey, job_wid=job_wid, defer_good=True)
             tried += n_tried2
             tally.update(round_tally2)
         if not result or stopped:
@@ -14713,6 +14760,10 @@ async def handle_image_edit(request):
             continue
 
         b64 = base64.b64encode(raw).decode()
+        # GOOD is recorded HERE, on actual completion — not when the host took the job
+        # (the race ran defer_good). A host that accepted then botched the render only
+        # logged a bad verdict above; one that finishes the render logs the good.
+        record_verdict(host, ekey, accepted(None, model_used), sticky_key=ekey)
         stored = {"images": [b64], "_dyva_model": model_used}
         _save_image_history(stored, {"prompt": prompt}, host, model_used)
         await _unregister_worker(job_wid, ok=True)
@@ -15478,6 +15529,7 @@ def make_app():
     swagger.add_get("/host-info", handle_host_info)
     swagger.add_get("/api/stats", handle_stats)
     swagger.add_get("/api/source-stats", handle_source_stats)
+    swagger.add_get("/api/service-stats", handle_service_stats)
     swagger.add_post("/geo-enrich", handle_geo_enrich)
     swagger.add_get("/geo-summary", handle_geo_summary)
     swagger.add_get("/geo-compare", handle_geo_compare)
