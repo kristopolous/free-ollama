@@ -1,4 +1,5 @@
 import json
+import os
 
 from graflex import hoststore
 
@@ -42,3 +43,37 @@ def test_rows_and_services(tmp_path):
     assert hoststore.rows(conn, "ollama", "working") == [("a:1", {"host": "a:1"}, "t1")]
     assert {h for h, _, _ in hoststore.rows(conn, "ollama")} == {"a:1", "b:2", "c:3"}   # _UNSET => all
     assert [h for h, _, _ in hoststore.rows(conn, "ollama", None)] == ["c:3"]           # NULL only
+
+
+def test_export_shapes_match_current_files(tmp_path):
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    hoststore.upsert(conn, "ollama", "b:2", "working", {"host": "b:2", "models": ["m"]}, "2026-01-02")
+    hoststore.upsert(conn, "ollama", "a:1", "working", {"host": "a:1", "models": []}, "2026-01-01")
+    hoststore.upsert(conn, "ollama", "x:9", "notworking", {"host": "x:9", "reason": "timeout"}, "2026-01-03")
+    hoststore.upsert(conn, "ollama", "u:0", None, {"service": "ollama", "host": "u:0"}, None)
+
+    written = {}
+    hoststore.export_files(conn,
+                           lambda path, data: written.__setitem__(os.path.basename(path), data),
+                           lambda svc, suffix: f"/x/{svc}-{suffix}.json")
+    # working = LIST, sorted by (checked, host)
+    assert written["ollama-working.json"] == [{"host": "a:1", "models": []}, {"host": "b:2", "models": ["m"]}]
+    # notworking = DICT keyed by host
+    assert written["ollama-notworking.json"] == {"x:9": {"host": "x:9", "reason": "timeout"}}
+    # hosts = LIST of {service, host}, every row for the service
+    assert sorted(written["ollama-hosts.json"], key=lambda e: e["host"]) == [
+        {"service": "ollama", "host": "a:1"}, {"service": "ollama", "host": "b:2"},
+        {"service": "ollama", "host": "u:0"}, {"service": "ollama", "host": "x:9"}]
+
+
+def test_export_emits_full_set_so_guard_sees_true_count(tmp_path):
+    # Export must hand save_fn the FULL current set (so the real _save_json_atomic LOBOTOMY
+    # guard compares against the true count, not a partial), never a subset.
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    for i in range(10):
+        hoststore.upsert(conn, "ollama", f"h:{i}", "working", {"host": f"h:{i}"}, "t")
+    seen = {}
+    hoststore.export_files(conn,
+                           lambda p, d: seen.__setitem__(p.rsplit("/", 1)[-1], len(d)),
+                           lambda s, x: f"{s}-{x}.json")
+    assert seen["ollama-working.json"] == 10
