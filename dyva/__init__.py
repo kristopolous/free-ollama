@@ -234,6 +234,16 @@ WARMING_RETRY = 5
 # (ignored by compliant SSE clients) resets its idle timer without altering the stream.
 # Well under a typical short client timeout.
 KEEPALIVE_INTERVAL = 5
+# Which key(s) the OpenAI /v1 output emits the model's reasoning under. Internally dyva
+# carries it as ollama's `thinking`; on the /v1 path it re-expresses that under the
+# operator-chosen key(s), ALL of them copied with the same text. OpenAI never standardized
+# the field, so the conventions diverged — `reasoning_content` (OpenAI/DeepSeek/vLLM, the
+# majority), `reasoning` (OpenRouter), and whatever else a given client wants (custom).
+# Default to the single majority key, because emitting MORE than one key breaks a strict
+# (schema-forbids-unknown-fields) client — the exact clients this is configurable for. An
+# empty list drops reasoning from the /v1 output entirely. Settable at runtime
+# (reasoning_keys). The ollama /api/chat path is unaffected — it always uses `thinking`.
+REASONING_KEYS = ["reasoning_content"]
 # Upper bound on a believable tokens/second reading. Even a tiny model on top-end
 # hardware stays well under this; a computed value above it is a measurement
 # artifact (a buffered response drained in near-zero wall-clock), not a real rate,
@@ -477,7 +487,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -493,6 +503,8 @@ def load_settings():
         HEDGE_DELAY = s["hedge_delay"]
     if isinstance(s.get("input_rate"), (int, float)) and s["input_rate"] > 0:
         INPUT_RATE = s["input_rate"]
+    if isinstance(s.get("reasoning_keys"), list):   # empty list = drop reasoning on /v1
+        REASONING_KEYS = [x.strip() for x in s["reasoning_keys"] if isinstance(x, str) and x.strip()]
     if isinstance(s.get("timeout_max"), (int, float)) and s["timeout_max"] > 0:
         TIMEOUT_MAX = s["timeout_max"]
     if isinstance(s.get("fanout"), (int, float)) and s["fanout"] > 0:
@@ -527,7 +539,7 @@ def save_settings(extra=None):
     if not isinstance(data, dict):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                 "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT,
+                 "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST, "model_list_on": MODEL_LIST_ON,
                  "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
@@ -3965,8 +3977,23 @@ def _fmt_tool_calls_delta(tcs):
     return out
 
 
+def _openai_reasoning(m):
+    """OpenAI output: re-express the internal ollama `thinking` field under the
+    operator-chosen reasoning key(s) (REASONING_KEYS). All chosen keys get the same text;
+    an empty REASONING_KEYS drops reasoning entirely. No-op when there's no thinking.
+    Mutates and returns `m`. (The ollama /api/chat path never calls this — it keeps
+    `thinking`.)"""
+    if not isinstance(m, dict) or m.get("thinking") in (None, ""):
+        m.pop("thinking", None)
+        return m
+    th = m.pop("thinking")
+    for k in REASONING_KEYS:
+        m[k] = th
+    return m
+
+
 def to_openai(resp, model):
-    msg = dict(resp.get("message", {}))
+    msg = _openai_reasoning(dict(resp.get("message", {})))
     tcs = msg.pop("tool_calls", None)
     if tcs:
         msg["tool_calls"] = _fmt_tool_calls(tcs)
@@ -5651,7 +5678,7 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
             if not tool_phase[0] and _has_tool(first):
                 tool_phase[0] = True
                 await _phase("running tools")
-            msg = dict(first.get("message", {}))
+            msg = _openai_reasoning(dict(first.get("message", {})))
             tcs = msg.pop("tool_calls", None)
             if tcs:
                 msg["tool_calls"] = _fmt_tool_calls_delta(tcs)
@@ -5736,16 +5763,34 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 # and let the caller continue the answer on the same connection.
                 if obj.get("done_reason") == "length":
                     return "length"
+                # The done chunk can ALSO carry the final payload — ollama commonly returns
+                # a whole tool call in the SAME message as done:true. Count it as progress
+                # and, on the OpenAI path, FORWARD it as a delta BEFORE the terminal finish
+                # chunk; otherwise that last partial (the tool call!) is dropped and the
+                # client gets a finish with nothing. The native path already forwards the
+                # raw line, which includes it.
+                accum(obj)
                 if openai_format:
-                    await cw(sse_str(sse_chunk(full, {}, done=True,
-                             finish_reason=obj.get("done_reason", "stop"))).encode())
+                    m = _openai_reasoning(dict((obj or {}).get("message", {})))
+                    tcs = m.pop("tool_calls", None)
+                    if tcs:
+                        m["tool_calls"] = _fmt_tool_calls_delta(tcs)
+                        m["content"] = None
+                    if m.get("content") or m.get("tool_calls") or any(m.get(k) for k in REASONING_KEYS):
+                        await cw(sse_str(sse_chunk(full, m)).encode())
+                    fin = obj.get("done_reason") or "stop"
+                    # OpenAI's finish_reason for a turn that made tool calls is 'tool_calls',
+                    # not 'stop' — a strict client keys off it to decide to run the tools.
+                    if tool_phase[0] and fin == "stop":
+                        fin = "tool_calls"
+                    await cw(sse_str(sse_chunk(full, {}, done=True, finish_reason=fin)).encode())
                 else:
                     await cw(line + b"\n")
                 return "done"
             # a normal content OR tool-call chunk — accum() counts both as progress
             accum(obj)
             if openai_format:
-                m = dict((obj or {}).get("message", {}))
+                m = _openai_reasoning(dict((obj or {}).get("message", {})))
                 tcs = m.pop("tool_calls", None)
                 if tcs:
                     m["tool_calls"] = _fmt_tool_calls_delta(tcs)
@@ -6922,6 +6967,85 @@ async def handle_stats(request):
     })
 
 
+def _source_quality():
+    """Per-SOURCE host-population quality for the Stats 'Source breakdown' card — how
+    good each discovery source actually is. Joins the live server list (host -> source)
+    with host_status reputation (host -> verdict), both keyed on the scheme-stripped host
+    so the two string shapes match. One GROUP BY query plus an in-memory pass over the
+    server list (cheap; the list is cached). Per source it tallies: hosts, live
+    (state good/maybe_good), dead (bad), unknown (unprobed / no row), honeypots
+    (smoke_date set AND fail_smoke=1 — counted SEPARATELY since a honeypot can read
+    'good' because it answered; whole-machine trait), and race won/lost sums. `quality`
+    = live / hosts. A host still in host_status but no longer in any source lands under
+    '(retired)' so the picture stays complete."""
+    q = {}
+    try:
+        for host, has_good, has_bad, honey, won, lost in _get_db().execute(
+                "SELECT host,"
+                " MAX(CASE WHEN state IN ('good','maybe_good') THEN 1 ELSE 0 END),"
+                " MAX(CASE WHEN state='bad' THEN 1 ELSE 0 END),"
+                " MAX(CASE WHEN smoke_date IS NOT NULL AND fail_smoke=1 THEN 1 ELSE 0 END),"
+                " SUM(race_won), SUM(race_lost)"
+                f" FROM host_status WHERE {_LIVE_REAL} GROUP BY host").fetchall():
+            q[_norm_host(host).rstrip("/")] = (has_good or 0, has_bad or 0,
+                                               honey or 0, won or 0, lost or 0)
+    except Exception as e:
+        log.debug(f"source quality query failed: {e}")
+    agg, seen = {}, set()
+
+    def _row(name):
+        return agg.setdefault(name, {"name": name, "hosts": 0, "live": 0, "dead": 0,
+                                     "unknown": 0, "honeypots": 0, "won": 0, "lost": 0})
+
+    def _apply(r, v):
+        r["hosts"] += 1
+        if v is None:
+            r["unknown"] += 1
+            return
+        has_good, has_bad, honey, won, lost = v
+        if honey:
+            r["honeypots"] += 1
+        if has_good:
+            r["live"] += 1
+        elif has_bad:
+            r["dead"] += 1
+        else:
+            r["unknown"] += 1
+        r["won"] += won
+        r["lost"] += lost
+
+    for s in load_servers():
+        if not isinstance(s, dict):
+            continue
+        host = str(s.get("server") or s.get("url") or "").strip()
+        if not host:
+            continue
+        key = _norm_host(host).rstrip("/")
+        seen.add(key)
+        _apply(_row(s.get("source") or "unknown"), q.get(key))
+    for key, v in q.items():          # host_status hosts not in any current source
+        if key not in seen:
+            _apply(_row("(retired)"), v)
+    rows = list(agg.values())
+    for r in rows:
+        r["quality"] = round(r["live"] / r["hosts"], 3) if r["hosts"] else 0.0
+    rows.sort(key=lambda x: -x["hosts"])
+    return rows
+
+
+async def handle_source_stats(request):
+    """
+    Per-source host-population quality (for the Stats 'Source breakdown' card).
+    ---
+    tags: [UI]
+    summary: GET /api/source-stats — live/dead/unknown/honeypot/won/lost per source
+    responses:
+      '200':
+        description: Per-source quality rows
+    """
+    return web.json_response({"sources": _source_quality()})
+
+
 async def handle_robots(request):
     """
     robots.txt
@@ -7380,7 +7504,7 @@ async def handle_settings_get(request):
         # show a password prompt instead of the controls.
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT,
+                              "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -7400,7 +7524,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -7425,6 +7549,8 @@ async def handle_settings_post(request):
         HEDGE_DELAY = min(body["hedge_delay"], 600)
     if isinstance(body.get("input_rate"), (int, float)) and body["input_rate"] > 0:
         INPUT_RATE = body["input_rate"]
+    if isinstance(body.get("reasoning_keys"), list):   # empty list = drop reasoning on /v1
+        REASONING_KEYS = [x.strip() for x in body["reasoning_keys"] if isinstance(x, str) and x.strip()]
     if isinstance(body.get("timeout_max"), (int, float)) and body["timeout_max"] > 0:
         TIMEOUT_MAX = min(body["timeout_max"], 3600)
     if isinstance(body.get("fanout"), (int, float)) and body["fanout"] > 0:
@@ -7463,7 +7589,7 @@ async def handle_settings_post(request):
     if sources_changed:
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
-                              "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT,
+                              "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -15302,6 +15428,7 @@ def make_app():
     swagger.add_get("/reload-hosts", handle_reload_hosts)
     swagger.add_get("/host-info", handle_host_info)
     swagger.add_get("/api/stats", handle_stats)
+    swagger.add_get("/api/source-stats", handle_source_stats)
     swagger.add_post("/geo-enrich", handle_geo_enrich)
     swagger.add_get("/geo-summary", handle_geo_summary)
     swagger.add_get("/geo-compare", handle_geo_compare)

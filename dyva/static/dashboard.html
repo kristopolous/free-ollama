@@ -199,6 +199,9 @@ body.chat{height:100vh;height:100dvh}
 .card-inner{background:var(--surface);border-radius:var(--r-lg);padding:var(--sp-5);box-shadow:var(--shadow-card);height:var(--card-h);overflow:hidden;display:flex;flex-direction:column}
 /* the click-to-view host-detail card fits its content instead of a fixed height */
 #hostDetailCard .card-inner{height:auto;max-height:var(--card-h);overflow:auto}
+.hd-head{display:flex;align-items:center;gap:8px}
+.hd-close{margin-left:auto;background:none;border:none;color:var(--text-muted);font-size:1.3rem;line-height:1;cursor:pointer;padding:0 6px;border-radius:4px;flex:0 0 auto}
+.hd-close:hover{color:var(--text);background:var(--accent-bg)}
 /* the model-host card keeps the base fixed height so its stats-strip / host-list
    split stays proportional (a model aggregate on top, the scrolling list below) */
 #modelStats{flex:0 0 3rem;min-height:0;overflow:auto;margin-bottom:var(--sp-4);padding-bottom:var(--sp-3);border-bottom:1px solid var(--border)}
@@ -331,6 +334,24 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
    scrollable so a long list can't push the map off-screen. Lower cap than the old
    two-stacked-tables layout needed. overscroll-behavior keeps a flick in the list. */
 .stats-rows{display:flex;flex-direction:column;gap:4px;max-height:22vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding-right:4px}
+/* The breakdown is 8 numeric columns — too wide for a phone. Let its container scroll
+   horizontally (native touch-drag) and let the table take its natural width rather than
+   being crushed to 100% (which would wrap/clip the cells). display:block overrides the
+   .stats-rows flex column so the table can exceed the container and scroll. */
+#sourceTable{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.src-tbl{width:max-content;min-width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+.src-tbl th{text-align:right;font-weight:600;color:var(--text-muted);font-size:var(--fs-2xs);padding:2px 6px;position:sticky;top:0;background:var(--card)}
+.src-tbl th:first-child,.src-tbl td:first-child{text-align:left}
+.src-tbl td{text-align:right;padding:2px 6px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.src-tbl .src-nm{max-width:14ch;overflow:hidden;text-overflow:ellipsis}
+.src-tbl .src-live{color:#90be6d}
+.src-tbl .src-dead{color:#e5668a}
+.src-tbl .src-honey{color:#d9a441;font-weight:600}
+.src-tbl .src-dim{color:var(--text-muted)}
+.src-q{display:inline-block;width:40px;height:6px;background:var(--border);border-radius:3px;overflow:hidden;vertical-align:middle;margin-right:5px}
+.src-q i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.src-qn{display:inline-block;min-width:3.4ch;text-align:right}
+.src-break-head{margin-top:var(--sp-6)}
 .stats-row{display:flex;align-items:center;gap:6px;font-size:var(--fs-md);min-width:0}
 /* name flexes and ellipsis-truncates (so long host domains / model names don't force
    a horizontal scroll), bar is a fixed narrow gauge, numbers size to their content. */
@@ -428,7 +449,7 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 .host-model{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-dim);max-width:50%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skip-link{opacity:0;color:var(--accent);font-size:var(--fs-xs);text-decoration:underline;margin:0 var(--sp-3);flex-shrink:0;transition:opacity .1s}
 .model-item:hover .skip-link{opacity:1}
-.host-tabs{display:flex;gap:var(--sp-1);border-bottom:1px solid var(--border);margin-bottom:var(--sp-4);flex-shrink:0;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.host-tabs{display:flex;gap:var(--sp-1);border-bottom:1px solid var(--border);margin-bottom:var(--sp-4);flex-shrink:0;overflow-x:auto;overflow-y:hidden;flex-wrap:nowrap;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .host-tabs::-webkit-scrollbar{display:none}
 .htab{background:transparent;color:var(--text-muted);border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 14px;font-size:var(--fs-sm);cursor:pointer;display:inline-flex;align-items:center;gap:5px;border-radius:var(--r-md) var(--r-md) 0 0;flex-shrink:0;white-space:nowrap}
 .htab:hover{color:var(--text-2);background:var(--surface-hover);border-bottom-color:var(--border-hover)}
@@ -759,6 +780,10 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .login-row input[type=password]{flex:1;max-width:280px;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-3);font-size:var(--fs-lg)}
 .setting-help{color:var(--text-dim);font-size:var(--fs-xs);margin-top:var(--sp-1);line-height:var(--line-body)}
 .setting-help code{background:var(--bg-inset);padding:.05em .3em;border-radius:var(--r-sm);font-size:var(--fs-2xs)}
+.rk-opts{display:flex;flex-direction:column;gap:var(--sp-2);margin-top:var(--sp-3)}
+.rk-opt{display:flex;align-items:center;gap:.4em;font-size:var(--fs-md);color:var(--text);cursor:pointer}
+.rk-opt code{font-size:.85em;background:var(--card);padding:.05em .4em;border-radius:4px}
+.rk-custom{width:150px;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-2) var(--sp-3);font-size:var(--fs-sm)}
 .cloudskip-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2) var(--sp-5);margin-top:var(--sp-3)}
 .cloudskip-item{display:flex;align-items:center;gap:.35em;font-size:var(--fs-md);color:var(--text);cursor:pointer}
 .cloudskip-item .cloudskip-n{color:var(--text-muted);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}
@@ -1133,7 +1158,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="card-inner"><div id="modelStats" class="model-stats"></div><div id="hostList"></div></div>
 </div>
 <div class="card" id="hostDetailCard" style="display:none">
-<h2><span id="hostDetailTitle">Host</span></h2>
+<h2 class="hd-head"><span id="hostDetailTitle">Host</span><button type="button" class="hd-close" title="Close" aria-label="Close host detail" onclick="closeHostDetailCard()">&times;</button></h2>
 <div class="card-inner"><div id="hostDetailBody"></div></div>
 </div>
 <div class="card">
@@ -1498,6 +1523,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="mapMetaPop" class="mm-pop" hidden></div>
 </div>
 <div id="mapLists" class="map-lists"></div>
+<h2 class="src-break-head">Source breakdown</h2>
+<div id="sourceTable" class="stats-rows"></div>
 </div></div>
 </div>
 
@@ -1541,6 +1568,12 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="settings-card">
 <div class="settings-card-title">Behavior<span class="dirty-flag">needs save</span></div>
 <label class="setting"><span class="setting-text"><span class="setting-name">Explore mode</span><small class="setting-help">Discover more of the unknown network: route hosts we haven't visited (unknown state) to the front of the line, ahead of known-good ones. Deliberately slower — a request may probe cold hosts first — but it maps out the pool. Off by default. <b>Caution:</b> the unvisited frontier is where the canary honeypots live, and poking a burst of fresh IPs is exactly what trips Cloudflare/WAF reputation — so this raises the chance of a soft IP ban on your egress. Use it for deliberate survey passes, not routine routing.</small></span><input type="checkbox" id="setExplore" onchange="updateExploreLogo()"></label>
+<div class="setting"><span class="setting-text"><span class="setting-name">Thinking token key</span><small class="setting-help">For OpenAI <code>/v1</code> requests, which key(s) carry the model's reasoning. Every ticked key is emitted with the same text. OpenAI never standardized this field, so clones diverged — tick what <b>your</b> client reads. Emitting more than one can break a strict client that rejects unknown fields, so the default is the single OpenAI key. (The ollama <code>/api/chat</code> path always uses <code>thinking</code> and is unaffected.)</small>
+<div class="rk-opts">
+<label class="rk-opt"><input type="checkbox" id="rkReasoningContent"> OpenAI &mdash; <code>reasoning_content</code></label>
+<label class="rk-opt"><input type="checkbox" id="rkReasoning"> OpenRouter &mdash; <code>reasoning</code></label>
+<label class="rk-opt"><input type="checkbox" id="rkCustomOn"> custom <input type="text" id="rkCustom" class="rk-custom" placeholder="e.g. thinking" spellcheck="false" autocomplete="off"></label>
+</div></span></div>
 <div class="setting"><span class="setting-text"><span class="setting-name">Cloudskipper</span><small class="setting-help">Never route to — or even connect to — hosts on the ticked clouds. The soft-ban tripwire can fire on the TCP connection itself, so a skipped cloud's hosts are dropped from every request <b>before any connection is made</b>. Clouds are identified by enrichment; the list below is the ones most represented in the current survey. Applies to every source and is always in effect, independent of Explore mode.</small><div id="cloudSkipList" class="cloudskip-list"></div></span></div>
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
 </div>
@@ -8227,6 +8260,34 @@ function loadStats(){
   var q=(fe&&fe.value||'').trim();
   fetch('api/stats'+(q?'?q='+encodeURIComponent(q):''))
     .then(function(r){return r.json()}).then(renderStats).catch(function(){});
+  loadSourceStats();   // source-quality card — independent of the usage filter
+}
+// Source breakdown: per-source host-population quality (live/dead/unknown/honeypots and
+// race won/lost), so you can see which discovery sources actually yield usable hosts.
+function renderSourceStats(d){
+  var el=document.getElementById('sourceTable');if(!el)return;
+  var rows=(d&&d.sources)||[];
+  if(!rows.length){el.innerHTML='<div class="muted">no sources yet</div>';return;}
+  var head='<tr><th>Source</th><th>Hosts</th><th>Live</th><th>Dead</th><th>Unk</th>'
+    +'<th title="honeypots (failed the smoke screen)">🍯</th>'
+    +'<th title="races won / lost">W/L</th><th>Quality</th></tr>';
+  var body=rows.map(function(s){
+    var q=Math.round((s.quality||0)*100);
+    return '<tr>'
+      +'<td class="src-nm" title="'+escHtml(s.name)+'">'+escHtml(s.name)+'</td>'
+      +'<td>'+NUM_FMT.format(s.hosts||0)+'</td>'
+      +'<td class="src-live">'+NUM_FMT.format(s.live||0)+'</td>'
+      +'<td class="src-dead">'+NUM_FMT.format(s.dead||0)+'</td>'
+      +'<td class="src-dim">'+NUM_FMT.format(s.unknown||0)+'</td>'
+      +'<td class="'+(s.honeypots?'src-honey':'src-dim')+'">'+NUM_FMT.format(s.honeypots||0)+'</td>'
+      +'<td class="src-dim">'+NUM_FMT.format(s.won||0)+'/'+NUM_FMT.format(s.lost||0)+'</td>'
+      +'<td><span class="src-q"><i style="width:'+q+'%"></i></span><span class="src-qn">'+q+'%</span></td>'
+      +'</tr>';
+  }).join('');
+  el.innerHTML='<table class="src-tbl">'+head+body+'</table>';
+}
+function loadSourceStats(){
+  fetch('api/source-stats').then(function(r){return r.json()}).then(renderSourceStats).catch(function(){});
 }
 function _wireStatsFilter(){
   var go=document.getElementById('statsGo'),fe=document.getElementById('statsFilter');
@@ -8607,6 +8668,28 @@ function _collectCloudSkip(){
   return Array.prototype.map.call(document.querySelectorAll('#cloudSkipList .cloudskip-cb:checked'),
                                   function(cb){return cb.value});
 }
+// "Thinking token key" setting: which key(s) the /v1 output emits reasoning under.
+// Two canonical checkboxes + one free-text custom slot; the stored value is a flat list.
+function setReasoningKeys(keys){
+  keys=Array.isArray(keys)?keys:['reasoning_content'];
+  var rc=document.getElementById('rkReasoningContent'),rr=document.getElementById('rkReasoning'),cu=document.getElementById('rkCustom');
+  if(!rc||!rr||!cu)return;
+  rc.checked=keys.indexOf('reasoning_content')>=0;
+  rr.checked=keys.indexOf('reasoning')>=0;
+  var custom=keys.filter(function(k){return k!=='reasoning_content'&&k!=='reasoning';});
+  cu.value=custom.length?custom[0]:'';
+  var on=document.getElementById('rkCustomOn');if(on)on.checked=custom.length>0;
+}
+function collectReasoningKeys(){
+  var out=[];
+  if(document.getElementById('rkReasoningContent').checked)out.push('reasoning_content');
+  if(document.getElementById('rkReasoning').checked)out.push('reasoning');
+  // The custom key counts ONLY when its checkbox is ticked — a typed-but-unticked value
+  // is inert, so there's no ambiguity about whether the text field "means" anything.
+  var c=(document.getElementById('rkCustom').value||'').trim();
+  if(document.getElementById('rkCustomOn').checked&&c&&out.indexOf(c)<0)out.push(c);
+  return out;
+}
 function populateSettings(s){
   showSettingsLocked(false);
   document.getElementById('setWorkers').value=s.workers;
@@ -8622,6 +8705,7 @@ function populateSettings(s){
   document.getElementById('setLocal').checked=!!s.local;
   document.getElementById('setExplore').checked=!!s.explore;
   updateExploreLogo();
+  setReasoningKeys(s.reasoning_keys);
   renderCloudSkip(s.cloudskip||[]);
   setPwState(!!s.admin_pw_set);
   document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
@@ -8634,7 +8718,15 @@ function populateSettings(s){
 // diagram-knob drag (which dispatches 'input' on its field) — flags that card "needs
 // save"; a successful Save clears every card, since one POST commits all of them.
 var _dirtyWired=false;
-function _markDirty(e){var c=e.target&&e.target.closest&&e.target.closest('.settings-card');if(c)c.classList.add('is-dirty');}
+function _markDirty(e){
+  var t=e.target;if(!t||!t.closest)return;
+  // The admin-password field and its anti-autofill username decoy are write-only, and the
+  // browser's password manager fills them unprompted — which fired a false "needs save" on
+  // Congeniality nearly every load. Credential fields never drive the dirty flag (a typed
+  // password is still SENT on Save; it just doesn't light the pill).
+  if(t.id==='setAdminPw'||t.id==='adminPwUserDecoy')return;
+  var c=t.closest('.settings-card');if(c)c.classList.add('is-dirty');
+}
 function _clearDirty(){Array.prototype.forEach.call(document.querySelectorAll('.settings-card.is-dirty'),function(c){c.classList.remove('is-dirty');});}
 function _wireDirty(){
   if(_dirtyWired)return;
@@ -8700,6 +8792,7 @@ function saveSettings(){
     model_list_on:document.getElementById('setModelListOn').checked,
     local:document.getElementById('setLocal').checked,
     explore:document.getElementById('setExplore').checked,
+    reasoning_keys:collectReasoningKeys(),
     cloudskip:_collectCloudSkip()
   };
   if(isNaN(body.workers)||body.workers<1)delete body.workers;
@@ -8735,6 +8828,7 @@ function saveSettings(){
       setModelList(s.model_list||[],s.model_list_on);
       document.getElementById('setLocal').checked=!!s.local;
       document.getElementById('setExplore').checked=!!s.explore;
+      setReasoningKeys(s.reasoning_keys);
       renderCloudSkip(s.cloudskip||[]);
       setPwState(!!s.admin_pw_set);
       document.getElementById('setSources').value=JSON.stringify(s.sources||[],null,2);
