@@ -30,3 +30,15 @@ def test_concurrent_writers_both_land(tmp_path):
     hoststore.upsert(c1, "ollama", "a:1", "working", {"host": "a:1"}, None)
     hoststore.upsert(c2, "ollama", "b:2", "working", {"host": "b:2"}, None)  # must not raise 'database is locked'
     assert c1.execute("SELECT COUNT(*) FROM host").fetchone()[0] == 2
+
+
+def test_rows_and_services(tmp_path):
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    hoststore.upsert(conn, "ollama", "a:1", "working", {"host": "a:1"}, "t1")
+    hoststore.upsert(conn, "ollama", "b:2", "notworking", {"host": "b:2"}, "t2")
+    hoststore.upsert(conn, "ollama", "c:3", None, {"service": "ollama", "host": "c:3"}, None)
+    hoststore.upsert(conn, "vllm", "d:4", "working", {"host": "d:4"}, "t3")
+    assert hoststore.services(conn) == ["ollama", "vllm"]
+    assert hoststore.rows(conn, "ollama", "working") == [("a:1", {"host": "a:1"}, "t1")]
+    assert {h for h, _, _ in hoststore.rows(conn, "ollama")} == {"a:1", "b:2", "c:3"}   # _UNSET => all
+    assert [h for h, _, _ in hoststore.rows(conn, "ollama", None)] == ["c:3"]           # NULL only
