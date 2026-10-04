@@ -52,3 +52,19 @@ def upsert(conn, service, host, status, payload, checked):
         (service, host, status, json.dumps(payload, ensure_ascii=False), checked),
     )
     conn.commit()
+
+
+def rows(conn, service, status=_UNSET):
+    """(host, payload_dict, checked) for a service. status=_UNSET -> all rows;
+    status=None -> only NULL-status (discovered) rows; a string -> that status."""
+    if status is _UNSET:
+        cur = conn.execute("SELECT host, payload, checked FROM host WHERE service=?", (service,))
+    elif status is None:
+        cur = conn.execute("SELECT host, payload, checked FROM host WHERE service=? AND status IS NULL", (service,))
+    else:
+        cur = conn.execute("SELECT host, payload, checked FROM host WHERE service=? AND status=?", (service, status))
+    return [(h, json.loads(p), c) for h, p, c in cur.fetchall()]
+
+
+def services(conn):
+    return [r[0] for r in conn.execute("SELECT DISTINCT service FROM host ORDER BY service").fetchall()]
