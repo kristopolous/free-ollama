@@ -431,12 +431,12 @@
       "guidance_node": "FluxGuidance",
       "guidance": 2.5,
       "model": "(?i)klein",
-      "clip": "(?i)qwen[-_. ]?3",
+      "clip": "(?i)qwen[-_. ]?3[-_. ]?4b",
       "vae": "(?i)flux[-_.]?2[-_.]?vae",
       "clip_type": "flux2",
       "cfg": 1.0,
       "steps": 20,
-      "note": "FLUX.2 klein uses Qwen3, not Mistral. Verified against the FLUX.2 klein model cards and ComfyUI's klein tutorial."
+      "note": "FLUX.2 klein uses Qwen3-4B specifically — not Mistral, and NOT the 8B. The flux2 CLIPLoader for klein instantiates a 2560-dim Qwen3-4B, so loading an 8B encoder (4096-dim) size-mismatches at render ('embed_tokens.weight 4096 vs 2560'); the clip pattern requires the 4B file, so a host that only has qwen3-8b is skipped rather than crashed. Verified against the FLUX.2 klein model cards and ComfyUI's klein tutorial."
     },
     {
       "name": "Flux2",
