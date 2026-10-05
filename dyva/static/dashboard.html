@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
 <!-- Crawlers found this: bingbot walked the dashboard and indexed a 496KB page of
      live host addresses. /robots.txt is not reliably ours to serve (a reverse proxy
@@ -715,8 +715,17 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
   .tabs .tab{flex:1;text-align:center;padding:10px var(--sp-2)}
   .htab{padding:7px 9px}
   #chat.panel.active{min-height:0}
-  body.chat{height:auto;min-height:100vh;overflow-y:scroll}
-  .chat-layout{max-height:calc(100vh - 12rem);gap:0}
+  /* Fixed-viewport flex column — NO magic reservation. The body is exactly one dynamic
+     viewport tall (100dvh), so flexbox can compute the layout: .header and .tabs take their
+     natural height (flex-shrink:0), .messages (flex:1) gets whatever is left and scrolls
+     internally, and .field (the composer, flex-shrink:0) pins to the bottom. When any of
+     header/tabs/composer change height, "what's left" recomputes automatically — which the
+     old calc(100vh - 12rem) guess could not do. base min-height:100vh (which on mobile is
+     taller than 100dvh) is reset so it can't force a scroll. The keyboard is handled by
+     interactive-widget=resizes-content in the viewport meta: it shrinks the viewport, 100dvh
+     shrinks with it, flex re-computes, and the composer sits above the keyboard. */
+  body.chat{height:100dvh;min-height:0;overflow:hidden}
+  .chat-layout{gap:0}
   .chat-menu-btn{display:flex;align-items:center;justify-content:center;flex-shrink:0;min-width:var(--ctl-h);height:var(--ctl-h);padding:.5rem;font-size:1rem;box-sizing:border-box}
   .chat-sidebar{position:fixed;top:0;bottom:0;left:0;width:240px;max-width:80vw;z-index:100;border-radius:0;border-right:1px solid var(--border);box-shadow:var(--shadow-drawer);transform:translateX(-100%);transition:transform .2s ease}
   .chat-sidebar.open{transform:translateX(0)}
