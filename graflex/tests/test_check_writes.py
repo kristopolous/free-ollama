@@ -70,6 +70,38 @@ def test_session_hosts_parses_raw_fetch_files(tmp_path):
     assert {graflex._entry_host(h) for h in hosts} == {"1.2.3.4:11434", "5.6.7.8:11434"}
 
 
+def test_check_all_check_new_session_path(tmp_path, monkeypatch):
+    # Exercise the whole check-new+session path through _check_all (with _check_hosts
+    # stubbed) so the wiring — input from the session, skip via the DB, and the shared
+    # downstream vars (done / existing_working) — is covered end to end.
+    import asyncio
+    import os
+    import shutil
+    import graflex
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    monkeypatch.setattr(graflex, "_HOSTSTORE", conn, raising=False)
+    monkeypatch.setattr(graflex, "CACHE_DIR", str(tmp_path), raising=False)
+    graflex._store_record("ollama", "9.9.9.9:11434", "notworking", {"host": "9.9.9.9:11434"})
+    sess = "testsess_%d" % os.getpid()
+    sdir = os.path.join("/tmp/graflex", sess, "hunter")
+    os.makedirs(sdir, exist_ok=True)
+    try:
+        with open(os.path.join(sdir, "ollama-q-p1.json"), "w") as f:
+            json.dump({"code": 200, "data": {"list": [
+                {"ip": "9.9.9.9", "port": "11434"},    # already recorded -> skipped
+                {"ip": "8.8.8.8", "port": "11434"}]}}, f)   # new -> checked
+        captured = {}
+
+        async def fake_check_hosts(to_check, *a, **k):
+            captured["to_check"] = [graflex._entry_host(h) for h in to_check]
+
+        monkeypatch.setattr(graflex, "_check_hosts", fake_check_hosts)
+        asyncio.run(graflex._check_all("ollama", name="ollama", check_new=True, session=sess))
+        assert captured.get("to_check") == ["8.8.8.8:11434"]
+    finally:
+        shutil.rmtree(os.path.join("/tmp/graflex", sess), ignore_errors=True)
+
+
 def test_check_hosts_runs_import_before_writing(tmp_path, monkeypatch):
     # The fetch-check path reaches _check_hosts WITHOUT going through _check_all, so the
     # one-time import must trigger here too — otherwise the first probe write makes the DB

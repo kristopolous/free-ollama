@@ -2835,6 +2835,11 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             return
         recorded = _recorded_hosts(service)
         to_check = [h for h in hosts if _entry_host(h) not in recorded]
+        # Shared downstream (pool-report line, _check_hosts call) expects these set in
+        # both branches: `done` = session hosts already in the running record; and let
+        # _check_hosts load the working set itself.
+        done = {_entry_host(h) for h in hosts} & recorded
+        existing_working = None
     else:
         hosts = _load_json(hosts_file)
         if not service and hosts:
