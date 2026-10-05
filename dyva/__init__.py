@@ -51,6 +51,83 @@ class ApacheStyleFormatter(logging.Formatter):
         return datetime.datetime.fromtimestamp(record.created, tz=tz).strftime("[%d/%b/%Y:%H:%M:%S %z]")
 
 
+# ANSI colors for TERMINAL log output only. Installed solely on a TTY handler (see below),
+# so the date-stamped --log file and any `2>` redirect stay plain — ANSI bytes in a file
+# are just noise. Level sets the base color; the INFO activity lines are additionally
+# tinted by their status word so success / busy / failure are scannable at a glance.
+_LOG_RESET = "\x1b[0m"
+_LOG_DIM = "\x1b[90m"                 # grey — the timestamp and source address
+# Per-level color for the LEVEL field.
+_LOG_LVL_COLOR = {
+    logging.DEBUG: "\x1b[90m",        # grey
+    logging.INFO: "\x1b[32m",         # green
+    logging.WARNING: "\x1b[33m",      # yellow
+    logging.ERROR: "\x1b[31m",        # red
+    logging.CRITICAL: "\x1b[1;31m",   # bold red
+}
+
+
+def _log_msg_color(record, msg):
+    """Activity tint for the MESSAGE field (orthogonal to the level) so a success /
+    busy / failure line reads at a glance; red for any ERROR+."""
+    if " success:" in msg or " connected" in msg:
+        return "\x1b[32m"             # green
+    if " busy:" in msg or " warming" in msg or "retrying" in msg:
+        return "\x1b[33m"             # yellow
+    if " trying:" in msg:
+        return "\x1b[36m"             # cyan
+    if record.levelno >= logging.ERROR:
+        return "\x1b[31m"             # red
+    return ""
+
+
+class ColorFormatter(ApacheStyleFormatter):
+    """Field-colored terminal output, the usual colored-log look: a dim timestamp +
+    source, the level in its severity color, and the message tinted by dyva's activity
+    status. Composed by hand (NOT by mutating the record's level/message) so the very
+    same record going on to the plain --log file handler is left untouched — otherwise
+    ANSI codes would leak into the file. Mirrors LOG_FORMAT's field order."""
+    def format(self, record):
+        if not hasattr(record, "srcaddr"):
+            record.srcaddr = "-"
+        ts = self.formatTime(record)
+        msg = record.getMessage()
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            msg = f"{msg}\n{record.exc_text}"
+        lvlc = _LOG_LVL_COLOR.get(record.levelno, "")
+        mc = _log_msg_color(record, msg)
+        body = f"{mc}{msg}{_LOG_RESET}" if mc else msg
+        return (f"{_LOG_DIM}{ts}{_LOG_RESET} "
+                f"{_LOG_DIM}{record.srcaddr}{_LOG_RESET} "
+                f"{lvlc}{record.levelname}{_LOG_RESET} {body}")
+
+
+class AccessColorFormatter(logging.Formatter):
+    """Field-color an access line the way the app log is colored: dim the timestamp,
+    source, byte count and referer/UA, color ONLY the HTTP status by class (2xx green,
+    3xx cyan, 4xx yellow, 5xx red), and leave the request itself default so the path stays
+    readable. Access lines all log at one level, so the status (in the message) is the only
+    useful signal — nothing off-the-shelf colors by it (colorlog & co. key on level). Line
+    shape is aiohttp's `%t %a "%r" %s %b "%{Referer}i" "%{User-Agent}i"`; on no match the
+    line is returned plain. TTY-only, so the --log access file stays clean."""
+    _RE = re.compile(r'^(\[[^\]]*\])\s+(\S+)\s+("(?:[^"\\]|\\.)*")\s+(\d{3})\s+(\S+)\s*(.*)$')
+
+    def format(self, record):
+        msg = super().format(record)
+        m = self._RE.match(msg)
+        if not m:
+            return msg
+        ts, addr, req, status, nbytes, rest = m.groups()
+        code = int(status)
+        sc = ("\x1b[32m" if code < 300 else "\x1b[36m" if code < 400
+              else "\x1b[33m" if code < 500 else "\x1b[31m")
+        tail = f"{nbytes} {rest}".rstrip()
+        return (f"{_LOG_DIM}{ts}{_LOG_RESET} {_LOG_DIM}{addr}{_LOG_RESET} "
+                f"{req} {sc}{status}{_LOG_RESET} {_LOG_DIM}{tail}{_LOG_RESET}")
+
+
 # Console output uses the locale encoding, which on Windows is a codepage that
 # can't represent the ✓/— we log. Keep the console's own encoding (so nothing
 # turns to mojibake) but degrade an unencodable character instead of raising.
@@ -64,8 +141,11 @@ logging.basicConfig(
     level=getattr(logging, LOGLEVEL, logging.INFO),
     handlers=[logging.StreamHandler(sys.stderr)],
 )
+# Color the terminal handler, but only when stderr is a real TTY and NO_COLOR isn't set —
+# so piping/redirecting the logs (or the --log file) keeps them clean.
+_LOG_COLOR = bool(getattr(sys.stderr, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
 for _handler in logging.getLogger().handlers:
-    _handler.setFormatter(ApacheStyleFormatter(LOG_FORMAT))
+    _handler.setFormatter((ColorFormatter if _LOG_COLOR else ApacheStyleFormatter)(LOG_FORMAT))
 log = logging.getLogger("dumpster-dyva")
 
 
@@ -101,7 +181,8 @@ log.setLevel(getattr(logging, LOGLEVEL, logging.INFO))
 access_logger = logging.getLogger("aiohttp.access")
 access_logger.propagate = False
 access_logger.addHandler(logging.StreamHandler(sys.stderr))
-access_logger.handlers[-1].setFormatter(logging.Formatter("%(message)s"))
+access_logger.handlers[-1].setFormatter(
+    (AccessColorFormatter if _LOG_COLOR else logging.Formatter)("%(message)s"))
 
 
 class _DailyLogFile(logging.Handler):
@@ -15726,7 +15807,7 @@ def banner():
     except Exception as e:
         VERSION="(git)"
     color = int(random.randint(22,250)/6)*6 - 2
-    max=7
+    max=6
     for i in range(0,max):
         print(f"""
     \\\\  \033[38;5;{color-i}m     ████▅▅  █▂ ▂█  █▄    ▄█   ▟▙ \033[0m    //
@@ -15738,7 +15819,7 @@ def banner():
     """)
         if i < max-1:
             print("\033[9A")
-            time.sleep(0.06)
+            time.sleep(0.04)
 
 def main():
     global TIMEOUT, PORT, WORKER_COUNT, _LOCAL, _CURLIFY, BASE_PATH, ACTIVITY_LOG
