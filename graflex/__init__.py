@@ -234,11 +234,12 @@ def _store_discovery(service, host):
     _hoststore.discover(_store(), service, host, {"service": service, "host": host})
 
 
-def export():
-    """Regenerate every <service>-{working,notworking,hosts}.json from the DB, in the
-    exact shapes dyva and resume consume. Called at the end of a check (and periodically
-    during one) so the json files stay a faithful, byte-shape-identical view of the store."""
-    return _hoststore.export_files(_store(), _save_json_atomic, _cache_file)
+def export(service=None):
+    """Regenerate <service>-{working,notworking,hosts}.json from the DB, in the exact shapes
+    dyva and resume consume. Called at the end of a check (and periodically during one) so the
+    json files stay a faithful, byte-shape-identical view of the store. service=None does every
+    service (migration/standalone); a name does only that service's three files (periodic flush)."""
+    return _hoststore.export_files(_store(), _save_json_atomic, _cache_file, service)
 
 
 def _import_if_empty():
@@ -262,6 +263,11 @@ BACKOFF = 11
 MAX_BACKOFF = 300
 SLEEP_DEFAULT = 4
 STATS_EVERY = 50
+# Partial results reach dyva by re-exporting the current service's json mid-sweep, but the
+# notworking file can be ~32MB — so the flush is throttled to wall-clock, not per-N-hosts
+# (which on fast-failing hosts fires far too often and reintroduces whole-file I/O).
+EXPORT_EVERY_SEC = 15
+_LAST_EXPORT = 0.0
 
 
 def _clean_cookie(value):
@@ -2847,7 +2853,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
                      + f" in session {session}")
     if not to_check:
         log.info(f"check: all {len(hosts)} hosts already have model data")
-        export()   # regenerate the json files from the DB (working sorted, notworking, hosts)
+        export(service)   # regenerate this service's json from the DB (working sorted, notworking, hosts)
         return
 
     # Report the FULL pool, not just the remainder — otherwise "64 to check" reads as
@@ -2864,7 +2870,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     log.info(f"check{'-all' if check_all else ''}: {len(to_check)} to check of {_pool} in pool"
              + (f" ({'; '.join(_why)})" if _why else ""))
     await _check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working)
-    export()   # final regeneration of the json files from the DB after the sweep
+    export(service)   # final regeneration of this service's json from the DB after the sweep
 
 
 async def _check_hosts(hosts, service, working_file, notworking_file, check_timeout=60, workers=10, existing_working=None):
@@ -2873,6 +2879,11 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
     the interleaved fetch-check pipeline (which drains a bounded batch of
     freshly-fetched hosts between page fetches)."""
     from datetime import datetime, timezone
+
+    # The choke point for every DB write below: the fetch-check path reaches here without
+    # going through _check_all, so run the one-time import HERE — before the first probe
+    # write makes the DB non-empty and permanently pre-empts the migration.
+    _import_if_empty()
 
     if existing_working is None:
         existing_working = _load_json(working_file)
@@ -2948,11 +2959,15 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
                 _save_check_failure(_hp[0], (_hp[1] if len(_hp) > 1 else ""), reason)
                 log.info(f"  {entry['host']}: {reason}")
         completed += 1
+        now = time.time()
         if completed % STATS_EVERY == 0:
-            elapsed = time.time() - start
+            elapsed = now - start
             eta = elapsed * (len(to_check) / completed) - elapsed
             log.info(f"Checked: {completed} | Runtime: {_fmt_duration(elapsed)} | Remaining: {len(to_check) - completed} | ETA: {_fmt_duration(eta)}")
-            export()   # flush the derived json from the DB on the same cadence so partial results reach dyva
+        global _LAST_EXPORT
+        if now - _LAST_EXPORT >= EXPORT_EVERY_SEC:
+            _LAST_EXPORT = now        # claim the slot first so concurrent coroutines don't all flush
+            export(service)           # only THIS service's json, so partial results reach dyva
         return ok
 
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
