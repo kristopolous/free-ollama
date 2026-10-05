@@ -2759,6 +2759,48 @@ async def _is_network_reachable(session, check_hosts=None, timeout=10):
     return False
 
 
+def _recorded_hosts(service):
+    """Hosts that already have a check RESULT in the DB (status set) — the running
+    record check-new skips against. A discovered-but-unchecked NULL host is NOT a
+    record, so it still gets checked."""
+    cur = _store().execute("SELECT host FROM host WHERE service=? AND status IS NOT NULL", (service,))
+    return {h for (h,) in cur.fetchall()}
+
+
+def _session_hosts(session, service, base="/tmp/graflex"):
+    """Hosts fetched for `service` in `session`, reparsed from that session's raw fetch
+    files (the survey's source of truth) with the existing per-site parsers — no network,
+    no JSON transports. Dedup by host:port; a raw file that won't parse (an API error
+    envelope, schema drift) is logged and skipped, never fatal."""
+    import glob
+    parsers = {
+        "fofa":    lambda p: _parse_fofa_html(p, service),
+        "shodan":  lambda p: _parse_shodan_html(p, service),
+        "censys":  lambda p: _parse_censys_json(p, service),
+        "hunter":  lambda p: _parse_hunter_json(p, service),
+        "zoomeye": lambda p: _parse_zoomeye(json.load(open(p, encoding="utf-8", errors="replace")), service),
+    }
+    out = {}
+    for site, parse in parsers.items():
+        d = os.path.join(base, session, site)
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(glob.glob(os.path.join(d, f"{service}-*"))):
+            try:
+                parsed = parse(fn) or []
+            except SystemExit:
+                log.warning(f"session parse: skip {fn} (parser error envelope)")
+                continue
+            except Exception as e:
+                log.warning(f"session parse: skip {fn}: {e}")
+                continue
+            for h in parsed:
+                eh = _entry_host(h)
+                if eh:
+                    out.setdefault(eh, h)
+    return list(out.values())
+
+
 async def _check_all(service, name=None, check_timeout=60, check_new=False, check_all=False, workers=10, session=None):
     from datetime import datetime, timezone
 
@@ -2782,66 +2824,78 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
 
-    hosts = _load_json(hosts_file)
-    if not service and hosts:
-        service = hosts[0].get("service", "")
-    # No service filter: these caches are already per-service (the file name is
-    # the service), and a probe may re-label what it found — an ollama-shaped
-    # host with no /api/version is recorded as "sglang". Filtering on the label
-    # would silently drop exactly those hosts from the sweep.
-    if not hosts:
-        log.warning(f"check: no {service or '?'} hosts - run fetch first")
-        return
-
-    existing_working = _load_json(working_file)
-    existing_notworking_raw = _load_json(notworking_file)
-    if isinstance(existing_notworking_raw, dict):
-        existing_notworking = existing_notworking_raw
-    elif isinstance(existing_notworking_raw, list):
-        existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
+    if check_new and session and service:
+        # Session-scoped check-new: input is the session's fetched hosts (reparsed from
+        # the raw fetch files — the survey's source of truth); the DB is the running record
+        # we skip against. No JSON transports are read here. (Other check modes still read
+        # the JSON pool — see the migration TODO; this is the first path moved onto the DB.)
+        hosts = _session_hosts(session, service)
+        if not hosts:
+            log.warning(f"check-new: no {service} hosts fetched in session {session}")
+            return
+        recorded = _recorded_hosts(service)
+        to_check = [h for h in hosts if _entry_host(h) not in recorded]
     else:
-        existing_notworking = {}
-    # check-all = EVERY ip we've ever seen, INCLUDING ones previously concluded bad.
-    # hosts.json is only the latest fetch's discovery; a host that failed before and
-    # wasn't re-discovered has dropped out of it. So union the working + notworking
-    # hosts into the sweep (deduped) — their records already carry "host"/"service",
-    # so they re-probe as-is. `done` stays empty below, so all of them get checked.
-    if check_all:
-        _seen = {_entry_host(h) for h in hosts}
-        for extra in list(existing_working) + list(existing_notworking.values()):
-            eh = _entry_host(extra)   # handles host-keyed AND url-only records
-            if eh and eh not in _seen:
-                _seen.add(eh)
-                # Append a clean hosts.json-shaped entry ({service, host}) — NOT the
-                # raw record, which may be url-only (no "host" key) and would KeyError
-                # downstream. check_one re-probes fresh and rewrites everything anyway.
-                hosts.append({"service": extra.get("service") or service, "host": eh})
+        hosts = _load_json(hosts_file)
+        if not service and hosts:
+            service = hosts[0].get("service", "")
+        # No service filter: these caches are already per-service (the file name is
+        # the service), and a probe may re-label what it found — an ollama-shaped
+        # host with no /api/version is recorded as "sglang". Filtering on the label
+        # would silently drop exactly those hosts from the sweep.
+        if not hosts:
+            log.warning(f"check: no {service or '?'} hosts - run fetch first")
+            return
 
-    # Record every host in the pool as a discovery row (status NULL) so the DB —
-    # and thus the exported hosts.json — stays complete even for hosts that never
-    # get a working/notworking result this run (interrupted, skipped on resume).
-    # Non-downgrading: a host already checked keeps its status (INSERT OR IGNORE).
-    for _h in hosts:
-        _eh = _entry_host(_h)
-        if _eh:
-            _store_discovery(_h.get("service") or service, _eh)
-
-    done = set()
-    if not check_all:
-        # Keyed by host alone, not service@host: the working/notworking files are
-        # already per-service caches, and a probe may *re-label* the service it
-        # found (an ollama-shaped host with no /api/version is recorded as
-        # "sglang"). Keying on the recorded service made those hosts never match
-        # the "ollama" entry in hosts.json, so they were re-probed on every run
-        # and appended to working.json again each time.
-        if check_new:
-            done = {_entry_host(h) for h in existing_working}
-            done.update(_entry_host(n) for n in existing_notworking.values())
+        existing_working = _load_json(working_file)
+        existing_notworking_raw = _load_json(notworking_file)
+        if isinstance(existing_notworking_raw, dict):
+            existing_notworking = existing_notworking_raw
+        elif isinstance(existing_notworking_raw, list):
+            existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
         else:
-            done = {_entry_host(h) for h in existing_working}
-            done.update(_entry_host(n) for n in existing_notworking.values() if n.get("result") == "error")
+            existing_notworking = {}
+        # check-all = EVERY ip we've ever seen, INCLUDING ones previously concluded bad.
+        # hosts.json is only the latest fetch's discovery; a host that failed before and
+        # wasn't re-discovered has dropped out of it. So union the working + notworking
+        # hosts into the sweep (deduped) — their records already carry "host"/"service",
+        # so they re-probe as-is. `done` stays empty below, so all of them get checked.
+        if check_all:
+            _seen = {_entry_host(h) for h in hosts}
+            for extra in list(existing_working) + list(existing_notworking.values()):
+                eh = _entry_host(extra)   # handles host-keyed AND url-only records
+                if eh and eh not in _seen:
+                    _seen.add(eh)
+                    # Append a clean hosts.json-shaped entry ({service, host}) — NOT the
+                    # raw record, which may be url-only (no "host" key) and would KeyError
+                    # downstream. check_one re-probes fresh and rewrites everything anyway.
+                    hosts.append({"service": extra.get("service") or service, "host": eh})
 
-    to_check = [h for h in hosts if _entry_host(h) not in done]
+        # Record every host in the pool as a discovery row (status NULL) so the DB —
+        # and thus the exported hosts.json — stays complete even for hosts that never
+        # get a working/notworking result this run (interrupted, skipped on resume).
+        # Non-downgrading: a host already checked keeps its status (INSERT OR IGNORE).
+        for _h in hosts:
+            _eh = _entry_host(_h)
+            if _eh:
+                _store_discovery(_h.get("service") or service, _eh)
+
+        done = set()
+        if not check_all:
+            # Keyed by host alone, not service@host: the working/notworking files are
+            # already per-service caches, and a probe may *re-label* the service it
+            # found (an ollama-shaped host with no /api/version is recorded as
+            # "sglang"). Keying on the recorded service made those hosts never match
+            # the "ollama" entry in hosts.json, so they were re-probed on every run
+            # and appended to working.json again each time.
+            if check_new:
+                done = {_entry_host(h) for h in existing_working}
+                done.update(_entry_host(n) for n in existing_notworking.values())
+            else:
+                done = {_entry_host(h) for h in existing_working}
+                done.update(_entry_host(n) for n in existing_notworking.values() if n.get("result") == "error")
+
+        to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
         failed_set = _load_check_failed(session)
         if failed_set:
