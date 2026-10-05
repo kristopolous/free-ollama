@@ -435,6 +435,7 @@ SERVICE_CONFIG = {
         "port": 1234,
         "fofa_query": 'body="Unexpected endpoint or method. (GET /)"',
         "zoomeye_query": '"Unexpected endpoint or method"',
+        "hunter_query": 'web.body="Unexpected endpoint or method. (GET /)"',
         "check_path": "/v1/models",
     },
     "ds4": {
@@ -536,6 +537,18 @@ def _check_snapshot_exists(host, port, run_ts):
     resumed -i run skips hosts it already checked."""
     ident = _host_ident(f"{host}:{port}")
     return os.path.exists(os.path.join("/tmp/graflex", run_ts, "check", f"{ident}.json"))
+
+
+def _check_snapshot_idents(run_ts):
+    """The set of host idents (see _host_ident) that already have a success snapshot this
+    session, read with ONE os.listdir. The resume-skip loops use this instead of an
+    os.path.exists PER host: on a large pool over slow/contended storage, N stat() calls
+    serialize into minutes of disk I/O before the first probe (the 'check sits silent' hang)."""
+    d = os.path.join("/tmp/graflex", run_ts, "check")
+    try:
+        return {n[:-5] for n in os.listdir(d) if n.endswith(".json")}
+    except OSError:
+        return set()
 
 
 def _check_failed_path(run_ts):
@@ -2835,11 +2848,12 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
             log.info(f"check: {len(failed_set)} failed hosts recorded in session {session}")
         resumed = failed = 0
         kept = []
+        snap = _check_snapshot_idents(session)
         for h in to_check:
             host_port = h["host"].split(":")
             hh = host_port[0]
             pp = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-            if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
+            if service in SNAPSHOT_SERVICES and _host_ident(f"{hh}:{pp}") in snap:
                 resumed += 1
                 continue
             if f"{hh}:{pp}" in failed_set:   # already failed this session — don't re-probe
@@ -3016,11 +3030,12 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
     if session:
         failed_set = _load_check_failed(session)
         kept = []
+        snap = _check_snapshot_idents(session)
         for h in to_check:
             host_port = h["host"].split(":")
             hh = host_port[0]
             pp = int(host_port[1]) if len(host_port) > 1 else SERVICE_CONFIG[service]["port"]
-            if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
+            if service in SNAPSHOT_SERVICES and _host_ident(f"{hh}:{pp}") in snap:
                 continue
             if f"{hh}:{pp}" in failed_set:
                 continue
@@ -3120,11 +3135,12 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
     preserved = list(zero_nonempty)
     if session:
         to_scan = []
+        snap = _check_snapshot_idents(session)
         for w in working:
             hp = w["host"].split(":")
             hh = hp[0]
             pp = int(hp[1]) if len(hp) > 1 else SERVICE_CONFIG[service]["port"]
-            if service in SNAPSHOT_SERVICES and _check_snapshot_exists(hh, pp, session):
+            if service in SNAPSHOT_SERVICES and _host_ident(f"{hh}:{pp}") in snap:
                 preserved.append(w)
                 continue
             to_scan.append(w)

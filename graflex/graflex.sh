@@ -107,18 +107,6 @@ case "$SERVICE" in
     PORTS="8082,8001,8000,11434,8090,8081"
     ;;
 
-  llamacpp-hunter)
-    SERVICE=llama.cpp
-    SITE=hunter
-    PORTS="8000,8082,8001,11434,8090,8081"
-    ;;
-
-  comfyui-hunter)
-    SERVICE=comfyui
-    SITE=hunter
-    PORTS="9443,9200,8983,9200,5060,8089,5601,28017,8188,8080,80,443"
-    QUERY='web.title=="ComfyUI"'
-    ;;
 
   lmstudio-zoomeye)
     SERVICE=lmstudio
@@ -220,6 +208,25 @@ ENDL
     SITE=hunter
     SERVICE=ollama
     PORTS='11434'
+    ;;
+
+  llamacpp-hunter)
+    SERVICE=llama.cpp
+    SITE=hunter
+    PORTS="8000,8082,8001,11434,8090,8081"
+    ;;
+
+  comfyui-hunter)
+    SERVICE=comfyui
+    SITE=hunter
+    PORTS="9443,9200,8983,9200,5060,8089,5601,28017,8188,8080,80,443"
+    QUERY='web.title=="ComfyUI"'
+    ;;
+
+  lmstudio-hunter)
+    SERVICE=lmstudio
+    SITE=hunter
+    PORTS="1234,80,443,8080,8000,12345"
     ;;
 
   censys)
