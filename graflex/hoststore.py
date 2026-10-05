@@ -79,14 +79,18 @@ def services(conn):
     return [r[0] for r in conn.execute("SELECT DISTINCT service FROM host ORDER BY service").fetchall()]
 
 
-def export_files(conn, save_fn, cache_file_fn):
+def export_files(conn, save_fn, cache_file_fn, service=None):
     """Regenerate the per-service JSON files from the DB, in the exact shapes consumers
     expect: working = list (sorted by checked,host); notworking = dict keyed by host;
     hosts = list of {service, host}. `save_fn(path, data)` / `cache_file_fn(service, suffix)`
     are injected so the real caller passes graflex's _save_json_atomic (keeping the LOBOTOMY
-    guard) and _cache_file. Returns the paths written."""
+    guard) and _cache_file. Returns the paths written.
+
+    service=None regenerates every service (migration / standalone export); a service name
+    regenerates ONLY that service's three files — the periodic flush during a one-service
+    sweep must not re-serialize every other service's whole (up to 32MB) file."""
     written = []
-    for svc in services(conn):
+    for svc in ([service] if service is not None else services(conn)):
         work = [p for _h, p, _c in sorted(rows(conn, svc, "working"), key=lambda r: (r[2] or "", r[0]))]
         save_fn(cache_file_fn(svc, "working"), work)
         notwork = {h: p for h, p, _c in rows(conn, svc, "notworking")}
