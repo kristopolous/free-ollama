@@ -42,6 +42,34 @@ def test_export_single_service_leaves_others_untouched(tmp_path, monkeypatch):
     assert not any(k.startswith("vllm-") for k in saved)   # vllm's big files not rewritten
 
 
+def test_recorded_hosts_is_only_status_rows(tmp_path, monkeypatch):
+    # The DB is the running record check-new skips against: a host with a result
+    # (working/notworking) is "recorded"; a discovered-but-unchecked NULL host is not.
+    import graflex
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    monkeypatch.setattr(graflex, "_HOSTSTORE", conn, raising=False)
+    graflex._store_record("ollama", "a:1", "working", {"host": "a:1"})
+    graflex._store_record("ollama", "b:2", "notworking", {"host": "b:2"})
+    hoststore.discover(conn, "ollama", "c:3", {"service": "ollama", "host": "c:3"})  # NULL
+    assert graflex._recorded_hosts("ollama") == {"a:1", "b:2"}
+
+
+def test_session_hosts_parses_raw_fetch_files(tmp_path):
+    # check-new's input is the session's fetched hosts, reparsed from the raw fetch
+    # files with the existing per-site parsers — no network, no JSON transports.
+    import graflex
+    sess = "20990101000000"
+    d = tmp_path / sess / "hunter"
+    d.mkdir(parents=True)
+    (d / "ollama-q-p1.json").write_text(json.dumps(
+        {"code": 200, "data": {"list": [
+            {"ip": "1.2.3.4", "port": "11434"}, {"ip": "5.6.7.8", "port": 11434}]}}))
+    (d / "ollama-q-p2.json").write_text(json.dumps(
+        {"code": 200, "data": {"list": [{"ip": "1.2.3.4", "port": "11434"}]}}))  # dup across pages
+    hosts = graflex._session_hosts(sess, "ollama", base=str(tmp_path))
+    assert {graflex._entry_host(h) for h in hosts} == {"1.2.3.4:11434", "5.6.7.8:11434"}
+
+
 def test_check_hosts_runs_import_before_writing(tmp_path, monkeypatch):
     # The fetch-check path reaches _check_hosts WITHOUT going through _check_all, so the
     # one-time import must trigger here too — otherwise the first probe write makes the DB
