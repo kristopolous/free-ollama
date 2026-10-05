@@ -2280,6 +2280,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     key = _entry_host(h)
                     if key not in seen:
                         pool.append(h)
+                        _store_discovery(svc, key)   # persist discovery to the DB (running record)
                         seen.add(key)
                         fresh += 1
                         fresh_hosts.append(h)
@@ -2384,6 +2385,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     key = _entry_host(h)
                     if key not in seen:
                         pool.append(h)
+                        _store_discovery(svc, key)   # persist discovery to the DB (running record)
                         seen.add(key)
                         fresh += 1
                         fresh_hosts.append(h)
@@ -2485,6 +2487,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 key = _entry_host(h)
                 if key not in seen:
                     pool.append(h)
+                    _store_discovery(svc, key)   # persist discovery to the DB (running record)
                     seen.add(key)
                     fresh += 1
                     fresh_hosts.append(h)
@@ -2557,6 +2560,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                     key = _entry_host(h)
                     if key not in seen:
                         pool.append(h)
+                        _store_discovery(svc, key)   # persist discovery to the DB (running record)
                         seen.add(key)
                         fresh += 1
                         fresh_hosts.append(h)
@@ -2689,6 +2693,7 @@ def fetch(dry=False, curlify=False, service=None, query=None, name=None, servers
                 key = _entry_host(h)
                 if key not in seen:
                     pool.append(h)
+                    _store_discovery(svc, key)   # persist discovery to the DB (running record)
                     seen.add(key)
                     index[key] = h
                     fresh += 1
@@ -3070,21 +3075,10 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
     working_file = _cache_file(name, "working")
     notworking_file = _cache_file(name, "notworking")
 
-    existing_working = _load_json(working_file)
-    existing_notworking_raw = _load_json(notworking_file)
-    if isinstance(existing_notworking_raw, dict):
-        existing_notworking = existing_notworking_raw
-    elif isinstance(existing_notworking_raw, list):
-        existing_notworking = {_entry_host(n): n for n in existing_notworking_raw}
-    else:
-        existing_notworking = {}
-
-    # Host-keyed for the same reason as _check_all: the probe may relabel the
-    # service, and a service-qualified key would then never match.
-    done = set()
-    done.update(_entry_host(h) for h in existing_working)
-    done.update(_entry_host(n) for n in existing_notworking.values())
-
+    # Skip hosts that already have a RESULT in the DB (the running record) — the DB
+    # replaced the working/notworking JSON transports as the skip interface, same as
+    # check-new. Only never-recorded hosts get probed.
+    done = _recorded_hosts(service)
     to_check = [h for h in hosts if _entry_host(h) not in done]
     if session:
         failed_set = _load_check_failed(session)
@@ -3103,7 +3097,7 @@ def check_batch(hosts, service, name=None, check_timeout=60, workers=10, session
     if not to_check:
         return
 
-    asyncio.run(_check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers, existing_working))
+    asyncio.run(_check_hosts(to_check, service, working_file, notworking_file, check_timeout, workers))
 
 
 # woahllama's phantom-responder frozen catalog (day50.dev/woahllama): the fakes serve

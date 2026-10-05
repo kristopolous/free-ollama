@@ -102,6 +102,27 @@ def test_check_all_check_new_session_path(tmp_path, monkeypatch):
         shutil.rmtree(os.path.join("/tmp/graflex", sess), ignore_errors=True)
 
 
+def test_check_batch_skips_recorded_via_db(tmp_path, monkeypatch):
+    # check_batch (the fetch-check inline check) skips hosts already recorded in the DB,
+    # not the working/notworking JSON transports.
+    import asyncio
+    import graflex
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    monkeypatch.setattr(graflex, "_HOSTSTORE", conn, raising=False)
+    monkeypatch.setattr(graflex, "CACHE_DIR", str(tmp_path), raising=False)
+    graflex._store_record("ollama", "1.1.1.1:11434", "working", {"host": "1.1.1.1:11434"})
+    captured = {}
+
+    async def fake_check_hosts(to_check, *a, **k):
+        captured["to_check"] = [graflex._entry_host(h) for h in to_check]
+
+    monkeypatch.setattr(graflex, "_check_hosts", fake_check_hosts)
+    graflex.check_batch([{"service": "ollama", "host": "1.1.1.1:11434"},   # recorded -> skip
+                         {"service": "ollama", "host": "2.2.2.2:11434"}],   # new -> check
+                        "ollama", name="ollama", session=None)
+    assert captured.get("to_check") == ["2.2.2.2:11434"]
+
+
 def test_check_hosts_runs_import_before_writing(tmp_path, monkeypatch):
     # The fetch-check path reaches _check_hosts WITHOUT going through _check_all, so the
     # one-time import must trigger here too — otherwise the first probe write makes the DB
