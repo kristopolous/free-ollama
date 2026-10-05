@@ -113,6 +113,13 @@ case "$SERVICE" in
     PORTS="8000,8082,8001,11434,8090,8081"
     ;;
 
+  comfyui-hunter)
+    SERVICE=comfyui
+    SITE=hunter
+    PORTS="9443,9200,8983,9200,5060,8089,5601,28017,8188,8080,80,443"
+    QUERY='web.title=="ComfyUI"'
+    ;;
+
   lmstudio-zoomeye)
     SERVICE=lmstudio
     SITE=zoomeye
