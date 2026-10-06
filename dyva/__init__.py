@@ -15904,7 +15904,43 @@ def main():
         BASE_PATH = _normalize_base(args.base)
     if BASE_PATH:
         log.info(f"Mounting all routes under base path {BASE_PATH!r} (e.g. {BASE_PATH}/v1/models)")
+
+    # Bind to the requested port, but if it's already taken (another dyva, a leftover
+    # process), walk forward to the next free one instead of dying. __PORT__ in the
+    # dashboard and the reload poke read this global, so set it before make_app()/serve.
+    host = args.host or "0.0.0.0"
+    import socket as _socket
+    _bind_probe_host = "" if host == "0.0.0.0" else host
+    for _cand in range(PORT, PORT + 50):
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
+            _s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            try:
+                _s.bind((_bind_probe_host, _cand))
+                break
+            except OSError:
+                continue
+    else:
+        log.error(f"no free port in {PORT}..{PORT + 49} — is something stuck?")
+        return
+    if _cand != PORT:
+        log.warning(f"port {PORT} is in use — binding {_cand} instead")
+        PORT = _cand
+
     log.info(f"Starting dumpster-dyva on port {PORT}, WORKER_COUNT={WORKER_COUNT}, TIMEOUT={TIMEOUT}, MIN_COUNT={MIN_COUNT}, LOCAL={_LOCAL}")
+
+    # Big, obvious, clickable (OSC8) link so there's zero hunting for where to go.
+    _disp_host = "localhost" if host in ("0.0.0.0", "", "::") else host
+    _url = f"http://{_disp_host}:{PORT}{BASE_PATH}"
+    _iw = len(_url) + 6                                   # 3 spaces of padding each side
+    _link = f"\x1b]8;;{_url}\x1b\\\x1b[1;96m{_url}\x1b[0m\x1b]8;;\x1b\\"   # bold bright-cyan + clickable
+    _pad = " " * 14                                       # fixed 14-space indent, not centered
+    _label = "DASHBOARD"
+    _lp = (_iw - len(_label)) // 2                         # center the label within the box
+    _dash = "│" + " " * _lp + "\x1b[1m" + _label + "\x1b[0m" + " " * (_iw - len(_label) - _lp) + "│"
+    print("\n" + _pad + "╭" + "─" * _iw + "╮"
+          + "\n" + _pad + _dash
+          + "\n" + _pad + "│   " + _link + "   │"
+          + "\n" + _pad + "╰" + "─" * _iw + "╯" + "\n", flush=True)
 
     app = make_app()
 
@@ -15916,7 +15952,7 @@ def main():
     try:
         web.run_app(
             app,
-            host=args.host or "0.0.0.0",
+            host=host,
             port=PORT,
             # Don't wait out aiohttp's default 60s for lingering connections on quit
             # — on_shutdown already cancels the background tasks, so a couple seconds
