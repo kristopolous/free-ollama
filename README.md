@@ -23,52 +23,7 @@ Your path to victory is **free-ollama**!
 - **Testing**: Probe to see if the server picks up your calls.  
 - **Zero-Config**: With caching! Works until it doesn’t.
 
-#### Notes
-* This project has been named to be hard to google and find online. If you're here, you found it for a reason.
-* Dyva's architecture draws a hard line at incurring any *additional* costs. Only unused time on idle machines.
-* The largest collection of hosts, done through the [graflex surveys](https://github.com/kristopolous/free-ollama/tree/main/graflex) are kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. You can reconstruct them with the tool. I'm happy to share it for legitimate research purposes. You can find me.
-* The built-in sources are still about 1,500 servers so it's not nothing...although it is decreasing. I may include a subslice of my graflex survey if the number gets too low (it's sitting around ~7,000 active machines)
-* I've been looking for open lists that are still being updated and will integrate them when I find them
-* Other dyva servers get flagged and excluded from the survey so this will not just become a hall of mirrors. You can avoid getting picked up by other scanners in the wild by adding a `base_path`, this is configurable in settings on the dash. 
-* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as Cloudflare. This includes IoT networks, imdb, huggingface, cloud storage, all kinds of stuff... even banks. The public surveys have honeypots with tripwires that get the `srcaddr` (you) put in some temporary ban pool with an expiry merely by a `tcp_connect()`. These are also called canaries in the literature.
 
-This means you don't have to actually use it. The doorknock is what flags you. Most of them are on AWS And AWS GPU rates are atrociously high so there isn't much good stuff there. So in the settings you can block out AWS and other cloud providers and this seems to mitigate the problem.  I've also found a separate class of honeypots running on OVH. So you can block them as well.
-
-There's a rich testing and probing harness in dyva to block these based on an ensemble of techniques. You can also sweep and mark based on model queries to quarantine them but it's a slightly moving target because a static list of honeypots defeats the purpose.
-
-You can also do a cheap ~$3-$4 VPS host with a number of providers (tornado, vultr, digitalocean, oci free if you can get it). I haven't tried AWS ec2, but it's probably a bad idea. Just make sure you get their IPv4 machines. Generally if the provider has a CLI tool, these IPv4 and low instances are easier to provision than through their web portal but YMMV. Anyways, in this case you'll want to do something like
-
-```script
-$ MALLOC_ARENA_MAX=2 exec .venv/bin/python3 -OO ./dyva --host "your vpn address" 
-```
-
-The RSS peaks out about 150MB and averages around 100 so the 512MB VPS can handle it. You can also `mkswap` on them to avoid the OOM if you run into problems. Also, you may be able to run this "serverless" depending on whatever a providers definition of that magical word is. Report in on your progress.
-
-## What's actually out there?
-
-Some of the surveys reveal hardware specs and it's mostly CPU, about 70%. This makes economical sense: A cheap VPS is about 1/70th the cost of a decent GPU but only about 1/7th the inference speed.
-
-This means the median inference cost of a single request is about `$0.00007` - and if you didn't make the request, they'd still pay that because it's metered by time, not by workload. This means the actual incurred costs on the machine for the request is $0.00. Not close, but exactly.
-
-In that remaining 30%, the venerable RTX 4090 takes the top spot with 4.5% followed by "All AMD (this survey buckets them all)" at 3% and the rest being difficult to justify any claims on given their low population density.
-
-About 1.5% are professional class (A6000/A5000) for example, and approximately 4% are server class (L4, A100, H100, V100 etc)
-
-```mermaid
-pie showData
-    title Hardware breakdown 2026/09/15
-    "CPU" : 70
-    "RTX 4090" : 4.5
-    "All AMD" : 3
-    "50X0 consumer" : 4.5
-    "Professional class" : 1.5
-    "Server class" : 4
-    "Other consumer GPU" : 12.5
-```
-
-### Demo
-
-https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 ## Method 1: Liberated Infrastructure
 
@@ -133,6 +88,8 @@ See [examples/imagegen](examples/imagegen) for the full CLI example.
 ## Method 2: Artisanal Ollamas in Terminal Space
 
  There's also a command line for the losers who like typing shit.
+
+https://github.com/user-attachments/assets/b5b99780-2526-4ebc-ba23-2870d84a7516
 
 Use the awesome [`ursh`](https://github.com/day50-dev/ursh/) for super fast access (or git clone like an amateur)
 
@@ -306,6 +263,49 @@ $ free-ollama glm-4.7-flash:q4_K_M {0..9} | xpanes -c "./test-and-log.sh {}"
 - **Force refresh**: Built in, baby!
 ```bash
 $ free-ollama --refresh
+```
+
+#### Notes
+* This project has been named to be hard to google and find online. If you're here, you found it for a reason.
+* Dyva's architecture draws a hard line at incurring any *additional* costs. Only unused time on idle machines.
+* The largest collection of hosts, done through the [graflex surveys](https://github.com/kristopolous/free-ollama/tree/main/graflex) are kept private because "don't be a dick" isn't an instruction everyone feels obligated to follow. You can reconstruct them with the tool. I'm happy to share it for legitimate research purposes. You can find me.
+* The built-in sources are still about 1,500 servers so it's not nothing...although it is decreasing. I may include a subslice of my graflex survey if the number gets too low (it's sitting around ~7,000 active machines)
+* I've been looking for open lists that are still being updated and will integrate them when I find them
+* Other dyva servers get flagged and excluded from the survey so this will not just become a hall of mirrors. You can avoid getting picked up by other scanners in the wild by adding a `base_path`, this is configurable in settings on the dash. 
+* Running this is likely to get you blocked temporarily from numerous sites on CDNs such as Cloudflare. This includes IoT networks, imdb, huggingface, cloud storage, all kinds of stuff... even banks. The public surveys have honeypots with tripwires that get the `srcaddr` (you) put in some temporary ban pool with an expiry merely by a `tcp_connect()`. These are also called canaries in the literature.
+
+This means you don't have to actually use it. The doorknock is what flags you. Most of them are on AWS And AWS GPU rates are atrociously high so there isn't much good stuff there. So in the settings you can block out AWS and other cloud providers and this seems to mitigate the problem.  I've also found a separate class of honeypots running on OVH. So you can block them as well.
+
+There's a rich testing and probing harness in dyva to block these based on an ensemble of techniques. You can also sweep and mark based on model queries to quarantine them but it's a slightly moving target because a static list of honeypots defeats the purpose.
+
+You can also do a cheap ~$3-$4 VPS host with a number of providers (tornado, vultr, digitalocean, oci free if you can get it). I haven't tried AWS ec2, but it's probably a bad idea. Just make sure you get their IPv4 machines. Generally if the provider has a CLI tool, these IPv4 and low instances are easier to provision than through their web portal but YMMV. Anyways, in this case you'll want to do something like
+
+```script
+$ MALLOC_ARENA_MAX=2 exec .venv/bin/python3 -OO ./dyva --host "your vpn address" 
+```
+
+The RSS peaks out about 150MB and averages around 100 so the 512MB VPS can handle it. You can also `mkswap` on them to avoid the OOM if you run into problems. Also, you may be able to run this "serverless" depending on whatever a providers definition of that magical word is. Report in on your progress.
+
+## What's actually out there?
+
+Some of the surveys reveal hardware specs and it's mostly CPU, about 70%. This makes economical sense: A cheap VPS is about 1/70th the cost of a decent GPU but only about 1/7th the inference speed.
+
+This means the median inference cost of a single request is about `$0.00007` - and if you didn't make the request, they'd still pay that because it's metered by time, not by workload. This means the actual incurred costs on the machine for the request is $0.00. Not close, but exactly.
+
+In that remaining 30%, the venerable RTX 4090 takes the top spot with 4.5% followed by "All AMD (this survey buckets them all)" at 3% and the rest being difficult to justify any claims on given their low population density.
+
+About 1.5% are professional class (A6000/A5000) for example, and approximately 4% are server class (L4, A100, H100, V100 etc)
+
+```mermaid
+pie showData
+    title Hardware breakdown 2026/09/15
+    "CPU" : 70
+    "RTX 4090" : 4.5
+    "All AMD" : 3
+    "50X0 consumer" : 4.5
+    "Professional class" : 1.5
+    "Server class" : 4
+    "Other consumer GPU" : 12.5
 ```
 
 ## Disclaimer 
