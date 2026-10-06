@@ -33,7 +33,9 @@ The details:
 
 They can be stacked so "qwen>2026>5gb" means the newer large qwens.
 
-You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. 
+You can multi source host lists or bring your own.
+
+That means dyva can sit on top of your own infrastructure as well. 
 
 Here's the web interface so you can see the status while you're running it. [I might be running it right now](https://9ol.es/11434/)
 
