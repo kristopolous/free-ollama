@@ -234,6 +234,18 @@ def _store_discovery(service, host):
     _hoststore.discover(_store(), service, host, {"service": service, "host": host})
 
 
+def _export_offthread(service):
+    """export() for the periodic mid-check flush, run in a thread executor so the ~32MB
+    write can't block the event loop. Uses its own short-lived connection because the
+    module _HOSTSTORE handle is bound to the event-loop thread (WAL allows the concurrent
+    read while checks keep upserting on the main connection)."""
+    conn = _hoststore.connect(os.path.join(CACHE_DIR, "graflex.db"))
+    try:
+        _hoststore.export_files(conn, _save_json_atomic, _cache_file, service)
+    finally:
+        conn.close()
+
+
 def export(service=None):
     """Regenerate <service>-{working,notworking,hosts}.json from the DB, in the exact shapes
     dyva and resume consume. Called at the end of a check (and periodically during one) so the
@@ -3029,7 +3041,11 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
         global _LAST_EXPORT
         if now - _LAST_EXPORT >= EXPORT_EVERY_SEC:
             _LAST_EXPORT = now        # claim the slot first so concurrent coroutines don't all flush
-            export(service)           # only THIS service's json, so partial results reach dyva
+            # Run the mid-check flush OFF the event loop: for ollama it's a ~32MB read+write,
+            # and doing it inline froze every in-flight probe long enough that fast hosts hit
+            # their timeout, fell to the https knock, and got recorded with a bogus
+            # WRONG_VERSION. In a thread (own read connection) the probes keep running.
+            await asyncio.get_running_loop().run_in_executor(None, _export_offthread, service)
         return ok
 
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
