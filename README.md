@@ -17,11 +17,14 @@ Try it now [by clicking here](https://9ol.es/11434) or run it yourself with a fe
 uvx dyva
 ```
 
-## Method 1: Liberated Infrastructure
-
+## Getting started
 The massive varieties of models and installations are unified through a simple model query syntax.
 
 This is designed so you can slice and dice the pool in any application. Place it AS the model.
+
+For instance "*" means use any model. ">2026" means anything released after 2026, "qwen>2026>10gb,gemma4" means 'use any qwen released in 2026 over 10gb and fallback to Gemma4 if you can't find any"
+
+The details:
 
 * Specified as partial strings or globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable.
 * As fallbacks with a comma such as "gemma3,qwen3.6" (try the first, fall back to the second)
