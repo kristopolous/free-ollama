@@ -19,7 +19,9 @@ uvx dyva
 
 ## Method 1: Liberated Infrastructure
 
-The massive varieties of models and installations are unified through a simple model query syntax:
+The massive varieties of models and installations are unified through a simple model query syntax.
+
+This is designed so you can slice and dice the pool in any application. Place it AS the model.
 
 * Specified as partial strings or globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable.
 * As fallbacks with a comma such as "gemma3,qwen3.6" (try the first, fall back to the second)
