@@ -8,6 +8,15 @@
 </p>
 
 ---
+A proxy that transparently routes to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, strata, A1111, generic gradio, and ComfyUI hosts from Shodan, Zoomeye, Censys, hunter.how and FOFA with dynamic failover, context-window scaling, and honeypot detection. Capable of image generation and editing, video generatoin, TTS, and music generation in a unified interface.
+
+Try it now [by clicking here](htts://9ol.es/11434) in a few keystrokes. 
+
+```
+uvx dyva
+```
+
+Works on Linux, Windows, Mac, even Android. 
 
 **Unreliable** **ethically-questionable** **free** tokens for 2 decent models and 700 useless ones.
 
