@@ -493,6 +493,8 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 .worker-card.worker-done{opacity:.72;border-style:dashed}
 .worker-card.worker-done .worker-model{color:var(--text-2)}
 .worker-host{font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-faint);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-host-link{color:inherit;text-decoration:none;cursor:pointer}
+.worker-host-link:hover{color:var(--text-2);text-decoration:underline}
 .worker-rmodel{color:var(--text-2)}
 .wk-tok{color:var(--text-dim);white-space:nowrap;flex:0 0 auto;font-variant-numeric:tabular-nums}
 .wk-tok.trunc{color:var(--err-hover)}
@@ -703,7 +705,10 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .chat-status{display:flex;align-items:center;gap:.45em;color:var(--text-dim);font-size:var(--fs-xs);font-style:italic;margin:.15em 0 .3em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-status::before{content:'';flex-shrink:0;width:.6em;height:.6em;border:1.5px solid var(--border-strong);border-top-color:var(--accent);border-radius:var(--r-full);animation:spin .8s linear infinite}
 .chat-layout{display:flex;gap:var(--sp-4);flex:1;min-height:0}
-.chat-menu-btn{display:none}
+.chat-menu-btn{display:flex;align-items:center;justify-content:center;flex-shrink:0;min-width:var(--ctl-h);height:var(--ctl-h);padding:.5rem;font-size:1rem;box-sizing:border-box;background:transparent;border:0;border-radius:var(--r-md);color:var(--text-2);cursor:pointer}
+.chat-menu-btn:hover{background:var(--accent-bg);color:var(--text)}
+/* Desktop: collapse the conversation sidebar (toggled by the ☰ button; mobile uses the drawer). */
+@media(min-width:641px){#chat.chat-collapsed .chat-sidebar{display:none}}
 .chat-backdrop{display:none}
 @media(max-width:640px){
   body{padding:10px}
@@ -2663,8 +2668,17 @@ function renderWorkers(workers){
     var svc=w.service||'';
     var prov=[where,rm].filter(Boolean).join(' ');
     if(prov){
-      var hs=document.createElement('span');hs.className='worker-host';
-      hs.textContent=prov;hs.title=prov;
+      var hs=document.createElement('span');hs.className='worker-host';hs.title=prov;
+      if(where&&w.host){
+        // The host the worker used -> click to open that host's detail card.
+        var ha=document.createElement('a');ha.className='worker-host-link';ha.href='#';
+        ha.textContent=where;ha.title='open host card for '+where;
+        ha.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();openHostDetail(w.host);});
+        hs.appendChild(ha);
+        if(rm)hs.appendChild(document.createTextNode(' '+rm));
+      }else{
+        hs.textContent=prov;
+      }
       sub.appendChild(hs);
     }
     // Finished worker that reached a host: a 👎/👍 vote pair on the row itself. 👎
@@ -6912,11 +6926,19 @@ function closeChatDrawer(){
   if(bd)bd.classList.remove('open');
 }
 document.getElementById('chatMenuBtn').addEventListener('click',function(){
-  var sd=document.getElementById('chatSidebar');
-  var open=sd&&sd.classList.toggle('open');
-  document.getElementById('chatBackdrop').classList.toggle('open',open);
+  if(window.matchMedia('(max-width:640px)').matches){
+    // Mobile: slide-in drawer over the chat.
+    var sd=document.getElementById('chatSidebar');
+    var open=sd&&sd.classList.toggle('open');
+    document.getElementById('chatBackdrop').classList.toggle('open',open);
+  }else{
+    // Desktop: collapse/expand the conversation sidebar in place (chat-main reflows wider).
+    var collapsed=document.getElementById('chat').classList.toggle('chat-collapsed');
+    try{localStorage.setItem('chatSidebarCollapsed',collapsed?'1':'0')}catch(e){}
+  }
 });
 document.getElementById('chatBackdrop').addEventListener('click',closeChatDrawer);
+try{if(localStorage.getItem('chatSidebarCollapsed')==='1')document.getElementById('chat').classList.add('chat-collapsed')}catch(e){}
 
 function bindSlider(id,out){
   var s=document.getElementById(id),o=document.getElementById(out);
