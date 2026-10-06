@@ -10,7 +10,7 @@
 ---
 A proxy that transparently routes to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, Strata, A1111, gradio, and ComfyUI hosts from Shodan, Zoomeye, Censys, hunter.how and FOFA with dynamic failover, context-window scaling, and honeypot detection. Capable of text generation, vision, tool calling, image generation and editing, video generatoin, TTS, and music generation in a unified interface with state of the art routing providing sub 1s latency.
 
-Try it now [by clicking here](htts://9ol.es/11434) in a few keystrokes. 
+Try it now [by clicking here](https://9ol.es/11434) in a few keystrokes. 
 
 ```
 uvx dyva
