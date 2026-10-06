@@ -202,6 +202,7 @@ ENDL
   localai)
     QUERY='title="localai"'
     PORTS="8080,80,443,3000,8081,8000"
+    COUNTRIES="US,CN,IR,TW,DE,RU,FR,KR,PL,GB,HK,JP,NL,BR,VN,FI,IN,CA"
     ;;
 
   fooocus)
