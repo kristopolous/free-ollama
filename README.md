@@ -19,19 +19,16 @@ uvx dyva
 
 ## Method 1: Liberated Infrastructure
 
-Dyva cycles through and find working hosts automatically. 
+The massive varieties of models and installations are unified through a simple model query syntax:
 
-You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable. You can also do fallbacks with a comma such as "gemma3,qwen3.6" (try the first, fall back to the second), filter by size like "qwen >10gb", and by release date like "qwen>2026".
+* Specified as partial strings or globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable.
+* As fallbacks with a comma such as "gemma3,qwen3.6" (try the first, fall back to the second)
+* By size like "qwen >10gb"
+* By release date like "qwen>2026".
 
 They can be stacked so "qwen>2026>5gb" means the newer large qwens.
 
-Run it yourself:
-
-```shell
-$ uvx dyva
-```
-
-You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
+You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. 
 
 Here's the web interface so you can see the status while you're running it. [I might be running it right now](https://9ol.es/11434/)
 
