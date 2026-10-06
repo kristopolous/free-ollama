@@ -948,6 +948,7 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
     cfg = SERVICE_CONFIG[service]
     path = cfg["check_path"]
     last_error = None
+    http_error = None
 
     for start_scheme in ("http", "https"):
         current_scheme = start_scheme
@@ -1341,12 +1342,20 @@ async def _check_host(session, host, port, service, timeout=TIMEOUT):
                 break
         else:
             last_error = {"error": "too many redirects"}
-        if got_http_response:
-            break
+        if start_scheme == "http":
+            # Remember http's verdict, but DON'T stop here just because http answered: a
+            # TLS host behind a proxy replies to a plaintext GET on :443 with "HTTP 400"
+            # (plain HTTP sent to an HTTPS port) while the service actually lives on https —
+            # so still fall through and try it.
+            http_error = last_error
 
-    if last_error is not None:
-        last_error['lapse'] = time.time() - start_time
-    return last_error
+    # Both schemes failed (a success returns inline). Prefer the http error: https is only
+    # a fallback, and its WRONG_VERSION/400 masks the real reason (http timed out, or the
+    # host answered http with an error).
+    final = http_error if http_error is not None else last_error
+    if final is not None:
+        final['lapse'] = time.time() - start_time
+    return final
 
 
 def _tag(value):
@@ -2809,6 +2818,7 @@ def _session_hosts(session, service, site=None, base="/tmp/graflex"):
     envelope, schema drift, an empty page) is skipped, never fatal."""
     import glob
     import logging
+    import concurrent.futures
     parsers = {
         "fofa":    lambda p: _parse_fofa_html(p, service),
         "shodan":  lambda p: _parse_shodan_html(p, service),
@@ -2816,29 +2826,43 @@ def _session_hosts(session, service, site=None, base="/tmp/graflex"):
         "hunter":  lambda p: _parse_hunter_json(p, service),
         "zoomeye": lambda p: _parse_zoomeye(json.load(open(p, encoding="utf-8", errors="replace")), service),
     }
+    jobs = []   # (path, parser)
+    for st, parse in parsers.items():
+        if site and st != site:
+            continue
+        d = os.path.join(base, session, st)
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(glob.glob(os.path.join(d, f"{service}-*"))):
+            jobs.append((fn, parse))
+    if not jobs:
+        return []
+
+    def _parse_one(job):
+        fn, parse = job
+        try:
+            return parse(fn) or []
+        except (SystemExit, Exception):
+            return []   # error envelope / schema drift / empty page — not fatal
+
+    # These raw files can be hundreds of MB of fofa HTML; read them in parallel (I/O-bound,
+    # the GIL is released during the read) instead of one-at-a-time, and announce it so a
+    # long reparse doesn't look hung. Quiet the parsers' per-file "! NO RESULTS" flood.
+    log.info(f"check-new: reparsing {len(jobs)} session file(s)"
+             + (f" from {site}" if site else "") + " …")
     out = {}
-    # A bulk reparse walks many empty/old pages; the parsers' per-file "! NO RESULTS"
-    # (and our per-file skips) would flood the terminal, so quiet warnings for this pass.
     prev_level = log.level
     log.setLevel(logging.ERROR)
     try:
-        for st, parse in parsers.items():
-            if site and st != site:
-                continue
-            d = os.path.join(base, session, st)
-            if not os.path.isdir(d):
-                continue
-            for fn in sorted(glob.glob(os.path.join(d, f"{service}-*"))):
-                try:
-                    parsed = parse(fn) or []
-                except (SystemExit, Exception):
-                    continue   # error envelope / schema drift / empty — not fatal
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(jobs))) as ex:
+            for parsed in ex.map(_parse_one, jobs):
                 for h in parsed:
                     eh = _entry_host(h)
                     if eh:
                         out.setdefault(eh, h)
     finally:
         log.setLevel(prev_level)
+    log.info(f"check-new: {len(out)} host(s) from {len(jobs)} session file(s)")
     return list(out.values())
 
 
@@ -3048,7 +3072,7 @@ async def _check_hosts(hosts, service, working_file, notworking_file, check_time
             await asyncio.get_running_loop().run_in_executor(None, _export_offthread, service)
         return ok
 
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL, force_close=True, limit=0), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as client:
         session = client
         tasks = [check_one(entry) for entry in to_check]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -3233,7 +3257,7 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
             reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
             return ("dead", entry, reason)
 
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL, force_close=True, limit=0), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
         done = await asyncio.gather(*[probe(e) for e in working], return_exceptions=True)
 
     kept = []
