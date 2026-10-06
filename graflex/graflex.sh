@@ -85,8 +85,8 @@ case "$SERVICE" in
   ollama-shodan)
     SERVICE=ollama
     SITE=shodan
-    PORTS="11434,9200,10001,8888,9000,8080,8083,80,443"
-    COUNTRIES="US,AU,JP,IN,CA,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
+    PORTS="11434,8080,8081,8082,80,443" #9200,10001,8888,9000,8080,8083,80,443"
+    COUNTRIES="US,AU,JP,IN,CA" #,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
     ;;
 
   # Not in the daily `all` loop: ZOOMEYE_COOKIE is a browser SESSION token that

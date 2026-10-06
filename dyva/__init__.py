@@ -8829,6 +8829,34 @@ def _check_admin(request):
     return web.json_response({"error": "admin password required"}, status=403)
 
 
+async def handle_shutdown(request):
+    """
+    Stop the dyva server process (same as Ctrl+C). ADMIN-GATED — when an admin
+    password is set the request must carry X-Admin-Key, exactly like saving settings.
+    ---
+    tags: [UI]
+    summary: POST /shutdown — stop dyva
+    responses:
+      '200':
+        description: Shutting down
+      '403':
+        description: Admin password required
+    """
+    gate = _check_admin(request)
+    if gate:
+        return gate
+    import signal as _signal
+    peer = request.headers.get("X-Forwarded-For") or (request.remote or "?")
+    log.warning(f"Shutdown requested via dashboard (from {peer}) — stopping dyva")
+
+    async def _kill():
+        await asyncio.sleep(0.3)                       # let the 200 flush to the browser first
+        os.kill(os.getpid(), _signal.SIGINT)           # triggers web.run_app's graceful shutdown
+
+    asyncio.ensure_future(_kill())
+    return web.json_response({"ok": True, "msg": "dyva is shutting down"})
+
+
 async def handle_ollama_chat(request):
     """
     Chat completion (Ollama format)
@@ -15679,6 +15707,7 @@ def make_app():
     swagger.add_get("/robots.txt", handle_robots)
     swagger.add_get("/guide", handle_guide)
     swagger.add_get("/reload-hosts", handle_reload_hosts)
+    swagger.add_post("/shutdown", handle_shutdown)
     swagger.add_get("/host-info", handle_host_info)
     swagger.add_get("/api/stats", handle_stats)
     swagger.add_get("/api/source-stats", handle_source_stats)

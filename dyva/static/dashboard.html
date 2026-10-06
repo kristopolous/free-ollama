@@ -848,6 +848,9 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .src-test-err{color:var(--err)}
 .src-test-warn{color:var(--warn)}
 .settings-actions{margin-top:var(--sp-3);display:flex;justify-content:flex-end;align-items:center;gap:var(--sp-4)}
+.settings-shutdown{flex:0 0 auto;background:transparent;border:1px solid #a73d5d;color:#e5668a;border-radius:var(--r-md);padding:6px 16px;font:inherit;font-size:var(--fs-sm);cursor:pointer}
+.settings-shutdown:hover{background:#a73d5d;color:#fff}
+.settings-shutdown[disabled]{opacity:.6;cursor:default}
 .settings-save{background:var(--accent-bg-active);color:var(--accent-bright);border:none;border-radius:var(--r-md);padding:var(--sp-3) var(--sp-6);font-size:var(--fs-md);cursor:pointer}
 .settings-save:hover{background:var(--accent-bg-hover)}
 .settings-status{color:var(--ok);font-size:var(--fs-sm)}
@@ -1655,6 +1658,10 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="srcTest" class="src-test"></div>
 </div>
 <div class="settings-actions"><span class="settings-status"></span><button type="button" class="settings-save">Save</button></div>
+</div>
+<div class="settings-card">
+<div class="settings-card-title">Server</div>
+<label class="setting"><span class="setting-text"><span class="setting-name">Shut down dyva</span><small class="setting-help">Stop the server process (like Ctrl+C in the terminal). You'll need host/terminal access to start it again. Admin-gated: requires the admin password when one is set.</small></span><button type="button" id="shutdownBtn" class="settings-shutdown">Shutdown</button></label>
 </div>
 </div>
 </div></div>
@@ -8752,6 +8759,18 @@ var ADMIN_KEY_LS='dyva_admin_key';
 function adminKey(){try{return localStorage.getItem(ADMIN_KEY_LS)||''}catch(e){return''}}
 function setAdminKeyStored(v){try{v?localStorage.setItem(ADMIN_KEY_LS,v):localStorage.removeItem(ADMIN_KEY_LS)}catch(e){}}
 function adminHeaders(extra){var h=Object.assign({},extra||{});var k=adminKey();if(k)h['X-Admin-Key']=k;return h}
+(function(){
+  var sb=document.getElementById('shutdownBtn');
+  if(!sb)return;
+  sb.addEventListener('click',function(){
+    if(!confirm('Shut down dyva? The server process will stop and you will need host access to start it again.'))return;
+    sb.disabled=true;sb.textContent='Shutting down…';
+    fetch('shutdown',{method:'POST',headers:adminHeaders()}).then(function(r){
+      if(r.status===403){alert('Admin password required.');sb.disabled=false;sb.textContent='Shutdown';return;}
+      sb.textContent='Stopped';
+    }).catch(function(){sb.textContent='Stopped';});   // the server dropping the connection IS the success signal
+  });
+})();
 // Inject the password inputs from their <template>s on first Settings open, so
 // there is no live <input type=password> in the DOM on page load (which would
 // make Chrome hijack #modelFilter as a username field). Each input is placed as
