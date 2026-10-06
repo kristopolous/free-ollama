@@ -8,7 +8,7 @@
 </p>
 
 ---
-A proxy that transparently routes to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, Strata, A1111, gradio, and ComfyUI hosts from Shodan, Zoomeye, Censys, hunter.how and FOFA with dynamic failover, context-window scaling, and honeypot detection. Capable of text generation, vision, tool calling, image generation and editing, video generatoin, TTS, and music generation in a unified interface with state of the art routing providing sub 1s latency.
+**Dyva** is a proxy that transparently routes to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, Strata, A1111, gradio, and ComfyUI hosts from Shodan, Zoomeye, Censys, hunter.how and FOFA with dynamic failover, context-window scaling, and honeypot detection. Capable of text generation, vision, tool calling, image generation and editing, video generatoin, TTS, and music generation in a unified interface with state of the art routing providing sub 1s latency.
 
 Try it now [by clicking here](https://9ol.es/11434) in a few keystrokes. 
 
@@ -18,27 +18,10 @@ uvx dyva
 
 Works on Linux, Windows, Mac, even Android. 
 
-**Unreliable** **ethically-questionable** **free** tokens for 2 decent models and 700 useless ones.
-
-Run **135m smollm2** or **270m gemma3** on someone else's RTX 2070.
-
-Interested?
-
-Your path to victory is **free-ollama**!
-
-- **See ollamas in the wild**: Open Ollama servers are just sitting there on IPv4. 
-- **Filter the cute ones**: Find what a server *claims* to have 
-- **Performance Sorting**: Sort by TPS so you can choose the *least* slow server.  
-- **Testing**: Probe to see if the server picks up your calls.  
-- **Zero-Config**: With caching! Works until it doesn’t.
-
-
 
 ## Method 1: Liberated Infrastructure
 
-**Dyva** is a managed proxy that you can connect to with any OpenAI, Fooocus, Ollama, ComfyUI, SGLang, LM Studio, llama.cpp, vllm, ds4, or a1111 compatible client (graflex finds the open ones). 
-
-It will cycle through and find working hosts automatically. This is where the majority of the work is in these days.
+Dyva cycles through and find working hosts automatically. 
 
 You can even specify models in partial forms and with globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable. You can also do fallbacks with a comma such as "gemma3,qwen3.6" (try the first, fall back to the second), filter by size like "qwen >10gb", and by release date like "qwen>2026".
 
@@ -49,8 +32,6 @@ Run it yourself:
 ```shell
 $ uvx dyva
 ```
-
-Yeah, 4 letters. I got that. In 2026.
 
 You can go to the port in your web browser and view the current settings or crank up that `LOGLEVEL` value. Think about it as a janky LiteLLM proxy with zero configuration. Or don't...
 
