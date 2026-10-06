@@ -1,6 +1,6 @@
 # Dumpster Dyva
 
-Dyva is an OpenAI and Ollama-compatible proxy that routes inference to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, strata, A1111, generic gradio, and ComfyUI hosts from Shodan, Zoomeye, Censys, hunter.how and FOFA with dynamic failover routing and honeypot detection.
+Dyva is an OpenAI and Ollama-compatible proxy that routes inference to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, strata, A1111, generic gradio, and ComfyUI hosts from Shodan, Zoomeye, Censys, hunter.how and FOFA with dynamic failover routing, context-window scaling, honeypot detection, and vision detection. It is also capable of image generation and editing, video generatoin, TTS, and music generation in a unified interface.
 
 Compatible enough that the real Ollama CLI thinks it's talking to a real Ollama server — see [below](#use-it-like-ollama).
 
