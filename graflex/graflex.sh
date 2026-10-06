@@ -199,6 +199,11 @@ ENDL
     COUNTRIES="US,CN,TR,KR,RU,TH,RO,TW,DE,HK,JP,BR,VN,CA,FR,ES,IN,SG,CL,IT,NL,GB"
     ;;
 
+  localai)
+    QUERY='title="localai"'
+    PORTS="8080,80,443,3000,8081,8000"
+    ;;
+
   fooocus)
     COUNTRIES='CN'
     SERVERS='uvicorn,nginx'
@@ -208,6 +213,13 @@ ENDL
     SITE=hunter
     SERVICE=ollama
     PORTS='11434'
+    ;;
+
+  llamacpp-censys)
+    SERVICE=llama.cpp
+    SITE=censys
+    COUNTRIES="United States,China,France,Germany,Hong Kong"
+    PORTS="8000,8082,8001,11434,8090,8081"
     ;;
 
   llamacpp-hunter)
@@ -233,7 +245,6 @@ ENDL
     SITE=censys
     SERVICE=ollama
     COUNTRIES="United States,China,France,Germany,Hong Kong"
-    ACTION=fetch
     PORTS="11434,3000,443,8080,8000"
     ;;
 
@@ -261,7 +272,7 @@ ENDL
     ;;
 
   *)
-    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|fooocus|comfyui|a1111|vllm|llama.cpp|lmstudio|lmstudio-zoomeye|gradio|combine]" >&2
+    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|fooocus|comfyui|a1111|vllm|llama.cpp|lmstudio|lmstudio-zoomeye|localai|gradio|combine]" >&2
     exit 1
     ;;
 esac

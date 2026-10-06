@@ -8128,7 +8128,7 @@ function _renderStatsChart(){
       var val=f==='__other__'?otherSum:(fam[f]||0);
       if(val<=0)return;
       var nm=f==='__other__'?'Other':f, c=f==='__other__'?OTHER:color[f];
-      html+='<i style="height:'+(100*val/yTop).toFixed(2)+'%;background:'+c+'" title="'+escHtml(nm+' · '+_ktok(val)+'k')+'"></i>';
+      html+='<i style="height:'+(100*val/yTop).toFixed(2)+'%;background:'+c+'" title="'+escHtml(g.tfmt(s[0])+' · '+nm+' · '+_ktok(val)+'k')+'"></i>';
     });
     return '<div class="sc-col" title="'+escHtml(g.tfmt(s[0])+' · '+_ktok(total)+'k tokens')+'">'+html+'</div>';
   }).join('');

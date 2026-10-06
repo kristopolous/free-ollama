@@ -431,6 +431,7 @@ SERVICE_CONFIG = {
         "fofa_query": 'server=="llama.cpp"',
         "zoomeye_query": 'http.header.server="llama.cpp"',
         "hunter_query": 'header.server=="llama.cpp"',
+        "censys_query": 'web.endpoints.http.headers.value="llama.cpp"',
         "check_path": "/v1/models",
     },
     "vllm": {
@@ -459,6 +460,14 @@ SERVICE_CONFIG = {
         "port": 8080,
         "fofa_query": "'{\"error\":{\"message\":\"unknown endpoint\",\"type\":\"invalid_request_error\"}}'",
         "countries": "US,CN",
+        "check_path": "/v1/models",
+    },
+    "localai": {
+        # LocalAI (github.com/mudler/LocalAI): an OpenAI-compatible inference engine whose
+        # web UI page title is "LocalAI" (the FOFA fingerprint). /v1/models lists the loaded
+        # models and lands in the OpenAI-dialect else branch of _check_host (data[].id).
+        "port": 8080,
+        "fofa_query": 'title="localai"',
         "check_path": "/v1/models",
     },
 }
@@ -493,7 +502,7 @@ def _named_query(name):
 
 # Services that cache a raw model-list snapshot per host during check, so a
 # resume (-i) run can skip hosts already snapshotted this session.
-SNAPSHOT_SERVICES = {"ollama", "vllm", "lmstudio", "llama.cpp"}
+SNAPSHOT_SERVICES = {"ollama", "vllm", "lmstudio", "llama.cpp", "localai"}
 
 
 def _load_json(path, silent=False):
@@ -3516,7 +3525,7 @@ SAMPLE_OUT = os.path.join(CACHE_DIR, "graflex-mini.json")
 # bucket -> (services to draw from, how many, the classifier kind for comfyui
 # media buckets — None means "no per-model kind gate for this bucket").
 SAMPLE_BUCKETS = {
-    "text":   (["ollama", "llama.cpp", "vllm", "lmstudio"], 30, None),
+    "text":   (["ollama", "llama.cpp", "vllm", "lmstudio", "localai"], 30, None),
     "image":  (["a1111", "comfyui"], 8, "image"),
     "edit":   (["comfyui"], 4, "edit"),
     "video":  (["comfyui"], 8, "video"),
