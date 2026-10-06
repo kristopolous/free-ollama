@@ -1,6 +1,6 @@
 # Dumpster Dyva
 
-OpenAI and Ollama-compatible proxy that routes inference to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, strata, A1111, generic gradio, and ComfyUI hosts using Shodan, zoomeye, censys, hunter.how and FOFA with dynamic failover routing and honeypot detection.
+OpenAI and Ollama-compatible proxy that routes inference to insecure Ollama, vLLM, LM Studio, LocalAI, SGLang, KTT, MLX, llama.cpp, ds4, fooocus, strata, A1111, generic gradio, and ComfyUI hosts from Shodan, zoomeye, censys, hunter.how and FOFA with dynamic failover routing and honeypot detection.
 
 Compatible enough that the real Ollama CLI thinks it's talking to a real Ollama server — see [below](#use-it-like-ollama).
 
