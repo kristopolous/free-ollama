@@ -70,6 +70,17 @@ def test_session_hosts_parses_raw_fetch_files(tmp_path):
     assert {graflex._entry_host(h) for h in hosts} == {"1.2.3.4:11434", "5.6.7.8:11434"}
 
 
+def test_session_hosts_site_filter(tmp_path):
+    # -t <site> restricts check-new's reparse to that one source's files.
+    import graflex
+    sess = "20990101000001"
+    d = tmp_path / sess / "hunter"
+    d.mkdir(parents=True)
+    (d / "ollama-q.json").write_text(json.dumps({"code": 200, "data": {"list": [{"ip": "1.1.1.1", "port": 11434}]}}))
+    assert {graflex._entry_host(h) for h in graflex._session_hosts(sess, "ollama", "hunter", base=str(tmp_path))} == {"1.1.1.1:11434"}
+    assert graflex._session_hosts(sess, "ollama", "censys", base=str(tmp_path)) == []   # wrong site -> nothing
+
+
 def test_check_all_check_new_session_path(tmp_path, monkeypatch):
     # Exercise the whole check-new+session path through _check_all (with _check_hosts
     # stubbed) so the wiring — input from the session, skip via the DB, and the shared
@@ -121,6 +132,28 @@ def test_check_batch_skips_recorded_via_db(tmp_path, monkeypatch):
                          {"service": "ollama", "host": "2.2.2.2:11434"}],   # new -> check
                         "ollama", name="ollama", session=None)
     assert captured.get("to_check") == ["2.2.2.2:11434"]
+
+
+def test_check_all_plain_check_reads_db(tmp_path, monkeypatch):
+    # Plain `check` (no session) now draws candidates from the DB: skip working and
+    # hard-errored, re-probe the previously-unreachable and the never-checked (NULL).
+    import asyncio
+    import graflex
+    conn = hoststore.connect(str(tmp_path / "g.db"))
+    monkeypatch.setattr(graflex, "_HOSTSTORE", conn, raising=False)
+    monkeypatch.setattr(graflex, "CACHE_DIR", str(tmp_path), raising=False)
+    graflex._store_record("ollama", "w:1", "working", {"host": "w:1"})
+    graflex._store_record("ollama", "e:2", "notworking", {"host": "e:2", "result": "error"})
+    graflex._store_record("ollama", "u:3", "notworking", {"host": "u:3", "result": "unreachable"})
+    hoststore.discover(conn, "ollama", "n:4", {"service": "ollama", "host": "n:4"})  # NULL
+    captured = {}
+
+    async def fake_check_hosts(to_check, *a, **k):
+        captured["to_check"] = sorted(graflex._entry_host(h) for h in to_check)
+
+    monkeypatch.setattr(graflex, "_check_hosts", fake_check_hosts)
+    asyncio.run(graflex._check_all("ollama", name="ollama", check_new=False, check_all=False, session=None))
+    assert captured.get("to_check") == ["n:4", "u:3"]
 
 
 def test_check_hosts_runs_import_before_writing(tmp_path, monkeypatch):
