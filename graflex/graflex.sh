@@ -15,8 +15,7 @@ source .env
 
 case "$SERVICE" in
   all)
-
-    for i in ds4 vllm lmstudio fooocus llama.cpp ollama ollama-shodan comfyui a1111 gradio; do
+    for i in ds4 vllm lmstudio fooocus llama.cpp ollama shodan comfyui a1111 gradio; do
       $CMD $i ${EXTRA_ARGS[@]}
       last_res="$?"
       echo ">>   "$last_res
@@ -80,31 +79,6 @@ case "$SERVICE" in
       | grep oding | sed 's/^..../"/g' | tail -1 | jq -r 'fromjson' \
       | python3 "$HERE/build_release_dates.py" - "$HERE/../dyva/model-release-dates.json"
     exit $?
-    ;;
-
-  # Not in the daily `all` loop: ZOOMEYE_COOKIE is a browser SESSION token that
-  # expires, so run this by hand after refreshing the cookie (unlike the stable
-  # Shodan API key). ZoomEye caps a query at ~250 results, so it's a quick pass.
-  ollama-zoomeye)
-    SERVICE=ollama
-    SITE=zoomeye
-    # No port filter — ollama runs on many ports. ISO alpha-2 codes (UK -> GB);
-    # each country is its own ≤250 slice past ZoomEye's cap.
-    COUNTRIES="RU,DE,US,CN,IN,GB,ES" #TR,RO,TH,SK,FR,JP,SG,IT,SA,ID,BR,VT"
-    ;;
-
-  llamacpp-zoomeye)
-    SERVICE=llama.cpp
-    SITE=zoomeye
-    COUNTRIES="US,CN,IR,DE,FR"
-    PORTS="8082,8001,8000,11434,8090,8081"
-    ;;
-
-
-  lmstudio-zoomeye)
-    SERVICE=lmstudio
-    SITE=zoomeye
-    COUNTRIES="US,CN,RU,TR,KR,TH,RO,TW,DE,HK,JP,BR,VN,CA,FR,ES,IN,SG,CL,IT,NL,GB"
     ;;
 
   ollama)
@@ -203,86 +177,6 @@ ENDL
     SERVERS='uvicorn,nginx'
     ;;
 
-  # hunter.how section
-  hunter)
-    for service in ollama llamacpp comfyui lmstudio; do
-      "$CMD" "$service"-hunter "${EXTRA_ARGS[@]}" 
-    done
-    exit 0
-    ;;
-
-  ollama-hunter)
-    SITE=hunter
-    SERVICE=ollama
-    PORTS='11434'
-    ;;
-
-  llamacpp-hunter)
-    SERVICE=llama.cpp
-    SITE=hunter
-    PORTS="8000,8082,8001,11434,8090,8081"
-    ;;
-
-  comfyui-hunter)
-    SERVICE=comfyui
-    SITE=hunter
-    PORTS="9443,9200,8983,9200,5060,8089,5601,28017,8188,8080,80,443"
-    QUERY='web.title=="ComfyUI"'
-    ;;
-
-  lmstudio-hunter)
-    SERVICE=lmstudio
-    SITE=hunter
-    PORTS="1234,80,443,8080,8000,12345"
-    ;;
-
-
-  # censys
-  censys)
-    for service in ollama llamacpp; do
-      "$CMD" "$service"-censys "${EXTRA_ARGS[@]}" 
-    done
-    exit 0
-    ;;
-
-  llamacpp-censys)
-    SERVICE=llama.cpp
-    SITE=censys
-    COUNTRIES="United States,China,France,Germany,Hong Kong"
-    PORTS="8000,8082,8001,11434,8090,8081"
-    ;;
-
-  ollama-censys)
-    SITE=censys
-    SERVICE=ollama
-    COUNTRIES="United States,China,France,Germany,Hong Kong"
-    PORTS="11434,3000,443,8080,8000"
-    ;;
-
-
-
-  # shodan section
-  shodan)
-    for service in ollama llamacpp; do
-      "$CMD" "$service"-shodan "${EXTRA_ARGS[@]}" 
-    done
-    exit 0
-    ;;
-
-  llamacpp-shodan)
-    SERVICE=llama.cpp
-    SITE=shodan
-    PORTS="8000,8080,8082,8001,8081"
-    ;;
-
-  ollama-shodan)
-    SERVICE=ollama
-    SITE=shodan
-    PORTS="11434,8080,8081,8082,80,443" #9200,10001,8888,9000,8080,8083,80,443"
-    COUNTRIES="US,AU,JP,IN,CA" #,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
-    ;;
-
-
   ds4)
     ;;
 
@@ -305,6 +199,118 @@ ENDL
 )
 
     ;;
+
+  # zoomeye
+  # Not in the daily `all` loop: ZOOMEYE_COOKIE is a browser SESSION token that
+  # expires, so run this by hand after refreshing the cookie (unlike the stable
+  # Shodan API key). ZoomEye caps a query at ~250 results, so it's a quick pass.
+  zoomeye)
+    for service in ollama llamacpp lmstudio; do
+      "$CMD" zomeye-"$service" "${EXTRA_ARGS[@]}" 
+    done
+    exit 0
+    ;;
+
+  zoomeye-ollama)
+    SERVICE=ollama
+    SITE=zoomeye
+    # No port filter — ollama runs on many ports. ISO alpha-2 codes (UK -> GB);
+    # each country is its own ≤250 slice past ZoomEye's cap.
+    COUNTRIES="RU,DE,US,CN,IN,GB,ES" #TR,RO,TH,SK,FR,JP,SG,IT,SA,ID,BR,VT"
+    ;;
+
+  zoomeye-llamacpp)
+    SERVICE=llama.cpp
+    SITE=zoomeye
+    COUNTRIES="US,CN,IR,DE,FR"
+    PORTS="8082,8001,8000,11434,8090,8081"
+    ;;
+
+  zoomeye-lmstudio)
+    SERVICE=lmstudio
+    SITE=zoomeye
+    COUNTRIES="US,CN,RU,TR,KR,TH,RO,TW,DE,HK,JP,BR,VN,CA,FR,ES,IN,SG,CL,IT,NL,GB"
+    ;;
+
+
+  # hunter.how section
+  hunter)
+    for service in ollama llamacpp comfyui lmstudio; do
+      "$CMD" hunter-"$service" "${EXTRA_ARGS[@]}" 
+    done
+    exit 0
+    ;;
+
+  hunter-ollama)
+    SITE=hunter
+    SERVICE=ollama
+    PORTS='11434'
+    ;;
+
+  hunter-llamacpp)
+    SERVICE=llama.cpp
+    SITE=hunter
+    PORTS="8000,8082,8001,11434,8090,8081"
+    ;;
+
+  hunter-comfyui)
+    SERVICE=comfyui
+    SITE=hunter
+    PORTS="9443,9200,8983,9200,5060,8089,5601,28017,8188,8080,80,443"
+    QUERY='web.title=="ComfyUI"'
+    ;;
+
+  hunter-lmstudio)
+    SERVICE=lmstudio
+    SITE=hunter
+    PORTS="1234,80,443,8080,8000,12345"
+    ;;
+
+
+  # censys
+  censys)
+    for service in ollama llamacpp; do
+      "$CMD" censys-"$service" "${EXTRA_ARGS[@]}" 
+    done
+    exit 0
+    ;;
+
+  censys-llamacpp)
+    SERVICE=llama.cpp
+    SITE=censys
+    COUNTRIES="United States,China,France,Germany,Hong Kong"
+    PORTS="8000,8082,8001,11434,8090,8081"
+    ;;
+
+  censys-ollama)
+    SITE=censys
+    SERVICE=ollama
+    COUNTRIES="United States,China,France,Germany,Hong Kong"
+    PORTS="11434,3000,443,8080,8000"
+    ;;
+
+
+  # shodan section
+  shodan)
+    for service in ollama llamacpp; do
+      "$CMD" shodan-"$service" "${EXTRA_ARGS[@]}" 
+    done
+    exit 0
+    ;;
+
+  shodan-llamacpp)
+    SERVICE=llama.cpp
+    SITE=shodan
+    PORTS="8000,8080,8082,8001,8081"
+    ;;
+
+  shodan-ollama)
+    SERVICE=ollama
+    SITE=shodan
+    PORTS="11434,8080,8081,8082,80,443" #9200,10001,8888,9000,8080,8083,80,443"
+    COUNTRIES="US,AU,JP,IN,CA" #,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
+    ;;
+
 
   *)
     echo "Usage: $0" $(grep -P '\s+[\-\w]+[)]$' "$0" | sort | tr -d ')\n') >&2
