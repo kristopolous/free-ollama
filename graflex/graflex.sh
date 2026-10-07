@@ -232,7 +232,7 @@ ENDL
   llamacpp-shodan)
     SERVICE=llama.cpp
     SITE=shodan
-    PORTS="8000,8082,8001,11434,8090,8081"
+    PORTS="8000,8080,8082,8001,8081"
     ;;
 
   comfyui-hunter)
