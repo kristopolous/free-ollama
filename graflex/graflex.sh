@@ -82,13 +82,6 @@ case "$SERVICE" in
     exit $?
     ;;
 
-  ollama-shodan)
-    SERVICE=ollama
-    SITE=shodan
-    PORTS="11434,8080,8081,8082,80,443" #9200,10001,8888,9000,8080,8083,80,443"
-    COUNTRIES="US,AU,JP,IN,CA" #,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
-    ;;
-
   # Not in the daily `all` loop: ZOOMEYE_COOKIE is a browser SESSION token that
   # expires, so run this by hand after refreshing the cookie (unlike the stable
   # Shodan API key). ZoomEye caps a query at ~250 results, so it's a quick pass.
@@ -210,29 +203,24 @@ ENDL
     SERVERS='uvicorn,nginx'
     ;;
 
+  # hunter.how section
   hunter)
+    for service in ollama llamacpp comfyui lmstudio; do
+      "$CMD" "$service"-hunter "${EXTRA_ARGS[@]}" 
+    done
+    exit 0
+    ;;
+
+  ollama-hunter)
     SITE=hunter
     SERVICE=ollama
     PORTS='11434'
-    ;;
-
-  llamacpp-censys)
-    SERVICE=llama.cpp
-    SITE=censys
-    COUNTRIES="United States,China,France,Germany,Hong Kong"
-    PORTS="8000,8082,8001,11434,8090,8081"
     ;;
 
   llamacpp-hunter)
     SERVICE=llama.cpp
     SITE=hunter
     PORTS="8000,8082,8001,11434,8090,8081"
-    ;;
-
-  llamacpp-shodan)
-    SERVICE=llama.cpp
-    SITE=shodan
-    PORTS="8000,8080,8082,8001,8081"
     ;;
 
   comfyui-hunter)
@@ -248,12 +236,52 @@ ENDL
     PORTS="1234,80,443,8080,8000,12345"
     ;;
 
+
+  # censys
   censys)
+    for service in ollama llamacpp; do
+      "$CMD" "$service"-censys "${EXTRA_ARGS[@]}" 
+    done
+    exit 0
+    ;;
+
+  llamacpp-censys)
+    SERVICE=llama.cpp
+    SITE=censys
+    COUNTRIES="United States,China,France,Germany,Hong Kong"
+    PORTS="8000,8082,8001,11434,8090,8081"
+    ;;
+
+  ollama-censys)
     SITE=censys
     SERVICE=ollama
     COUNTRIES="United States,China,France,Germany,Hong Kong"
     PORTS="11434,3000,443,8080,8000"
     ;;
+
+
+
+  # shodan section
+  shodan)
+    for service in ollama llamacpp; do
+      "$CMD" "$service"-shodan "${EXTRA_ARGS[@]}" 
+    done
+    exit 0
+    ;;
+
+  llamacpp-shodan)
+    SERVICE=llama.cpp
+    SITE=shodan
+    PORTS="8000,8080,8082,8001,8081"
+    ;;
+
+  ollama-shodan)
+    SERVICE=ollama
+    SITE=shodan
+    PORTS="11434,8080,8081,8082,80,443" #9200,10001,8888,9000,8080,8083,80,443"
+    COUNTRIES="US,AU,JP,IN,CA" #,SG,IL,DE,BR,HK,ZA,CH,TH,IT"
+    ;;
+
 
   ds4)
     ;;
@@ -279,7 +307,7 @@ ENDL
     ;;
 
   *)
-    echo "Usage: $0 [ollama|ollama-shodan|ollama-zoomeye|fooocus|comfyui|a1111|vllm|llama.cpp|lmstudio|lmstudio-zoomeye|localai|gradio|combine]" >&2
+    echo "Usage: $0" $(grep -P '\s+[\-\w]+[)]$' "$0" | sort | tr -d ')\n') >&2
     exit 1
     ;;
 esac
