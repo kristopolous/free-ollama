@@ -382,10 +382,13 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .sr-bar i{display:block;height:100%;background:var(--accent)}
 /* Fixed-width right-aligned columns so tokens / tps / reqs line up straight down the
    list (tabular-nums keeps digits monospaced) instead of snaking with the text. */
-.sr-tok,.sr-tps,.sr-req{text-align:right;white-space:nowrap;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.sr-tok,.sr-tps,.sr-req,.sr-last{text-align:right;white-space:nowrap;color:var(--text-muted);font-variant-numeric:tabular-nums}
 .sr-tok{flex:0 0 62px}
 .sr-tps{flex:0 0 46px}
 .sr-req{flex:0 0 40px}
+.sr-last{flex:0 0 58px}
+.stats-hdr .sr-h{cursor:pointer;user-select:none}
+.stats-hdr .sr-h:hover,.stats-hdr .sr-sorted{color:var(--text)}
 /* Units live here once, in the header, instead of being suffixed onto all 40 rows.
    Sticky so the columns stay labelled while the bounded list scrolls. */
 .stats-hdr .sr-name{font-size:var(--fs-md);letter-spacing:var(--eyebrow-tracking)}
@@ -777,6 +780,7 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
          color:var(--text-2);background:rgba(20,20,20,.5);padding:3px 8px;border-radius:1px;
          pointer-events:none;white-space:nowrap}
 .doc-panel{flex:1;min-width:0;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--bg-sunken);overflow:hidden}
+.doc-panel.doc-max{position:fixed;inset:0;z-index:200;border-radius:0}
 .doc-head{display:flex;align-items:center;gap:var(--sp-3);padding:var(--sp-3) 10px;border-bottom:1px solid var(--border);flex-shrink:0}
 .doc-select{flex:1;min-width:0}
 .doc-type{color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:var(--eyebrow-tracking);flex-shrink:0}
@@ -1293,6 +1297,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <span id="docVer" class="doc-ver" style="display:none"><button id="docVerPrev" class="doc-btn doc-ver-btn" title="Older version">‹</button><span id="docVerLabel" class="doc-ver-label" title="Document version"></span><button id="docVerNext" class="doc-btn doc-ver-btn" title="Newer version">›</button></span>
 <button id="docView" class="doc-btn" title="Show rendered" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
 <button id="docDownload" class="doc-btn" title="Download"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></button>
+<button id="docMax" class="doc-btn" title="Maximize"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg></button>
 <button id="docClose" class="doc-close" title="Close">✕</button>
 </div>
 <div class="doc-body" id="docBody"></div>
@@ -2476,6 +2481,18 @@ function agoText(secs){
 function agoLong(secs){
   if(secs<3600)return Math.floor(secs/60)+'m '+(secs%60|0)+'s';
   return Math.floor(secs/3600)+'h '+(Math.floor(secs%3600/60))+'m';
+}
+// Coarse, day/week-aware delta for the stats "Last" column: "now", "5 min", "3 hours",
+// "1 day", "2 weeks". agoText above tops out at hours; this reads at a glance for stale rows.
+function agoDelta(secs){
+  if(!isFinite(secs)||secs<0)return '';
+  if(secs<45)return 'now';
+  if(secs<3600)return Math.round(secs/60)+' min';
+  var v,u;
+  if(secs<86400){v=Math.round(secs/3600);u='hour';}
+  else if(secs<604800){v=Math.round(secs/86400);u='day';}
+  else{v=Math.round(secs/604800);u='week';}
+  return v+' '+u+(v!==1?'s':'');
 }
 // The workers view wants precision the activity feed doesn't: a sub-second host
 // find should read "0.8s", not "0s", because that number is the whole point.
@@ -6723,7 +6740,9 @@ function openDoc(id){
   syncDocBtn();
 }
 function hideDocPanel(){document.getElementById('docPanel').style.display='none';syncDocBtn();}   // hide without changing intent
-function closeDoc(){_docPanelWanted=false;hideDocPanel();}                            // user dismissed it
+function closeDoc(){_docPanelWanted=false;hideDocPanel();                              // user dismissed it
+  var p=document.getElementById('docPanel');if(p)p.classList.remove('doc-max');       // leave maximized state behind
+  var mb=document.getElementById('docMax');if(mb&&typeof _docMaxIcon!=='undefined'){mb.title='Maximize';mb.innerHTML=_docMaxIcon.off;}}
 function docFilename(doc){
   // the model names documents with their extension (e.g. hanoi.pl); use the
   // title verbatim, only supplying a fallback extension if it left one off
@@ -6907,6 +6926,14 @@ document.getElementById('docVerNext').addEventListener('click',function(){
   renderDocPanel();
 });
 document.getElementById('docDownload').addEventListener('click',downloadDoc);
+var _docMaxIcon={
+  on:'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>',
+  off:'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>'};
+document.getElementById('docMax').addEventListener('click',function(){
+  var max=document.getElementById('docPanel').classList.toggle('doc-max');
+  this.title=max?'Restore':'Maximize';
+  this.innerHTML=max?_docMaxIcon.on:_docMaxIcon.off;
+});
 document.getElementById('docClose').addEventListener('click',closeDoc);
 document.getElementById('docToggle').addEventListener('click',function(){
   if(document.getElementById('docPanel').style.display==='none'){
@@ -8114,23 +8141,44 @@ function _mapTip(){var t=document.getElementById('mapTip');if(!t){t=document.cre
 function _showTip(html,ev){var t=_mapTip();t.innerHTML=html;t.style.display='block';var x=ev.clientX+14,y=ev.clientY+14;t.style.left=Math.min(x,innerWidth-t.offsetWidth-8)+'px';t.style.top=Math.min(y,innerHeight-t.offsetHeight-8)+'px'}
 function _hideTip(){var t=document.getElementById('mapTip');if(t)t.style.display='none'}
 var _mapData=null,_mapCmp=null,_mapWired=false;
-function _statRows(rows,label){
+var _statSort={col:'tok',dir:-1};   // table sort: default Tokens, descending
+function _statVal(x,col){
+  if(col==='name')return (x.name||'').toLowerCase();
+  if(col==='tps')return (x.tps==null?-1:x.tps);
+  if(col==='req')return (x.reqs||0);
+  if(col==='last')return (x.last||0);
+  return (x.up||0)+(x.down||0);     // 'tok'
+}
+function _statRows(rows,label,showLast){
   rows=rows||[];
+  var nowSec=Date.now()/1000;
   // The section title ("By model") sits in the header row's NAME column rather than in
-  // its own <h3> above, so the label and the column units read as one line. Units live
-  // in the header, so every row prints a bare number.
-  var hdr='<div class="stats-row stats-hdr"><span class="sr-name">'+escHtml(label||'')+'</span>'
-    +'<span class="sr-bar"></span><span class="sr-tok">Tokens (k)</span>'
-    +'<span class="sr-tps">Tok/s</span><span class="sr-req">Req</span></div>';
+  // its own <h3> above, so the label and the column units read as one line. Every header
+  // cell is click-to-sort (data-sort); the active one carries a ▾/▴ direction arrow.
+  function hc(cls,txt,col){
+    var on=_statSort.col===col, arrow=on?(_statSort.dir<0?' ▾':' ▴'):'';
+    return '<span class="'+cls+' sr-h'+(on?' sr-sorted':'')+'" data-sort="'+col+'">'+escHtml(txt)+arrow+'</span>';
+  }
+  var hdr='<div class="stats-row stats-hdr">'
+    +hc('sr-name',label||'','name')+'<span class="sr-bar"></span>'
+    +hc('sr-tok','Tokens (k)','tok')+hc('sr-tps','Tok/s','tps')+hc('sr-req','Req','req')
+    +(showLast?hc('sr-last','Last','last'):'')+'</div>';
   if(!rows.length)return hdr+'<div class="muted">—</div>';
+  var col=_statSort.col; if(col==='last'&&!showLast)col='tok';
+  var sorted=rows.slice().sort(function(a,b){
+    var av=_statVal(a,col),bv=_statVal(b,col);
+    return (av<bv?-1:av>bv?1:0)*_statSort.dir;
+  });
   var max=1;rows.forEach(function(x){max=Math.max(max,(x.up||0)+(x.down||0))});
-  return hdr+rows.slice(0,40).map(function(x){
+  return hdr+sorted.slice(0,40).map(function(x){
     var tot=(x.up||0)+(x.down||0);
+    var last=showLast?('<span class="sr-last"'+(x.last?' title="'+escHtml(new Date(x.last*1000).toLocaleString())+'"':'')
+             +'>'+(x.last?escHtml(agoDelta(nowSec-x.last)):'')+'</span>'):'';
     return '<div class="stats-row"><span class="sr-name" title="'+escHtml(x.name)+'">'+escHtml(x.name)+'</span>'
       +'<span class="sr-bar"><i style="width:'+(100*tot/max).toFixed(1)+'%"></i></span>'
       +'<span class="sr-tok">'+_ktok(tot)+'</span>'
       +'<span class="sr-tps">'+(x.tps?NUM_FMT.format(Math.round(x.tps)):'')+'</span>'
-      +'<span class="sr-req">'+NUM_FMT.format(x.reqs||0)+'</span></div>';
+      +'<span class="sr-req">'+NUM_FMT.format(x.reqs||0)+'</span>'+last+'</div>';
   }).join('');
 }
 var _statsGran='day';   // usage-chart granularity: hour / day / week
@@ -8240,7 +8288,7 @@ function _renderStatsTable(){
   if(_statsView==='hosts'){rows=_statsData.hosts;label='By host';}
   else if(_statsView==='family'){rows=_familyRows(_statsData.models);label='By family';}
   else{rows=_statsData.models;label='By model';}
-  el.innerHTML=_statRows(rows,label);
+  el.innerHTML=_statRows(rows,label,_statsView==='hosts');
   var tabs=document.getElementById('statsTabs');
   if(tabs)tabs.querySelectorAll('button').forEach(function(b){
     b.classList.toggle('active', b.getAttribute('data-view')===_statsView);});
@@ -8256,6 +8304,17 @@ function _wireStatsTabs(){
   var gran=document.getElementById('statsGran');
   if(gran&&!gran._wired){gran._wired=true;
     gran.addEventListener('change',function(){_statsGran=gran.value;_renderStatsChart();});   // re-render from stashed data, no refetch
+  }
+  // Click a column header to sort by it; click again to flip direction (no refetch).
+  var stbl=document.getElementById('statsTable');
+  if(stbl&&!stbl._sortWired){stbl._sortWired=true;
+    stbl.addEventListener('click',function(e){
+      var h=e.target.closest&&e.target.closest('.sr-h[data-sort]');if(!h)return;
+      var col=h.getAttribute('data-sort');
+      if(_statSort.col===col)_statSort.dir=-_statSort.dir;
+      else _statSort={col:col,dir:(col==='name'?1:-1)};   // numbers default desc, name asc
+      _renderStatsTable();
+    });
   }
 }
 function renderStats(d){

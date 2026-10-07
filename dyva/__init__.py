@@ -7175,17 +7175,20 @@ async def handle_stats(request):
                     h = hours.setdefault(hk, {"day": hk, "up": 0, "down": 0, "reqs": 0, "fam": {}})
                     h["up"] += up; h["down"] += down; h["reqs"] += 1; h["fam"][fam] = h["fam"].get(fam, 0) + toks
                 for bucket, bkey in ((models, r.get("model") or "?"), (hosts, r.get("host") or "?")):
-                    b = bucket.setdefault(bkey, {"up": 0, "down": 0, "reqs": 0, "_tps": 0.0, "_tn": 0})
+                    b = bucket.setdefault(bkey, {"up": 0, "down": 0, "reqs": 0, "_tps": 0.0, "_tn": 0, "_last": 0.0})
                     b["up"] += up; b["down"] += down; b["reqs"] += 1
                     if tps is not None:
                         b["_tps"] += tps; b["_tn"] += 1
+                    if down > 0 and rdate > b["_last"]:
+                        b["_last"] = rdate   # last time this host/model actually EMITTED tokens
                 tot_up += up; tot_down += down; tot_reqs += 1
     except OSError:
         pass
 
     def _rows(bucket):
         out = [{"name": k, "up": b["up"], "down": b["down"], "reqs": b["reqs"],
-                "tps": round(b["_tps"] / b["_tn"], 1) if b["_tn"] else None}
+                "tps": round(b["_tps"] / b["_tn"], 1) if b["_tn"] else None,
+                "last": (b.get("_last") or None)}
                for k, b in bucket.items()]
         out.sort(key=lambda x: x["up"] + x["down"], reverse=True)
         return out
