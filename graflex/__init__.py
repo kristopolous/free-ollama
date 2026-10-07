@@ -429,6 +429,7 @@ SERVICE_CONFIG = {
     "llama.cpp": {
         "port": 8080,
         "fofa_query": 'server=="llama.cpp"',
+        "shodan_query": 'product="llama.cpp"',
         "zoomeye_query": 'http.header.server="llama.cpp"',
         "hunter_query": 'header.server=="llama.cpp"',
         "censys_query": 'web.endpoints.http.headers.value="llama.cpp"',

@@ -229,6 +229,12 @@ ENDL
     PORTS="8000,8082,8001,11434,8090,8081"
     ;;
 
+  llamacpp-shodan)
+    SERVICE=llama.cpp
+    SITE=hunter
+    PORTS="8000,8082,8001,11434,8090,8081"
+    ;;
+
   comfyui-hunter)
     SERVICE=comfyui
     SITE=hunter
