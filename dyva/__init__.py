@@ -4612,6 +4612,16 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         if hedging:
             t0 = time.time()
             while (not done.is_set() and time.time() - t0 < hedge_delay and tried < 2):
+                # Fan out the INSTANT the pinned sticky/warm host resolves WITHOUT winning.
+                # race_log[0] is that host; once its attempt finishes with a non-accepted
+                # outcome (failed / timed out / skipped / retry), waiting out the rest of
+                # hedge_delay is pointless — and on a tool continuation hedge_delay is
+                # CONTINUATION_HEDGE (3600s / 1h), so a warm host that disconnects or hangs
+                # would otherwise pin the whole request to it for an hour with no fan-out
+                # (checked=1, 'searching' forever). `tried < 2` never trips here because the
+                # permit is still frozen at 1, so this is the real failover trigger.
+                if race_log and race_log[0].get("outcome") not in (None, V_ACCEPTED):
+                    break
                 await asyncio.sleep(0.1)
             if done.is_set():
                 return
@@ -4644,7 +4654,20 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             if live + n <= cap:
                 _spawn(n)
 
-    fan = asyncio.create_task(_fanout())
+    async def _fanout_guarded():
+        # _fanout is fire-and-forget (only awaited in the final gather, which never runs
+        # until the race ends). An unhandled exception in it was therefore SILENT: the
+        # fan-out would simply stop, _permit froze at its initial value, and the first
+        # worker could never take a second candidate — the race sat at checked=1, in
+        # 'searching', forever, with no signal anywhere. Log it loudly so the cause is
+        # visible; the race-level _deadline above is the safety net that ends the request.
+        try:
+            await _fanout()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("race _fanout crashed — fan-out stalled for %s", label or key)
+    fan = asyncio.create_task(_fanout_guarded())
     tasks.append(fan)
     _tasks_holder.append(fan)
     try:
@@ -4654,6 +4677,20 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 break
             except asyncio.QueueEmpty:
                 if all(t.done() for t in tasks):
+                    result = None
+                    break
+                # HARD CEILING on the SEARCH phase. The race must find a host within the
+                # request budget (_deadline = TIMEOUT + stretch). Without this, a single
+                # attempt that hangs in-flight — a host that accepts the socket then never
+                # answers, awaited at `await att` with no per-attempt timeout — wedges its
+                # worker forever: the job sits in 'searching' (checked=1, find=null),
+                # neither streaming nor fanning out. The warming-retry logic honours
+                # _deadline for RE-QUEUEING but nothing stopped a stuck LIVE attempt. Past
+                # the budget with no winner, give up (None) and cancel the hung tasks below.
+                if not done.is_set() and time.time() > _deadline:
+                    log.warning("race for %s: no host within budget (%.0fs) — giving up "
+                                "after %d/%d checked", label or key, TIMEOUT + stretch,
+                                tried, len(entries))
                     result = None
                     break
             await asyncio.sleep(0.1)
