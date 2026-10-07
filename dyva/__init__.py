@@ -302,6 +302,16 @@ FANOUT = 20
 # cap ceil(TIMEOUT/FANOUT)*workers from inflating for a big prompt — it just waits longer
 # on the same number of hosts, it doesn't widen the fan-out. Settable at runtime (timeout_max).
 TIMEOUT_MAX = 180
+# Absolute ceiling on ONE streamed response, anchored to when the worker started.
+# The per-read watchdog (TIMEOUT) resets on every line, so a host that trickles a
+# token (or a keep-alive) more often than TIMEOUT can stream for hours — this is
+# the hard stop on total run time. 0 disables it. WORKER_MAX_FAILOVER picks the
+# action on a cap-hit: False = end the stream cleanly (no failover, host not
+# penalised); True = treat it as a mid-stream truncation and fail over to another
+# host (so e.g. a 300s cap can re-race instead of just stopping). Settable at
+# runtime (worker_max / worker_max_failover).
+WORKER_MAX = 1800
+WORKER_MAX_FAILOVER = False
 # A host that answers with a cold-start signal ("loading model") or a busy signal
 # (503 / full queue) is ALIVE and committing to serve us — it just isn't ready this
 # instant. That is the whole availability-beats-speed premise: we do not drop it, we
@@ -568,7 +578,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH, WORKER_MAX, WORKER_MAX_FAILOVER
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -588,6 +598,10 @@ def load_settings():
         REASONING_KEYS = [x.strip() for x in s["reasoning_keys"] if isinstance(x, str) and x.strip()]
     if isinstance(s.get("timeout_max"), (int, float)) and s["timeout_max"] > 0:
         TIMEOUT_MAX = s["timeout_max"]
+    if isinstance(s.get("worker_max"), (int, float)) and s["worker_max"] >= 0:
+        WORKER_MAX = s["worker_max"]
+    if isinstance(s.get("worker_max_failover"), bool):
+        WORKER_MAX_FAILOVER = s["worker_max_failover"]
     if isinstance(s.get("fanout"), (int, float)) and s["fanout"] > 0:
         FANOUT = s["fanout"]
     if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
@@ -621,6 +635,7 @@ def save_settings(extra=None):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                  "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
+                 "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST, "model_list_on": MODEL_LIST_ON,
                  "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
@@ -3743,25 +3758,33 @@ def find_servers(sub, caps=None):
     # 2026-02" can't include a model we can't date (and most undated ones are just
     # older models that didn't match the leaderboard). Date before size so
     # 'qwen>2026-02>5gb' splits cleanly.
+    # New-style ;key op value facets (host_status columns) are peeled off FIRST and left
+    # to a cheap host-set reduction at the end — the existing model-name grammar below is
+    # untouched, and with no facets the DB is never consulted (the hybrid stays cheap).
+    sub, facets = _split_host_facets(sub)
     sub, date_pred = _split_date_filter(sub)
     sub, size_pred = _split_size_filter(sub)
     result = _find_servers_raw(sub, caps)
-    if not size_pred and not date_pred:
-        return result
-    out = []
-    for prio, host, ms in result:
-        ms2 = ms
-        if size_pred:
-            cmp, thresh = size_pred
-            ms2 = [m for m in ms2 if (_model_size(m) is None) or cmp(_model_size(m), thresh)]
-        if date_pred:
-            dcmp, dthresh = date_pred
-            ms2 = [m for m in ms2
-                   if _model_release_date(m) is not None
-                   and dcmp(_expand_date(_model_release_date(m)), dthresh)]
-        if ms2:
-            out.append((prio, host, ms2))
-    return out
+    if size_pred or date_pred:
+        out = []
+        for prio, host, ms in result:
+            ms2 = ms
+            if size_pred:
+                cmp, thresh = size_pred
+                ms2 = [m for m in ms2 if (_model_size(m) is None) or cmp(_model_size(m), thresh)]
+            if date_pred:
+                dcmp, dthresh = date_pred
+                ms2 = [m for m in ms2
+                       if _model_release_date(m) is not None
+                       and dcmp(_expand_date(_model_release_date(m)), dthresh)]
+            if ms2:
+                out.append((prio, host, ms2))
+        result = out
+    if facets:
+        hosts = _facet_host_set(facets)
+        if hosts is not None:
+            result = [t for t in result if t[1] in hosts]   # cheap set reduction
+    return result
 
 
 _FALLBACK_RE = re.compile(r"\s*,\s*")
@@ -5756,6 +5779,15 @@ _STREAM_BREAK_ERRORS = (BrokenPipeError, ConnectionResetError,
                         asyncio.TimeoutError, OSError)
 
 
+def _stream_deadline(started, worker_max):
+    """Absolute wall-clock time by which a stream must stop, or None for no cap.
+    Anchored to the worker's START so the cap bounds TOTAL run time (across agentic
+    rounds), not a single read. A 0/None worker_max, or an unknown start, disables it."""
+    if not started or not worker_max or worker_max <= 0:
+        return None
+    return started + worker_max
+
+
 async def _pump_stream(response, resp, first_line, host, full, openai_format,
                        upstream_openai, wid, num_ctx, partial, cancel=None):
     """Forward ONE already-won upstream stream to the already-prepared client
@@ -5831,6 +5863,14 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
             except Exception:
                 pass
 
+        # Absolute run-time ceiling for this stream, anchored to the worker's START
+        # (so it caps TOTAL run time — even across agentic rounds — not per read). The
+        # per-read watchdog below only catches SILENCE; without this, a host that keeps
+        # trickling a token or keep-alive resets it forever. 0/unset = no cap.
+        _w = _workers.get(wid) if wid else None
+        _started = _w.get("started") if isinstance(_w, dict) else None
+        _hard_deadline = _stream_deadline(_started, WORKER_MAX)
+
         while True:
             # WATCHDOG + MANUAL STOP (after first token). Race the next upstream line
             # against (a) the TIMEOUT silence watchdog and (b) the manual-stop signal.
@@ -5838,10 +5878,18 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
             # truncation (fail over). A set `cancel` -> abort THIS host like a client
             # hang-up ('stopped', no failover), which is how a committed slow crawler is
             # killed. readline is reset every line, so slow-but-live generation is fine.
+            # The hard deadline rides alongside: shorten the wait so we stop AT the cap,
+            # and return 'capped' (the caller ends cleanly, or fails over, per setting).
+            _wait = TIMEOUT
+            if _hard_deadline is not None:
+                _rem = _hard_deadline - time.time()
+                if _rem <= 0:
+                    return "capped"
+                _wait = min(TIMEOUT, _rem)
             read_task = asyncio.ensure_future(resp.content.readline())
             waiters = [read_task] + ([cancel_wait] if cancel_wait is not None else [])
             done_set, _pending = await asyncio.wait(
-                waiters, timeout=TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+                waiters, timeout=_wait, return_when=asyncio.FIRST_COMPLETED)
             if cancel_wait is not None and cancel_wait.done():
                 read_task.cancel()
                 with contextlib.suppress(Exception):
@@ -5851,6 +5899,9 @@ async def _pump_stream(response, resp, first_line, host, full, openai_format,
                 read_task.cancel()
                 with contextlib.suppress(Exception):
                     await read_task
+                # the wait can expire for the silence watchdog OR the hard deadline
+                if _hard_deadline is not None and time.time() >= _hard_deadline:
+                    return "capped"
                 raise asyncio.TimeoutError
             line = read_task.result()
             if not line:
@@ -6095,6 +6146,21 @@ async def _stream_chat_failover(request, session, model, servers, opayload,
                 _w["stop"] = cancel.set
         status = await _pump_stream(response, resp, first_line, host, full, openai_format,
                                     oai, job_wid, _effective_num_ctx(payload), partial, cancel)
+        if status == "capped":
+            # The absolute run-time ceiling (WORKER_MAX) was hit. Two actions by setting:
+            # failover -> treat exactly like a mid-stream truncation (carry partial work
+            # forward, re-race another host); default -> end cleanly like an operator Stop
+            # (no failover, host NOT penalised — a duration guard, not a quality verdict).
+            if WORKER_MAX_FAILOVER:
+                await broadcast_activity(host, full, "warming",
+                    f"hit the {WORKER_MAX}s max run time on {host} — failing over", wid=job_wid)
+                status = "truncated"
+            else:
+                await broadcast_activity(host, full, "failed",
+                    f"hit the {WORKER_MAX}s max run time on {host} — ending the stream", wid=job_wid)
+                with contextlib.suppress(Exception):
+                    await _write_terminal_done(response, full, openai_format)
+                break
         if status == "stopped":
             # operator killed a committed stream: close the client's stream cleanly (the
             # real API client is still connected and would otherwise hang) and stop — no
@@ -7558,6 +7624,130 @@ async def handle_dashboard_models(request):
                         headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
+# --- host_status filter grammar -------------------------------------------
+# A `;`-delimited `key op value` filter compiled to a parameterized SQL WHERE
+# over host_status. The key is whitelisted against the table's REAL columns, so
+# nothing arbitrary reaches SQL; the value is always BOUND, never interpolated.
+# NULLs drop out on their own (SQL comparison semantics) — a filter only reduces
+# matches. Ops: = > < >= <= (2-char ops checked first). No negation yet.
+_HS_OPS = ("<=", ">=", "<", ">", "=")
+_hs_columns_cache = None
+
+
+def _hs_coerce(v):
+    """Bind numbers as numbers (so tps>10 compares numerically) and everything
+    else as text — SQLite takes the comparison kind from the bound value's type."""
+    try:
+        return int(v)
+    except ValueError:
+        try:
+            return float(v)
+        except ValueError:
+            return v
+
+
+def host_status_where(query, columns):
+    """Compile a ;-delimited `key op value` filter into (sql, params) for a WHERE
+    over host_status — e.g. ';tps>10;state=good' -> ('tps > ? AND state = ?', [10, 'good']).
+    `columns` is the allowed column set (the whitelist). Empty query -> ('', []).
+    Raises ValueError on an unknown key or a clause with no operator: nothing
+    unvalidated ever reaches SQL, and every value is bound, not interpolated."""
+    frags, params = [], []
+    for clause in query.split(";"):
+        clause = clause.strip()
+        if not clause:
+            continue
+        for op in _HS_OPS:
+            if op in clause:
+                key, _, val = clause.partition(op)
+                break
+        else:
+            raise ValueError(f"filter clause has no operator (= > < >= <=): {clause!r}")
+        key = key.strip().lower()
+        val = val.strip()
+        if not key or not val:
+            raise ValueError(f"malformed filter clause: {clause!r}")
+        if key not in columns:
+            raise ValueError(f"unknown filter key: {key!r}")
+        frags.append(f"{key} {op} ?")
+        params.append(_hs_coerce(val))
+    return " AND ".join(frags), params
+
+
+def _host_status_columns():
+    """The real host_status columns = the filter-key whitelist, read from the
+    schema so a newly-added column is filterable automatically (no hardcoded list)."""
+    global _hs_columns_cache
+    if _hs_columns_cache is None:
+        rows = _get_db().execute("PRAGMA table_info(host_status)").fetchall()
+        _hs_columns_cache = {r[1].lower() for r in rows}   # row = (cid, name, type, ...)
+    return _hs_columns_cache
+
+
+def _split_host_facets(sub):
+    """Split a model query into (model_token, facet_clause or None): everything BEFORE
+    the first ';' is the existing model-name token (globs / size / date / fallback —
+    untouched and still going through that pipeline), everything after is the ';'-delimited
+    host_status facet filter. No ';' at all -> the whole string is the model token and the
+    DB is never consulted (the common, cheap path). Unknown facet keys are NOT folded into
+    the model name (which would silently match nothing) — they reach host_status_where,
+    which rejects them, and _facet_host_set logs and ignores the bad clause."""
+    sub = sub or ""
+    if ";" not in sub:
+        return sub, None
+    head, _, rest = sub.partition(";")
+    facets = ";".join(seg.strip() for seg in rest.split(";") if seg.strip())
+    return head.strip(), (facets or None)
+
+
+def _facet_host_set(facet_clause):
+    """Hosts whose host_status satisfies the facets — one cheap indexed SELECT returned
+    as a set for an in-memory intersection with the candidate list. Host-level: a host
+    passes if ANY of its (host,model) rows match. Returns None when there is nothing to
+    filter by, or when the clause is malformed (logged and ignored — a typo in a facet
+    must not break routing)."""
+    try:
+        where, params = host_status_where(facet_clause, _host_status_columns())
+    except ValueError as e:
+        log.warning(f"ignoring malformed host filter {facet_clause!r}: {e}")
+        return None
+    if not where:
+        return None
+    sql = f"SELECT DISTINCT host FROM host_status WHERE {_LIVE_REAL} AND {where}"
+    return {h for (h,) in _get_db().execute(sql, params).fetchall()}
+
+
+async def handle_host_status_query(request):
+    """
+    Query the host-status table (JSON)
+    ---
+    tags: [UI]
+    summary: GET /dashboard/host-status?q=<;key op value;...> — reputation rows matching a filter
+    description: >
+      A ;-delimited `key op value` filter (ops = > < >= <=) compiled to a
+      parameterized WHERE over host_status; keys are whitelisted to the table's
+      columns and values are bound. Read-only. e.g. ?q=;tps>10;state=good;fail_smoke=0
+    responses:
+      '200':
+        description: Matching host_status rows
+      '400':
+        description: Bad filter (unknown key or a clause with no operator)
+    """
+    q = request.query.get("q", "") or ""
+    try:
+        where, params = host_status_where(q, _host_status_columns())
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    sql = f"SELECT * FROM host_status WHERE {_LIVE_REAL}"
+    if where:
+        sql += f" AND {where}"
+    sql += " LIMIT 1000"
+    cur = _get_db().execute(sql, params)
+    names = [d[0] for d in cur.description]
+    rows = [dict(zip(names, r)) for r in cur.fetchall()]
+    return web.json_response({"count": len(rows), "filter": q, "hosts": rows})
+
+
 async def handle_model_hosts(request):
     """
     Hosts for one model (JSON)
@@ -7659,6 +7849,7 @@ async def handle_settings_get(request):
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
+                              "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -7678,7 +7869,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH, WORKER_MAX, WORKER_MAX_FAILOVER
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -7707,6 +7898,10 @@ async def handle_settings_post(request):
         REASONING_KEYS = [x.strip() for x in body["reasoning_keys"] if isinstance(x, str) and x.strip()]
     if isinstance(body.get("timeout_max"), (int, float)) and body["timeout_max"] > 0:
         TIMEOUT_MAX = min(body["timeout_max"], 3600)
+    if isinstance(body.get("worker_max"), (int, float)) and body["worker_max"] >= 0:
+        WORKER_MAX = min(body["worker_max"], 30 * 86400)   # 0 disables; ceiling 30 days
+    if isinstance(body.get("worker_max_failover"), bool):
+        WORKER_MAX_FAILOVER = body["worker_max_failover"]
     if isinstance(body.get("fanout"), (int, float)) and body["fanout"] > 0:
         FANOUT = body["fanout"]
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
@@ -7744,6 +7939,7 @@ async def handle_settings_post(request):
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
+                              "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -9606,6 +9802,46 @@ async def handle_chat_delete(request):
 WEB_FETCH_TIMEOUT = 45          # wall clock for one page
 WEB_FETCH_MAX = 200_000         # bytes of text handed back to a model
 WEB_IMAGE_MAX = 32 * 1024 * 1024
+WEB_SEARCH_MAX = 8              # results handed back per search
+# DuckDuckGo's no-JS HTML endpoint — light orchestration (one POST + parse),
+# no API key, no searxng/container. Same engine the duckduckgo-mcp-server uses.
+WEB_SEARCH_URL = "https://html.duckduckgo.com/html/"
+# Self-throttle BELOW DDG's threshold (observed block at ~30/min from one IP) so a
+# busy public demo — every user's search leaving one server IP — paces itself
+# instead of tripping the IP-wide CAPTCHA. Prevention beats reacting to a block:
+# once flagged, DDG serves a 202 challenge no retry can clear.
+WEB_SEARCH_RPM = 20
+_web_search_hits = collections.deque()
+_web_search_lock = asyncio.Lock()
+
+
+async def _web_search_throttle():
+    """Sliding 60s window: block until firing one more search keeps the last-minute
+    count at or under WEB_SEARCH_RPM. When the window is full, wait for the oldest
+    hit to age out. Shared across all callers, so the whole process stays under the
+    per-IP rate however many users are searching at once."""
+    while True:
+        async with _web_search_lock:
+            now = time.monotonic()
+            while _web_search_hits and now - _web_search_hits[0] >= 60:
+                _web_search_hits.popleft()
+            if len(_web_search_hits) < WEB_SEARCH_RPM:
+                _web_search_hits.append(now)
+                return
+            wait = 60 - (now - _web_search_hits[0])
+        await asyncio.sleep(max(wait, 0.05))
+
+
+def _retry_after_seconds(headers):
+    """Parse a Retry-After header (seconds form), clamped non-negative; None if absent
+    or unparseable (an HTTP-date form is uncommon here and treated as absent)."""
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, float(str(raw).strip()))
+    except ValueError:
+        return None
 WEB_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -9857,6 +10093,134 @@ async def handle_web_fetch(request):
                              f"fetch: {url} ✓ ({out.get('backend')})",
                              duration=time.time() - t0)
     return web.json_response(out)
+
+
+def _parse_ddg_html(html, n):
+    """Pull the organic results out of a DuckDuckGo HTML page: title, the real
+    destination URL (unwrapped from DDG's /l/?uddg= redirect), and the snippet.
+    Ad slots (y.js) are dropped. Structured parse via bs4, not regex, so a markup
+    tweak degrades to fewer results rather than garbage."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")   # stdlib parser — no lxml dependency
+    out = []
+    for res in soup.select(".result"):
+        a = res.select_one(".result__title a") or res.select_one(".result__a")
+        if not a:
+            continue
+        href = a.get("href") or ""
+        if not href or "y.js" in href:         # ad / tracking slot
+            continue
+        if "uddg=" in href:                     # unwrap the DDG redirect
+            try:
+                href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
+            except Exception:
+                pass
+        if href.startswith("//"):
+            href = "https:" + href
+        sn = res.select_one(".result__snippet")
+        out.append({"title": a.get_text(" ", strip=True),
+                    "url": href,
+                    "snippet": sn.get_text(" ", strip=True) if sn else ""})
+        if len(out) >= n:
+            break
+    return out
+
+
+async def web_search(session, query, n=WEB_SEARCH_MAX):
+    """Search the web via DuckDuckGo's HTML endpoint. Returns a list of
+    {title, url, snippet}. No browser engine, no API key — one POST and a parse."""
+    query = (query or "").strip()
+    if not query:
+        raise ComfyError("empty search query")
+    await _web_search_throttle()         # pace below DDG's per-IP rate before firing
+    headers = {"User-Agent": WEB_UA,
+               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+               "Accept-Language": "en-US,en;q=0.9",
+               "Content-Type": "application/x-www-form-urlencoded",
+               "Referer": "https://html.duckduckgo.com/"}
+    data = {"q": query, "b": "", "kl": "us-en", "kp": "-2"}   # kp=-2: safesearch off
+
+    async def _once():
+        r = await session.post(WEB_SEARCH_URL, data=data, headers=headers,
+                               allow_redirects=True,
+                               timeout=aiohttp.ClientTimeout(total=WEB_FETCH_TIMEOUT))
+        try:
+            return r.status, r.headers, await r.text()
+        finally:
+            await r.release()
+
+    try:
+        status, hdrs, html = await _once()
+        if status == 429:                # soft "slow down" — honor Retry-After, retry once
+            await asyncio.sleep(min(_retry_after_seconds(hdrs) or 2.0, 30.0))
+            status, hdrs, html = await _once()
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+        raise ComfyError(f"search request failed: {e}")
+    # 202/403 (and a still-429, or an empty 200) are DDG's block responses, not "no
+    # results". Once the IP is flagged DDG serves a JS/CAPTCHA challenge no retry clears,
+    # so this surfaces as a transient block — the throttle above is what avoids it.
+    if status in (202, 403, 429) or not html.strip():
+        raise ComfyError("DuckDuckGo blocked the search (rate limited) — try again shortly")
+    return _parse_ddg_html(html, n)
+
+
+def _format_search_results(query, results):
+    """Plain-text rendering of search results for a model (sub-agent path)."""
+    if not results:
+        return f'No web results for "{query}".'
+    lines = [f'Web search results for "{query}":', ""]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r.get('title') or r.get('url')}")
+        lines.append(f"   {r.get('url')}")
+        if r.get("snippet"):
+            lines.append(f"   {r['snippet']}")
+        lines.append("")
+    lines.append("To read one, call web again with its URL.")
+    return "\n".join(lines)
+
+
+async def handle_web_search(request):
+    """
+    Search the web
+    ---
+    tags: [Web]
+    summary: POST /v1/web/search — DuckDuckGo search, returns a title/url/snippet list
+    description: |
+      Light orchestration over DuckDuckGo's no-JS HTML endpoint — one POST and a
+      parse, no API key and no searxng container. Safesearch is off. Pair it with
+      /v1/web/fetch: search to find pages, then fetch to read one.
+    responses:
+      '200':
+        description: '{"query": ..., "results": [{"title","url","snippet"}, ...]}'
+      '400':
+        description: Missing query
+      '502':
+        description: The search failed or was blocked
+    """
+    resp = await _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    q = (body.get("q") or body.get("query") or request.query.get("q") or "").strip()
+    if not q:
+        return web.json_response({"error": "'q' is required"}, status=400)
+    t0 = time.time()
+    await broadcast_activity(q, "web", "trying", f"search: {q}")
+    try:
+        results = await web_search(request.app["session"], q)
+    except ComfyError as e:
+        await broadcast_activity(q, "web", "failure", f"search: {q} - {e}")
+        return web.json_response({"error": str(e)}, status=502)
+    except asyncio.TimeoutError:
+        await broadcast_activity(q, "web", "failure", f"search: {q} - timed out")
+        return web.json_response({"error": "timed out"}, status=502)
+    await broadcast_activity(q, "web", "success",
+                             f"search: {q} ✓ ({len(results)})",
+                             duration=time.time() - t0)
+    return web.json_response({"query": q, "results": results})
 
 
 async def handle_txt2img(request):
@@ -11490,7 +11854,8 @@ JOB_ACTIVE = frozenset({JOB_PENDING, JOB_PROCESSING})
 JOB_TERMINAL = frozenset({JOB_COMPLETED, JOB_FAILED, JOB_CANCELED})
 JOBS_KEEP = 300          # retain the newest N jobs; older ones are purged
 # A job flagged `dyva_agent` runs a server-side tool loop (currently read-only:
-# fetch_url via the in-process web_fetch). This is the ONE orchestration engine
+# the `web` tool — search + fetch — via the in-process web_search/web_fetch).
+# This is the ONE orchestration engine
 # sub-agents use; the main chat can migrate onto it later. Kept minimal on
 # purpose — the long-term home for orchestration is a separate composable tool,
 # not dyva. A round is one completion + its tool results.
@@ -11815,8 +12180,9 @@ async def _run_chat_job(session, jid):
     async def _run_agent_tools(tcs):
         """Execute a sub-agent's tool calls INSIDE dyva and append the assistant
         turn + tool results to the running transcript, so the next round sees
-        them. Read-only scope: only fetch_url, via the in-process web_fetch (the
-        same engine /v1/web/fetch uses). Returns True if any tool actually ran."""
+        them. Read-only scope: the `web` tool (search + fetch), via the in-process
+        web_search/web_fetch (the same engines /v1/web/* use), plus the scratchpad.
+        Returns True if any tool actually ran."""
         assistant_msg = {"role": "assistant", "content": "", "tool_calls": tcs}
         tool_msgs = []
         ran = False
@@ -11830,18 +12196,28 @@ async def _run_chat_job(session, jid):
                 except Exception:
                     a = {}
             a = a or {}
-            if name == "fetch_url":
-                url = str(a.get("url") or "").strip()
-                try:
-                    out = await web_fetch(session, url) or {}
-                    if out.get("kind") == "image":
-                        text = f"(fetched an image from {url}; a text sub-agent can't use it)"
-                    else:
-                        text = ((out.get("title") + "\n\n") if out.get("title") else "") + (out.get("text") or "")
-                        if not text.strip():
-                            text = f"(the page at {url} had no readable text)"
-                except Exception as e:
-                    text = f"Error fetching {url}: {e}"
+            if name == "web":
+                q = str(a.get("query") or a.get("url") or "").strip()
+                # One tool: a URL (scheme, or a single bare-domain token) reads a
+                # page; anything else is a search. Mirrors the chat-side web tool.
+                is_url = bool(re.match(r'^https?://', q, re.I)) or bool(re.match(r'^\S+\.\S{2,}$', q))
+                if is_url:
+                    url = q if re.match(r'^https?://', q, re.I) else "https://" + q
+                    try:
+                        out = await web_fetch(session, url) or {}
+                        if out.get("kind") == "image":
+                            text = f"(fetched an image from {url}; a text sub-agent can't use it)"
+                        else:
+                            text = ((out.get("title") + "\n\n") if out.get("title") else "") + (out.get("text") or "")
+                            if not text.strip():
+                                text = f"(the page at {url} had no readable text)"
+                    except Exception as e:
+                        text = f"Error fetching {url}: {e}"
+                else:
+                    try:
+                        text = _format_search_results(q, await web_search(session, q))
+                    except Exception as e:
+                        text = f"Error searching for {q}: {e}"
                 ran = True
             elif name == "write_scratch":
                 # shared blackboard for this spawn batch, attributed to this agent
@@ -15719,6 +16095,7 @@ def make_app():
     swagger.add_get("/dashboard-data", handle_dashboard_data)
     swagger.add_get("/dashboard-models", handle_dashboard_models)
     swagger.add_get("/dashboard-model-hosts", handle_model_hosts)
+    swagger.add_get("/dashboard/host-status", handle_host_status_query)
     swagger.add_get("/settings", handle_settings_get)
     swagger.add_post("/settings", handle_settings_post)
     swagger.add_post("/settings/test", handle_settings_test)
@@ -15765,6 +16142,7 @@ def make_app():
     # Registered on the plain router (not swagger) so path params and the
     # sendBeacon POST body aren't subject to swagger request validation.
     app.router.add_post("/v1/web/fetch", handle_web_fetch)
+    app.router.add_post("/v1/web/search", handle_web_search)
     app.router.add_get("/api/chats", handle_chats_get)
     app.router.add_get("/api/chats/{cid}", handle_chat_get)
     app.router.add_post("/api/chats/{cid}", handle_chat_post)

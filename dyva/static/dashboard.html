@@ -1596,6 +1596,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <label class="setting"><span class="setting-text"><span class="setting-name">Hedge delay (s)</span><small class="setting-help">How long the last-good host gets to respond before the rest of the pool is raced alongside it. Whoever answers first wins. 0 races everything at once. Keeps a dead-but-connected favourite from stalling the whole request.</small></span><input type="number" id="setHedge" min="0" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Minimum timeout (s)</span><small class="setting-help">Floor on the per-host first-token wait. A small prompt uses exactly this; a big prompt scales up from here toward Maximum timeout. Also the base clock for the worker cap in the diagram.</small></span><input type="number" id="setTimeout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Maximum timeout (s)</span><small class="setting-help">Ceiling on the per-host first-token wait &mdash; the longest we'll ever wait on a monster prompt. The budget scales from Minimum up to this with prompt size (at Input rate), and the SAME extra seconds are added to Fanout, so the worker/connection maximum is unchanged &mdash; a big prompt just waits longer on the same number of hosts. Set equal to Minimum timeout to disable scaling.</small></span><input type="number" id="setTimeoutMax" min="1" max="3600" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Max run time (s)</span><small class="setting-help">Hard ceiling on a single response's TOTAL run time, measured from when the worker starts. The timeouts above only cover the wait for the first token and the gap between tokens &mdash; a host that keeps trickling tokens (or keep-alives) can otherwise stream for hours. <b>0 disables.</b> Default 1800 (30&nbsp;min); can be set as high as 30 days.</small></span><input type="number" id="setWorkerMax" min="0" max="2592000" step="1"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Fail over on max run time</span><small class="setting-help">What happens when Max run time is hit. <b>Off (default):</b> end the stream cleanly with what was produced &mdash; no failover, and the host is NOT penalised (a duration guard, not a quality verdict). <b>On:</b> treat it as a mid-stream cutoff and fail over to another host, carrying the partial answer forward &mdash; useful with a short cap (e.g. 300s) to re-race a slow host.</small></span><input type="checkbox" id="setWorkerMaxFailover"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Fanout (s)</span><small class="setting-help">How often another wave of hosts is opened, independent of Timeout. Lower = widen the search faster; each attempt still gets its full Timeout, so a cold host isn't dropped to make room. <b id="fanoutImpl"></b></small></span><input type="number" id="setFanout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Input rate (tok/s)</span><small class="setting-help">Assumed prefill speed &mdash; how fast a capable host chews through the prompt before the first token. Turns prompt size into expected prefill time, so the race clocks stretch for a big prompt and it isn't dropped for taking the prefill we asked of it. Conservative on purpose (real hardware does several times this). Small prompts are unaffected.</small></span><input type="number" id="setInputRate" min="1" max="100000" step="1"></label>
 </div>
@@ -4734,16 +4736,48 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           results.push({text:'generate_image could not finish ('+ex.message+'). Try again, or pick a different model with search_models type "image".',
                         md:'`\u26a0 generate_image: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
-      }else if(fn.name==='fetch_url'){
-        var wurl=String(args.url||'').trim();
+      }else if(fn.name==='web'){
+        var wq=String(args.query||args.url||'').trim();
+        // One tool: a URL (has a scheme, or a single bare-domain token) reads a
+        // page; anything else is a search query.
+        var isUrl=/^https?:\/\//i.test(wq)||/^[^\s]+\.[^\s]{2,}$/.test(wq);
+        if(!isUrl){
+          setStatus('searching '+wq.slice(0,40)+'\u2026');
+          try{
+            var rs=await fetch('v1/web/search',{method:'POST',headers:{'Content-Type':'application/json'},
+                                                body:JSON.stringify({q:wq}),signal:ac.signal});
+            if(!rs.ok){
+              var sm='HTTP '+rs.status;try{var sj=await rs.json();sm=sj.error||sm}catch(e){}
+              results.push({text:'Web search failed ('+sm+'). Try again shortly or rephrase.',
+                            md:'`\u26a0 web: '+String(sm).replace(/`/g,"'")+'`'});
+            }else{
+              var sj2=await rs.json();var rr=(sj2.results||[]);
+              if(!rr.length){
+                results.push({text:'No web results for "'+wq+'".',md:'`\u2315 '+wq.replace(/`/g,"'").slice(0,60)+'` \u2192 0'});
+              }else{
+                var stext='Web search results for "'+wq+'":\n\n'+rr.map(function(r,i){
+                  return (i+1)+'. '+(r.title||r.url)+'\n   '+r.url+(r.snippet?'\n   '+r.snippet:'');
+                }).join('\n\n')+'\n\nTo read one, call web again with its URL.';
+                results.push({text:stext,
+                              md:'`\u2315 '+wq.replace(/`/g,"'").slice(0,60)+'` \u2192 '+rr.length+' results'});
+              }
+            }
+          }catch(ex){
+            if(ac.signal.aborted)return;
+            results.push({text:'Web search failed ('+ex.message+'). Try again shortly or rephrase.',
+                          md:'`\u26a0 web: '+String(ex.message).replace(/`/g,"'")+'`'});
+          }
+          continue;
+        }
+        var wurl=wq;if(!/^https?:\/\//i.test(wurl))wurl='https://'+wurl;
         setStatus('fetching '+wurl.replace(/^https?:\/\//,'').slice(0,40)+'\u2026');
         try{
           var rw=await fetch('v1/web/fetch',{method:'POST',headers:{'Content-Type':'application/json'},
                                              body:JSON.stringify({url:wurl}),signal:ac.signal});
           if(!rw.ok){
             var wm='HTTP '+rw.status;try{var jw=await rw.json();wm=jw.error||wm}catch(e){}
-            results.push({text:'Could not fetch '+wurl+' ('+wm+'). Check the URL and call fetch_url again, or try a different page.',
-                          md:'`\u26a0 fetch_url: '+String(wm).replace(/`/g,"'")+'`'});
+            results.push({text:'Could not fetch '+wurl+' ('+wm+'). Check the URL and call web again, or try a different page.',
+                          md:'`\u26a0 web: '+String(wm).replace(/`/g,"'")+'`'});
           }else{
             var jw2=await rw.json();
             if(jw2.kind==='image'){
@@ -4774,8 +4808,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           }
         }catch(ex){
           if(ac.signal.aborted)return;
-          results.push({text:'Could not fetch '+wurl+' ('+ex.message+'). Check the URL and call fetch_url again, or try a different page.',
-                        md:'`\u26a0 fetch_url: '+String(ex.message).replace(/`/g,"'")+'`'});
+          results.push({text:'Could not fetch '+wurl+' ('+ex.message+'). Check the URL and call web again, or try a different page.',
+                        md:'`\u26a0 web: '+String(ex.message).replace(/`/g,"'")+'`'});
         }
       }else if(fn.name==='search_models'){
         var mtype=String(args.type||'').trim();
@@ -5122,7 +5156,8 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
             // model is chosen at invocation (per-agent); default to this chat's
             var amodel=String(ag.model||'').trim()||model;
             var sys='You are '+nm+', a focused sub-agent working one part of a larger task. '
-                  +'You cannot see the main conversation. You can read web pages with fetch_url '
+                  +'You cannot see the main conversation. You can use the web: call web with '
+                  +'search terms to find pages, or with a URL to read one '
                   +'(its output stays in your own context, not the caller’s). You also share a '
                   +'scratchpad with the other agents: write_scratch(text) leaves a note for them '
                   +'(and the user sees it), read_scratch() shows what they have posted so far. '
@@ -5802,7 +5837,7 @@ function assetBackfill(chat){
   if(added)saveChat(chat);
   return added;
 }
-var WEB_TOOL={type:'function',function:{name:'fetch_url',description:'Read the page at an explicit URL. Use it when the user gives you a link, or when you already know the exact address of something — this fetches one address, it does not search the web. The page comes back as text. If the URL points at an image it is downloaded into the conversation instead and can then be used with edit_image.',parameters:{type:'object',properties:{url:{type:'string',description:'The full URL, including http:// or https://'},name:{type:'string',description:'Only for an image URL: a short filename to save it under, e.g. "lady.jpg". Ignored for pages.'}},required:['url']}}};
+var WEB_TOOL={type:'function',function:{name:'web',description:'Access the live web. Pass a full URL (with http:// or https://) to READ that page — it comes back as text; if the URL is an image it is downloaded into the conversation for use with edit_image. Pass search terms instead to SEARCH the web — you get back a list of results (title, URL, snippet). Typical flow: search to find the page you need, then call web again with its URL to read it.',parameters:{type:'object',properties:{query:{type:'string',description:'A full URL to read (e.g. "https://example.com/page"), or search terms to look up (e.g. "best espresso machines 2026").'},name:{type:'string',description:'Only when reading an image URL: a short filename to save it under, e.g. "lady.jpg". Ignored otherwise.'}},required:['query']}}};
 function _resultMetaMd(name,model,service,host){
   var bits=[];
   if(name)bits.push(name);
@@ -5917,7 +5952,7 @@ function askUser(question,options,signal){
 var VIDEO_TOOL={type:'function',function:{name:'generate_video',description:'Make a short silent video from a description. Use when the user asks for a video, clip, animation or something moving. It can start from a picture (image-to-video) \u2014 if the user says "this cat/dog/photo" or attached an image, pass that image\'s name in `image` and the video animates from it. This takes several MINUTES and produces a few seconds of footage \u2014 say so before calling it, and do not call it more than once per request.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What happens in the shot, e.g. "a man petting a cat" or "the dog chases its tail". Describe the motion, not just the subject.'},seconds:{type:'number',description:'Desired length in seconds, e.g. 5. Optional \u2014 leave blank for the model\'s default (usually a few seconds). Keep it short; these are brief clips.'},image:{type:'string',description:'Optional start frame: the name of an image already in this conversation (from list_assets, an upload, or a generated image) to animate FROM. Use this whenever the user refers to "this" picture or attached one. Omit for a video made purely from the text prompt.'},aspect:{type:'string',enum:['long','square','tall'],description:'Frame shape. "long" is 16:9 and the usual choice.'},size:{type:'string',enum:['small','medium','large'],description:'Resolution bucket; "small" renders noticeably faster.'},model:{type:'string',description:'The video model to use. If the user names one, put it HERE as a substring or glob \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a name; use search_models (type "video").'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "paper_boat.mp4". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
 var TTS_TOOL_MAX=600;   // hard ceiling on what the chat tool will speak
 var SPEECH_TOOL={type:'function',function:{name:'generate_speech',description:'Speak one or two sentences out loud as audio. Use when the user asks you to say, read, voice or perform something aloud, or wants to hear a character speak. AT MOST 2 SENTENCES. Anything longer is cut off before it is spoken. If the user wants something long read aloud, speak only its best line and mention that in your reply. Write only the words to be spoken \u2014 no stage directions, no markdown, no lists.',parameters:{type:'object',properties:{text:{type:'string',description:'The words to speak, verbatim. At most 2 sentences.'},voice:{type:'string',description:'Optional voice name; leave blank to use whatever the host offers'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "hello_world.mp3". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['text','name']}}};
-var SPAWN_TOOL={type:'function',function:{name:'spawn_agents',description:'Run several sub-agents in parallel to divide a large task, then read back what each returned. Each agent is an independent generation that sees ONLY the task and context you give it — not this conversation — so make every task self-contained. Each agent can READ WEB PAGES itself with fetch_url, and crucially the pages it reads stay in ITS context, not yours — so this is the right tool when the inputs are big (give each agent a URL to fetch and digest, e.g. one web page or API endpoint per agent). Use it for work that splits into independent pieces (e.g. "fetch and summarize each of these 20 pages", "research X from 5 angles"). You are the coordinator: give each agent a focused task, then synthesize their short answers into your own reply — do not just paste them. Agents run server-side and keep going even if the app is backgrounded.',parameters:{type:'object',properties:{agents:{type:'array',description:'The sub-agents to run in parallel (each self-contained). Use as many as the task genuinely splits into (one per page/angle); 80 is the ceiling.',items:{type:'object',properties:{name:{type:'string',description:'Short label for this agent, e.g. "story-42" or "skeptic".'},task:{type:'string',description:'The complete instruction for this agent. Include everything it needs — it cannot see the conversation or the other agents.'},model:{type:'string',description:'Optional model for this agent (glob ok, e.g. "qwen*"). Leave blank to use this chat’s model.'}},required:['task']}},context:{type:'string',description:'Optional shared background prepended to every agent’s task.'}},required:['agents']}}};
+var SPAWN_TOOL={type:'function',function:{name:'spawn_agents',description:'Run several sub-agents in parallel to divide a large task, then read back what each returned. Each agent is an independent generation that sees ONLY the task and context you give it — not this conversation — so make every task self-contained. Each agent can use the web itself with the web tool (search for pages, or read a URL), and crucially what it reads stays in ITS context, not yours — so this is the right tool when the inputs are big (give each agent a URL to fetch and digest, or a topic to research, e.g. one web page or question per agent). Use it for work that splits into independent pieces (e.g. "fetch and summarize each of these 20 pages", "research X from 5 angles"). You are the coordinator: give each agent a focused task, then synthesize their short answers into your own reply — do not just paste them. Agents run server-side and keep going even if the app is backgrounded.',parameters:{type:'object',properties:{agents:{type:'array',description:'The sub-agents to run in parallel (each self-contained). Use as many as the task genuinely splits into (one per page/angle); 80 is the ceiling.',items:{type:'object',properties:{name:{type:'string',description:'Short label for this agent, e.g. "story-42" or "skeptic".'},task:{type:'string',description:'The complete instruction for this agent. Include everything it needs — it cannot see the conversation or the other agents.'},model:{type:'string',description:'Optional model for this agent (glob ok, e.g. "qwen*"). Leave blank to use this chat’s model.'}},required:['task']}},context:{type:'string',description:'Optional shared background prepended to every agent’s task.'}},required:['agents']}}};
 var WRITE_SCRATCH_TOOL={type:'function',function:{name:'write_scratch',description:'Leave a note on the shared scratchpad the other sub-agents (and the user) can see. Use it to post a finding, flag a dead end, or ask the others for something. Notes are attributed to you.',parameters:{type:'object',properties:{text:{type:'string',description:'The note to post (markdown allowed).'}},required:['text']}}};
 var READ_SCRATCH_TOOL={type:'function',function:{name:'read_scratch',description:'Read the shared scratchpad — the notes the other sub-agents have posted so far, each attributed to its author. Check it before duplicating work or when you need something another agent may have found.',parameters:{type:'object',properties:{}}}};
 // Mirror a spawn batch's shared scratchpad into the "Scratchpad" document so the
@@ -8866,6 +8901,8 @@ function populateSettings(s){
   document.getElementById('setTimeout').value=s.timeout;
   document.getElementById('setInputRate').value=s.input_rate;
   document.getElementById('setTimeoutMax').value=s.timeout_max;
+  document.getElementById('setWorkerMax').value=('worker_max' in s)?s.worker_max:1800;
+  document.getElementById('setWorkerMaxFailover').checked=!!s.worker_max_failover;
   document.getElementById('setFanout').value=s.fanout;
   document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   _wireFanoutImpl();
@@ -8954,6 +8991,8 @@ function saveSettings(){
     timeout:parseInt(document.getElementById('setTimeout').value,10),
     input_rate:parseInt(document.getElementById('setInputRate').value,10),
     timeout_max:parseInt(document.getElementById('setTimeoutMax').value,10),
+    worker_max:parseInt(document.getElementById('setWorkerMax').value,10),
+    worker_max_failover:document.getElementById('setWorkerMaxFailover').checked,
     fanout:parseInt(document.getElementById('setFanout').value,10),
     hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
@@ -8968,6 +9007,7 @@ function saveSettings(){
   if(isNaN(body.workers)||body.workers<1)delete body.workers;
   if(isNaN(body.timeout)||body.timeout<1)delete body.timeout;
   if(isNaN(body.hedge_delay)||body.hedge_delay<0)delete body.hedge_delay;
+  if(isNaN(body.worker_max)||body.worker_max<0)delete body.worker_max;   // 0 is valid (disables)
   if(isNaN(body.min_count)||body.min_count<0)delete body.min_count;
   // Only send admin_pw when the operator typed a new one (blank = keep current).
   var newPw=document.getElementById('setAdminPw').value;
@@ -8990,6 +9030,8 @@ function saveSettings(){
       document.getElementById('setTimeout').value=s.timeout;
   document.getElementById('setInputRate').value=s.input_rate;
   document.getElementById('setTimeoutMax').value=s.timeout_max;
+  document.getElementById('setWorkerMax').value=('worker_max' in s)?s.worker_max:1800;
+  document.getElementById('setWorkerMaxFailover').checked=!!s.worker_max_failover;
   document.getElementById('setFanout').value=s.fanout;
       document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   _wireFanoutImpl();
