@@ -322,12 +322,17 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
    tokens, single colour). Model-query stacking is deferred; leave it unlabelled. */
 .stats-chart{margin:2px 0 var(--sp-4)}
 .sc-ymax{font-size:11px;color:var(--text-muted);margin-bottom:4px;font-variant-numeric:tabular-nums}
-.sc-bars{display:flex;align-items:flex-end;gap:3px;height:160px;position:relative}
-/* Gridline at every multiple of the leading place value (yTop 6408 -> a line at each
-   1000). Absolutely positioned so it sits outside the flex flow; z-index keeps it
-   behind the bars rather than painting over them. */
-.sc-grid{position:absolute;left:0;right:0;height:1px;background:var(--border);opacity:.55;pointer-events:none;z-index:0}
-.sc-col{flex:1 1 0;min-width:2px;height:100%;display:flex;flex-direction:column-reverse;position:relative;z-index:1}
+/* The plot holds a FIXED grid backdrop plus a horizontally-scrollable bar strip. The
+   hourly view is 168 columns — far too many for a phone — so the bars scroll (opened
+   scrolled to the most recent, on the right) rather than being crushed below legibility
+   or clipped off-screen. Day/week have few enough columns that they just fill the width.
+   Gridlines live in their own non-scrolling layer so they stay put as the bars scroll. */
+.sc-plot{position:relative;height:160px}
+.sc-grid-layer{position:absolute;inset:0;z-index:0;pointer-events:none}
+.sc-grid{position:absolute;left:0;right:0;height:1px;background:var(--border);opacity:.55}
+.sc-scroll{position:relative;z-index:1;height:100%;overflow-x:auto;overflow-y:hidden}
+.sc-bars{display:flex;align-items:flex-end;gap:3px;height:100%;min-width:100%;width:max-content}
+.sc-col{flex:1 1 auto;min-width:4px;height:100%;display:flex;flex-direction:column-reverse;position:relative;z-index:1}
 .sc-col i{display:block;width:100%;min-height:1px;background:var(--accent)}
 .sc-col i:last-child{border-radius:2px 2px 0 0}
 .sc-col:hover{filter:brightness(1.18)}
@@ -8201,9 +8206,14 @@ function _renderStatsChart(){
     return '<span><i style="background:'+c+'"></i>'+escHtml(nm)+'</span>';
   }).join('');
   chart.innerHTML='<div class="sc-ymax">'+_ktok(yTop)+'k</div>'
-    +'<div class="sc-bars">'+grid+bars+'</div>'
+    +'<div class="sc-plot"><div class="sc-grid-layer">'+grid+'</div>'
+    +'<div class="sc-scroll"><div class="sc-bars">'+bars+'</div></div></div>'
     +'<div class="sc-x"><span>'+escHtml(win.length?win[0][0]:'')+'</span><span>'+escHtml(endStr)+'</span></div>'
     +(leg?'<div class="sc-legend">'+leg+'</div>':'');
+  // Open on the MOST RECENT end: for a span that overflows (hourly, 168 cols) start the
+  // view scrolled fully right — recent hours matter more than old ones. Harmless when
+  // nothing overflows (scrollWidth == clientWidth).
+  var _sc=chart.querySelector('.sc-scroll');if(_sc)_sc.scrollLeft=_sc.scrollWidth;
 }
 // The stats table is one table with three tabbed views. renderStats stashes the
 // latest payload here; the active tab decides what _renderStatsTable draws.

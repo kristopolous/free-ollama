@@ -4656,11 +4656,10 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
 
     async def _fanout_guarded():
         # _fanout is fire-and-forget (only awaited in the final gather, which never runs
-        # until the race ends). An unhandled exception in it was therefore SILENT: the
+        # until the race ends). An unhandled exception in it would otherwise be SILENT: the
         # fan-out would simply stop, _permit froze at its initial value, and the first
-        # worker could never take a second candidate — the race sat at checked=1, in
-        # 'searching', forever, with no signal anywhere. Log it loudly so the cause is
-        # visible; the race-level _deadline above is the safety net that ends the request.
+        # worker could never take a second candidate — the race would sit at checked=1, in
+        # 'searching', with no signal anywhere. Log it loudly so the cause is visible.
         try:
             await _fanout()
         except asyncio.CancelledError:
@@ -4677,20 +4676,6 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
                 break
             except asyncio.QueueEmpty:
                 if all(t.done() for t in tasks):
-                    result = None
-                    break
-                # HARD CEILING on the SEARCH phase. The race must find a host within the
-                # request budget (_deadline = TIMEOUT + stretch). Without this, a single
-                # attempt that hangs in-flight — a host that accepts the socket then never
-                # answers, awaited at `await att` with no per-attempt timeout — wedges its
-                # worker forever: the job sits in 'searching' (checked=1, find=null),
-                # neither streaming nor fanning out. The warming-retry logic honours
-                # _deadline for RE-QUEUEING but nothing stopped a stuck LIVE attempt. Past
-                # the budget with no winner, give up (None) and cancel the hung tasks below.
-                if not done.is_set() and time.time() > _deadline:
-                    log.warning("race for %s: no host within budget (%.0fs) — giving up "
-                                "after %d/%d checked", label or key, TIMEOUT + stretch,
-                                tried, len(entries))
                     result = None
                     break
             await asyncio.sleep(0.1)
@@ -6568,12 +6553,15 @@ async def _quick_probe(session, host, full, model_in, tools=None, grade=True):
     try:
         # Same send primitive as the real request path: the host's own dialect with a
         # fallback to the other (a probe that forced /api/chat culled every OpenAI host).
-        # Capped at CONNECT_TIMEOUT. Without this the probe inherits the full request
-        # budget, so a connected-but-mute box costs 30s to learn nothing — three of
-        # them in one search is 90s of probing. A host too slow to answer twenty
-        # tokens inside the connect budget is not one to hand a 19k-token payload.
+        # Honour the ROUTING budget — timeout=None lets _send_chat use the same
+        # _slow_timeout the real request would, with sock_connect=CONNECT_TIMEOUT so a
+        # genuinely DEAD host (no socket) still fails fast in the connect phase. Capping
+        # the whole probe at CONNECT_TIMEOUT (10s) was wrong: it culled connected-but-slow
+        # hosts the operator's longer timeout was meant to wait for, AND — since the TOTAL
+        # was 10s — every timeout landed under CONNECT_TIMEOUT+2 and got mislabelled "no
+        # connection", so the connected-but-slow→inconclusive branch below was dead code.
         resp, oai, _ep, why = await _send_chat(session, host, full, payload, "/api/chat",
-                                               False, timeout=CONNECT_TIMEOUT)
+                                               False)
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
         dur = time.time() - start
         detail = " ".join(str(e).split())[:200] or type(e).__name__
@@ -6685,9 +6673,9 @@ async def _quick_probe(session, host, full, model_in, tools=None, grade=True):
     # for a 20-token prompt with no real prefill, so recording it as the host's TTFT
     # writes a systematically optimistic number that the host never earned. Only the
     # real request path measures performance (see record_perf in the race attempt).
-    log.info(f"quick test PASS (unknown — not promoted) {host} ({full}): answer={shown!r}")
+    log.info(f"quick test PASS {host} ({full}): answer={shown!r}")
     await broadcast_activity(host, model_in, "connected",
-        f"quick test: {host} for {model_in} - answered (unknown, not promoted): {shown!r}", duration=dur, wid=wid)
+        f"quick test PASSED: {host} for {model_in} answered {shown!r}", duration=dur, wid=wid)
     return True, shown
 
 
@@ -6845,7 +6833,10 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
                 if errors:
                     msg += ": " + "; ".join(dict.fromkeys(errors))
                 with contextlib.suppress(Exception):
-                    await ka_resp.write(sse_str({"error": msg}).encode())
+                    # OpenAI-shaped error object ({"error":{"message":...}}) — a raw
+                    # {"error":"string"} fails strict clients' schema (opencode rejects it
+                    # with an invalid_union error and never surfaces the real message).
+                    await ka_resp.write(sse_str(err_obj(msg)).encode())
                     await ka_resp.write(sse_str(sse_chunk("", {}, done=True)).encode())
                 return ka_resp
             elif do_stream:
