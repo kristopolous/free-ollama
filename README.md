@@ -43,13 +43,6 @@ Actual documentation? Alright, whatever. [Here you go](dyva).
 
 <img alt="sshot" src="https://github.com/user-attachments/assets/5afdf551-d62f-4146-a4b6-9e0bdc9ac4bc" />
 
-Now where's that $50 million seed round...
-
-Also let's take a moment and appreciate that magnificent icon, generated with one of these shady ip addresses!
-
-<center>
-<img alt="dyva" src="https://github.com/user-attachments/assets/2439201b-d263-43ca-a1b6-1954d873bd45" />
-</center>
 
 ### Image Generation
 
