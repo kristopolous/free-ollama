@@ -231,7 +231,7 @@ ENDL
 
   llamacpp-shodan)
     SERVICE=llama.cpp
-    SITE=hunter
+    SITE=shodan
     PORTS="8000,8082,8001,11434,8090,8081"
     ;;
 
