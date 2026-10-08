@@ -242,8 +242,8 @@ ENDL
     ;;
 
   hunter-ollama)
-    SITE=hunter
     SERVICE=ollama
+    SITE=hunter
     PORTS='11434'
     ;;
 
@@ -302,6 +302,12 @@ ENDL
     SERVICE=llama.cpp
     SITE=shodan
     PORTS="8000,8080,8082,8001,8081"
+    ;;
+
+  shodan-localai)
+    SERVICE=localai
+    SITE=shodan
+    PORTS="8080,80,443,3000,8081,8000"
     ;;
 
   shodan-ollama)

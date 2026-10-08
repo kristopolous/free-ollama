@@ -469,6 +469,7 @@ SERVICE_CONFIG = {
         # models and lands in the OpenAI-dialect else branch of _check_host (data[].id).
         "port": 8080,
         "fofa_query": 'title="localai"',
+        "shodan_query": 'product:localai',
         "check_path": "/v1/models",
     },
 }
