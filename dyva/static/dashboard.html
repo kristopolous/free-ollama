@@ -6793,7 +6793,12 @@ function _maybeLiveWriteFile(gen,toolCalls){
   var args=(tc.function||{}).arguments;
   if(typeof args!=='string')return;                 // already an object (one-shot) — completion path renders it
   var nameF=_extractJsonStringField(args,'name')||_extractJsonStringField(args,'title');
-  if(!nameF||!nameF.value)return;                    // need a name before we can open the doc
+  // Wait for the FULL name (its closing quote) before opening the doc. A name still
+  // streaming ("open-re" on its way to "open-research.html") would open a doc titled
+  // with the partial, which the completed write_file can't match by name — leaving a
+  // stray "open-re" duplicate beside the real file. The content streams AFTER the name
+  // in the JSON, so gating on the closed name costs nothing for the live content fill.
+  if(!nameF||!nameF.value||!nameF.closed)return;
   var contentF=_extractJsonStringField(args,'content');
   var typeF=_extractJsonStringField(args,'type'),langF=_extractJsonStringField(args,'language');
   syncWriteFileLive(gen,{name:nameF.value,type:typeF&&typeF.value,

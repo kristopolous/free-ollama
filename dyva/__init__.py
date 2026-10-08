@@ -3567,6 +3567,20 @@ def mark_no_vision(host, model):
         _mark_known(host, model, new_caps)
 
 
+def mark_no_tools(host, model):
+    """Record that this (host, model) can't do tool-calling (the host 400'd with
+    "does not support tools"). Mirrors mark_no_vision: drop "tools" from the known
+    caps (defaulting an empty list to ["completion"] so the model reads as KNOWN-
+    incapable, not unknown). find_servers then routes tool requests away from it —
+    last in its tier, host skipped if ALL its models are tools-incapable — while
+    plain chat (no "tools" cap required) is unaffected."""
+    caps_map = (load_knowns().get(host) or {}).get("models", {})
+    cur = caps_map.get(model) or []
+    new_caps = sorted(set(cur) - {"tools"}) or ["completion"]
+    if new_caps != sorted(cur):
+        _mark_known(host, model, new_caps)
+
+
 async def trial_balloon(session, host, full, model):
     """Cheap vision probe: send a 1x1 red pixel with no prompt.
 
@@ -5536,6 +5550,19 @@ async def _race_servers(session, model, servers, payload, do_stream, endpoint="/
                 mark_ctx_limit(host, full, _parse_ctx_limit(body))
                 await broadcast_activity(host, model, "warming",
                     f"won't fit: {host} for {model} - {detail}", duration=dur, wid=wid)
+                return skip(detail)
+            # The model can't tool-call ("does not support tools") — a capability
+            # mismatch every host serving this file rejects identically, not a bad
+            # host (it answers plain chat fine). We can't drop the tools (that would
+            # change what the caller asked), so record the no-tools fact and skip
+            # (no reputation penalty): find_servers now routes TOOL requests away from
+            # this pair, so we stop doorknocking it for every tool call, while plain
+            # chat still uses it.
+            if code == 400 and "does not support tools" in _blow:
+                mark_no_tools(host, full)
+                await broadcast_activity(host, model, "trial",
+                    f"no tools: {host} for {model} - {full} does not support tool-calling",
+                    duration=dur, wid=wid)
                 return skip(detail)
             await broadcast_activity(host, model, "failed",
                 f"failure: {host} for {model} - {detail}", duration=dur, wid=wid)
@@ -7887,15 +7914,15 @@ async def handle_model_facets(request):
     tags: [UI]
     summary: GET /dashboard/model-facets?q=<model + ;key op value> — model names served by a host whose reputation matches the facets
     description: >
-      Splits the query like routing does (model token + ';'-delimited host_status
-      facets). If there are NO facets, returns {"facets": false} so the caller
-      keeps its plain name filtering. With facets, returns {"facets": true,
-      "models": [...]} — the DISTINCT host_status.model values whose (host,model)
-      reputation row matches the facet WHERE. The browser intersects that set with
-      its own name filter. Read-only; the facet model set is small and uncommon.
+      Splits the query like routing does (model token plus ';'-delimited host_status
+      facets). With no facets the response has facets=false and the caller keeps its
+      plain name filtering. With facets the response carries facets=true, the stripped
+      model token, and models — the DISTINCT host_status.model values whose (host,model)
+      reputation row matches the facet WHERE. The browser intersects that set with its
+      own name filter. Read-only; the facet model set is small and uncommon.
     responses:
       '200':
-        description: Either {"facets": false} or {"facets": true, "models": [...]}
+        description: facets flag plus (when true) the stripped model token and matching model list
       '400':
         description: Bad facet (unknown key or a clause with no operator)
     """
