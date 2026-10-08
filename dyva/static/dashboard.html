@@ -1185,7 +1185,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 </div>
 <div class="filter-row">
 <span class="mf-wrap">
-<input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, size &gt;10gb, or date &gt;2026-02" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?); a trailing $ anchors the end, so qwen3.8:27b$ excludes -abliterated / quant variants&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;• release date — an operator and YYYY-MM: &gt;2026-02, &lt;2025-01 (the major models; undated ones are hidden by a date filter)&#10;Combine any of them: 'qwen &gt;2026-02 &gt;5gb'. Half-typed size/date fragments are ignored until complete. A model whose size/date isn't known is hidden by that filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
+<input type="text" id="modelFilter" oninput="filterModels()" placeholder="name, *glob*, size &gt;10gb, date &gt;2026-02, or ;tps&gt;40" title="Filter models by:&#10;• name substring (qwen) or glob (*coder*, llama?); a trailing $ anchors the end, so qwen3.8:27b$ excludes -abliterated / quant variants&#10;• size — an operator, number and unit: &gt;10gb, &lt;3gb, &gt;=7gb, &lt;=500mb (units k/m/g/t, the 'b' is optional)&#10;• release date — an operator and YYYY-MM: &gt;2026-02, &lt;2025-01 (the major models; undated ones are hidden by a date filter)&#10;• host facet — a ';'-prefixed reputation predicate on the serving host: ;tps&gt;40, ;state=good, ;ttft&lt;0.5 — shows only models some host serves at that quality (a server lookup; order-free, so 'qwen;tps&gt;40' and ';tps&gt;40;qwen' are the same)&#10;Combine any of them: 'qwen &gt;2026-02 &gt;5gb ;tps&gt;40'. Half-typed size/date fragments are ignored until complete. A model whose size/date isn't known is hidden by that filter." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" name="modelFilter">
 <span id="modelInstalls" class="mf-installs" aria-hidden="true"></span>
 </span>
 <button type="button" id="modelUse" class="use-btn" disabled title="Use this as the chat model">use</button>
@@ -2031,7 +2031,7 @@ function updateModelPaneCounts(q){
     var rows=list.querySelectorAll('.model-item'),hit=0,inst=0;
     for(var i=0;i<rows.length;i++){
       var mid=rows[i].getAttribute('data-name');
-      if(matchModel(mid,q||'')){hit++;inst+=((modelAgg[mid]||{}).count||0);}
+      if(matchModel(mid,q||'')&&(_facetSet===null||_facetSet.has(mid))){hit++;inst+=((modelAgg[mid]||{}).count||0);}
     }
     installs[t[0]]=inst;
     var el=document.getElementById(t[1]);
@@ -2049,8 +2049,46 @@ function updateModelPaneCounts(q){
   if(ov){var n=installs[listId]||0;ov.textContent=n?fmtCount(n):'';
     ov.title=n?fmtCount(n)+' installations across the matched models':'';}
 }
+// Host-facet filtering ('qwen;tps>40', ';state=good'): a ';'-segment whose key is a
+// real host_status column (tps, state, ...) can't be answered in the browser — it needs
+// per-host reputation data we don't ship — so for a facet query we fetch the matching
+// model set from the server once and intersect it with the normal name filter. No facet
+// in the query -> _facetSet stays null and everything is the old pure client-side path.
+var _facetSet=null;        // Set of model names matching the facets, or null = no facet filter
+var _facetFetchQ=null;     // the raw query _facetSet corresponds to (guards stale responses)
+var _facetName='';         // the model-name token with facets stripped off
+var _facetTimer=null;
+// The model-name query in effect: the facet-stripped token when a facet filter is live for
+// the current input, else the raw input. Read by every place that filters by model name so
+// a ';tps>40' fragment never reaches matchModel (which would match nothing).
+function _effFilterName(){
+  var raw=document.getElementById('modelFilter').value.trim();
+  if(_facetSet!==null&&_facetFetchQ===raw)return _facetName;
+  return raw;
+}
+function _fetchFacets(raw){
+  fetch('dashboard/model-facets?q='+encodeURIComponent(raw),{cache:'no-store'})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(document.getElementById('modelFilter').value.trim()!==raw)return;   // stale: input moved on
+      if(!d||!d.facets){_facetSet=null;_facetFetchQ=raw;_facetName=raw;_applyModelFilter(raw);return;}
+      _facetSet=new Set(d.models||[]);_facetFetchQ=raw;_facetName=d.model||'';
+      _applyModelFilter(_facetName);
+    })
+    .catch(function(){_facetSet=null;_facetFetchQ=null;_applyModelFilter(raw)});
+}
 function filterModels(){
-  var q=document.getElementById('modelFilter').value.trim();
+  var raw=document.getElementById('modelFilter').value.trim();
+  if(raw.indexOf(';')<0){            // common path: pure name/glob/size/date, all client-side
+    _facetSet=null;_facetFetchQ=null;clearTimeout(_facetTimer);
+    _applyModelFilter(raw);
+    return;
+  }
+  if(_facetFetchQ===raw){_applyModelFilter(_effFilterName());return;}   // already resolved this query
+  clearTimeout(_facetTimer);
+  _facetTimer=setTimeout(function(){_fetchFacets(raw)},200);            // debounce the round-trip
+}
+function _applyModelFilter(q){
   // Narrowing the filter until the selected model is no longer listed clears
   // the selection, so "use" can't send a model that's been filtered away.
   if(_currentModel&&!matchModel(_currentModel,q)){
@@ -2059,7 +2097,10 @@ function filterModels(){
     var hc=document.getElementById('hostCard');if(hc)hc.style.display='none';
   }
   refreshUseBtn();
-  document.querySelectorAll('.modellist .model-item').forEach(function(el){el.style.display=matchModel(el.getAttribute('data-name'),q)?'':'none'});
+  document.querySelectorAll('.modellist .model-item').forEach(function(el){
+    var n=el.getAttribute('data-name');
+    el.style.display=(matchModel(n,q)&&(_facetSet===null||_facetSet.has(n)))?'':'none';
+  });
   // Per group: the header count reflects how many models MATCH the query (not the
   // group total), and a group with no matches is hidden. Collapse is respected — a
   // collapsed group stays collapsed during a search; its header still shows the
@@ -2094,7 +2135,7 @@ document.querySelectorAll('[data-mpane]').forEach(function(t){
     var p=t.getAttribute('data-mpane');
     document.querySelectorAll('[data-mpane]').forEach(function(x){x.classList.toggle('active',x===t)});
     ['text','image'].forEach(function(k){document.getElementById('mpane-'+k).style.display=k===p?'':'none'});
-    updateModelPaneCounts(document.getElementById('modelFilter').value.trim());
+    updateModelPaneCounts(_effFilterName());
     try{localStorage.setItem('dyva_modelpane',p)}catch(e){}
   })
 });
@@ -2295,7 +2336,7 @@ function renderModels(models){
   _appendModelPane(document.getElementById('modelList'),textIds,_modelFacet,false);
   _appendModelPane(document.getElementById('modelListImage'),imageIds,_modelFacet,true);
   filterModels();
-  updateModelPaneCounts(document.getElementById('modelFilter').value.trim());
+  updateModelPaneCounts(_effFilterName());
 }
 (function(){var ctl=document.getElementById('modelGroupCtl');if(!ctl)return;
   ctl.querySelectorAll('.gbtn').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-facet')===_modelFacet);});
@@ -2463,7 +2504,7 @@ function renderKeyPane(listId,moreId,countId,arr,q,skip,total){
   _setCount(countId,eff);
 }
 function renderHostPanes(){
-  var q=document.getElementById('modelFilter').value.trim();
+  var q=_effFilterName();
   var last=document.getElementById('lastList');last.innerHTML='';
   var lm=globSearch(q,_hostData.last,function(e){return (e.host||'')+' '+(e.model||'')});
   if(!lm.length){last.innerHTML='<div style="color:var(--text-muted);font-size:var(--fs-md)">'

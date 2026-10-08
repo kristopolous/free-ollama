@@ -7800,19 +7800,36 @@ def _host_status_columns():
 
 
 def _split_host_facets(sub):
-    """Split a model query into (model_token, facet_clause or None): everything BEFORE
-    the first ';' is the existing model-name token (globs / size / date / fallback —
-    untouched and still going through that pipeline), everything after is the ';'-delimited
-    host_status facet filter. No ';' at all -> the whole string is the model token and the
-    DB is never consulted (the common, cheap path). Unknown facet keys are NOT folded into
-    the model name (which would silently match nothing) — they reach host_status_where,
-    which rejects them, and _facet_host_set logs and ignores the bad clause."""
+    """Split a model query into (model_token, facet_clause or None). A ';'-delimited segment
+    is a host_status FACET when its key is a real host_status column ('tps>40', 'state=good');
+    everything else is the model-name token (globs / size / date / fallback — untouched, still
+    going through that pipeline). So facets and the model can appear in ANY order — 'qwen;tps>40'
+    and ';tps>40;qwen' both parse to ('qwen', 'tps>40'). No ';' at all -> the whole string is the
+    model token and the DB is never consulted (the common, cheap path). A segment that looks like
+    'key op value' but whose key is NOT a column (a typo, an unsupported facet) is left in the
+    model token rather than silently dropped, so it narrows to nothing visibly instead of matching
+    everything; a debug line notes it."""
     sub = sub or ""
     if ";" not in sub:
         return sub, None
-    head, _, rest = sub.partition(";")
-    facets = ";".join(seg.strip() for seg in rest.split(";") if seg.strip())
-    return head.strip(), (facets or None)
+    cols = _host_status_columns()
+    model_parts, facets = [], []
+    for seg in sub.split(";"):
+        s = seg.strip()
+        if not s:
+            continue
+        key = None
+        for op in _HS_OPS:
+            if op in s:
+                key = s.split(op, 1)[0].strip().lower()
+                break
+        if key and key in cols:
+            facets.append(s)
+        else:
+            if key is not None:
+                log.debug("host filter: %r key is not a host_status column — treated as model text", s)
+            model_parts.append(s)
+    return " ".join(model_parts), (";".join(facets) or None)
 
 
 def _facet_host_set(facet_clause):
@@ -7861,6 +7878,40 @@ async def handle_host_status_query(request):
     names = [d[0] for d in cur.description]
     rows = [dict(zip(names, r)) for r in cur.fetchall()]
     return web.json_response({"count": len(rows), "filter": q, "hosts": rows})
+
+
+async def handle_model_facets(request):
+    """
+    Models matching a host facet (JSON)
+    ---
+    tags: [UI]
+    summary: GET /dashboard/model-facets?q=<model + ;key op value> — model names served by a host whose reputation matches the facets
+    description: >
+      Splits the query like routing does (model token + ';'-delimited host_status
+      facets). If there are NO facets, returns {"facets": false} so the caller
+      keeps its plain name filtering. With facets, returns {"facets": true,
+      "models": [...]} — the DISTINCT host_status.model values whose (host,model)
+      reputation row matches the facet WHERE. The browser intersects that set with
+      its own name filter. Read-only; the facet model set is small and uncommon.
+    responses:
+      '200':
+        description: Either {"facets": false} or {"facets": true, "models": [...]}
+      '400':
+        description: Bad facet (unknown key or a clause with no operator)
+    """
+    q = request.query.get("q", "") or ""
+    _model, facets = _split_host_facets(q)
+    if not facets:
+        return web.json_response({"facets": False})
+    try:
+        where, params = host_status_where(facets, _host_status_columns())
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    sql = f"SELECT DISTINCT model FROM host_status WHERE {_LIVE_REAL}"
+    if where:
+        sql += f" AND {where}"
+    models = [m for (m,) in _get_db().execute(sql, params).fetchall() if m]
+    return web.json_response({"facets": True, "model": _model, "models": models})
 
 
 async def handle_model_hosts(request):
@@ -16269,6 +16320,7 @@ def make_app():
     swagger.add_get("/dashboard-models", handle_dashboard_models)
     swagger.add_get("/dashboard-model-hosts", handle_model_hosts)
     swagger.add_get("/dashboard/host-status", handle_host_status_query)
+    swagger.add_get("/dashboard/model-facets", handle_model_facets)
     swagger.add_get("/settings", handle_settings_get)
     swagger.add_post("/settings", handle_settings_post)
     swagger.add_post("/settings/test", handle_settings_test)

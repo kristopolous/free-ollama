@@ -390,6 +390,25 @@ Server-Room filter, and the map's compare boxes):
   get-dates`). Unlike size, a date filter **excludes** models it can't date — a
   temporal filter can only include what it can place in time, and most undated
   models are just older ones not on the leaderboard.
+- **Host-reputation facets** — and, if you have a very mature reputation
+  database that has connected to a lot of hosts and measured them well, these
+  kinds of queries may actually work: a `;`-delimited `key op value` predicate
+  filters by the *serving host's* measured reputation rather than by anything
+  about the model. The key is whitelisted against the real `host_status`
+  columns (so nothing arbitrary reaches SQL) and the value is always bound, never
+  interpolated. The usual suspects:
+  - `;tps>40` — models some host serves at over 40 tokens/sec
+  - `;state=good` — only hosts in good standing
+  - `;ttft<0.5` — sub-half-second time-to-first-token
+  - `;fail_smoke=0` — hosts whose last smoke test passed
+
+  Facets and the model name are **order-free** and compose with everything above:
+  `qwen;tps>40`, `;tps>40;qwen`, and `tps>40;qwen` all mean the same thing, and
+  `qwen >5gb ;tps>40 ;state=good` layers a size filter, a throughput floor and a
+  standing requirement on a qwen search. Each facet is one indexed `host_status`
+  lookup; a query with no `;` never touches the DB. A reputation that's thin or
+  cold simply returns little — the predicate is only as good as the data behind
+  it, which is why it wants a mature database to shine.
 
 ### Context window
 
