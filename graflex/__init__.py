@@ -2906,7 +2906,7 @@ async def _check_all(service, name=None, check_timeout=60, check_new=False, chec
         # the JSON pool — see the migration TODO; this is the first path moved onto the DB.)
         hosts = _session_hosts(session, service, site)
         if not hosts:
-            log.warning(f"check-new: no {service} hosts fetched in session {session}"
+            log.warning(f"!!!! check-new: !!!! NO {service} HOSTS fetched in session {session} !!!!"
                         + (f" via {site}" if site else ""))
             return
         recorded = _recorded_hosts(service)
