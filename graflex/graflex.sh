@@ -292,7 +292,7 @@ ENDL
 
   # shodan section
   shodan)
-    for service in ollama llamacpp; do
+    for service in localai ollama llamacpp; do
       "$CMD" shodan-"$service" "${EXTRA_ARGS[@]}" 
     done
     exit 0
