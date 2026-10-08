@@ -1617,6 +1617,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <label class="setting"><span class="setting-text"><span class="setting-name">Maximum timeout (s)</span><small class="setting-help">Ceiling on the per-host first-token wait &mdash; the longest we'll ever wait on a monster prompt. The budget scales from Minimum up to this with prompt size (at Input rate), and the SAME extra seconds are added to Fanout, so the worker/connection maximum is unchanged &mdash; a big prompt just waits longer on the same number of hosts. Set equal to Minimum timeout to disable scaling.</small></span><input type="number" id="setTimeoutMax" min="1" max="3600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Max run time (s)</span><small class="setting-help">Hard ceiling on a single response's TOTAL run time, measured from when the worker starts. The timeouts above only cover the wait for the first token and the gap between tokens &mdash; a host that keeps trickling tokens (or keep-alives) can otherwise stream for hours. <b>0 disables.</b> Default 1800 (30&nbsp;min); can be set as high as 30 days.</small></span><input type="number" id="setWorkerMax" min="0" max="2592000" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Fail over on max run time</span><small class="setting-help">What happens when Max run time is hit. <b>Off (default):</b> end the stream cleanly with what was produced &mdash; no failover, and the host is NOT penalised (a duration guard, not a quality verdict). <b>On:</b> treat it as a mid-stream cutoff and fail over to another host, carrying the partial answer forward &mdash; useful with a short cap (e.g. 300s) to re-race a slow host.</small></span><input type="checkbox" id="setWorkerMaxFailover"></label>
+<label class="setting"><span class="setting-text"><span class="setting-name">Race watchdog (s)</span><small class="setting-help">If a request's host search runs longer than this without finding a host, log its internal state (candidates tried, fan-out liveness, permits) every N seconds &mdash; so a wedged search surfaces in the log instead of hanging silently. Quiet for healthy requests, which resolve well under it. <b>0 = off.</b> Default 30.</small></span><input type="number" id="setRaceWatchdog" min="0" max="3600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Fanout (s)</span><small class="setting-help">How often another wave of hosts is opened, independent of Timeout. Lower = widen the search faster; each attempt still gets its full Timeout, so a cold host isn't dropped to make room. <b id="fanoutImpl"></b></small></span><input type="number" id="setFanout" min="1" max="600" step="1"></label>
 <label class="setting"><span class="setting-text"><span class="setting-name">Input rate (tok/s)</span><small class="setting-help">Assumed prefill speed &mdash; how fast a capable host chews through the prompt before the first token. Turns prompt size into expected prefill time, so the race clocks stretch for a big prompt and it isn't dropped for taking the prefill we asked of it. Conservative on purpose (real hardware does several times this). Small prompts are unaffected.</small></span><input type="number" id="setInputRate" min="1" max="100000" step="1"></label>
 </div>
@@ -9035,6 +9036,7 @@ function populateSettings(s){
   document.getElementById('setTimeoutMax').value=s.timeout_max;
   document.getElementById('setWorkerMax').value=('worker_max' in s)?s.worker_max:1800;
   document.getElementById('setWorkerMaxFailover').checked=!!s.worker_max_failover;
+  document.getElementById('setRaceWatchdog').value=('race_watchdog' in s)?s.race_watchdog:30;
   document.getElementById('setFanout').value=s.fanout;
   document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   _wireFanoutImpl();
@@ -9125,6 +9127,7 @@ function saveSettings(){
     timeout_max:parseInt(document.getElementById('setTimeoutMax').value,10),
     worker_max:parseInt(document.getElementById('setWorkerMax').value,10),
     worker_max_failover:document.getElementById('setWorkerMaxFailover').checked,
+    race_watchdog:parseInt(document.getElementById('setRaceWatchdog').value,10),
     fanout:parseInt(document.getElementById('setFanout').value,10),
     hedge_delay:parseInt(document.getElementById('setHedge').value,10),
     min_count:parseInt(document.getElementById('setMinCount').value,10),
@@ -9140,6 +9143,7 @@ function saveSettings(){
   if(isNaN(body.timeout)||body.timeout<1)delete body.timeout;
   if(isNaN(body.hedge_delay)||body.hedge_delay<0)delete body.hedge_delay;
   if(isNaN(body.worker_max)||body.worker_max<0)delete body.worker_max;   // 0 is valid (disables)
+  if(isNaN(body.race_watchdog)||body.race_watchdog<0)delete body.race_watchdog;   // 0 is valid (off)
   if(isNaN(body.min_count)||body.min_count<0)delete body.min_count;
   // Only send admin_pw when the operator typed a new one (blank = keep current).
   var newPw=document.getElementById('setAdminPw').value;
@@ -9164,6 +9168,7 @@ function saveSettings(){
   document.getElementById('setTimeoutMax').value=s.timeout_max;
   document.getElementById('setWorkerMax').value=('worker_max' in s)?s.worker_max:1800;
   document.getElementById('setWorkerMaxFailover').checked=!!s.worker_max_failover;
+  document.getElementById('setRaceWatchdog').value=('race_watchdog' in s)?s.race_watchdog:30;
   document.getElementById('setFanout').value=s.fanout;
       document.getElementById('setHedge').value=('hedge_delay' in s)?s.hedge_delay:30;
   _wireFanoutImpl();

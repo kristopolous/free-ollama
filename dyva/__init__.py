@@ -318,6 +318,12 @@ WORKER_MAX_FAILOVER = False
 # come back. WARMING_RETRY is how long we wait before re-fronting such a host, retried
 # until it's ready or the request TIMEOUT lapses.
 WARMING_RETRY = 5
+# A race that's still SEARCHING (no host found) past this many seconds logs its internal
+# state every RACE_WATCHDOG seconds — tried/started/permit/n, the fan-out task's liveness
+# and any exception — so a wedged search (e.g. a continuation pinned to a dead warm host,
+# stuck at checked=1) surfaces instead of hanging silently. Quiet for healthy races: they
+# resolve well under this. 0 disables.
+RACE_WATCHDOG = 30
 # How often, in seconds, to emit an SSE keepalive comment to a streaming OpenAI client
 # while dyva is still finding a host (race + hedge + warming + the winner's prefill) and
 # has no token to send yet. dyva adds pre-first-token latency raw ollama doesn't, so a
@@ -578,7 +584,7 @@ def model_modalities(model):
 def load_settings():
     """Apply persisted runtime settings (workers/timeout/min_count/local) over
     the CLI defaults, so changes made in the dashboard survive restarts."""
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH, WORKER_MAX, WORKER_MAX_FAILOVER
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH, WORKER_MAX, WORKER_MAX_FAILOVER, RACE_WATCHDOG
     if not os.path.exists(SETTINGS_FILE):
         return
     try:
@@ -602,6 +608,8 @@ def load_settings():
         WORKER_MAX = s["worker_max"]
     if isinstance(s.get("worker_max_failover"), bool):
         WORKER_MAX_FAILOVER = s["worker_max_failover"]
+    if isinstance(s.get("race_watchdog"), (int, float)) and s["race_watchdog"] >= 0:
+        RACE_WATCHDOG = s["race_watchdog"]
     if isinstance(s.get("fanout"), (int, float)) and s["fanout"] > 0:
         FANOUT = s["fanout"]
     if isinstance(s.get("min_count"), int) and s["min_count"] >= 0:
@@ -635,7 +643,7 @@ def save_settings(extra=None):
         data = {}
     data.update({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                  "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
-                 "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER,
+                 "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER, "race_watchdog": RACE_WATCHDOG,
                  "min_count": MIN_COUNT, "local": _LOCAL, "explore": EXPLORE_MODE,
                  "admin_pw": ADMIN_PW, "model_list": MODEL_LIST, "model_list_on": MODEL_LIST_ON,
                  "cloudskip": sorted(CLOUD_SKIP), "base_path": BASE_PATH})
@@ -4669,6 +4677,32 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
     fan = asyncio.create_task(_fanout_guarded())
     tasks.append(fan)
     _tasks_holder.append(fan)
+
+    async def _race_watchdog():
+        # Low-noise diagnostic: stays quiet until a search has run past RACE_WATCHDOG, then
+        # logs the fan-out state every RACE_WATCHDOG seconds while it's STILL unresolved. A
+        # healthy race wins (done) well under the threshold and never logs; a wedged one
+        # (checked=1, no host) prints exactly why — fan-out dead? permit frozen? attempt
+        # hung? NOT in `tasks`, so it never gates the all-done check; cancelled in finally.
+        if not RACE_WATCHDOG or RACE_WATCHDOG <= 0:
+            return
+        t0 = time.time()
+        try:
+            while not done.is_set():
+                await asyncio.sleep(RACE_WATCHDOG)
+                if done.is_set():
+                    return
+                _fe = fan.exception() if (fan.done() and not fan.cancelled()) else None
+                log.warning("race watchdog[%s] %.0fs still searching: tried=%d started=%d "
+                            "permit=%d n=%d spent=%s retryq=%d tasks=%d live=%d "
+                            "fan_done=%s fan_exc=%r checked=%d",
+                            label or key, time.time() - t0, tried, _started[0], _permit[0],
+                            n, _spent[0], len(retry_q), len(tasks),
+                            sum(1 for t in tasks if not t.done()), fan.done(), _fe,
+                            (_workers.get(wwid) or {}).get("checked", -1))
+        except asyncio.CancelledError:
+            pass
+    _wd = asyncio.ensure_future(_race_watchdog())
     try:
         while True:
             try:
@@ -4681,6 +4715,7 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
             await asyncio.sleep(0.1)
 
         done.set()
+        _wd.cancel()
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -7929,7 +7964,7 @@ async def handle_settings_get(request):
         return web.json_response({"admin": False, "admin_pw_set": True}, status=403)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
-                              "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER,
+                              "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER, "race_watchdog": RACE_WATCHDOG,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
@@ -7949,7 +7984,7 @@ async def handle_settings_post(request):
       '200':
         description: Updated settings
     """
-    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH, WORKER_MAX, WORKER_MAX_FAILOVER
+    global WORKER_COUNT, TIMEOUT, MIN_COUNT, ADMIN_PW, _LOCAL, MODEL_LIST, MODEL_LIST_ON, HEDGE_DELAY, INPUT_RATE, TIMEOUT_MAX, FANOUT, REASONING_KEYS, EXPLORE_MODE, CLOUD_SKIP, BASE_PATH, WORKER_MAX, WORKER_MAX_FAILOVER, RACE_WATCHDOG
     resp = await _check_local(request) or _check_admin(request)
     if resp:
         return resp
@@ -7982,6 +8017,8 @@ async def handle_settings_post(request):
         WORKER_MAX = min(body["worker_max"], 30 * 86400)   # 0 disables; ceiling 30 days
     if isinstance(body.get("worker_max_failover"), bool):
         WORKER_MAX_FAILOVER = body["worker_max_failover"]
+    if isinstance(body.get("race_watchdog"), (int, float)) and body["race_watchdog"] >= 0:
+        RACE_WATCHDOG = min(int(body["race_watchdog"]), 3600)   # 0 = off; seconds between logs
     if isinstance(body.get("fanout"), (int, float)) and body["fanout"] > 0:
         FANOUT = body["fanout"]
     if isinstance(body.get("min_count"), int) and body["min_count"] >= 0:
@@ -8019,7 +8056,7 @@ async def handle_settings_post(request):
         await asyncio.get_event_loop().run_in_executor(None, refresh_cache)
     return web.json_response({"workers": WORKER_COUNT, "timeout": TIMEOUT,
                               "hedge_delay": HEDGE_DELAY, "input_rate": INPUT_RATE, "timeout_max": TIMEOUT_MAX, "fanout": FANOUT, "reasoning_keys": REASONING_KEYS,
-                              "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER,
+                              "worker_max": WORKER_MAX, "worker_max_failover": WORKER_MAX_FAILOVER, "race_watchdog": RACE_WATCHDOG,
                               "min_count": MIN_COUNT, "local": _LOCAL,
                               "explore": EXPLORE_MODE,
                               "cloudskip": sorted(CLOUD_SKIP),
