@@ -223,6 +223,7 @@ body.chat{height:100vh;height:100dvh}
    glance which hosts you've already checked. */
 .status-line a{color:inherit;text-decoration:underline}
 .status-searching{color:var(--text-dim)}
+.status-searched,.status-fetched{color:var(--text-3)}
 .status-trying{color:var(--accent)}
 .status-connected{color:var(--ok)}
 .status-failed{color:var(--err)}
@@ -878,6 +879,13 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .doc-body{flex:1;min-height:0;overflow:auto;padding:14px;font-size:var(--fs-lg);line-height:var(--line-loose)}
 .doc-body pre{background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--r-md);padding:.7em;overflow-x:auto;white-space:pre;margin:0}
 .doc-body code{font-family:var(--font-mono);font-size:var(--fs-sm)}
+.code-wrap{position:relative}
+.code-copy{position:absolute;top:6px;right:6px;z-index:2;font-size:11px;line-height:1.5;padding:2px 8px;
+  background:var(--bg-inset);color:var(--text-dim);border:1px solid var(--border);border-radius:var(--r-md);
+  cursor:pointer;opacity:.5;transition:opacity .12s,color .12s,border-color .12s;font-variant-numeric:tabular-nums}
+.code-wrap:hover .code-copy,.code-copy:focus{opacity:1}
+.code-copy:hover{color:var(--text);border-color:var(--border-strong)}
+.code-copy.ok{color:var(--ok,#3fb950);border-color:var(--ok,#3fb950);opacity:1}
 .doc-body ul,.doc-body ol{margin:.5em 0;padding-left:1.6em}
 .doc-body li{margin:.2em 0}
 .doc-body p{margin:.5em 0}
@@ -1297,6 +1305,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <span id="docVer" class="doc-ver" style="display:none"><button id="docVerPrev" class="doc-btn doc-ver-btn" title="Older version">‹</button><span id="docVerLabel" class="doc-ver-label" title="Document version"></span><button id="docVerNext" class="doc-btn doc-ver-btn" title="Newer version">›</button></span>
 <button id="docView" class="doc-btn" title="Show rendered" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></button>
 <button id="docDownload" class="doc-btn" title="Download"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></button>
+<button id="docShare" class="doc-btn" title="Copy share link"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg></button>
 <button id="docMax" class="doc-btn" title="Maximize"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg></button>
 <button id="docClose" class="doc-close" title="Close">✕</button>
 </div>
@@ -3832,7 +3841,41 @@ function highlightBlocks(scope){
   for(var i=0;i<blocks.length;i++){
     if(blocks[i].classList.contains('language-mermaid'))continue;   // already a diagram
     try{window.hljs.highlightElement(blocks[i])}catch(e){}
+    addCodeCopy(blocks[i]);          // a copy-to-clipboard button, pinned top-right
   }
+}
+// Wrap each fenced code block and pin a "Copy" button in its top-right corner. The
+// button lives on the WRAPPER, not inside the <pre>, so it stays put when a wide block
+// scrolls horizontally. Idempotent: re-highlighting the same block won't stack buttons.
+function addCodeCopy(code){
+  var pre=code.parentElement;
+  if(!pre||pre.tagName!=='PRE')return;
+  var wrap=pre.parentElement;
+  if(!wrap||!wrap.classList.contains('code-wrap')){
+    wrap=document.createElement('div');wrap.className='code-wrap';
+    pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);
+  }
+  if(wrap.querySelector('.code-copy'))return;
+  var btn=document.createElement('button');
+  btn.type='button';btn.className='code-copy';btn.textContent='Copy';btn.title='Copy to clipboard';
+  btn.addEventListener('click',function(ev){
+    ev.preventDefault();ev.stopPropagation();
+    _copyText(code.textContent||'',function(ok){
+      btn.textContent=ok?'Copied':'Failed';btn.classList.toggle('ok',ok);
+      setTimeout(function(){btn.textContent='Copy';btn.classList.remove('ok');},1200);
+    });
+  });
+  wrap.appendChild(btn);
+}
+function _copyText(text,cb){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(function(){cb(true)},function(){cb(_execCopy(text))});
+  }else{cb(_execCopy(text))}
+}
+function _execCopy(text){
+  try{var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.left='-9999px';
+      document.body.appendChild(ta);ta.focus();ta.select();var ok=document.execCommand('copy');
+      document.body.removeChild(ta);return ok;}catch(e){return false}
 }
 var _mermaidReady=false;
 function _initMermaid(){
@@ -6926,6 +6969,26 @@ document.getElementById('docVerNext').addEventListener('click',function(){
   renderDocPanel();
 });
 document.getElementById('docDownload').addEventListener('click',downloadDoc);
+// Shareable link to the active document: <base>/docs/<chat-id>/<title>. Built relative to
+// the page (so it inherits BASE_PATH and the real origin), copied to the clipboard.
+function _shareDocUrl(){
+  var cid=currentChat&&currentChat.id;
+  var doc=cid?findDoc(currentDocs(),activeDocId):null;
+  if(!cid||!doc)return null;
+  var name=encodeURIComponent(doc.title||doc.id||'document');
+  try{return new URL('docs/'+encodeURIComponent(cid)+'/'+name,document.baseURI).href;}catch(e){return null;}
+}
+document.getElementById('docShare').addEventListener('click',function(){
+  var btn=this,url=_shareDocUrl();
+  if(!url){showSnack('No document to share',false);_snackTimer=setTimeout(hideSnack,2200);return;}
+  _copyText(url,function(ok){
+    btn.classList.toggle('on',ok);
+    // snackbar is the real feedback; on failure keep the URL up longer so it's still usable
+    showSnack(ok?'Share link copied to clipboard':('Copy failed — '+url),false);
+    _snackTimer=setTimeout(hideSnack,ok?2500:6000);
+    setTimeout(function(){btn.classList.remove('on')},2000);
+  });
+});
 var _docMaxIcon={
   on:'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>',
   off:'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>'};

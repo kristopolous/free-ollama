@@ -206,7 +206,7 @@ ENDL
   # Shodan API key). ZoomEye caps a query at ~250 results, so it's a quick pass.
   zoomeye)
     for service in ollama llamacpp lmstudio; do
-      "$CMD" zomeye-"$service" "${EXTRA_ARGS[@]}" 
+      "$CMD" zoomeye-"$service" "${EXTRA_ARGS[@]}" 
     done
     exit 0
     ;;

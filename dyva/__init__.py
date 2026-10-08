@@ -4024,7 +4024,7 @@ def to_ollama(body):
             for tc in tcs:
                 fn = tc.get("function", {})
                 args = _tool_args_obj(fn.get("arguments", {}))
-                out.append({"function": {"name": fn.get("name", ""), "arguments": args}})
+                out.append({"function": {"name": fn.get("name") or "", "arguments": args}})
             m["tool_calls"] = out
     return body
 
@@ -4047,7 +4047,7 @@ def _fmt_tool_calls(tcs):
             # upstream's when present instead of minting a fresh one on every chunk.
             "id": tc.get("id") or f"call_{int(time.time())}_{i}",
             "type": "function",
-            "function": {"name": fn.get("name", ""), "arguments": args},
+            "function": {"name": fn.get("name") or "", "arguments": args},
         })
     return out
 
@@ -4802,7 +4802,7 @@ def _messages_openai(messages):
                     cid = f"call_{ctr}"
                 pending.append(cid)
                 new_tcs.append({"id": cid, "type": "function",
-                                "function": {"name": fn.get("name", ""), "arguments": args}})
+                                "function": {"name": fn.get("name") or "", "arguments": args}})
             mm = dict(m, tool_calls=new_tcs)
             # content must be a string or array of objects — NEVER null/missing
             # (some OpenAI hosts reject null even alongside tool_calls, and a
@@ -5036,6 +5036,55 @@ def _coerce_tool_args(messages):
             fn = tc.get("function") if isinstance(tc, dict) else None
             if isinstance(fn, dict) and "arguments" in fn:
                 fn["arguments"] = _tool_args_obj(fn["arguments"])
+
+
+def _drop_nameless_tool_calls(messages):
+    """Remove any assistant tool_call with no usable function name. A host can stream a
+    garbage/empty call ({"function":{"name":null,"arguments":{}}}); the client (opencode)
+    stores it and echoes it back, and an OpenAI-typed host then 400s on the whole request
+    ("ChatCompletionMessageFunctionToolCallParam.function.name — Input should be a valid
+    string [input=None]"), which kills the entire race. A nameless call is not a real call,
+    so drop it (don't coerce to "") — and drop a now-empty tool_calls key so we don't send
+    an empty tool turn. In place, dialect-agnostic (doesn't touch arguments format)."""
+    for m in messages or []:
+        if not isinstance(m, dict) or not m.get("tool_calls"):
+            continue
+        kept = [tc for tc in m["tool_calls"]
+                if isinstance(tc, dict)
+                and (((tc.get("function") or {}).get("name") or "").strip())]
+        if kept:
+            m["tool_calls"] = kept
+        else:
+            m.pop("tool_calls", None)
+
+
+def _merge_tool_call_fragments(frags):
+    """Streamed tool calls arrive as per-delta FRAGMENTS: the opener carries index+id+name
+    and the START of `arguments`; each later fragment repeats the same index and appends
+    more argument text. Merge them by index into complete calls — concatenating the argument
+    strings — so a consumer sees whole tool calls, not a pile of partials. Without this a
+    3-chunk call becomes 3 broken calls whose argument fragments ('{"q": "ca', 'ltech"}')
+    each fail to parse at the next host ('Unterminated string')."""
+    byidx, order = {}, []
+    for f in frags or []:
+        if not isinstance(f, dict):
+            continue
+        idx = f.get("index")
+        if idx is None:
+            idx = ("_", len(order))          # no index -> its own complete call
+        if idx not in byidx:
+            byidx[idx] = {"function": {"name": None, "arguments": ""}}
+            order.append(idx)
+        cur = byidx[idx]
+        if f.get("id"):
+            cur["id"] = f["id"]
+        fn = f.get("function") or {}
+        if fn.get("name"):
+            cur["function"]["name"] = fn["name"]
+        a = fn.get("arguments")
+        if a:
+            cur["function"]["arguments"] += a if isinstance(a, str) else json.dumps(a)
+    return [byidx[i] for i in order]
 
 
 def _coerced_messages(messages):
@@ -9123,6 +9172,7 @@ async def handle_ollama_chat(request):
         opayload = body
         # Native path forwards the body as-is, so normalize tool_call arguments
         # here the same way to_ollama does for the OpenAI path.
+        _drop_nameless_tool_calls(opayload.get("messages"))
         _coerce_tool_args(opayload.get("messages"))
         log.debug(f"Ollama chat request: model={model}, stream={do_stream}")
         return await _proxy_chat(request, session, model, opayload, do_stream, openai_format=False)
@@ -9176,6 +9226,7 @@ async def handle_chat_job_submit(request):
     model = body.get("model", "")
     if not model:
         return web.json_response(err_obj("model is required", "missing_model"), status=400)
+    _drop_nameless_tool_calls(body.get("messages"))
     _coerce_tool_args(body.get("messages"))
 
     # `__dyva_info__` (/info, /next, /test) is a synchronous routing report, not
@@ -9400,6 +9451,7 @@ async def handle_openai_chat(request):
         if not model:
             return web.json_response(err_obj("model is required", "missing_model"), status=400)
         do_stream = body.get("stream", False)
+        _drop_nameless_tool_calls(body.get("messages"))   # strip echoed garbage calls before any conversion
         opayload = to_ollama(body)
         log.debug(f"OpenAI request: model={model}, stream={do_stream}")
         return await _proxy_chat(request, session, model, opayload, do_stream, openai_format=True)
@@ -9823,6 +9875,58 @@ async def handle_chat_delete(request):
     return web.json_response({"ok": True})
 
 
+def _doc_content_type(doc):
+    """HTML docs render in the browser; everything else is served as plain text so a
+    shared link just shows the content."""
+    t = (doc.get("type") or "").lower()
+    lang = (doc.get("language") or "").lower()
+    title = (doc.get("title") or "").lower()
+    if "html" in t or lang in ("html", "htm") or title.endswith((".html", ".htm")):
+        return "text/html"
+    return "text/plain"
+
+
+async def handle_doc_share(request):
+    """
+    Shareable document
+    ---
+    tags: [UI]
+    summary: GET /docs/{cid}/{doc} — one chat's document by chat id + title (or doc id)
+    description: >
+      A shareable link to a document created in a chat: find the chat by id, pull the
+      document by its title (or id), and return it. HTML renders; everything else is
+      served as text. Honours -l (localhost-only) like the other chat endpoints.
+    responses:
+      '200':
+        description: The document content
+      '404':
+        description: Chat or document not found
+    """
+    resp = await _check_local(request)
+    if resp:
+        return resp
+    chat = _chat_get(request.match_info.get("cid"))
+    if not isinstance(chat, dict):
+        return web.Response(text="chat not found", status=404, content_type="text/plain")
+    want = urllib.parse.unquote(request.match_info.get("doc") or "").strip().lower()
+    doc = None
+    for d in (chat.get("documents") or []):
+        if isinstance(d, dict) and (str(d.get("id") or "").lower() == want
+                                    or str(d.get("title") or "").strip().lower() == want):
+            doc = d
+            break
+    if doc is None:
+        return web.Response(text="document not found", status=404, content_type="text/plain")
+    ctype = _doc_content_type(doc)
+    r = web.Response(text=(doc.get("content") or ""), content_type=ctype, charset="utf-8")
+    if ctype == "text/html":
+        # Model/user-authored HTML served from dyva's own origin could otherwise read the
+        # admin key out of localStorage. Sandbox it into an OPAQUE origin — it still renders
+        # and runs its own scripts, but can't touch dyva's storage, cookies, or DOM.
+        r.headers["Content-Security-Policy"] = "sandbox allow-scripts allow-popups allow-forms"
+    return r
+
+
 # ---- Fetching explicit URLs -----------------------------------------------
 # Three backends, best first. A real browser engine is preferred because a
 # growing share of the web renders nothing without JavaScript, and the point of
@@ -9834,13 +9938,14 @@ WEB_FETCH_TIMEOUT = 45          # wall clock for one page
 WEB_FETCH_MAX = 200_000         # bytes of text handed back to a model
 WEB_IMAGE_MAX = 32 * 1024 * 1024
 WEB_SEARCH_MAX = 8              # results handed back per search
-# DuckDuckGo's no-JS HTML endpoint — light orchestration (one POST + parse),
-# no API key, no searxng/container. Same engine the duckduckgo-mcp-server uses.
-WEB_SEARCH_URL = "https://html.duckduckgo.com/html/"
-# Self-throttle BELOW DDG's threshold (observed block at ~30/min from one IP) so a
-# busy public demo — every user's search leaving one server IP — paces itself
-# instead of tripping the IP-wide CAPTCHA. Prevention beats reacting to a block:
-# once flagged, DDG serves a 202 challenge no retry can clear.
+# Keenable's keyless public search endpoint: structured JSON ({title, url, snippet}),
+# no API key, no browser, no container — rate limited per IP (~1000/hr, 10/s, unbilled).
+# Replaces the old DuckDuckGo HTML scrape, which any server IP got CAPTCHA'd out of.
+# The X-Keenable-Title header (our app name) is REQUIRED on the keyless endpoint.
+WEB_SEARCH_URL = "https://api.keenable.ai/v1/search/public"
+WEB_SEARCH_TITLE = "dyva"
+# Self-throttle so a busy public demo (every user's search leaving ONE server IP) stays
+# well under the per-IP ceiling — a prevention habit kept from the scrape days.
 WEB_SEARCH_RPM = 20
 _web_search_hits = collections.deque()
 _web_search_lock = asyncio.Lock()
@@ -10120,60 +10225,44 @@ async def handle_web_fetch(request):
     except asyncio.TimeoutError:
         await broadcast_activity(url, "web", "failure", f"fetch: {url} - timed out")
         return web.json_response({"error": "timed out"}, status=502)
-    await broadcast_activity(url, "web", "success",
+    # 'fetched', not 'success': reading a page is routine utility, not an inference win —
+    # muted feed line (status-fetched -> --text-3), same as search landings.
+    await broadcast_activity(url, "web", "fetched",
                              f"fetch: {url} ✓ ({out.get('backend')})",
                              duration=time.time() - t0)
     return web.json_response(out)
 
 
-def _parse_ddg_html(html, n):
-    """Pull the organic results out of a DuckDuckGo HTML page: title, the real
-    destination URL (unwrapped from DDG's /l/?uddg= redirect), and the snippet.
-    Ad slots (y.js) are dropped. Structured parse via bs4, not regex, so a markup
-    tweak degrades to fewer results rather than garbage."""
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "html.parser")   # stdlib parser — no lxml dependency
+def _parse_keenable(data, n):
+    """Map Keenable's JSON search response to our {title, url, snippet} shape. A result
+    carries `snippet` (and a longer `description`); fall back to the description, then
+    to the URL for the title, and skip anything without a URL."""
     out = []
-    for res in soup.select(".result"):
-        a = res.select_one(".result__title a") or res.select_one(".result__a")
-        if not a:
+    for r in (data.get("results") or []):
+        url = r.get("url")
+        if not url:
             continue
-        href = a.get("href") or ""
-        if not href or "y.js" in href:         # ad / tracking slot
-            continue
-        if "uddg=" in href:                     # unwrap the DDG redirect
-            try:
-                href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
-            except Exception:
-                pass
-        if href.startswith("//"):
-            href = "https:" + href
-        sn = res.select_one(".result__snippet")
-        out.append({"title": a.get_text(" ", strip=True),
-                    "url": href,
-                    "snippet": sn.get_text(" ", strip=True) if sn else ""})
+        out.append({"title": r.get("title") or url,
+                    "url": url,
+                    "snippet": r.get("snippet") or r.get("description") or ""})
         if len(out) >= n:
             break
     return out
 
 
 async def web_search(session, query, n=WEB_SEARCH_MAX):
-    """Search the web via DuckDuckGo's HTML endpoint. Returns a list of
-    {title, url, snippet}. No browser engine, no API key — one POST and a parse."""
+    """Search the web via Keenable's keyless public endpoint. Returns a list of
+    {title, url, snippet}. No API key, no browser — one POST and a JSON parse."""
     query = (query or "").strip()
     if not query:
         raise ComfyError("empty search query")
-    await _web_search_throttle()         # pace below DDG's per-IP rate before firing
-    headers = {"User-Agent": WEB_UA,
-               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-               "Accept-Language": "en-US,en;q=0.9",
-               "Content-Type": "application/x-www-form-urlencoded",
-               "Referer": "https://html.duckduckgo.com/"}
-    data = {"q": query, "b": "", "kl": "us-en", "kp": "-2"}   # kp=-2: safesearch off
+    await _web_search_throttle()         # stay under the per-IP ceiling
+    headers = {"X-Keenable-Title": WEB_SEARCH_TITLE,   # required on the keyless endpoint
+               "Content-Type": "application/json", "User-Agent": WEB_UA}
+    body = {"query": query, "max_results": max(1, min(int(n), 50))}
 
     async def _once():
-        r = await session.post(WEB_SEARCH_URL, data=data, headers=headers,
-                               allow_redirects=True,
+        r = await session.post(WEB_SEARCH_URL, json=body, headers=headers,
                                timeout=aiohttp.ClientTimeout(total=WEB_FETCH_TIMEOUT))
         try:
             return r.status, r.headers, await r.text()
@@ -10181,18 +10270,21 @@ async def web_search(session, query, n=WEB_SEARCH_MAX):
             await r.release()
 
     try:
-        status, hdrs, html = await _once()
-        if status == 429:                # soft "slow down" — honor Retry-After, retry once
+        status, hdrs, text = await _once()
+        if status == 429:                # rate limited — honor Retry-After, retry once
             await asyncio.sleep(min(_retry_after_seconds(hdrs) or 2.0, 30.0))
-            status, hdrs, html = await _once()
+            status, hdrs, text = await _once()
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
         raise ComfyError(f"search request failed: {e}")
-    # 202/403 (and a still-429, or an empty 200) are DDG's block responses, not "no
-    # results". Once the IP is flagged DDG serves a JS/CAPTCHA challenge no retry clears,
-    # so this surfaces as a transient block — the throttle above is what avoids it.
-    if status in (202, 403, 429) or not html.strip():
-        raise ComfyError("DuckDuckGo blocked the search (rate limited) — try again shortly")
-    return _parse_ddg_html(html, n)
+    if status == 429:
+        raise ComfyError("web search rate limited — try again shortly")
+    if status != 200:
+        raise ComfyError(f"web search failed (HTTP {status}): {' '.join(text.split())[:200]}")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise ComfyError("web search returned a non-JSON response")
+    return _parse_keenable(data, n)
 
 
 def _format_search_results(query, results):
@@ -10248,7 +10340,9 @@ async def handle_web_search(request):
     except asyncio.TimeoutError:
         await broadcast_activity(q, "web", "failure", f"search: {q} - timed out")
         return web.json_response({"error": "timed out"}, status=502)
-    await broadcast_activity(q, "web", "success",
+    # 'searched', not 'success': a web search landing is routine utility, not an
+    # inference win — the feed line is muted (status-searched -> --text-3), not green.
+    await broadcast_activity(q, "web", "searched",
                              f"search: {q} ✓ ({len(results)})",
                              duration=time.time() - t0)
     return web.json_response({"query": q, "results": results})
@@ -12214,6 +12308,17 @@ async def _run_chat_job(session, jid):
         them. Read-only scope: the `web` tool (search + fetch), via the in-process
         web_search/web_fetch (the same engines /v1/web/* use), plus the scratchpad.
         Returns True if any tool actually ran."""
+        # A flaky host can stream a nameless/garbage tool_call ({"function":{"name":null}}).
+        # Processing it builds an assistant tool_call AND a tool message both carrying
+        # name=null, which the NEXT host then rejects (llama.cpp: "Failed to parse messages
+        # … type must be string, but is null"; vLLM: a 400 on function.name) — killing every
+        # subsequent round. Drop nameless calls before building anything; then `name` below
+        # is always a real string and the "(tool 'X' is not available)" branch only ever
+        # names a genuine-but-unsupported tool.
+        tcs = [tc for tc in tcs
+               if isinstance(tc, dict) and (((tc.get("function") or {}).get("name") or "").strip())]
+        if not tcs:
+            return False
         assistant_msg = {"role": "assistant", "content": "", "tool_calls": tcs}
         tool_msgs = []
         ran = False
@@ -12541,7 +12646,7 @@ async def _run_chat_job(session, jid):
             if agentic and round_tcs and _round < max_rounds - 1:
                 _set_worker_phase(job_wid, "running tools")
                 await _job_set(jid, phase="running tools")
-                if await _run_agent_tools(round_tcs):
+                if await _run_agent_tools(_merge_tool_call_fragments(round_tcs)):
                     continue
                 # nothing executable -> treat this turn as final
             await _job_set(jid, status=JOB_COMPLETED, phase=None)
@@ -16178,6 +16283,7 @@ def make_app():
     app.router.add_get("/api/chats/{cid}", handle_chat_get)
     app.router.add_post("/api/chats/{cid}", handle_chat_post)
     app.router.add_post("/api/chats/{cid}/delete", handle_chat_delete)
+    app.router.add_get("/docs/{cid}/{doc}", handle_doc_share)   # shareable document link
     # Chat jobs (the print queue). Plain router: path params + control bodies.
     app.router.add_post("/api/chat/jobs", handle_chat_job_submit)
     app.router.add_get("/api/chat/jobs", handle_chat_jobs_list)

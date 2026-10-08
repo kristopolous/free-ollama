@@ -864,17 +864,17 @@ new comes out whole.
 run a web search, a **URL** reads that page. Typical flow is search to find the
 page, then call `web` again with its URL to read it.
 
-Search is light orchestration over DuckDuckGo's no-JS HTML endpoint — one POST
-and a parse (via `beautifulsoup4`), no API key and no searxng container, the
-same approach as [duckduckgo-mcp-server](https://github.com/nickclyde/duckduckgo-mcp-server).
-It returns up to eight results as `{title, url, snippet}`; safesearch is off.
-`/v1/web/search` exposes it over HTTP.
+Search is one POST to [Keenable](https://docs.keenable.ai/api-reference/search.md)'s
+keyless public endpoint (`POST /v1/search/public`) — structured JSON, no API key, no
+browser, no container. It returns up to eight results as `{title, url, snippet}`.
+`/v1/web/search` exposes it over HTTP. (This replaced an earlier DuckDuckGo HTML
+scrape, which got CAPTCHA'd from any server IP.)
 
-Because every user's search leaves the one server IP, searches are paced by a
-shared sliding-window throttle (≤20/min across the whole process) to stay under
-DuckDuckGo's per-IP rate — prevention, since once an IP is flagged DDG serves a
-CAPTCHA no retry can clear. A soft `429` is retried once honoring `Retry-After`;
-a hard block surfaces as a transient "try again shortly".
+The endpoint is rate limited per IP (≈1000/hr, 10/s, unbilled), so — because every
+user's search leaves the one server IP — searches are paced by a shared
+sliding-window throttle (≤20/min across the whole process) to stay well under it. A
+`429` is retried once honoring `Retry-After`; anything else surfaces as a transient
+"try again shortly".
 
 Reading a URL renders the page with the best engine installed, in this order:
 
