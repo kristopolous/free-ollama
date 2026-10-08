@@ -266,6 +266,12 @@ ENDL
     PORTS="1234,80,443,8080,8000,12345"
     ;;
 
+  hunter-localai)
+    SERVICE=localai
+    SITE=hunter
+    PORTS="8080,8081,80,443,3000,8000,8001"
+    ;;
+
 
   # censys
   censys)
@@ -283,12 +289,17 @@ ENDL
     ;;
 
   censys-ollama)
-    SITE=censys
     SERVICE=ollama
+    SITE=censys
     COUNTRIES="United States,China,France,Germany,Hong Kong"
     PORTS="11434,3000,443,8080,8000"
     ;;
 
+  censys-localai)
+    SERVICE=localai
+    SITE=censys
+    PORTS="8080,8081,80,443,3000,8000,8001"
+    ;;
 
   # shodan section
   shodan)
@@ -307,7 +318,7 @@ ENDL
   shodan-localai)
     SERVICE=localai
     SITE=shodan
-    PORTS="8080,80,443,3000,8081,8000"
+    PORTS="8080,8081,80,443,3000,8000,8001"
     ;;
 
   shodan-ollama)

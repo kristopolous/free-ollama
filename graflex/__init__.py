@@ -470,6 +470,8 @@ SERVICE_CONFIG = {
         "port": 8080,
         "fofa_query": 'title="localai"',
         "shodan_query": 'product:localai',
+        "censys_query": 'host.services.endpoints.http.html_title="localai"',
+        "hunter_query": 'web.title="localai"',
         "check_path": "/v1/models",
     },
 }

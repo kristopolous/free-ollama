@@ -509,7 +509,7 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 .wk-tok.trunc{color:var(--err-hover)}
 /* Two spans, each with a thin coloured rule under the words: finding a host
    (blue) then running the job on it (green). Just a line — no fill. */
-.wk-timeline{margin-left:auto;flex:0 0 auto;display:flex;gap:12px;font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
+.wk-timeline{margin-left:auto;flex:0 0 auto;display:flex;align-items:baseline;gap:12px;font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
 .wk-seg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-dim);padding-bottom:0px;border-bottom:1px solid transparent}
 .wk-find{border-bottom-color:var(--accent)}
 .wk-run{border-bottom-color:#39d353;flex:1 1 auto}
@@ -517,7 +517,7 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 /* a job that never secured a host: a quiet line, not an alarm */
 .wk-seg.nofind{border-bottom-color:var(--border-strong)}
 .workers-empty{color:var(--text-muted);font-size:var(--fs-md);text-align:center;padding:2.5rem 0}
-.workers-done-hdr{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint);margin:var(--sp-3) 0 var(--sp-2)}
+.workers-done-hdr{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.05em;color:var(--text-faint);margin:var(--sp-1) 0 var(--sp-2)}
 /* no inner scroll — #pane-workers scrolls at the container level now */
 .workers-idle{color:var(--text-muted);font-size:var(--fs-md);margin-bottom:var(--sp-3)}
 .worker-stop{flex:0 0 auto;background:var(--accent-bg);border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer}
@@ -527,7 +527,7 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 .worker-skip{flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer;margin-left:4px}
 .worker-skip:hover{background:var(--accent-bg);color:var(--text)}
 .worker-skip[disabled]{opacity:.6;cursor:default;font-style:italic}
-.worker-flag{flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 7px;font-size:var(--fs-2xs);line-height:1.5;cursor:pointer;margin-left:4px}
+.worker-flag{flex:0 0 auto;background:transparent;border:1px solid var(--border);color:var(--text-2);border-radius:var(--r-sm);padding:0 6px;font-size:var(--fs-3xs);line-height:1.5;cursor:pointer;margin-left:4px}
 .worker-flag:hover{background:#a73d5d;border-color:#a73d5d;color:#fff}
 .worker-flag[disabled]{opacity:.6;cursor:default;font-style:italic}
 .worker-flag[disabled]:hover{background:transparent;border-color:var(--border);color:var(--text-2)}
@@ -2804,14 +2804,16 @@ function renderWorkers(workers){
     tl.setAttribute('data-find',w.find===undefined?'?':(w.find===null?'':String(w.find)));
     tl.setAttribute('data-checked',String(w.checked));
     tl.setAttribute('data-ctoks',w.ctoks!=null?String(w.ctoks):'');   // so the live ticker can show tps
-    // Token accounting sits to the LEFT of the time: (up)(down) (context), all in
-    // k (1024). Red + ⚠ when the prompt filled the window (truncation). Shown only
-    // once the host reported counts.
-    if(w.ptoks!=null||w.ctoks!=null||w.num_ctx!=null){
+    // One number to the LEFT of the time: the approximate request SIZE = prompt +
+    // completion tokens, in k (1024), as an integer. The prompt alone already tracks
+    // the context, and the window figure is often unknown, so a single sum is all
+    // that's useful here — no arrows, no parentheses, no icon (keeps the row to two
+    // lines). Red when the prompt filled the window (truncation). Shown once counts arrive.
+    if(w.ptoks!=null||w.ctoks!=null){
       var tk=document.createElement('span');tk.className='wk-tok'+(w.truncated?' trunc':'');
-      tk.textContent='↑'+_kfmt(w.ptoks)+' ↓'+_kfmt(w.ctoks)+' ('+_kfmt(w.num_ctx)+')'+(w.truncated?' ⚠':'');
-      tk.title='↑ prompt (upstream) ↓ completion (downstream) (context window) in 1024-token k'
-        +(w.truncated?' prompt filled the window, head truncated':'');
+      tk.textContent=Math.round(((w.ptoks||0)+(w.ctoks||0))/1024)+'k';
+      tk.title='approximate request size: prompt + completion tokens, in 1024-token k'
+        +(w.truncated?' — prompt filled the window, head truncated':'');
       tl.appendChild(tk);
     }
     // Wall-clock time the request began (24hr). Static — set once, never ticks;

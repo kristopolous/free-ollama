@@ -9093,22 +9093,151 @@ async def handle_api_embeddings(request):
             err_obj(f"no embedding servers for '{model}'", "model_not_found"), status=404)
 
     session = request.app["session"]
-    errors = []
+
+    async def attempt(item, wid, done):
+        # Same contract as the chat/decision attempts — _embed_one speaks the host's
+        # dialect; we just turn its result into a race verdict so embeddings get the
+        # same availability-first racing, reputation and failover as everything else.
+        _p, host, ms = item
+        full = ms[0]
+        t0 = time.time()
+        await broadcast_activity(host, model, "trying", f"trying: {host} for {model}", wid=wid)
+        try:
+            vec = await _embed_one(session, host, full, text)
+        except asyncio.TimeoutError:
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - timeout", duration=time.time() - t0, wid=wid)
+            return timed_out("read timeout")
+        except (aiohttp.ClientError, OSError) as e:
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - {type(e).__name__}", duration=time.time() - t0, wid=wid)
+            return unreachable_host(type(e).__name__)
+        if done.is_set():
+            return skip("another host won")
+        if vec:
+            await broadcast_activity(host, model, "connected",
+                f"success: {host} for {model}", duration=time.time() - t0, wid=wid, rmodel=full)
+            return accepted({"embedding": vec}, extra=full)
+        await broadcast_activity(host, model, "failed",
+            f"failure: {host} for {model} - no embedding", duration=time.time() - t0, wid=wid)
+        return failed("no embedding")
+
     async with request.app["semaphore"]:
-        for _prio, host, ms in servers[:6]:
-            full = ms[0]
-            try:
-                vec = await _embed_one(session, host, full, text)
-            except Exception as e:
-                errors.append(f"{host}: {' '.join(str(e).split())[:120] or type(e).__name__}")
-                continue
-            if vec:
-                return web.json_response({"embedding": vec})
-            errors.append(f"{host}: no embedding")
-    msg = "all embedding servers failed"
-    if errors:
-        msg += ": " + "; ".join(dict.fromkeys(errors))
-    return web.json_response(err_obj(msg), status=502)
+        result, _stopped, _tried, tally = await _race_hosts(
+            servers, attempt, model, host_of=lambda it: it[1],
+            key_of=lambda it: it[2][0],       # reputation keyed by the RESOLVED model, like chat
+            banker_key=model, hedge_delay=HEDGE_DELAY)
+    if result is None:
+        return web.json_response(
+            err_obj("all embedding servers failed for '" + model + "' ("
+                    + (", ".join(f"{k}={v}" for k, v in tally.items()) or "none tried") + ")"),
+            status=502)
+    return web.json_response(result)
+
+
+async def handle_systemone(request):
+    """
+    Decision models (Ollama /v1/systemone)
+    ---
+    tags: [Generation]
+    summary: Evaluate a state against typed questions via a discovered decision-model host (clef-flash, laya, tev1, nimble, …). Proxies to upstream Ollama servers, failing over across hosts.
+    description: >
+      Ollama's /v1/systemone endpoint (TypeSafe's Jev API): a `state` plus a map of
+      1-64 named `questions` returns typed probabilistic `answers`. Just another
+      discovered-host endpoint — dyva resolves the model by name (the decision models
+      list in /api/tags like any other) and forwards the body verbatim through the SAME
+      host race as chat (availability-first, reputation, hedge, failover, /workers). It
+      is single-shot: no streaming, tools or context sizing.
+    responses:
+      '200':
+        description: The host's decision answers (answers, usage, …)
+      '400':
+        description: Invalid request (missing model or questions)
+      '404':
+        description: No host serves this model
+      '502':
+        description: All matching hosts failed
+    """
+    resp = await _check_local(request)
+    if resp:
+        return resp
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, Exception):
+        return web.json_response(err_obj("invalid JSON"), status=400)
+    model = body.get("model", "")
+    if not model:
+        return web.json_response(err_obj("model is required", "missing_model"), status=400)
+    questions = body.get("questions")
+    if not isinstance(questions, dict) or not questions:
+        return web.json_response(
+            err_obj("questions is required: a map of 1-64 named questions", "missing_questions"),
+            status=400)
+    if len(questions) > 64:
+        return web.json_response(
+            err_obj("at most 64 questions per request", "too_many_questions"), status=400)
+
+    servers = find_servers(model)
+    if not servers:
+        return web.json_response(
+            err_obj(f"no servers for '{model}'", "model_not_found"), status=404)
+
+    session = request.app["session"]
+
+    async def attempt(item, wid, done):
+        # One host's shot at the decision — contact, send, read, judge; the SAME
+        # contract as the chat/image attempts, so the race handles reputation,
+        # hedging, failover, warming-retry and the /workers card for free.
+        _p, host, ms = item
+        full = ms[0]
+        payload = dict(body)
+        payload["model"] = full              # forward the RESOLVED model name
+        t0 = time.time()
+        await broadcast_activity(host, model, "trying", f"trying: {host} for {model}", wid=wid)
+        _to = aiohttp.ClientTimeout(total=TIMEOUT, sock_connect=CONNECT_TIMEOUT)
+        try:
+            async with session.post(f"{host}/v1/systemone", json=payload, timeout=_to) as r:
+                code = r.status
+                text = await r.text()
+        except asyncio.TimeoutError:
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - timeout", duration=time.time() - t0, wid=wid)
+            return timed_out("read timeout")
+        except (aiohttp.ClientError, OSError) as e:
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - {type(e).__name__}", duration=time.time() - t0, wid=wid)
+            return unreachable_host(type(e).__name__)
+        if code == 503:                       # alive but busy — park and retry, no penalty
+            return retry_later("busy (HTTP 503)")
+        if code != 200:
+            detail = f"HTTP {code}: {' '.join(text.split())[:160]}"
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - {detail}", duration=time.time() - t0, wid=wid)
+            return failed(detail)
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            await broadcast_activity(host, model, "failed",
+                f"failure: {host} for {model} - bad response", duration=time.time() - t0, wid=wid)
+            return failed("bad response (not JSON)")
+        if done.is_set():
+            return skip("another host won")
+        data["_dyva_host"] = host
+        await broadcast_activity(host, model, "connected",
+            f"success: {host} for {model}", duration=time.time() - t0, wid=wid, rmodel=full)
+        return accepted(data, extra=full)
+
+    async with request.app["semaphore"]:
+        result, _stopped, _tried, tally = await _race_hosts(
+            servers, attempt, model, host_of=lambda it: it[1],
+            key_of=lambda it: it[2][0],       # reputation keyed by the RESOLVED model, like chat
+            banker_key=model, hedge_delay=HEDGE_DELAY)
+    if result is None:
+        return web.json_response(
+            err_obj(f"all hosts failed for '{model}' ({', '.join(f'{k}={v}' for k, v in tally.items()) or 'none tried'})"),
+            status=502)
+    result.pop("_dyva_host", None)
+    return web.json_response(result)
 
 
 async def handle_ollama_stop(request):
@@ -16372,6 +16501,7 @@ def make_app():
 
     swagger.add_post("/api/show", handle_api_show)
     swagger.add_post("/api/embeddings", handle_api_embeddings)
+    swagger.add_post("/v1/systemone", handle_systemone)
     swagger.add_post("/api/stop", handle_ollama_stop)
     swagger.add_post("/api/pull", handle_api_pull)
     swagger.add_post("/api/chat", handle_ollama_chat)
