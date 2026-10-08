@@ -17,7 +17,7 @@ Try it now [by clicking here](https://9ol.es/11434) or run it yourself with a fe
 uvx dyva
 ```
 
-## Getting started
+## Querying for models
 The massive varieties of models and installations are unified through a simple model query syntax.
 
 This is designed so you can slice and dice the pool in any application. Place it AS the model.
@@ -26,12 +26,12 @@ For instance "*" means use any model. ">2026" means anything released after 2026
 
 The details:
 
-* Specified as partial strings or globs such as "qwen*27b" or even "abliterated" for the times you want to slip into something more comfortable.
-* As fallbacks with a comma such as "gemma3,qwen3.6" (try the first, fall back to the second)
-* By size like "qwen >10gb"
-* By release date like "qwen>2026".
+* Specified as partial strings or globs such as `qwen*27b` or even `abliterated` for the times you want to slip into something more comfortable.
+* As fallbacks with a comma such as `gemma3,qwen3.6` (try the first, fall back to the second)
+* By size like `qwen >10gb`
+* By release date like `qwen>2026`.
 
-They can be stacked so "qwen>2026>5gb" means the newer large qwens.
+They can be stacked so `qwen>2026>5gb` means the newer large qwens.
 
 You can multi source host lists or bring your own.
 
