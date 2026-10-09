@@ -12,7 +12,7 @@
 
 Capable of text generation, embeddings, decision models, vision, tool calling, image generation and editing, video generatoin, TTS, and music generation in a unified interface with state of the art, real-time tunable routing providing sub 1s latency. 
 
-[see a demo](https://9ol.es/11434) or run it yourself with a few keystrokes on Linux, Windows, Mac, and even Android. 
+[See a demo](https://9ol.es/11434) or run it yourself with a few keystrokes on Linux, Windows, Mac, and even Android. 
 
 
 ```
