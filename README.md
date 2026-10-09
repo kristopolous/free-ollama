@@ -36,9 +36,9 @@ They can be stacked so `qwen>2026>5gb` means the newer large qwens. [More detail
 ## Finding new hosts
 You can multi source host lists or bring your own. There's a separate survey tool called [graflex](graflex).
 
-That means dyva can sit on top of your own infrastructure as well. 
+That means [dyva](dyva) can sit on top of your own infrastructure as well. 
 
-Here's the web interface, [called dyva](dyva), so you can see the status while you're running it. It is a feature rich system with chat that includes image generatoin, web search, sub agent, documents, video generation, tts, stats, and even graphically tweaking the routing algorithm.
+It is a feature-rich system with chat that includes image generatoin, web search, sub agent, documents, video generation, tts, stats, and even graphically tweaking the routing algorithm.
 
 
 <img alt="sshot" src="https://github.com/user-attachments/assets/5afdf551-d62f-4146-a4b6-9e0bdc9ac4bc" />
