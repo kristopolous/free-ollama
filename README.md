@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="832" height="480" alt="2026-10-09-03h05m18s_seed717495260_make some of the servers disk arrays and some of the UPS, some of them servers" src="https://github.com/user-attachments/assets/adf2e0df-48a2-46fa-a32d-6759eaf2eccd" />
+  <img width="832" height="480" alt="2026-10-09-03h11m20s_seed93365271_fix the characters hat and make sure it says dyva clean up the compression artifacts and make the" src="https://github.com/user-attachments/assets/541d3805-67e3-4aeb-86ba-9d48d493d540" />
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
   <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>Paying for AI is for chumps with self respect</i>
