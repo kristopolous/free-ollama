@@ -2,7 +2,7 @@
   <img width="832" height="480" alt="2026-10-09-03h11m20s_seed93365271_fix the characters hat and make sure it says dyva clean up the compression artifacts and make the" src="https://github.com/user-attachments/assets/541d3805-67e3-4aeb-86ba-9d48d493d540" />
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
-  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>Paying for AI is for chumps with self respect</i>
+  <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> 
   <br/><br/><b>Try it now</b><br/>
   <code>uvx dyva</code><br/>
 </p>
@@ -33,7 +33,7 @@ The details:
 
 They can be stacked so `qwen>2026>5gb` means the newer large qwens. [More details](https://github.com/kristopolous/free-ollama/tree/main/dyva#model-names-are-routing-patterns)
 
-## Finding new ones
+## Finding new hosts
 You can multi source host lists or bring your own. There's a separate survey tool called [graflex](graflex).
 
 That means dyva can sit on top of your own infrastructure as well. 
