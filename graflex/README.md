@@ -1,6 +1,10 @@
-# graflex
+<p align="center">
+<img width="700" alt="2026-10-09-03h54m05s_seed947866237_move the llama to a different part of the datacenter by using different servers and a different layo" src="https://github.com/user-attachments/assets/c9dcb985-e84b-4aa0-a928-4e2d621fb173" />
+<br/><b>Graflex</b>: Discover what's out there
+</p>
 
-Discover public internet hosts via search-engine scraping (FOFA or Shodan) without paying for an API. Because let's be real, it wouldn't be Free Ollama if you had to pay Shodan/FOFA.
+
+**Graflex** is for surveying LLM related internet hosts via search-engine scraping such as FOFA, Shodan, Censys, Zoomeye, and Hunter.how.
 
 This is used as a [dyva/freeollama source](https://9ol.es/tmp/ollama-working.json) but there is no output included by default.
 
