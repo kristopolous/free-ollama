@@ -19,6 +19,12 @@ Capable of text generation, embeddings, decision models, vision, tool calling, i
 uvx dyva
 ```
 
+It is a feature-rich system with chat that includes image generation, web search, sub agent, documents, video generation, tts, stats, and even graphically tweaking the routing algorithm.
+<div align="center">
+  <img width="45%" alt="ollama" src="https://github.com/user-attachments/assets/0d9d72bf-01b9-4349-a798-34cd944781d4" />
+  <img width="45%"  alt="algo" src="https://github.com/user-attachments/assets/ccd88d55-80cf-4c2e-960c-2d81eb11fb6c" />
+</div>
+
 ## Querying for models
 The massive varieties of models and installations are unified through a simple model query syntax.
 
@@ -40,10 +46,6 @@ You can multi source host lists or bring your own. There's a separate survey too
 
 That means [dyva](dyva) can sit on top of your own infrastructure as well. 
 
-It is a feature-rich system with chat that includes image generatoin, web search, sub agent, documents, video generation, tts, stats, and even graphically tweaking the routing algorithm.
-
-
-<img alt="sshot" src="https://github.com/user-attachments/assets/5afdf551-d62f-4146-a4b6-9e0bdc9ac4bc" />
 
 
 There's also a [simple command line](freeollama.md).
