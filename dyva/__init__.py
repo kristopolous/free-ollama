@@ -371,6 +371,14 @@ MAX_STREAM_CONTINUES = 6
 # still fans out immediately via _race_hosts' `tried < 2` short-circuit, so a dead
 # host doesn't block). Not a hard pin — failover is preserved, just not speculative.
 CONTINUATION_HEDGE = 3600
+# ...but the EXCLUSIVE part of that hedge — the window where ONLY the warm host runs and
+# the pool is held back — is capped here. A KV-cached warm host first-tokens fast (it only
+# prefills the new turn), so if it hasn't ACCEPTED within this window it is hung or too slow,
+# and holding the entire pool back for up to CONTINUATION_HEDGE (an hour) pins the request at
+# checked=1. Past this cap the pool fans out for insurance while the warm attempt keeps
+# running — if the warm host recovers it still wins. Generous enough to clear a healthy
+# warm host's smoke screen + first token, short enough that a hang fails over in under a minute.
+CONTINUATION_HEDGE_PROBE = 45
 # How long a model's last-good ("sticky") host stays trusted. After this, the warm
 # host is probably cold/evicted (prompt cache gone, maybe the box rebooted), so the
 # hedge's reason to prefer it is stale — drop the stickiness and race normally.
@@ -1255,6 +1263,7 @@ def _worker_snapshot():
             "ptoks": w.get("ptoks"),
             "ctoks": w.get("ctoks"),
             "num_ctx": w.get("num_ctx"),
+            "want_ctx": w.get("want_ctx"),   # the window we INTEND to send (known before any host answers)
             "truncated": w.get("truncated"),
         })
     # live first, oldest at the top (as before); finished after, most recent
@@ -4633,7 +4642,12 @@ async def _race_hosts(entries, attempt, key, job_wid=None, workers=None, host_of
         # rate to keep opening sockets at.
         if hedging:
             t0 = time.time()
-            while (not done.is_set() and time.time() - t0 < hedge_delay and tried < 2):
+            # Cap the EXCLUSIVE window: a tool continuation sets hedge_delay to
+            # CONTINUATION_HEDGE (1h), which must not mean the pool is blocked for an hour
+            # when the warm host hangs. After the cap, release the pool as insurance (the
+            # warm attempt is NOT cancelled — it keeps running and still wins if it answers).
+            _window = min(hedge_delay, CONTINUATION_HEDGE_PROBE)
+            while (not done.is_set() and time.time() - t0 < _window and tried < 2):
                 # Fan out the INSTANT the pinned sticky/warm host resolves WITHOUT winning.
                 # race_log[0] is that host; once its attempt finishes with a non-accepted
                 # outcome (failed / timed out / skipped / retry), waiting out the rest of
@@ -6917,6 +6931,13 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
     cancel = asyncio.Event()   # manual-stop signal; armed onto the worker for the stream
     job_wid = await _register_worker(model_list[0], total, cancel.set, kind="text",
                                      title=_client_title(request))
+    # The context window we intend to send is prompt-derived and known NOW, before any
+    # host answers — stash it so the active card can show it during the search/fan-out
+    # phase (the MEASURED num_ctx replaces it once a host reports tokens).
+    with contextlib.suppress(Exception):
+        _wrec = _workers.get(job_wid)
+        if _wrec is not None:
+            _wrec["want_ctx"] = (opayload.get("options") or {}).get("num_ctx") or _auto_num_ctx(opayload)
     try:
         # The sticky (last-good) host is already sorted first in _servers, so
         # the hedged race tries it alone for HEDGE_DELAY seconds and only fans
@@ -14746,6 +14767,22 @@ def fit_dims(w, h, max_mp=EDIT_MAX_MP, step=EDIT_ROUND):
     nh = max(step, int(round(h * scale / step)) * step)
     return nw, nh
 
+
+# Edit output shape when the model asks for one, as model-friendly buckets rather
+# than a width/height box — the image mirror of video_dims. Aspect reuses the video
+# ratios (long/square/tall); size scales the family's native pixel budget. Capped at
+# EDIT_MAX_MP so a bucket can never push a host past the size it tolerates.
+IMAGE_SIZES = {"small": 0.5, "medium": 1.0, "large": 1.6}
+
+
+def image_dims(fam, aspect="square", size="medium"):
+    res = float((fam or {}).get("res") or 1024)
+    budget = min(res * res * IMAGE_SIZES.get(size, 1.0), EDIT_MAX_MP * 1e6)
+    ratio = VIDEO_ASPECTS.get(aspect, 1.0)
+    w = max(EDIT_ROUND, int(round(math.sqrt(budget * ratio) / EDIT_ROUND)) * EDIT_ROUND)
+    h = max(EDIT_ROUND, int(round(math.sqrt(budget / ratio) / EDIT_ROUND)) * EDIT_ROUND)
+    return w, h
+
 # A render failure is a verdict about the host, not just about this request.
 # These say the host can't run this graph at all — a different prompt would
 # fail the same way — so the engine should hand the job to someone else.
@@ -15230,6 +15267,15 @@ def _edit_workflow(plan, prompt, image_names, params=None):
 
     width = int(params.get("width", 1024))
     height = int(params.get("height", 1024))
+    # Optional model-requested output shape (long/square/tall + small/medium/large).
+    # An aspect overrides keeping the source's proportions (match_source off below);
+    # size scales the budget. `_size_mp` scales the source-match pixel budget for a
+    # size-only request so the source's own aspect is kept while the result shrinks/grows.
+    _asp = str(params.get("aspect") or "").strip().lower() or None
+    _size = str(params.get("size") or "").strip().lower() or None
+    if _asp in VIDEO_ASPECTS:
+        width, height = image_dims(fam, _asp, _size if _size in IMAGE_SIZES else "medium")
+    _size_mp = min(EDIT_MAX_MP * IMAGE_SIZES.get(_size, 1.0), EDIT_MAX_MP) if _size in IMAGE_SIZES else EDIT_MAX_MP
     steps = int(params.get("steps", fam.get("steps", 20)))
     cfg = float(params.get("cfg_scale", fam.get("cfg", 2.5)))
     seed = int(params.get("seed", -1))
@@ -15288,6 +15334,8 @@ def _edit_workflow(plan, prompt, image_names, params=None):
     match_source = params.get("match_source", True)
     if isinstance(match_source, str):
         match_source = match_source.lower() not in ("0", "false", "no", "")
+    if _asp in VIDEO_ASPECTS:          # an explicit aspect replaces the source's shape
+        match_source = False
     if img_nodes and match_source:
         if scaled_latent is not None:
             # already encoded for the reference chain — FluxKontextImageScale
@@ -15298,7 +15346,7 @@ def _edit_workflow(plan, prompt, image_names, params=None):
             # bring it onto the grid and under the pixel budget: a 40MP photo
             # straight into VAEEncode is how you get a host to yell at you.
             src = img_nodes[0]
-            fitted = fit_dims(params.get("source_width"), params.get("source_height"))
+            fitted = fit_dims(params.get("source_width"), params.get("source_height"), max_mp=_size_mp)
             if fitted:
                 g["490"] = {"class_type": "ImageScale",
                             "inputs": {"image": src, "upscale_method": "lanczos",
@@ -15309,7 +15357,7 @@ def _edit_workflow(plan, prompt, image_names, params=None):
                 # no dimensions from the caller — let the host work it out
                 g["490"] = {"class_type": "ImageScaleToTotalPixels",
                             "inputs": {"image": src, "upscale_method": "lanczos",
-                                       "megapixels": EDIT_MAX_MP,
+                                       "megapixels": _size_mp,
                                        "resolution_steps": EDIT_ROUND}}
                 src = ["490", 0]
             g["500"] = {"class_type": "VAEEncode",
@@ -15485,7 +15533,8 @@ async def _edit_read_request(request):
         except Exception:
             raise ValueError(f"image[{i}] is not valid base64")
     for k in ("width", "height", "steps", "cfg_scale", "seed", "sampler_name",
-              "denoise", "match_source", "source_width", "source_height"):
+              "denoise", "match_source", "source_width", "source_height",
+              "aspect", "size"):
         if k in body:
             params[k] = body[k]
     return prompt, images, str(body.get("model") or "").strip() or None, params
