@@ -3266,12 +3266,33 @@ async def _check_working(service, name=None, check_timeout=60, workers=10, sessi
                     result["method"] = method
                 else:
                     result.pop("method", None)
-                return ("keep", entry, result)
-            reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
-            return ("dead", entry, reason)
+                outcome = ("keep", entry, result)
+            else:
+                reason = result.get("error", str(result)) if isinstance(result, dict) else str(result)
+                outcome = ("dead", entry, reason)
+        completed += 1
+        return outcome
+
+    async def _progress():
+        # The gather below is SILENT until every host resolves — at this scale, with
+        # dead/slow hosts each holding a worker for the full timeout, that is minutes
+        # to HOURS. Without this heartbeat a running rescan is indistinguishable from a
+        # hang (the exact confusion that prompted this). A count stuck at the same N
+        # across ticks IS the hang signal (e.g. _doorknock's offline-retry loop).
+        while True:
+            await asyncio.sleep(30)
+            el = time.time() - start
+            rate = completed / el if el > 0 else 0
+            eta = (len(working) - completed) / rate if rate > 0 else 0
+            log.info(f"check-working: {completed}/{len(working)} probed "
+                     f"({el/60:.0f}m elapsed, ~{eta/60:.0f}m left at {rate:.1f}/s)")
 
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=INSECURE_SSL, force_close=True, limit=0), timeout=aiohttp.ClientTimeout(total=check_timeout + 5)) as session:
-        done = await asyncio.gather(*[probe(e) for e in working], return_exceptions=True)
+        _prog = asyncio.ensure_future(_progress())
+        try:
+            done = await asyncio.gather(*[probe(e) for e in working], return_exceptions=True)
+        finally:
+            _prog.cancel()
 
     kept = []
     removed = 0

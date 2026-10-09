@@ -264,6 +264,9 @@ body.chat{height:100vh;height:100dvh}
 .mg-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mg-count{color:var(--text-dim);font-weight:600;font-size:var(--fs-sm);text-transform:none}
 .model-group-wrap.collapsed .model-group-body{display:none}
+#modelsHead{cursor:pointer;user-select:none}
+#modelsHead:hover{filter:brightness(1.25)}
+#modelsCard.collapsed > .card-inner{display:none}
 .host-name{font-family:var(--font-mono);font-size:var(--fs-sm);flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:none}
 a.host-name:hover{color:var(--accent);text-decoration:underline}
 #hostDetailTitle{font-family:var(--font-mono);font-size:.92rem;overflow-wrap:anywhere}
@@ -310,6 +313,11 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 .rc-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4) 32px;margin-bottom:var(--sp-6)}
 .rc-grid .setting{margin-bottom:0}
 .race-diagram svg{display:block;width:100%;height:auto;font:inherit}
+/* On a narrow screen width:100% shrinks the whole viewBox to the screen width — an
+   unreadable sliver. Instead pin a consistent height and let the diagram keep its
+   natural (aspect-derived) width, overflowing into the container's horizontal scroll
+   (.race-diagram already has overflow-x:auto). */
+@media(max-width:640px){.race-diagram svg{width:auto;height:190px;max-width:none}}
 .rc-grip{touch-action:none}
 .rc-grip.rc-x{cursor:ew-resize}
 .rc-grip.rc-y{cursor:ns-resize}
@@ -507,6 +515,7 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 .worker-rmodel{color:var(--text-2)}
 .wk-tok{color:var(--text-dim);white-space:nowrap;flex:0 0 auto;font-variant-numeric:tabular-nums}
 .wk-tok.trunc{color:var(--err-hover)}
+.wk-tok.wk-want{color:var(--text-faint);font-style:italic}   /* intended ctx while still resolving */
 /* Two spans, each with a thin coloured rule under the words: finding a host
    (blue) then running the job on it (green). Just a line — no fill. */
 .wk-timeline{margin-left:auto;flex:0 0 auto;display:flex;align-items:baseline;gap:12px;font-size:var(--fs-2xs);font-variant-numeric:tabular-nums}
@@ -824,7 +833,10 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .rk-opts{display:flex;flex-direction:column;gap:var(--sp-2);margin-top:var(--sp-3)}
 .rk-opt{display:flex;align-items:center;gap:.4em;font-size:var(--fs-md);color:var(--text);cursor:pointer}
 .rk-opt code{font-size:.85em;background:var(--card);padding:.05em .4em;border-radius:4px}
-.rk-custom{width:150px;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-2) var(--sp-3);font-size:var(--fs-sm)}
+.rk-custom{width:150px;max-width:55vw;background:var(--bg-inset);border:1px solid var(--border-strong);border-radius:var(--r-md);color:var(--text);padding:var(--sp-2) var(--sp-3);font-size:var(--fs-sm)}
+/* Highest-specificity + a max-width cap so this never stretches to the global
+   input[type=text]{width:100%}: a compact box on its row, not a full-width bar. */
+.setting input[type=text].rk-custom{width:150px;max-width:55vw;flex:0 0 auto}
 .cloudskip-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2) var(--sp-5);margin-top:var(--sp-3)}
 .cloudskip-item{display:flex;align-items:center;gap:.35em;font-size:var(--fs-md);color:var(--text);cursor:pointer}
 .cloudskip-item .cloudskip-n{color:var(--text-muted);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}
@@ -1176,8 +1188,8 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div id="serverroom" class="panel active">
 <div class="grid">
 
-<div class="card">
-<h2>Models</h2>
+<div class="card" id="modelsCard">
+<h2 id="modelsHead" title="Tap to collapse / expand">Models</h2>
 <div class="card-inner">
 <div class="host-tabs">
 <button type="button" class="htab active" data-mpane="text" title="Text models">📖<span class="htab-count" id="cnt-mtext"></span></button>
@@ -2019,6 +2031,22 @@ var K_FMT=new Intl.NumberFormat(undefined,{maximumFractionDigits:0});
 // purpose: this lands in textContent (totals), innerHTML (rows) and a title attribute,
 // and "<" before a digit is never a tag start, so it renders as text in all three.
 function _ktok(n){n=n||0;var k=n/1000;return (n>0&&k<1)?'<1':K_FMT.format(k);}
+// Token total on a UNIT LADDER (input is RAW tokens). Figures here get huge (100s of
+// millions), so instead of an endless "240,127k" we roll up a metric prefix whenever
+// the value would exceed _TOK_ROLL of the current unit, dividing by 1000 each step
+// (k -> M -> B -> T). That caps every figure at four integer digits. The base unit (k)
+// stays an integer with grouping ("9,999k"); a rolled-up unit carries one decimal
+// ("240.1M"). _TOK_ROLL is the one knob — 10000 rolls at ten-thousand, 100000 later.
+var _TOK_ROLL=10000;
+function _tokU(n){
+  n=n||0;
+  if(n<=0)return '0';
+  var k=n/1000;
+  if(k<1)return '<1k';
+  var u=['k','M','B','T'],i=0;
+  while(k>=_TOK_ROLL&&i<u.length-1){k/=1000;i++;}
+  return (i===0?K_FMT.format(k):k.toFixed(1))+u[i];
+}
 function fmtCount(n){var v=Number(n);return isFinite(v)?NUM_FMT.format(v):String(n)}
 // The tab labels are icons now, so the count carries the meaning: how many
 // models in that pane match the current filter. The words live in title=.
@@ -2129,6 +2157,19 @@ var savedPane=localStorage.getItem('dyva_hostpane');
 // Workers is the default view (first tab); only override if the user has
 // deliberately stuck a different pane.
 if(savedPane&&savedPane!=='workers'){var pb=document.querySelector('.htab[data-pane="'+savedPane+'"]');if(pb)pb.click()}
+
+// Tap the MODELS header to collapse the whole models card, so the HOSTS card sits
+// right under it without scrolling past the model list. State is remembered across
+// reloads (like the chat sidebar), restored before first paint.
+(function(){
+  var card=document.getElementById('modelsCard'),head=document.getElementById('modelsHead');
+  if(!card||!head)return;
+  try{if(localStorage.getItem('dyva_models_collapsed')==='1')card.classList.add('collapsed');}catch(e){}
+  head.addEventListener('click',function(){
+    var c=card.classList.toggle('collapsed');
+    try{localStorage.setItem('dyva_models_collapsed',c?'1':'0');}catch(e){}
+  });
+})();
 
 document.querySelectorAll('[data-mpane]').forEach(function(t){
   t.addEventListener('click',function(){
@@ -2809,10 +2850,21 @@ function renderWorkers(workers){
     // the context, and the window figure is often unknown, so a single sum is all
     // that's useful here — no arrows, no parentheses, no icon (keeps the row to two
     // lines). Red when the prompt filled the window (truncation). Shown once counts arrive.
-    if(w.ptoks!=null||w.ctoks!=null){
-      var tk=document.createElement('span');tk.className='wk-tok'+(w.truncated?' trunc':'');
-      tk.textContent=Math.round(((w.ptoks||0)+(w.ctoks||0))/1024)+'k';
-      tk.title='approximate request size: prompt + completion tokens, in 1024-token k'
+    // ONE number: the context WINDOW for this request, consistent from search through
+    // completion. While resolving it's want_ctx (the window we intend to send, known from
+    // the prompt before any host answers); once a host is secured it's the measured
+    // num_ctx (falling back to want_ctx). NOT the prompt+completion sum — with prompt
+    // caching a host reports only the NEW tokens it prefilled (~1k), not the 64k context
+    // we actually sent, so the sum looked like it collapsed when a request finished.
+    // Faint + italic while still searching (no host yet), solid once found; red if the
+    // prompt filled the window. Actual processed tokens live in the tooltip.
+    var _ctx=(w.num_ctx!=null&&w.num_ctx>0)?w.num_ctx:(w.want_ctx||0);
+    if(_ctx>0){
+      var tk=document.createElement('span');
+      tk.className='wk-tok'+(w.truncated?' trunc':'')+(w.host?'':' wk-want');
+      tk.textContent=Math.round(_ctx/1024)+'k';
+      tk.title='context window for this request (~'+_ctx+' tokens)'
+        +((w.ptoks!=null||w.ctoks!=null)?(' · processed ↑'+(w.ptoks||0)+' ↓'+(w.ctoks||0)):'')
         +(w.truncated?' — prompt filled the window, head truncated':'');
       tl.appendChild(tk);
     }
@@ -5114,6 +5166,13 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
             // fill optional fields with plausible-looking nonsense.
             var em=String(args.model||'').trim();
             if(em&&em.length<80)efd.append('model',em);
+            // Optional output shape the model asked for (same vocabulary as the video
+            // tool). An aspect overrides keeping the source's proportions; size scales
+            // the result. Unknown values are dropped so junk can't reach the host.
+            var easp=String(args.aspect||'').trim().toLowerCase();
+            if(easp==='long'||easp==='square'||easp==='tall')efd.append('aspect',easp);
+            var esz=String(args.size||'').trim().toLowerCase();
+            if(esz==='small'||esz==='medium'||esz==='large')efd.append('size',esz);
             // match_source only matters when there IS a source to match; a
             // from-text generation uses an empty latent instead.
             if(blobs.length)efd.append('match_source','1');
@@ -5977,7 +6036,7 @@ function _calcEval(expr){
   return (r&&r.toString)?r.toString():String(r);
 }
 var IMG_TOOL={type:'function',function:{name:'generate_image',description:'Generate an image from a text description. Use when the user asks to create, draw, or render a picture.',parameters:{type:'object',properties:{prompt:{type:'string',description:'Detailed description of the image to generate'},negative_prompt:{type:'string',description:'Things to avoid in the image'},model:{type:'string',description:'The checkpoint to render with. If the user names a model, family, or style \u2014 e.g. "dreamshaper", "flux", "juggernaut" \u2014 put it HERE, as a substring or glob ("dreamshaper*" matches dreamshaper_8.safetensors), and do NOT mention the model in the prompt. Leave blank only when the user did not name one, to auto-pick the best available. Never invent a model name; use search_models if unsure what exists.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "beautiful_garden.jpg". Lowercase, no spaces. Choose something descriptive of the content.'}},required:['prompt','name']}}};
-var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, combine several, or generate a fresh image on an edit-class model (Flux.2 and similar do text-to-image too \u2014 no reference needed). Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image (an incremental tweak), or when there is no image at all to generate from the prompt. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'The edit model to use. If the user names one, put it HERE as a substring or glob (globs work, e.g. "flux*2") \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a model name; use search_models (type "edit") if unsure.'}},required:['prompt','name']}}};
+var EDIT_TOOL={type:'function',function:{name:'edit_image',description:'Edit one image, combine several, or generate a fresh image on an edit-class model (Flux.2 and similar do text-to-image too \u2014 no reference needed). Use for "make it night", "put a hat on the dog", "remove the background", and for "add this lady to the garden" \u2014 in that last case pass BOTH pictures in `images`. Leave `images` out to work on the most recent image (an incremental tweak), or when there is no image at all to generate from the prompt. Call list_assets first if you need to know what the pictures are called.',parameters:{type:'object',properties:{prompt:{type:'string',description:'What to change, e.g. "put a feathered cap on the dog"'},images:{type:'array',items:{type:'string'},description:'Asset names to work from, e.g. ["lady.jpg","garden.jpg"], in the order they should be used \u2014 the first is the picture being changed, the rest are references drawn from. Omit entirely to use the most recent image. Names come from list_assets; do not invent them.'},name:{type:'string',description:'A short filename to save the result under, so it can be referred to later, e.g. "garden_with_lady.jpg". Lowercase, no spaces. Choose something descriptive of the content.'},model:{type:'string',description:'The edit model to use. If the user names one, put it HERE as a substring or glob (globs work, e.g. "flux*2") \u2014 not in the prompt. Leave blank to auto-pick the best available. Never invent a model name; use search_models (type "edit") if unsure.'},aspect:{type:'string',enum:['long','square','tall'],description:'Optional output shape: "long" is landscape (16:9), "square" is 1:1, "tall" is portrait (9:16). Omit to keep the source image\u2019s own proportions \u2014 only set it when the user asks for a different shape.'},size:{type:'string',enum:['small','medium','large'],description:'Optional output resolution bucket; "small" renders faster. Omit for the default (medium).'}},required:['prompt','name']}}};
 // The image to edit is known deterministically, so the model never picks it:
 // walk back through the conversation and take whichever came last, a generated
 // image or one the user attached.
@@ -8273,7 +8332,7 @@ function _statRows(rows,label,showLast){
   }
   var hdr='<div class="stats-row stats-hdr">'
     +hc('sr-name',label||'','name')+'<span class="sr-bar"></span>'
-    +hc('sr-tok','Tokens (k)','tok')+hc('sr-tps','Tok/s','tps')+hc('sr-req','Req','req')
+    +hc('sr-tok','Tokens','tok')+hc('sr-tps','Tok/s','tps')+hc('sr-req','Req','req')
     +(showLast?hc('sr-last','Last','last'):'')+'</div>';
   if(!rows.length)return hdr+'<div class="muted">—</div>';
   var col=_statSort.col; if(col==='last'&&!showLast)col='tok';
@@ -8288,7 +8347,7 @@ function _statRows(rows,label,showLast){
              +'>'+(x.last?escHtml(agoDelta(nowSec-x.last)):'')+'</span>'):'';
     return '<div class="stats-row"><span class="sr-name" title="'+escHtml(x.name)+'">'+escHtml(x.name)+'</span>'
       +'<span class="sr-bar"><i style="width:'+(100*tot/max).toFixed(1)+'%"></i></span>'
-      +'<span class="sr-tok">'+_ktok(tot)+'</span>'
+      +'<span class="sr-tok">'+_tokU(tot)+'</span>'
       +'<span class="sr-tps">'+(x.tps?NUM_FMT.format(Math.round(x.tps)):'')+'</span>'
       +'<span class="sr-req">'+NUM_FMT.format(x.reqs||0)+'</span>'+last+'</div>';
   }).join('');
@@ -8357,15 +8416,15 @@ function _renderStatsChart(){
       var val=f==='__other__'?otherSum:(fam[f]||0);
       if(val<=0)return;
       var nm=f==='__other__'?'Other':f, c=f==='__other__'?OTHER:color[f];
-      html+='<i style="height:'+(100*val/yTop).toFixed(2)+'%;background:'+c+'" title="'+escHtml(g.tfmt(s[0])+' · '+nm+' · '+_ktok(val)+'k')+'"></i>';
+      html+='<i style="height:'+(100*val/yTop).toFixed(2)+'%;background:'+c+'" title="'+escHtml(g.tfmt(s[0])+' · '+nm+' · '+_tokU(val))+'"></i>';
     });
-    return '<div class="sc-col" title="'+escHtml(g.tfmt(s[0])+' · '+_ktok(total)+'k tokens')+'">'+html+'</div>';
+    return '<div class="sc-col" title="'+escHtml(g.tfmt(s[0])+' · '+_tokU(total)+' tokens')+'">'+html+'</div>';
   }).join('');
   var leg=order.map(function(f){
     var nm=f==='__other__'?'Other':f, c=f==='__other__'?OTHER:color[f];
     return '<span><i style="background:'+c+'"></i>'+escHtml(nm)+'</span>';
   }).join('');
-  chart.innerHTML='<div class="sc-ymax">'+_ktok(yTop)+'k</div>'
+  chart.innerHTML='<div class="sc-ymax">'+_tokU(yTop)+'</div>'
     +'<div class="sc-plot"><div class="sc-grid-layer">'+grid+'</div>'
     +'<div class="sc-scroll"><div class="sc-bars">'+bars+'</div></div></div>'
     +'<div class="sc-x"><span>'+escHtml(win.length?win[0][0]:'')+'</span><span>'+escHtml(endStr)+'</span></div>'
@@ -8432,7 +8491,7 @@ function _wireStatsTabs(){
 function renderStats(d){
   var t=(d&&d.totals)||{};
   var tot=document.getElementById('statsTotals');
-  if(tot)tot.textContent=_ktok((t.up||0)+(t.down||0))+'k tokens · '+NUM_FMT.format(t.reqs||0)+' reqs'+((d&&d.q)?' · "'+d.q+'"':'');
+  if(tot)tot.textContent=_tokU((t.up||0)+(t.down||0))+' tokens · '+NUM_FMT.format(t.reqs||0)+' reqs'+((d&&d.q)?' · "'+d.q+'"':'');
   _statsData=d||{};
   _renderStatsChart();   // usage bars at the active granularity (hour / day / week)
   _renderStatsTable();   // one table, driven by the active tab (model / family / host)
