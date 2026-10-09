@@ -1,5 +1,5 @@
 <p align="center">
-<img width="704" height="368" alt="smaller" src="https://github.com/user-attachments/assets/9f6d6c56-890e-4a03-9903-4f9903d5709d"/>
+<img width="832" height="480" alt="2026-10-09-03h01m42s_seed628459700_make some of the server lights blink" src="https://github.com/user-attachments/assets/b536c41e-69ea-4fa5-8d30-6a1743bfbfbd" />
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
   <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>Paying for AI is for chumps with self respect</i>
