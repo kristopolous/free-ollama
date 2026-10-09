@@ -38,9 +38,8 @@ You can multi source host lists or bring your own. There's a separate survey too
 
 That means dyva can sit on top of your own infrastructure as well. 
 
-Here's the web interface so you can see the status while you're running it. [I might be running it right now](https://9ol.es/11434/)
+Here's the web interface, [called dyva](dyva), so you can see the status while you're running it. It is a feature rich system with chat that includes image generatoin, web search, sub agent, documents, video generation, tts, stats, and even graphically tweaking the routing algorithm.
 
-[Here's full documentation for dyva](dyva).
 
 <img alt="sshot" src="https://github.com/user-attachments/assets/5afdf551-d62f-4146-a4b6-9e0bdc9ac4bc" />
 
