@@ -1,5 +1,5 @@
 <p align="center">
-<img width="832" height="480" alt="2026-10-09-03h01m42s_seed628459700_make some of the server lights blink" src="https://github.com/user-attachments/assets/b536c41e-69ea-4fa5-8d30-6a1743bfbfbd" />
+  <img width="832" height="480" alt="2026-10-09-03h05m18s_seed717495260_make some of the servers disk arrays and some of the UPS, some of them servers" src="https://github.com/user-attachments/assets/adf2e0df-48a2-46fa-a32d-6759eaf2eccd" />
 <br/>
   <a href=https://pypi.org/project/dyva><img src=https://badge.fury.io/py/dyva.svg/></a>
   <a href=https://pepy.tech/projects/dyva><img src=https://static.pepy.tech/badge/dyva/week></a><br/> <i>Paying for AI is for chumps with self respect</i>
