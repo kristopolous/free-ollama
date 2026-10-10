@@ -3848,6 +3848,7 @@ def _find_servers_raw(sub, caps=None):
     good = load_good()
     maybe = load_maybe()
     unreachable = load_unreachable()
+    votes = _load_votes()   # 👎/👍 per (host, resolved-model); only non-zero pairs
     # Explore de-prioritizes hosts dyva has already raced (incl. no-verdict
     # timeouts) so they aren't re-fronted forever; only needed in Explore.
     race_stats = load_race_stats() if EXPLORE_MODE else {}
@@ -3936,6 +3937,14 @@ def _find_servers_raw(sub, caps=None):
                  if v.get("host") == host),
                 None)
         is_last = _last is not None and host == _last[0]
+        # A manual 👎 (deprio < 0) STRIPS the sticky top-slot. Otherwise a down-voted
+        # last-good host keeps TIER_LAST — its own tier, ahead of TIER_GOOD — and is routed
+        # to FIRST every time, where the within-tier vote (applied in _race_servers) can
+        # never sink it below the good hosts. "I deprioritized it and it's still tried first."
+        # Dropping it to its real tier lets the vote push it to the back; reputation is
+        # untouched (it's not marked bad), so this stays orthogonal to self-healing.
+        if is_last and votes and any(votes.get((host, m), 0) < 0 for m in ms):
+            is_last = False
         prio = host_tier(is_last, in_good, in_maybe, in_bad, host in unreachable)
         if EXPLORE_MODE:
             # Explore cascade (perpetual, LRU-cycled): race the never-raced frontier
