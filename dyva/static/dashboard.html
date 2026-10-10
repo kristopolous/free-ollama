@@ -14,7 +14,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -145,6 +146,61 @@
   --card-h:70vh;
   --sidebar-w:220px;
   --dur:.15s;
+  color-scheme:dark;
+}
+
+/* Light theme — AUTO only (follows the OS). The UI is built on two token layers: a raw
+   ramp (neutral / accent / foreground) and semantic aliases that reference it. So a light
+   theme is just the raw ramp inverted — every semantic alias (and thus nearly every rule)
+   follows for free. Accent SURFACES (incl. buttons) become light indigo tints rather than
+   staying dark, because the generic `button` keeps color:var(--text) (dark in light) — a
+   dark button bg would be unreadable. A handful of hardcoded colors are fixed below. */
+@media (prefers-color-scheme: light){
+  :root{
+    color-scheme:light;
+    /* neutral ramp, LAYERED (not blown-out white): page is a soft gray base, surfaces are
+       white and raised ABOVE it, borders are darker. Backgrounds (950..750) stay light;
+       border steps (700..500) go progressively darker so hairlines read on a light page. */
+    --n-950:#e9ebef;   /* page / code wells — soft, not pure white */
+    --n-900:#e2e5ea;   /* sunken: scroll panes, sidebar (recessed) */
+    --n-870:#dce0e6;   /* sunken alt: inset boxes, thumbs */
+    --n-850:#ffffff;   /* raised: cards, popovers, bubbles */
+    --n-800:#f3f5f7;   /* raised hover */
+    --n-750:#ffffff;   /* form fields (white + border) */
+    --n-700:#d2d6dd;   /* hairline border */
+    --n-600:#bcc2cb;   /* border strong */
+    --n-500:#9ca3af;   /* border hover */
+    /* accent ramp: light indigo surfaces + readable indigo text/lines */
+    --a-900:#eef1fc;
+    --a-850:#eff1fc;
+    --a-800:#e4e7fb;
+    --a-700:#d7dbf6;
+    --a-600:#e0e4fb;
+    --a-500:#ced4f4;
+    --a-400:#4b508c;
+    --a-300:#3a3ba2;
+    /* foreground inverted: dark text on light */
+    --f-100:#1b1d21;
+    --f-200:#34383f;
+    --f-300:#555b64;
+    --f-400:#6a7079;
+    --f-500:#878d96;
+    --f-600:#a6acb4;
+    /* status nudged darker for contrast on white */
+    --s-ok:#2e8b4f;
+    --s-err:#c62f2f;
+    --s-err-bright:#d84343;
+    --s-warn:#8f6410;
+    /* hardcoded-semantic overrides that the ramp can't reach */
+    --text-hi:#111417;
+    --btn-danger:#f2d7d7;
+    --btn-danger-hover:#ecc4c4;
+    --shadow-card:0 1px 3px rgba(20,22,40,.12);
+    --shadow-pop:0 8px 30px rgba(20,22,40,.18);
+    --shadow-drawer:0 0 24px rgba(20,22,40,.18);
+  }
+  /* hardcoded #fff that sits on a light surface in this theme */
+  .msg.note .note-text h4{color:var(--text)}
 }
 
 *{margin:0;padding:0;box-sizing:border-box}
@@ -236,11 +292,11 @@ body.chat{height:100vh;height:100dvh}
 .model-name{font-family:var(--font-mono);font-size:var(--fs-sm);max-width:85%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-count{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap}
 /* Model coverage bar: working/failing/untested, muted pastels (not a christmas tree) */
-.model-bar{flex-shrink:0;align-self:center;display:inline-flex;height:8px;overflow:hidden;margin-left:var(--sp-3);background:#2a2a2a}
+.model-bar{flex-shrink:0;align-self:center;display:inline-flex;height:8px;overflow:hidden;margin-left:var(--sp-3);background:var(--surface-hover)}
 .model-bar i{display:block;height:100%}
 .mb-g{background:#43b56a}
 .mb-r{background:#a73d5d}
-.mb-u{background:#444444}
+.mb-u{background:var(--border-strong)}
 /* External-use panel shown in an empty chat */
 .chat-empty{font-size:var(--fs-sm);line-height:1.5}
 .chat-empty h3{margin:0 0 .4em;font-size:var(--fs-md)}
@@ -271,6 +327,8 @@ body.chat{height:100vh;height:100dvh}
 a.host-name:hover{color:var(--accent);text-decoration:underline}
 #hostDetailTitle{font-family:var(--font-mono);font-size:.92rem;overflow-wrap:anywhere}
 :root{--map-land:#26262b;--map-coast:#3a3a42;--map-dot:#1fc7d4;--map-blue:#1fc7d4;--map-pink:#ff3fa8}
+/* light-theme map palette — placed AFTER the dark :root above so it wins the cascade */
+@media (prefers-color-scheme: light){:root{--map-land:#dadde3;--map-coast:#c2c7cf;--map-dot:#0f98a5;--map-blue:#0f98a5;--map-pink:#d81b86}}
 .map-inner{height:auto;max-height:none}
 .map-head{display:flex;align-items:center;gap:12px;margin-bottom:var(--sp-3);flex-wrap:wrap}
 .map-meta{font-size:.8rem;color:var(--text-dim)}
@@ -2445,9 +2503,9 @@ function openHostDetail(host){
 // ❌ failed, 🏁 races won/lost. Returns '' when there's nothing to show.
 function usageEmoji(served,failed,won,lost){
   var p=[];
-  if(served)p.push('✅ '+NUM_FMT.format(served));
-  if(failed)p.push('❌ '+NUM_FMT.format(failed));
-  if(won||lost)p.push('🏁 '+NUM_FMT.format(won||0)+'/'+NUM_FMT.format(lost||0));
+  if(served)p.push('<span title="Requests this host served successfully">✅ '+NUM_FMT.format(served)+'</span>');
+  if(failed)p.push('<span title="Requests that failed on this host (error, timeout, or refusal)">❌ '+NUM_FMT.format(failed)+'</span>');
+  if(won||lost)p.push('<span title="Races won / races lost — times this host answered first vs. lost the hedge race to another host">🏁 '+NUM_FMT.format(won||0)+'/'+NUM_FMT.format(lost||0)+'</span>');
   return p.join('  ');
 }
 function hostDetailHtml(host,j){
@@ -3153,6 +3211,7 @@ function serializeChat(c){
   if(c.documents&&c.documents.length)o.documents=c.documents.map(function(d){return {id:d.id,title:d.title,type:d.type,language:d.language,content:d.content,updated:d.updated,versions:(d.versions||[]).slice()}});
   if(c.tools)o.tools=c.tools;   // per-chat tool selection
   if(c.lastPayload)o.lastPayload=c.lastPayload;   // exact last body sent, for /download
+  if(c.ctxTokens)o.ctxTokens=c.ctxTokens;   // last host-reported prompt tokens (real context size)
   return o;
 }
 // Per-chat saves: async, debounced, coalesced by id (latest wins), non-blocking.
@@ -4058,12 +4117,18 @@ function renderMessages(){
   });
   updateTokEst();
 }
-// Rough context-size gauge. Real tokenization is model-specific; the ~1.33
-// tokens-per-word rule of thumb is close enough to tell "roomy" from "getting
-// full". Counts the system prompt, every message, the documents, and whatever
-// the active generation has streamed so far.
+// Context-size gauge — the running CONVERSATION AGGREGATE, i.e. how much context the
+// next turn carries, the same figure the worker card shows. We can't count it exactly on
+// the client: the ~1.33 tokens-per-word heuristic (system + every message + documents +
+// the live stream + the tools schema) misses what the transcript doesn't show — tool
+// results, cached history the host re-ingests — so on its own it reads far UNDER the real
+// size and dips when the streamed reasoning is dropped. So whenever a host has reported
+// the real prompt-token count (noteCtxTokens, from the done chunk), we floor the gauge
+// with it: it then agrees with the worker card and only moves DOWN on /compact, where the
+// context genuinely shrinks (ctxTokens is reset there). Before the first completed turn,
+// the heuristic alone covers a fresh short chat.
 function _wc(s){var t=String(s||'').trim();return t?t.split(/\s+/).length:0}
-function _tokEst(){
+function _tokEstHeuristic(){
   var w=0;
   if(currentChat){
     w+=_wc(currentChat.system);
@@ -4084,10 +4149,46 @@ function _tokEst(){
   }catch(e){}
   return t;
 }
+function _tokEst(){
+  var h=_tokEstHeuristic();
+  var measured=(currentChat&&currentChat.ctxTokens)||0;   // real host-reported context
+  return Math.max(h,measured);
+}
+// Record a real context-size signal onto its chat — the size of what we actually SEND
+// the host (full history + system + tools + tool results), which the note-truncated
+// transcript the heuristic can see badly understates. Two sources feed it: an estimate
+// of the exact payload we POST (always available, includes tool results) and the host's
+// reported prompt-token count (exact when the turn isn't prompt-cached). We keep the MAX,
+// so the gauge floors at the real size and never dips mid-conversation; it drops only on
+// /compact, which resets ctxTokens. Works for the in-view chat and a background gen alike.
+function noteCtxTokens(chatId,n){
+  if(!(n>0))return;
+  var c=(currentChat&&String(currentChat.id)===String(chatId))?currentChat:null;
+  if(!c){var g=(typeof gens!=='undefined')&&gens[chatId];c=g&&g.chat;}
+  if(!c)return;
+  c.ctxTokens=Math.max(c.ctxTokens||0,n);
+  saveChat(c);
+  if(currentChat&&String(currentChat.id)===String(chatId))updateTokEst();
+}
+// Estimate the token size of the exact body we POST. Dense JSON (tool results, schemas)
+// ~= chars/4 — the same order as the server's own sizing, so the gauge tracks num_ctx.
+function _payloadCtxTokens(payload){
+  try{
+    var n=Math.round(JSON.stringify(payload&&payload.messages||[]).length/4);
+    if(payload&&payload.tools&&payload.tools.length)n+=Math.round(JSON.stringify(payload.tools).length/4);
+    return n;
+  }catch(e){return 0;}
+}
 function updateTokEst(){
   var el=document.getElementById('tokEst');if(!el)return;
   var n=_tokEst();
   el.textContent='~'+(n>=1000?(n/1000).toFixed(n>=10000?0:1)+'k':n)+' tok';
+  // Reflect whether the figure is the host's measured context or just the word-count
+  // estimate, so a glance tells you how trustworthy the number is.
+  var measured=(currentChat&&currentChat.ctxTokens)||0;
+  el.title=(measured>0&&measured>=_tokEstHeuristic())
+    ? 'context carried in the last request — full history + tool results + tools (~'+measured+' tokens sent)'
+    : 'estimated context size (~words × 1.33; varies by model)';
 }
 function chatInView(chatId){return String(currentChat.id)===String(chatId)}
 // The chat being appended to is the one live object for that id: currentChat if
@@ -4287,6 +4388,11 @@ document.getElementById('chatModel').addEventListener('input',updateModelCount);
 updateModelCount();
 renderSidebar();
 
+// Soft-keyboard (phone/tablet) detection — there's no Shift+Enter, so Enter inserts a
+// newline and the ➤ button is how you send. Keyed on a coarse pointer, not width, so a
+// narrow desktop window keeps Enter-to-send. Declared up here because the send button
+// behaviour below depends on it.
+var _softKbd=!!(window.matchMedia&&window.matchMedia('(pointer:coarse)').matches);
 var SEND_ICON='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
 var STOP_ICON='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>';
 function setSendButton(state){
@@ -4301,8 +4407,15 @@ function setSendButton(state){
     btn.classList.remove('stop');
   }
 }
-// the send/stop button reflects only the conversation currently in view
-function refreshSendButton(){setSendButton(genOf(currentChat.id)?'streaming':'idle')}
+// the send/stop button reflects only the conversation currently in view.
+// On a soft-keyboard device the button is the ONLY send control (no Enter-to-send), so
+// while a generation runs we keep it as ➤ whenever there's text to send — tapping it
+// enqueues the follow-up (sendChat queues when busy). Stop (⏹) is shown only when the
+// box is empty. Desktop queues via Enter and keeps the plain send/stop toggle.
+function sendBtnEnqueueMode(){
+  return _softKbd && !!genOf(currentChat.id) && document.getElementById('chatInput').value.trim()!=='';
+}
+function refreshSendButton(){setSendButton((genOf(currentChat.id)&&!sendBtnEnqueueMode())?'streaming':'idle')}
 function stopChat(){
   var g=genOf(currentChat.id);
   if(g&&g.ac){g.stopped=true;g.ac.abort();}
@@ -4564,6 +4677,7 @@ async function compactChat(chat){
     if(!summary)return {ok:false,error:'the host returned an empty summary'};
     var before=all.length;
     chat.messages=[{role:'assistant',content:'📋 Summary of the conversation so far:\n\n'+summary,_meta:{compacted:true}}].concat(tail);
+    chat.ctxTokens=0;   // context genuinely shrank — re-measure on the next turn
     saveChat(chat);touchIndex(chat);
     return {ok:true,before:before,kept:tail.length};
   }catch(e){return {ok:false,error:(e&&e.message)||'request failed'};}
@@ -4712,7 +4826,7 @@ async function sendChat(){
     // Already generating — queue the message instead of dropping it. It reaches the
     // model at the next tool-result boundary, or as the next turn when this one ends.
     var _qt=document.getElementById('chatInput').value.trim();
-    if(_qt){ queuePush(currentChat.id,_qt); document.getElementById('chatInput').value=''; }
+    if(_qt){ queuePush(currentChat.id,_qt); document.getElementById('chatInput').value=''; refreshSendButton(); }
     return;
   }
   var model=document.getElementById('chatModel').value.trim();
@@ -5482,6 +5596,9 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
       // pull from the network tab, not a reconstruction. Updated each round, so it
       // ends as the most complete send (full tool exchange included).
       try{var _lc=liveChat(chatId)||currentChat;if(_lc)_lc.lastPayload=_payload;}catch(e){}
+      // Floor the context gauge with the size of what we're actually sending (full
+      // history + tool results + schemas) — the real "conversation aggregate".
+      noteCtxTokens(chatId,_payloadCtxTokens(_payload));
       var sresp=await fetch('api/chat/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_payload),signal:ac.signal});
       if(!sresp.ok){
         clearInflight();
@@ -5553,6 +5670,10 @@ async function runStream(chatId,chatCreated,chatTitle,model,msgs,bubble,depth,ex
           if(d.done){
             if(d.eval_count&&d.eval_duration)tps=Math.round(d.eval_count/(d.eval_duration/1e9)*10)/10;
             gen.tps=tps;
+            // Real context size the host ingested this turn — floors the context gauge so
+            // it agrees with the worker card instead of the word-count undercount.
+            var _pe=d.prompt_eval_count||(d.usage&&d.usage.prompt_tokens)||0;
+            if(_pe>0)noteCtxTokens(chatId,_pe);
             await complete();
             return;
           }
@@ -5721,9 +5842,14 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)setT
 window.addEventListener('pagehide',function(){try{sessionStorage.removeItem('dyva_own')}catch(e){}});
 document.getElementById('chatSend').addEventListener('click',function(e){
   e.preventDefault();
-  if(genOf(currentChat.id))stopChat();
+  // Stop only when it's genuinely a stop (generating AND nothing to enqueue); otherwise
+  // send — which queues the text when a generation is already running (see sendChat).
+  if(genOf(currentChat.id)&&!sendBtnEnqueueMode())stopChat();
   else sendChat();
 });
+// Soft keyboard: Enter makes a newline (no Shift+Enter there) and the ➤ button sends,
+// so reflect that in the placeholder. (_softKbd is declared up by setSendButton.)
+if(_softKbd){var _ciPH=document.getElementById('chatInput');if(_ciPH)_ciPH.placeholder='Message… (tap ➤ to send, /help for commands)';}
 document.getElementById('chatInput').addEventListener('keydown',function(e){
   if(slashOpen()){
     if(e.key==='ArrowUp'){e.preventDefault();slashMove(-1);return;}
@@ -5738,12 +5864,15 @@ document.getElementById('chatInput').addEventListener('keydown',function(e){
   }
   if(e.key==='ArrowUp'){recallPrompt(-1,e);return;}
   if(e.key==='ArrowDown'){recallPrompt(1,e);return;}
-  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();hideSlashPop(false);sendChat();}
+  if(e.key==='Enter'&&!e.shiftKey&&!_softKbd){e.preventDefault();hideSlashPop(false);sendChat();}
 });
 document.getElementById('chatInput').addEventListener('input',function(){
   _slashHidden=false;   // typing anything revives a dismissed popup
   _slashSel=0;
   renderSlashPop();
+  // Soft keyboard: while generating, flip the button between ➤ (text present → enqueue)
+  // and ⏹ (empty → stop) as you type, so the icon matches what a tap will do.
+  if(_softKbd&&genOf(currentChat.id))refreshSendButton();
 });
 // mousedown, not click: the textarea must not lose focus before we complete
 slashPop().addEventListener('mousedown',function(e){

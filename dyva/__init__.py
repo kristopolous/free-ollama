@@ -4795,6 +4795,20 @@ def speaks_openai(host):
     return service_of(host) in _OPENAI_SERVICES
 
 
+# Servers known to HONOUR the OpenAI `continue_final_message` / `add_generation_prompt`
+# flags, i.e. where we can "prefill" a partial assistant turn and have the model continue
+# THAT message instead of starting a new one. Deliberately NARROW: an OpenAI-dialect host
+# that does NOT implement the flags (Ollama's OpenAI shim, LM Studio, koboldcpp, …) would
+# not 400 — it would silently add a generation prompt and RESTART, duplicating text. So we
+# only prefill where it's known-safe; every other host uses the universal aside fallback
+# (see _continuation_aside). llama.cpp added the flags for vLLM compatibility.
+_PREFILL_SERVICES = {"vllm", "llama.cpp", "llamacpp"}
+
+
+def _supports_prefill(host):
+    return service_of(host) in _PREFILL_SERVICES
+
+
 def chat_endpoint(host, ollama_endpoint="/api/chat"):
     if not speaks_openai(host):
         return ollama_endpoint
@@ -4809,7 +4823,7 @@ _OLLAMA_ONLY = ("options", "keep_alive", "format", "template", "context", "raw",
 # dyva-internal routing hints attached to a job's params (sub-agent orchestration
 # and host-spread). They must be stripped before a request goes to any upstream
 # host — they mean nothing there, and a strict OpenAI host 400s on unknown fields.
-_DYVA_INTERNAL = ("dyva_agent", "spread", "scratch", "agent_name")
+_DYVA_INTERNAL = ("dyva_agent", "spread", "scratch", "agent_name", "_dyva_continue")
 
 
 def _oai_data_url(b64):
@@ -5208,11 +5222,18 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream, timeout=
     resp, ep = None, endpoint
     tried = []   # per-dialect outcome (status + body peek), surfaced if BOTH miss
     _think_dropped = False   # one-shot: retry a host once without `think` if it 400s
+    _prefill_dropped = False  # one-shot: retry once as the aside shape if prefill 400s
     for attempt_oai in (oai, not oai):
         ep = (("/v1/completions" if endpoint == "/api/generate"
                else "/v1/chat/completions") if attempt_oai else endpoint)
         p = {k: v for k, v in payload.items() if k not in _DYVA_INTERNAL}
         p["model"], p["stream"] = full, do_stream
+        # Carry-forward continuation: a partial answer from a skipped/dropped host, shaped
+        # per THIS host (prefill where supported, else the aside) — see _apply_continuation.
+        _cont_prefill = False
+        if payload.get("_dyva_continue"):
+            p = _apply_continuation(p, payload["_dyva_continue"], host, attempt_oai)
+            _cont_prefill = bool(p.get("continue_final_message"))
         # think:false has no universal off-switch, so STACK every known lever per
         # dialect (the way llcat's -nt does) — each backend ignores the ones it
         # doesn't recognise. The native `think` field is kept for Ollama but stripped
@@ -5283,6 +5304,26 @@ async def _send_chat(session, host, full, payload, endpoint, do_stream, timeout=
                          f"after {time.time()-_t0:.1f}s")
                 raise
             log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s (no think)")
+        # A host that doesn't actually honour the prefill flags can 400 on them (e.g. a
+        # vLLM build with the continue_final_message bug). Retry ONCE as the universal aside
+        # shape so the continuation still lands instead of sinking the host.
+        elif resp.status == 400 and _cont_prefill and not _prefill_dropped:
+            _prefill_dropped = True
+            with contextlib.suppress(Exception):
+                await resp.release()
+            p = _deprefill(p, payload["_dyva_continue"], attempt_oai)
+            _cont_prefill = False
+            log.info(f"[{rid}] {host}{ep} 400 with prefill — retrying as aside continuation")
+            _t0 = time.time()
+            try:
+                resp = await session.post(
+                    f"{host}{ep}", json=p,
+                    timeout=aiohttp.ClientTimeout(total=timeout or _slow_timeout(p), sock_connect=CONNECT_TIMEOUT))
+            except Exception as e:
+                log.info(f"[{rid}] err {host}{ep} {(' '.join(str(e).split())[:160] or type(e).__name__)} "
+                         f"after {time.time()-_t0:.1f}s")
+                raise
+            log.info(f"[{rid}] resp {host}{ep} HTTP {resp.status} in {time.time()-_t0:.1f}s (deprefill)")
         if resp.status not in (404, 405, 501):
             return resp, attempt_oai, ep, None
         st = resp.status
@@ -5815,6 +5856,11 @@ def _estimate_prompt_tokens(payload):
             tokens += _count_tokens(json.dumps(payload["tools"], ensure_ascii=False))
         except (TypeError, ValueError):
             pass
+    # A carried partial (continuation) isn't in `messages` yet — _send_chat materialises it
+    # per host — but it IS real context, so count it here or num_ctx/timeouts come out short.
+    _cont = payload.get("_dyva_continue")
+    if _cont:
+        tokens += _count_tokens(_cont)
     return tokens
 
 
@@ -5822,6 +5868,21 @@ def _auto_num_ctx(payload):
     want = _estimate_prompt_tokens(payload) * NUM_CTX_PAD + NUM_CTX_REPLY
     stepped = ((int(want) + NUM_CTX_STEP - 1) // NUM_CTX_STEP) * NUM_CTX_STEP  # round up
     return max(NUM_CTX_MIN, min(NUM_CTX_MAX, stepped))
+
+
+def _stash_want_ctx(wid, payload):
+    """Record on the worker the context window we INTEND to send for this request.
+
+    It's prompt-derived and known NOW — before any host answers — so the active card can
+    show the request size through the search/fan-out phase (the MEASURED num_ctx replaces
+    it once a host reports tokens). Set from EVERY text path (chat, generate, and the
+    background/agent job the dashboard chat uses), so a worker that's still searching or
+    was interrupted still shows its size instead of a blank — a blank read as 0, which
+    hid exactly the case where a too-large window may have caused the stall."""
+    with contextlib.suppress(Exception):
+        w = _workers.get(wid)
+        if w is not None:
+            w["want_ctx"] = (payload.get("options") or {}).get("num_ctx") or _auto_num_ctx(payload)
 
 
 def _race_stretch(payload):
@@ -6183,19 +6244,67 @@ async def _write_terminal_done(response, full, openai_format):
         await response.write((json.dumps(done) + "\n").encode())
 
 
-def _continuation_payload(payload, partial_text):
-    """Payload to hand the NEXT host after a mid-stream drop: the conversation so
-    far, plus the partial answer as an assistant turn and a nudge to finish it, and
-    a num_ctx floor big enough for the grown prompt (an interrupted long answer only
-    makes the context longer, and Ollama silently truncates past its window). Same
-    experimental continuation shape as a manual skip — the model may resume cleanly,
-    restate, or veer; the connection is kept alive either way."""
-    msgs = list(payload.get("messages") or []) + [
-        {"role": "assistant", "content": partial_text},
-        {"role": "user", "content": "Continue your previous answer from exactly where it "
-         "was cut off. Do not repeat what you already wrote."},
+def _continuation_aside(partial_text):
+    """The FALLBACK carry-forward shape, for any host that can't prefill (Ollama-native,
+    LM Studio, unknown — everything outside _PREFILL_SERVICES). Two messages: the assistant
+    trails off (owning a natural pause) and the user waves it on.
+
+    The trick: don't ORDER the model to "resume from exactly where it was cut off" — that
+    reads badly when the cut lands mid-token and invites a stilted restatement. A fresh
+    host/model picks up a self-interrupted train of thought more naturally than a splice
+    order. Both turns are CONTEXT ONLY — neither the aside nor the "continue" is written to
+    the visible buffer; only the model's continuation is, so it appends cleanly to the
+    partial already on screen. Ends on a USER turn, so the payload is syntactically valid on
+    every dialect. (Prefill-capable hosts skip this and continue the raw partial natively —
+    see _apply_continuation.) Experimental: the model may continue cleanly, restate, or veer."""
+    return [
+        {"role": "assistant",
+         "content": partial_text.rstrip() + "...\nActually, let me think about this some more."},
+        {"role": "user", "content": "No problem! Continue."},
     ]
-    out = dict(payload, messages=msgs)
+
+
+def _apply_continuation(p, partial_text, host, attempt_oai):
+    """Append a carried partial to `p` in the right shape for `host`, returning the new `p`.
+
+    PREFILL (OpenAI dialect + a host in _PREFILL_SERVICES): end on an OPEN-ENDED assistant
+    turn holding the RAW partial and set continue_final_message / add_generation_prompt:false
+    — the model continues that exact message, a seamless splice with no injected turns.
+    ASIDE (everything else): the universal fallback (see _continuation_aside)."""
+    msgs = list(p.get("messages") or [])
+    if attempt_oai and _supports_prefill(host):
+        # Raw partial as an open-ended final assistant turn; openai_payload keeps plain
+        # string content as-is, which is what continue_final_message wants to continue.
+        msgs.append({"role": "assistant", "content": partial_text})
+        return dict(p, messages=msgs,
+                    continue_final_message=True, add_generation_prompt=False)
+    return dict(p, messages=msgs + _continuation_aside(partial_text))
+
+
+def _deprefill(p, partial_text, attempt_oai):
+    """Turn a prefill-shaped request back into the universal aside shape — for the rare host
+    that 400s on continue_final_message (e.g. a vLLM version with the known bug). Drops the
+    flags and the open-ended assistant turn, then re-appends the aside."""
+    msgs = list(p.get("messages") or [])
+    if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "assistant":
+        msgs = msgs[:-1]
+    aside = _continuation_aside(partial_text)
+    if attempt_oai:
+        aside = _messages_openai(aside)
+    out = {k: v for k, v in p.items()
+           if k not in ("continue_final_message", "add_generation_prompt")}
+    out["messages"] = msgs + aside
+    return out
+
+
+def _continuation_payload(payload, partial_text):
+    """Payload to hand the NEXT host after a mid-stream drop: the conversation so far, the
+    partial carried forward as an internal marker (_send_chat shapes it per host — prefill
+    or aside), ACCUMULATED across hops, plus a num_ctx floor big enough for the grown prompt
+    (an interrupted long answer only makes the context longer, and Ollama silently truncates
+    past its window)."""
+    carried = (payload.get("_dyva_continue") or "") + partial_text
+    out = dict(payload, _dyva_continue=carried)
     opts = dict(out.get("options") or {})
     opts["num_ctx"] = max(_auto_num_ctx(out), opts.get("num_ctx") or 0)   # bump, never shrink
     out["options"] = opts
@@ -6934,10 +7043,7 @@ async def _proxy_chat(request, session, model_in, opayload, do_stream, openai_fo
     # The context window we intend to send is prompt-derived and known NOW, before any
     # host answers — stash it so the active card can show it during the search/fan-out
     # phase (the MEASURED num_ctx replaces it once a host reports tokens).
-    with contextlib.suppress(Exception):
-        _wrec = _workers.get(job_wid)
-        if _wrec is not None:
-            _wrec["want_ctx"] = (opayload.get("options") or {}).get("num_ctx") or _auto_num_ctx(opayload)
+    _stash_want_ctx(job_wid, opayload)
     try:
         # The sticky (last-good) host is already sorted first in _servers, so
         # the hedged race tries it alone for HEDGE_DELAY seconds and only fans
@@ -7088,6 +7194,7 @@ async def _proxy_generate(request, session):
 
     job_wid = await _register_worker(model, len(find_servers(model, req_caps)), lambda: None,
                                      kind="text", title=_client_title(request))
+    _stash_want_ctx(job_wid, body)
     try:
         # Sticky host first (via find_servers), then hedge: it gets HEDGE_DELAY
         # to itself before the rest of the pool is raced alongside it.
@@ -12540,6 +12647,7 @@ async def _run_chat_job(session, jid):
     job_wid = await _register_worker(model_list[0], len(servers),
                                      lambda: None,
                                      kind=("agent" if agentic else "text"))
+    _stash_want_ctx(job_wid, opayload)
 
     # Wire the worker's stop/skip buttons to this job's control flags, so the
     # existing dashboard controls drive the job without a second mechanism.
@@ -12800,11 +12908,7 @@ async def _run_chat_job(session, jid):
                             errors.append(f"{host}: stream stalled — no tokens for {TIMEOUT}s")
                             servers = [s for s in servers if s[1] != host]
                             if partial[0].strip():
-                                opayload["messages"] = list(opayload.get("messages") or []) + [
-                                    {"role": "assistant", "content": partial[0]},
-                                    {"role": "user", "content": "Continue your previous answer from "
-                                     "exactly where it was cut off. Do not repeat what you already wrote."},
-                                ]
+                                opayload["_dyva_continue"] = (opayload.get("_dyva_continue") or "") + partial[0]
                             _set_worker_phase(job_wid, None)
                             ctl["stall"] = False
                             skipped = True
@@ -12812,21 +12916,14 @@ async def _run_chat_job(session, jid):
                             record_verdict(host, full, skip("skipped by user"))
                             errors.append(f"{host}: skipped by user")
                             servers = [s for s in servers if s[1] != host]
-                            # EXPERIMENTAL skip-continuation (inherently undefined —
-                            # first attempt, tweak later): carry the work this host
-                            # already streamed into the context so the NEXT host
-                            # CONTINUES rather than restarting — otherwise its fresh
-                            # answer appends to the job buffer that already holds this
-                            # partial and the bubble is garbled. Represented as an
-                            # assistant turn + a "continue" nudge: syntactically valid
-                            # on every dialect (ends on user). The model may continue
-                            # cleanly, restate, or veer — the user chose to skip.
+                            # Carry the work this host already streamed (ACCUMULATED across
+                            # hops) forward as an internal marker so the NEXT host CONTINUES
+                            # rather than restarting — otherwise its fresh answer appends to
+                            # the job buffer that already holds this partial and the bubble is
+                            # garbled. _send_chat shapes the marker per host: prefill where
+                            # supported (_apply_continuation), else the aside (_continuation_aside).
                             if partial[0].strip():
-                                opayload["messages"] = list(opayload.get("messages") or []) + [
-                                    {"role": "assistant", "content": partial[0]},
-                                    {"role": "user", "content": "Continue your previous answer from "
-                                     "exactly where it was cut off. Do not repeat what you already wrote."},
-                                ]
+                                opayload["_dyva_continue"] = (opayload.get("_dyva_continue") or "") + partial[0]
                             _set_worker_phase(job_wid, None)
                             ctl["skip"] = False
                             skipped = True
@@ -12856,11 +12953,7 @@ async def _run_chat_job(session, jid):
                         await account_tokens(job_wid, host, full, _ctx_done, sent_ctx)
                         ctx_reissues += 1
                         if partial[0].strip():
-                            opayload["messages"] = list(opayload.get("messages") or []) + [
-                                {"role": "assistant", "content": partial[0]},
-                                {"role": "user", "content": "Continue your previous answer from "
-                                 "exactly where it was cut off. Do not repeat what you already wrote."},
-                            ]
+                            opayload["_dyva_continue"] = (opayload.get("_dyva_continue") or "") + partial[0]
                         # grow decisively: at least 2x, and enough to hold the (now
                         # larger) prompt the continuation turns it into.
                         bigger = min(max(sent_ctx * 2, _auto_num_ctx(opayload)), NUM_CTX_MAX)
@@ -12884,11 +12977,7 @@ async def _run_chat_job(session, jid):
                             f"stream dropped: {host} for {full} — ended with no completion", wid=job_wid)
                         servers = [s for s in servers if s[1] != host]
                         if partial[0].strip():
-                            opayload["messages"] = list(opayload.get("messages") or []) + [
-                                {"role": "assistant", "content": partial[0]},
-                                {"role": "user", "content": "Continue your previous answer from "
-                                 "exactly where it was cut off. Do not repeat what you already wrote."},
-                            ]
+                            opayload["_dyva_continue"] = (opayload.get("_dyva_continue") or "") + partial[0]
                         _set_worker_phase(job_wid, None)
                         continue         # re-race the remaining hosts
                     status = "ok"
