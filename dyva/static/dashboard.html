@@ -14,9 +14,21 @@
 <link href="https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link id="hljsDark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<link id="hljsLight" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" disabled>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+/* Theme init — runs in <head> before paint, so there's no flash. Resolves the stored
+   preference (auto/light/dark) to a concrete data-theme and toggles the right syntax
+   stylesheet. applyTheme() (in the main script) reuses the same logic for live changes. */
+(function(){try{
+  var p=localStorage.getItem('dyva_theme')||'auto';
+  var dark=p==='dark'||(p==='auto'&&!(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches));
+  document.documentElement.setAttribute('data-theme',dark?'dark':'light');
+  var d=document.getElementById('hljsDark'),l=document.getElementById('hljsLight');
+  if(d)d.disabled=!dark; if(l)l.disabled=dark;
+}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mathjs@13/lib/browser/math.js"></script>
@@ -113,7 +125,7 @@
   --fs-2xl:1.1rem;
   --fs-h1:1.7rem;
 
-  --ctl-h:2.5rem
+  --ctl-h:2.5rem;
   --r-sm:4px;
   --r-md:6px;
   --r-lg:8px;
@@ -155,8 +167,7 @@
    follows for free. Accent SURFACES (incl. buttons) become light indigo tints rather than
    staying dark, because the generic `button` keeps color:var(--text) (dark in light) — a
    dark button bg would be unreadable. A handful of hardcoded colors are fixed below. */
-@media (prefers-color-scheme: light){
-  :root{
+:root[data-theme="light"]{
     color-scheme:light;
     /* neutral ramp, LAYERED (not blown-out white): page is a soft gray base, surfaces are
        white and raised ABOVE it, borders are darker. Backgrounds (950..750) stay light;
@@ -202,7 +213,6 @@
     --shadow-pop:0 8px 30px rgba(20,22,40,.18);
     --shadow-drawer:0 0 24px rgba(20,22,40,.18);
   }
-}
 
 *{margin:0;padding:0;box-sizing:border-box}
 ::-webkit-scrollbar{width:10px;height:10px}
@@ -241,6 +251,11 @@ a{color:var(--text-muted)}
 .conn-count{text-transform:none;letter-spacing:0;font-size:var(--fs-sm);color:var(--text-faint);font-weight:normal;margin-left:var(--sp-3);font-variant-numeric:tabular-nums}
 .conn-count-row{font-size:var(--fs-2xs);color:var(--text-faint);margin:0 0 var(--sp-2);text-align:right;font-variant-numeric:tabular-nums}
 .header-text h1{font-family:var(--font-display);font-weight:400;font-size:var(--fs-h1);margin-bottom:2px}
+/* The "D" is a whimsical theme toggle: click it and it spins a full turn as light/dark flip. */
+.dyva-d{display:inline-block;cursor:pointer;transform-origin:50% 50%;outline:none}
+.dyva-d:hover{color:var(--accent-bright)}
+.dyva-d.spin{animation:dSpin .55s cubic-bezier(.34,1.3,.5,1)}
+@keyframes dSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
 .header-text .sub{color:var(--text-muted);font-size:var(--fs-md)}
 .tabs{display:flex;gap:0;margin-bottom:var(--sp-5);flex-shrink:0;border-bottom:1px solid var(--border)}
  .tab{padding:10px 18px;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--text-muted);font-size:var(--fs-lg);cursor:pointer;transition:color var(--dur),border-color var(--dur),background var(--dur);border-radius:var(--r-md) var(--r-md) 0 0}
@@ -313,7 +328,7 @@ body.chat{height:100vh;height:100dvh}
 .gbtn{background:transparent;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:.1em .55em;font-size:var(--fs-sm);cursor:pointer}
 .gbtn:hover{color:var(--text)}
 .gbtn.active{background:var(--accent-bg);color:var(--text);border-color:var(--accent)}
-.model-group{display:flex;align-items:center;gap:.45em;cursor:pointer;user-select:none;margin:var(--sp-3) 0 var(--sp-1);padding:.4em .55em;border-radius:5px;background:#262626;color:var(--text);font-size:var(--fs-md);font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+.model-group{display:flex;align-items:center;gap:.45em;cursor:pointer;user-select:none;margin:var(--sp-3) 0 var(--sp-1);padding:.4em .55em;border-radius:5px;background:var(--surface-hover);color:var(--text);font-size:var(--fs-md);font-weight:700;text-transform:uppercase;letter-spacing:.03em}
 .model-group:hover{filter:brightness(1.18)}
 .model-group-wrap:first-child .model-group{margin-top:0}
 .mg-caret{display:inline-block;transition:transform .12s;color:var(--text-dim);font-size:.8em}
@@ -329,7 +344,7 @@ a.host-name:hover{color:var(--accent);text-decoration:underline}
 #hostDetailTitle{font-family:var(--font-mono);font-size:.92rem;overflow-wrap:anywhere}
 :root{--map-land:#26262b;--map-coast:#3a3a42;--map-dot:#1fc7d4;--map-blue:#1fc7d4;--map-pink:#ff3fa8}
 /* light-theme map palette — placed AFTER the dark :root above so it wins the cascade */
-@media (prefers-color-scheme: light){:root{--map-land:#dadde3;--map-coast:#c2c7cf;--map-dot:#0f98a5;--map-blue:#0f98a5;--map-pink:#d81b86}}
+:root[data-theme="light"]{--map-land:#dadde3;--map-coast:#c2c7cf;--map-dot:#0f98a5;--map-blue:#0f98a5;--map-pink:#d81b86}
 .map-inner{height:auto;max-height:none}
 .map-head{display:flex;align-items:center;gap:12px;margin-bottom:var(--sp-3);flex-wrap:wrap}
 .map-meta{font-size:.8rem;color:var(--text-dim)}
@@ -674,7 +689,7 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .msg.note .note-text p{margin:.15em 0}
 .msg.note .note-text ul{margin:.25em 0;padding-left:1.2em}
 .msg.note .note-text li{margin:.1em 0}
-.msg.note .note-text code{font-family:var(--font-mono);font-size:var(--fs-sm);padding:0.05rem 0.15rem;background:#080808;color:inherit}
+.msg.note .note-text code{font-family:var(--font-mono);font-size:var(--fs-sm);padding:0.05rem 0.15rem;background:var(--bg-inset);color:inherit}
 .msg.note .note-text strong{color:var(--text);font-weight:500}
 .msg.note .note-text blockquote{border-left:2px solid var(--border-strong);margin:.3em 0;padding:0 .6em;color:var(--text-3)}
 .msg.note .note-text h4{margin:1.25rem 0 .3em;font-size:inherit;font-weight:500;letter-spacing:.05em;text-transform:uppercase;color:#fff}
@@ -771,9 +786,9 @@ button.stop:hover{background:var(--btn-danger-hover)}
 .result-meta{display:block;margin-top:.3em;font-family:var(--font-mono);font-size:var(--fs-2xs);color:var(--text-2)}
 .msg .file-chip{display:inline-block;background:var(--a-900);border:1px solid var(--border);border-radius:var(--r-md);padding:3px var(--sp-3);font-size:var(--fs-xs);color:var(--accent);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-details.thinkbox{margin:.15em 0 .55em;border-left:3px solid var(--border-strong);background:#232323;border-radius:var(--r-sm);padding:.25em .65em}
+details.thinkbox{margin:.15em 0 .55em;border-left:3px solid var(--border-strong);background:var(--surface-hover);border-radius:var(--r-sm);padding:.25em .65em}
 details.thinkbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none}
-details.toolbox{margin:.15em 0 .55em;border-left:3px solid var(--border-accent);background:#232323;border-radius:var(--r-sm);padding:.25em .65em}
+details.toolbox{margin:.15em 0 .55em;border-left:3px solid var(--border-accent);background:var(--surface-hover);border-radius:var(--r-sm);padding:.25em .65em}
 details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.07em;user-select:none}
 .toolbox .tc-item{margin:.4em 0 .2em}
 .toolbox .tc-fn{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-2)}
@@ -837,7 +852,7 @@ details.toolbox>summary{cursor:pointer;color:var(--text-dim);font-size:var(--fs-
 .chat-item{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);padding:var(--sp-3);border-radius:var(--r-md);cursor:pointer;font-size:var(--fs-sm);color:var(--text-2)}
 .chat-item:hover{background:var(--accent-bg)}
 .chat-item.active{background:var(--accent-bg-active)}
-.chat-item .title{overflow:hidden;white-space:nowrap;flex:1}
+.chat-item .title{overflow:hidden;white-space:nowrap;flex:1;min-width:0;font-size:var(--fs-sm)}
 .chat-item .del{opacity:0;color:var(--err-hover);cursor:pointer;font-size:var(--fs-md);padding:0 var(--sp-1)}
 .chat-item:hover .del{opacity:1}
 .chat-item .dl{opacity:0;color:var(--accent);cursor:pointer;font-size:var(--fs-md);padding:0 var(--sp-1)}
@@ -1215,16 +1230,16 @@ body.dragging-image .hist-item{cursor:grabbing}
   .settings-inner .setting:has(input[type=password]) input[type=password]{width:100%}
 }
 
-/* Light-theme SELECTOR overrides — these must live AFTER the base rules they override (a
-   media query adds no specificity, so an early copy loses the cascade to the later base
-   rule). Token (:root) overrides stay up top; only per-selector fixes belong here. */
-@media (prefers-color-scheme: light){
-  /* Settings cards use --bg-inset (= the page colour in light), so they vanish into the
-     page. Lift them onto the raised card surface so they read as distinct, coloured cards. */
-  .settings-card{background:var(--surface);box-shadow:var(--shadow-card)}
-  /* hardcoded #fff heading that would be invisible on a light surface */
-  .msg.note .note-text h4{color:var(--text)}
-}
+/* Light-theme SELECTOR overrides — these must live AFTER the base rules they override (the
+   :root[data-theme] prefix adds specificity, but keeping them late is clearest). Token
+   overrides stay up top; only per-selector fixes belong here. */
+/* Settings cards use --bg-inset (= the page colour in light), so they vanish into the
+   page. Lift them onto the raised card surface so they read as distinct, coloured cards. */
+:root[data-theme="light"] .settings-card{background:var(--surface);box-shadow:var(--shadow-card)}
+/* hardcoded #fff heading that would be invisible on a light surface */
+:root[data-theme="light"] .msg.note .note-text h4{color:var(--text)}
+/* token-count badge: hardcoded dark translucent chip -> a light one for light mode */
+:root[data-theme="light"] .tok-est{background:rgba(245,247,250,.72)}
 </style>
 </head>
 <body>
@@ -1232,7 +1247,7 @@ body.dragging-image .hist-item{cursor:grabbing}
 <div class="header">
 <a style=font-size:0 href="guide"><img id="logoImg" src="dyva.avif" alt="" width="56" height="56" data-explore="__EXPLORE__"></a>
 <div class="header-text">
-<h1>Dyva</h1>
+<h1><span class="dyva-d" role="button" tabindex="0" title="Spin to switch light / dark" aria-label="Toggle light or dark theme" onclick="spinD(this);toggleTheme()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();spinD(this);toggleTheme();}">D</span>yva</h1>
 <p class="sub"><!--<span title="workers">🔨 __WORKER_COUNT__ </span>&middot;<span title="timeout"> 🕰️ __TIMEOUT__s </span>&middot;--><span id="hostsPill" title="servers - loaded at __HOSTS_LOADED__" style="cursor:pointer"> <span id="hostsIcon">🖥</span> <span id="serverCount">__SERVER_COUNT__</span>
 </p>
 </div>
@@ -9340,6 +9355,34 @@ function _markDirty(e){
   if(t.id==='setAdminPw'||t.id==='adminPwUserDecoy')return;
   var c=t.closest('.settings-card');if(c)c.classList.add('is-dirty');
 }
+// Theme preference (client-only, localStorage). The <head> script already applied the
+// stored theme before paint; these keep it live and drive the whimsical "D" toggle.
+// applyTheme mirrors the head logic: auto follows the device, else forced.
+function _themePref(){try{return localStorage.getItem('dyva_theme')||'auto';}catch(e){return 'auto';}}
+function applyTheme(pref){
+  pref=pref||'auto';
+  var dark=pref==='dark'||(pref==='auto'&&!(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches));
+  document.documentElement.setAttribute('data-theme',dark?'dark':'light');
+  var d=document.getElementById('hljsDark'),l=document.getElementById('hljsLight');
+  if(d)d.disabled=!dark; if(l)l.disabled=dark;
+}
+// Click the "D" in the wordmark: flip the CURRENTLY applied theme to an explicit choice
+// (persisted per browser). First-load default stays Auto until the first flip.
+function toggleTheme(){
+  var cur=document.documentElement.getAttribute('data-theme')==='light'?'light':'dark';
+  var next=cur==='light'?'dark':'light';
+  try{localStorage.setItem('dyva_theme',next);}catch(e){}
+  applyTheme(next);
+}
+// Re-trigger the CSS spin on every click (remove + reflow + add).
+function spinD(el){ if(!el)return; el.classList.remove('spin'); void el.offsetWidth; el.classList.add('spin'); }
+(function initTheme(){
+  if(window.matchMedia){                 // follow the device while still in Auto
+    try{window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',function(){
+      if(_themePref()==='auto')applyTheme('auto');
+    });}catch(e){}
+  }
+})();
 function _clearDirty(){Array.prototype.forEach.call(document.querySelectorAll('.settings-card.is-dirty'),function(c){c.classList.remove('is-dirty');});}
 function _wireDirty(){
   if(_dirtyWired)return;
