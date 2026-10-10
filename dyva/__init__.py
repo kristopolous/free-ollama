@@ -7755,7 +7755,19 @@ async def handle_host_info(request):
         return re.sub(r"^https?://", "", u or "").rstrip("/")
 
     target = _bare(host)
-    rec = next((s for s in load_servers() if _bare(s.get("server")) == target), None)
+    servers = load_servers()
+    rec = next((s for s in servers if _bare(s.get("server")) == target), None)
+    if rec is None and target:
+        # No exact match — resolve a PARTIAL the user typed (e.g. a bare IP without the
+        # port). A UNIQUE substring match is taken as the host; SEVERAL matches come back as
+        # candidates for the client to disambiguate (the host card shows a "did you mean"
+        # list). This is what lets the HOSTS search open a card from just an address.
+        subs = [s for s in servers if target in _bare(s.get("server") or "")]
+        if len(subs) == 1:
+            rec = subs[0]
+        elif len(subs) > 1:
+            cands = sorted({_bare(s.get("server")) for s in subs if s.get("server")})
+            return web.json_response({"host": host, "found": False, "candidates": cands[:50]})
     server_url = rec.get("server") if rec else host
 
     out = {"host": server_url, "found": rec is not None}

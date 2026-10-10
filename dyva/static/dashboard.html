@@ -161,12 +161,15 @@
     /* neutral ramp, LAYERED (not blown-out white): page is a soft gray base, surfaces are
        white and raised ABOVE it, borders are darker. Backgrounds (950..750) stay light;
        border steps (700..500) go progressively darker so hairlines read on a light page. */
-    --n-950:#e9ebef;   /* page / code wells — soft, not pure white */
-    --n-900:#e2e5ea;   /* sunken: scroll panes, sidebar (recessed) */
-    --n-870:#dce0e6;   /* sunken alt: inset boxes, thumbs */
-    --n-850:#ffffff;   /* raised: cards, popovers, bubbles */
-    --n-800:#f3f5f7;   /* raised hover */
-    --n-750:#ffffff;   /* form fields (white + border) */
+    /* elevation ladder: sunken-alt < sunken < page < card < field(white). Cards are a
+       soft, faintly-cool off-white — "coloured", not a clinical #fff slab — and inputs
+       stay crisp white so they read as editable against the card. */
+    --n-950:#e8eaef;   /* page / code wells — soft, not pure white */
+    --n-900:#e3e6eb;   /* sunken: scroll panes, sidebar (recessed) */
+    --n-870:#dce0e6;   /* sunken alt: inset boxes, thumbs (deepest recess) */
+    --n-850:#f7f9fc;   /* raised: cards, popovers, bubbles — soft tinted off-white */
+    --n-800:#eef1f6;   /* raised hover (a hair darker than the card) */
+    --n-750:#ffffff;   /* form fields (crisp white + border) */
     --n-700:#d2d6dd;   /* hairline border */
     --n-600:#bcc2cb;   /* border strong */
     --n-500:#9ca3af;   /* border hover */
@@ -199,8 +202,6 @@
     --shadow-pop:0 8px 30px rgba(20,22,40,.18);
     --shadow-drawer:0 0 24px rgba(20,22,40,.18);
   }
-  /* hardcoded #fff that sits on a light surface in this theme */
-  .msg.note .note-text h4{color:var(--text)}
 }
 
 *{margin:0;padding:0;box-sizing:border-box}
@@ -537,6 +538,8 @@ table.hd-model-kv td.hd-kv-k{color:var(--text-faint);white-space:nowrap}
 .hd-smoke-ok{color:#39d353}.hd-smoke-bad{color:var(--err)}.hd-dim{color:var(--text-faint)}
 .hd-st-good{color:#39d353}.hd-st-bad{color:var(--err)}.hd-st-maybe_good{color:var(--accent)}
 .hd-attr{margin-top:1em;font-size:.64rem;color:var(--text-faint)}
+.hd-cand{padding:6px 8px;margin-top:4px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg-inset);color:var(--text-2);font-family:var(--font-mono);font-size:.8rem;cursor:pointer}
+.hd-cand:hover{background:var(--accent-bg);color:var(--text);border-color:var(--border-hover)}
 .host-checked{color:var(--text-dim);flex-shrink:0;padding-left:var(--sp-3);white-space:nowrap;font-size:var(--fs-xs)}
 .host-model{font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--text-dim);max-width:50%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skip-link{opacity:0;color:var(--accent);font-size:var(--fs-xs);text-decoration:underline;margin:0 var(--sp-3);flex-shrink:0;transition:opacity .1s}
@@ -616,7 +619,7 @@ label{display:block;font-size:var(--fs-sm);color:var(--text-muted);margin-bottom
 input[type=text],input[type=number],textarea,select{width:100%;padding:var(--sp-3) 10px;border:1px solid var(--border-strong);border-radius:var(--r-md);background:var(--field-bg);color:var(--text);font-size:var(--fs-md);outline:none;font-family:var(--font-mono)}
 input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{border-color:var(--border-focus)}
 .filter-row{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3);flex-shrink:0}
-.filter-row #modelFilter{margin-bottom:0;flex:1 1 auto;min-width:0;width:auto}
+.filter-row #modelFilter,.filter-row #hostLookup{margin-bottom:0;flex:1 1 auto;min-width:0;width:auto}
 .filter-row .mf-wrap{position:relative;flex:1 1 auto;min-width:0}
 .filter-row .mf-wrap #modelFilter{flex:none;width:100%;padding-right:3.6em}
 .mf-installs{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--text-muted);opacity:.7;font-size:var(--fs-sm);font-variant-numeric:tabular-nums;pointer-events:none}
@@ -1211,6 +1214,17 @@ body.dragging-image .hist-item{cursor:grabbing}
   .settings-inner .setting:has(input[type=text]) input[type=text],
   .settings-inner .setting:has(input[type=password]) input[type=password]{width:100%}
 }
+
+/* Light-theme SELECTOR overrides — these must live AFTER the base rules they override (a
+   media query adds no specificity, so an early copy loses the cascade to the later base
+   rule). Token (:root) overrides stay up top; only per-selector fixes belong here. */
+@media (prefers-color-scheme: light){
+  /* Settings cards use --bg-inset (= the page colour in light), so they vanish into the
+     page. Lift them onto the raised card surface so they read as distinct, coloured cards. */
+  .settings-card{background:var(--surface);box-shadow:var(--shadow-card)}
+  /* hardcoded #fff heading that would be invisible on a light surface */
+  .msg.note .note-text h4{color:var(--text)}
+}
 </style>
 </head>
 <body>
@@ -1291,6 +1305,9 @@ body.dragging-image .hist-item{cursor:grabbing}
 <button type="button" class="htab" data-pane="good" title="Good">🍀<span class="htab-count" id="cnt-good"></span></button>
 <button type="button" class="htab" data-pane="maybe" title="Maybe">🤷🏼<span class="htab-count" id="cnt-maybe"></span></button>
 <button type="button" class="htab" data-pane="bad" title="Bad">💀<span class="htab-count" id="cnt-bad"></span></button>
+</div>
+<div class="filter-row">
+<input type="text" id="hostLookup" placeholder="look up a host — IP or host:port, then Enter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" title="Type a host address (full ip:port, or just an IP) and press Enter to open its host card. A partial that matches several hosts shows a pick-list." onkeydown="if(event.key==='Enter'&&this.value.trim()){event.preventDefault();hostLookup(this.value);}">
 </div>
 <div id="pane-last" style="display:none">
 <div id="lastList"></div>
@@ -2484,6 +2501,16 @@ function _wireHostVotes(){
       }).catch(function(){b.disabled=false;});
   });
 }
+// HOSTS-card search: resolve a typed address to its host card. The backend (host-info)
+// handles exact / unique-partial / ambiguous matching; we just open the detail card and
+// bring it into view (it sits above the HOSTS card, so a search from there would otherwise
+// land off-screen).
+function hostLookup(val){
+  val=(val||'').trim(); if(!val)return;
+  openHostDetail(val);
+  var c=document.getElementById('hostDetailCard');
+  if(c&&c.scrollIntoView)c.scrollIntoView({behavior:'smooth',block:'start'});
+}
 function openHostDetail(host){
   var card=document.getElementById('hostDetailCard'),body=document.getElementById('hostDetailBody');
   if(!card||!body)return;
@@ -2509,8 +2536,17 @@ function usageEmoji(served,failed,won,lost){
   return p.join('  ');
 }
 function hostDetailHtml(host,j){
+  // Ambiguous lookup: the typed text matched several hosts — show a "did you mean" list
+  // of clickable candidates instead of a card for a host we didn't actually resolve.
+  if(j&&j.candidates&&j.candidates.length){
+    var cl=j.candidates.map(function(c){
+      return '<div class="hd-cand" onclick="hostLookup('+JSON.stringify(c).replace(/"/g,'&quot;')+')">'+escHtml(c)+'</div>';
+    }).join('');
+    return '<div class="hd-attr">'+j.candidates.length+' hosts match “'+escHtml(host)+'” — did you mean:</div>'+cl;
+  }
   var h=[];
   var url=j.host||host, href=/^https?:\/\//.test(url)?url:('http://'+url);
+  if(j&&j.found===false)h.push('<div class="hd-attr">No survey record for “'+escHtml(host)+'”. Reputation shown below if dyva has routed to it.</div>');
   var b=[];
   if(j.provider)b.push('<span class="hd-badge hd-prov">'+escHtml(j.provider)+'</span>');
   if(j.country)b.push('<span class="hd-badge">'+flagEmoji(j.country)+' '+escHtml(j.country)+(j.city?' · '+escHtml(j.city):'')+'</span>');
